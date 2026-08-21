@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -13,7 +13,7 @@ test.describe("Pocket voice settings", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "voice");
 
     const card = page.getByTestId("settings-voice");
@@ -77,7 +77,7 @@ test.describe("Pocket voice settings", () => {
         voicePreferences: ["pocket:eve"],
       },
     });
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "voice");
 
     const card = page.getByTestId("settings-voice");
@@ -121,7 +121,7 @@ test.describe("Pocket voice settings", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "voice");
 
     await page.getByTestId("pocket-voice-import").click();
@@ -172,7 +172,7 @@ test.describe("Pocket voice settings", () => {
     page,
   }) => {
     await installMockBridge(page, { pocketVoiceImportResult: "cancel" });
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "voice");
 
     await expect(page.getByTestId("pocket-voice-selector")).toContainText(
@@ -197,7 +197,7 @@ test.describe("Pocket voice settings", () => {
     page,
   }) => {
     await installMockBridge(page, { pocketVoiceImportResult: "invalid" });
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "voice");
 
     await page.getByTestId("pocket-voice-import").click();

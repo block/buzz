@@ -1,6 +1,7 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
+import { E2E_APP_ORIGIN } from "../helpers/bootstrap";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/drafts-all-fix";
@@ -18,34 +19,39 @@ test("Inbox All hides drafts while the Drafts filter keeps them", async ({
   page,
 }) => {
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
-  await page.addInitScript(
-    ({ draftStoreKey, draftStorageKey, channelId }) => {
-      const timestamp = new Date().toISOString();
-      window.localStorage.setItem(
-        draftStoreKey,
-        JSON.stringify({
-          [draftStorageKey]: {
-            channelId,
-            content: "Draft that must stay out of the All view",
-            createdAt: timestamp,
-            pendingImeta: [],
-            selectionEnd: 41,
-            selectionStart: 41,
-            spoileredAttachmentUrls: [],
-            status: "active",
-            updatedAt: timestamp,
-          },
-        }),
+  await bootstrapE2ePage(page, {
+    beforeNavigate: async () => {
+      await page.addInitScript(
+        ({ expectedOrigin, draftStoreKey, draftStorageKey, channelId }) => {
+          if (location.origin !== expectedOrigin) return;
+          const timestamp = new Date().toISOString();
+          window.localStorage.setItem(
+            draftStoreKey,
+            JSON.stringify({
+              [draftStorageKey]: {
+                channelId,
+                content: "Draft that must stay out of the All view",
+                createdAt: timestamp,
+                pendingImeta: [],
+                selectionEnd: 41,
+                selectionStart: 41,
+                spoileredAttachmentUrls: [],
+                status: "active",
+                updatedAt: timestamp,
+              },
+            }),
+          );
+        },
+        {
+          channelId: GENERAL_CHANNEL_ID,
+          expectedOrigin: E2E_APP_ORIGIN,
+          draftStorageKey: draftKey,
+          draftStoreKey: `buzz-drafts.v2:ws://localhost:3000:${MOCK_IDENTITY_PUBKEY}`,
+        },
       );
+      await installMockBridge(page);
     },
-    {
-      channelId: GENERAL_CHANNEL_ID,
-      draftStorageKey: draftKey,
-      draftStoreKey: `buzz-drafts.v2:ws://localhost:3000:${MOCK_IDENTITY_PUBKEY}`,
-    },
-  );
-  await installMockBridge(page);
-  await page.goto("/");
+  });
   await page.waitForFunction(() => {
     const win = window as MockFeedWindow;
     return typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function";

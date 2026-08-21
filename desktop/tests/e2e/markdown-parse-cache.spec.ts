@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -35,7 +35,7 @@ test("warm channel switches trigger zero fresh markdown parses", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_MD_PARSE_COUNT__ === "function",
   );

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -173,7 +173,7 @@ test("focus and split preserve reading context and interaction ownership", async
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const rootId = await seedLongThread(page);
 
   await page.getByTestId("channel-general").click();
@@ -283,7 +283,7 @@ test("narrow threads do not offer an unavailable layout switch", async ({
 }) => {
   await page.setViewportSize({ width: 860, height: 720 });
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const rootId = await seedLongThread(page);
   await page.getByTestId("channel-general").click();
   const summary = page.locator(

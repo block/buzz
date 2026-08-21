@@ -1,3 +1,25 @@
 {
-  "extends": ["../biome.json"]
+  "extends": ["../biome.json"],
+  "overrides": [
+    {
+      "includes": ["tests/e2e/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@playwright/test": {
+                    "importNames": ["test", "base", "default", "*"],
+                    "message": "Import test from ../helpers/test so every E2E test receives automatic origin bootstrap."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

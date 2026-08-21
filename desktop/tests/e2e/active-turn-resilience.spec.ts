@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -35,7 +35,7 @@ async function waitForBridge(page: import("@playwright/test").Page) {
 }
 
 async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await waitForBridge(page);
   await page.getByTestId("open-agents-view").click();
   await expect(page.getByTestId("unified-agents-groups")).toBeVisible({

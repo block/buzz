@@ -14,7 +14,7 @@
  * container (the same relative wrapper that owns the real top unread pill) and
  * asserts the pill clears the pinned header.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -65,7 +65,7 @@ async function injectSyntheticPill(
 test.describe("sidebar MoreUnreadButton top chrome overlap", () => {
   test.beforeEach(async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
   });
 

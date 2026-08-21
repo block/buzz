@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -15,7 +15,7 @@ const EDIT_AGENT_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
  * the "New agent" menu item, then fill a placeholder name.
  */
 async function openCreateDialog(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
   await page.locator("#persona-display-name").fill("Test Agent");
@@ -85,7 +85,7 @@ async function openEditDialog(
   page: import("@playwright/test").Page,
   agentName: string,
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
 
   const agentButton = page.getByRole("button", {

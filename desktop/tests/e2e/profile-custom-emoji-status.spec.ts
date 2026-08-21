@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }) => {
 test("profile popover renders a custom emoji status as an image", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openProfilePopover(page);
 
   await page.getByTestId("profile-popover-set-status").click();

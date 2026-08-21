@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { finalizeEvent } from "nostr-tools/pure";
 import { hexToBytes } from "@noble/hashes/utils.js";
 
@@ -82,7 +82,7 @@ test("an incoming DM produces exactly one desktop notification", async ({
       (response.request().postData() ?? "").includes('"#p"'),
     { timeout: 15_000 },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Wait until the DM channel is loaded — live subscriptions (channel + home
   // feed mention) are established once the channel list resolves.

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import type { RelayEvent } from "../../src/shared/api/types";
@@ -282,7 +282,7 @@ test.describe("inbox stable-conversation regressions", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
     await installScrollSpy(page);
@@ -403,7 +403,7 @@ test.describe("inbox stable-conversation regressions", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
     await installScrollSpy(page);
@@ -539,7 +539,7 @@ test.describe("inbox stable-conversation regressions", () => {
     // representative row, selected-message highlight, and parentEventId.
 
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
 
@@ -752,7 +752,7 @@ test.describe("inbox stable-conversation regressions", () => {
     //      message highlight, parentEventId — same shape as the primary cold test.
 
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
 
@@ -951,7 +951,7 @@ test.describe("inbox stable-conversation regressions", () => {
     // the newest message).
 
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
     await installScrollSpy(page);
@@ -1130,7 +1130,7 @@ test.describe("inbox stable-conversation regressions", () => {
     //   - Assert selected message stays in viewport; spy count stays 1.
 
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
     await installScrollSpy(page);
@@ -1340,7 +1340,7 @@ test.describe("inbox stable-conversation regressions", () => {
     //   - Assert selected message stays in viewport; spy count stays 1.
 
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(getListPane(page)).toBeVisible();
     await waitForBridgeReady(page);
     await installScrollSpy(page);

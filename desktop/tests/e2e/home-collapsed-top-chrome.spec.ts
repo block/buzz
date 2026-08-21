@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -8,7 +8,7 @@ test.describe("home inbox chrome", () => {
 
   test.beforeEach(async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   });
 

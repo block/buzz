@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -117,7 +117,7 @@ test("sidebar generic relay failures use the reconnect card", async ({
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // The card is gated on !isRelayConnectionConnected — a stale channelsReadError
   // alone (with state still "connected") no longer pins the card. Drive the relay
@@ -132,7 +132,7 @@ test("relay outage notification stays dismissed through retries and re-arms afte
   page,
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await setRelayConnectionState(page, "disconnected");
 
   const card = await expectGenericReconnectCard(page);
@@ -160,7 +160,7 @@ test("relay outage notification re-arms after same-URL lifecycle teardown", asyn
   page,
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await setRelayConnectionState(page, "disconnected");
 
   const card = await expectGenericReconnectCard(page);
@@ -182,7 +182,7 @@ test("sidebar proxy sign-in failures use the reconnect card", async ({
 }) => {
   await installMockBridge(page, { channelsReadError: PROXY_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Drive disconnected so the card appears immediately (connected is now authoritative).
   await setRelayConnectionState(page, "disconnected");
@@ -193,7 +193,7 @@ test("sidebar proxy sign-in failures use the reconnect card", async ({
 test("sidebar access failures use the reconnect card", async ({ page }) => {
   await installMockBridge(page, { channelsReadError: ACCESS_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Drive disconnected so the card appears immediately (connected is now authoritative).
   await setRelayConnectionState(page, "disconnected");
@@ -204,7 +204,7 @@ test("sidebar access failures use the reconnect card", async ({ page }) => {
 test("collapsed sidebar still shows the reconnect card", async ({ page }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Drive degraded state so the card appears.
   await setRelayConnectionState(page, "disconnected");
@@ -236,7 +236,7 @@ test("sidebar stalled relay state uses the reconnect card", async ({
 }) => {
   await installMockBridge(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("channel-general")).toBeVisible();
   await setRelayConnectionState(page, "stalled");
 
@@ -248,7 +248,7 @@ test("sidebar application auth disconnects stay on the error path", async ({
 }) => {
   await installMockBridge(page, { channelsReadError: RELAY_AUTH_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await setRelayConnectionState(page, "disconnected");
 
   await expect(page.getByText(RELAY_AUTH_ERROR)).toBeVisible();
@@ -260,7 +260,7 @@ test("sidebar reconnect action shows connected before hiding", async ({
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Drive disconnected state so the card appears immediately.
   await setRelayConnectionState(page, "disconnected");
@@ -285,7 +285,7 @@ test("sidebar reconnect action suppresses stale refresh errors after success", a
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Drive disconnected state so the card appears immediately.
   await setRelayConnectionState(page, "disconnected");
@@ -310,7 +310,7 @@ test("sidebar connected success clears when relay degrades again", async ({
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Drive disconnected state so the card appears immediately.
   await setRelayConnectionState(page, "disconnected");

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -8,7 +8,7 @@ const MOCK_PUBKEY = "deadbeef".repeat(8);
 // The inbox filter dropdown lives in the home pane, not the chat view. Land on
 // home and wait for the inbox before reaching for the filter trigger.
 async function gotoInboxHome(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox")).toBeVisible();
 }
 
@@ -78,7 +78,7 @@ test.describe("reminders", () => {
   });
 
   test("02 — message action menu shows Remind me later", async ({ page }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -99,7 +99,7 @@ test.describe("reminders", () => {
   });
 
   test("03 — Remind me later dialog with time presets", async ({ page }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 

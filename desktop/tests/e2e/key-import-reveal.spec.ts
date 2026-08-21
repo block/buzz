@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -16,7 +16,7 @@ test("key import masks the key with a reveal toggle", async ({ page }) => {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
   const input = page.getByTestId("nostr-import-nsec-input");

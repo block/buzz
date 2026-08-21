@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -21,7 +21,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("composer renders a custom emoji inline", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -34,7 +34,7 @@ test("composer renders a custom emoji inline", async ({ page }) => {
 test("settings card splits My emoji from read-only Community emoji", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
@@ -60,7 +60,7 @@ test("settings card splits My emoji from read-only Community emoji", async ({
 test("message list renders inline and emoji-only messages with Slack-style emoji sizing", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

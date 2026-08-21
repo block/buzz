@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
@@ -226,7 +226,7 @@ async function openReviewWithPostedTimecode(
   page: Page,
   commentText = "Neutral accent check",
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -281,7 +281,7 @@ test("video upload previews use poster frames and inline videos open review mode
     themeName: VIDEO_REVIEW_ACCENT_THEME,
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -840,7 +840,7 @@ test("inline video hover reveals a timeline without a second play control", asyn
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -937,7 +937,7 @@ test("video replies in threads open the review comments view", async ({
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -1104,7 +1104,7 @@ test("Inbox preserves bracketed timestamps without video evidence", async ({
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -1133,7 +1133,7 @@ test("Inbox recognizes reference-style video ancestors with custom alt text", as
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -1175,7 +1175,7 @@ test("message timecodes deterministically open the first attached video", async 
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -1243,7 +1243,7 @@ test("message timecodes deterministically open the first attached video", async 
 test("narrow inline videos hide playback speed control", async ({ page }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -1288,7 +1288,7 @@ test("constrained landscape inline videos measure rendered width before showing 
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -1404,7 +1404,7 @@ test("right-click menus expose distinct selectors for links, relay video, and of
 }) => {
   await installVideoReviewHarness(page);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");

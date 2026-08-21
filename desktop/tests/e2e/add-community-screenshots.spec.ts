@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -41,7 +41,7 @@ test.beforeEach(async ({ page }) => {
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("community-rail-add").click();
 });
 

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 
 /**
@@ -39,7 +39,7 @@ async function expectTooltipDismissesOnLeave(
 test("composer toolbar tooltip dismisses when cursor leaves the trigger", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -53,7 +53,7 @@ test("composer toolbar tooltip dismisses when cursor leaves the trigger", async 
 test("adjacent composer tooltips each require a fresh dwell", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -73,7 +73,7 @@ test("adjacent composer tooltips each require a fresh dwell", async ({
 test("formatting sub-toolbar tooltip dismisses when cursor leaves the trigger", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -93,7 +93,7 @@ test("formatting sub-toolbar tooltip dismisses when cursor leaves the trigger", 
 test("emoji picker tooltip dismisses when cursor leaves the trigger", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

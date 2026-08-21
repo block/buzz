@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -27,7 +27,7 @@ test.beforeEach(async ({ page }) => {
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "hosted-communities");
 });
 

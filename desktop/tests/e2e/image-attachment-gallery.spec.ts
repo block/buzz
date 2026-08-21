@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -118,7 +118,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("image bundle lightbox navigates as a gallery", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -259,7 +259,7 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
 test("hidden spoiler images are excluded from gallery navigation until revealed", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -352,7 +352,7 @@ test("message images load a thumbnail before requesting the original", async ({
     await route.fulfill({ body: svg("#4aa3df"), contentType: "image/svg+xml" });
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await waitForMockLiveSubscription(page, "general");
   await page.evaluate(
@@ -414,7 +414,7 @@ test("gallery items without imeta dimensions keep their thumbnail aspect ratio",
   page,
 }) => {
   await installNoDimImageRoutes(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -471,7 +471,7 @@ test("forum markdown images use the markdown root as their gallery scope", async
   page,
 }) => {
   await installNoDimImageRoutes(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect
     .poll(() => {
       return page.evaluate(() => {
@@ -557,7 +557,7 @@ test("multi-image mosaics keep a fixed width and grow by rows", async ({
   page,
 }) => {
   await installNoDimImageRoutes(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -617,7 +617,7 @@ test("multi-image mosaics keep a fixed width and grow by rows", async ({
 
 test("image mosaic screenshot", async ({ page }) => {
   await installNoDimImageRoutes(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -662,7 +662,7 @@ test("image mosaic screenshot", async ({ page }) => {
 test("mosaic image context menu is portaled outside the clipped gallery", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -704,7 +704,7 @@ test("mosaic image context menu is portaled outside the clipped gallery", async 
 test("lightbox image context menu stays inside the dialog focus scope", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -746,7 +746,7 @@ test("lightbox image context menu stays inside the dialog focus scope", async ({
 test("right-click image shows Copy image and invokes copy command", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

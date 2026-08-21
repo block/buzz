@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -66,7 +66,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   );
   await installMockBridge(page);
   await page.setViewportSize({ width: 900, height: 800 });
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
@@ -389,7 +389,7 @@ test("desktop composer shows entity card and send is not blocked by missing snap
 }) => {
   await installMockBridge(page);
   await page.setViewportSize({ width: 900, height: 800 });
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
 
   const repoLink = `buzz://repo?owner=${ALICE_PUBKEY}&d=relay-tools`;
@@ -470,7 +470,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
     },
   );
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("open-projects-view")).toBeVisible();
   const repoLink = `buzz://repo?owner=${DEFAULT_MOCK_PUBKEY}&d=buzz&tab=prs`;
   const prLink = `buzz://pr?id=${PR_ID}&owner=${DEFAULT_MOCK_PUBKEY}&d=buzz`;
@@ -622,7 +622,7 @@ test("cold-start entity links drain after the React listener mounts", async ({
     pendingEntityDeepLinks: [{ id: "cold-start-project", href }],
   });
 
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
 
   await expect(
     page.getByRole("tab", { name: "Review", exact: true }),

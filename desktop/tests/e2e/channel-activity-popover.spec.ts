@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -159,7 +159,7 @@ async function seedChannelActivity(
     includeAgent = true,
   }: { extraThreadCount?: number; includeAgent?: boolean } = {},
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -496,7 +496,7 @@ test.describe("channel activity hover preview", () => {
       "older-inbox-thread-for-hover",
       "second-inbox-thread-for-hover",
     ];
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByRole("button", { name: "Inbox", exact: true }).click();
@@ -639,7 +639,7 @@ test.describe("channel activity hover preview", () => {
   test("reading a grouped Inbox thread preserves an unrelated manual unread", async ({
     page,
   }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
@@ -701,7 +701,7 @@ test.describe("channel activity hover preview", () => {
   test("preserves Inbox ownership while another top-level row remains unread", async ({
     page,
   }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByRole("button", { name: "Inbox", exact: true }).click();
@@ -753,7 +753,7 @@ test.describe("channel activity hover preview", () => {
   test("surfaces future replies after the user reacts to a thread root", async ({
     page,
   }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");

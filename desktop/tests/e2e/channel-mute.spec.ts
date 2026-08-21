@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
@@ -51,7 +51,7 @@ async function waitForMockLiveSubscription(
 test.describe("channel muting", () => {
   test("01 — context menu shows Mute channel", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -75,7 +75,7 @@ test.describe("channel muting", () => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
@@ -95,7 +95,7 @@ test.describe("channel muting", () => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(page.locator("html")).toHaveClass(/dark/);
     await page.getByTestId("channel-random").click();
 
@@ -117,7 +117,7 @@ test.describe("channel muting", () => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-engineering").click();
     await expect(page.getByTestId("chat-title")).toHaveText("engineering");
     await waitForMockLiveSubscription(page, "engineering");
@@ -164,7 +164,7 @@ test.describe("channel muting", () => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
@@ -185,7 +185,7 @@ test.describe("channel muting", () => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-engineering").click();
     await expect(page.getByTestId("chat-title")).toHaveText("engineering");
 

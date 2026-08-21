@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
@@ -88,7 +88,7 @@ test("setup shows all bundled harnesses as detected", async ({ page }) => {
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
@@ -134,7 +134,7 @@ test("setup distinguishes a missing CLI from an installed desktop app", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const card = page.getByTestId("onboarding-runtime-codex");
@@ -157,7 +157,7 @@ test("ready state is detected and enables Next without persisting a default", as
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   await expect(page.getByTestId("onboarding-runtime-ready-claude")).toHaveText(
@@ -186,7 +186,7 @@ test("setup shows runtime discovery loading before rendering harnesses", async (
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   await expect(page.getByTestId("onboarding-runtime-loading")).toBeVisible();
@@ -202,7 +202,7 @@ test("unknown authentication can be checked again", async ({ page }) => {
     { acpRuntimesCatalogSequence: [[unknown], [loggedIn]] },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const checkAgain = page.getByRole("button", {
@@ -228,7 +228,7 @@ test("auth discovery failure stays actionable without exposing internals", async
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const card = page.getByTestId("onboarding-runtime-claude");
@@ -264,7 +264,7 @@ test("terminal launch failure keeps Sign in available", async ({ page }) => {
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const card = page.getByTestId("onboarding-runtime-claude");
@@ -301,7 +301,7 @@ test("sign in stays pending until catalog detection confirms Ready", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const signIn = page.getByRole("button", { name: "Sign in to Claude Code" });
@@ -361,7 +361,7 @@ test("failed install can be retried without shifting card content", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const card = page.getByTestId("onboarding-runtime-claude");
@@ -411,7 +411,7 @@ test("install transitions through Sign in to Ready", async ({ page }) => {
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const install = page.getByTestId("onboarding-runtime-install-claude");
@@ -447,7 +447,7 @@ test("defaults waits for baked configuration before rendering fields", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -475,7 +475,7 @@ test("defaults renders only fields supported by the selected harness", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -513,7 +513,7 @@ test("defaults hides model when optional harness has empty discovery", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -546,7 +546,7 @@ test("defaults keeps model control when optional harness discovery fails", async
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -580,7 +580,7 @@ test("defaults can be skipped while loading without persisting configuration", a
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -609,7 +609,7 @@ test("defaults stages auto-selection and edits without writing when skipped", as
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -657,7 +657,7 @@ test("Back preserves incomplete defaults draft without writing", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
   await expect(
@@ -720,7 +720,7 @@ test("defaults auto-selects the only ready visible harness", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
@@ -750,7 +750,7 @@ test("Next persists the latest staged harness choice", async ({ page }) => {
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -787,7 +787,7 @@ test("Next shows saving state and advances only after persistence", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
 
@@ -825,7 +825,7 @@ test("Next keeps the draft and retries after a save failure", async ({
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
@@ -869,7 +869,7 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
@@ -990,7 +990,7 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
 
   const claudeInstall = page.getByTestId("onboarding-runtime-install-claude");
@@ -1093,7 +1093,7 @@ test("Finish stays disabled until a provider-required harness is fully configure
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
@@ -1144,7 +1144,7 @@ test("baked build config keeps Finish enabled without manual provider setup", as
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await navigateToSetupPage(page);
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();

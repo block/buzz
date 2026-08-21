@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import type { Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
@@ -23,7 +23,7 @@ function seedSortState(page: Page, groups: Record<string, string>) {
 }
 
 async function openApp(page: Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }

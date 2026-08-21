@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -118,7 +118,7 @@ test("MEASURE: composer keystroke latency, quiet vs agent-busy channel", async (
 }) => {
   test.setTimeout(240_000);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );

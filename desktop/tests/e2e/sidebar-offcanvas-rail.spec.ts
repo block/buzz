@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -36,7 +36,7 @@ async function setup(page: Page, theme: string) {
     },
     { list: [COMMUNITY_A, COMMUNITY_B], active: COMMUNITY_A.id },
   );
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("community-rail")).toBeVisible();
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 }

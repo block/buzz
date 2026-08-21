@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -188,7 +188,7 @@ test("editing an immediate attachment reply preserves its media tags", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
     () =>
@@ -326,7 +326,7 @@ test("Inbox offers Edit and Delete actions only for manageable messages", async 
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
     () =>
@@ -458,7 +458,7 @@ test("cancelling explicit Inbox deletion preserves the message and selection", a
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   const { detail, rootRow } = await seedEmptyDeleteThread(page);
   const selectedReplyRow = detail.locator(
@@ -492,7 +492,7 @@ test("explicit Inbox deletion targets the chosen non-selected message", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   const { detail, rootRow } = await seedEmptyDeleteThread(page);
   const selectedReplyRow = detail.locator(
@@ -526,7 +526,7 @@ test("empty edit confirms deletion of the edited non-selected Inbox row", async 
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   const { detail, rootRow } = await seedEmptyDeleteThread(page);
   const selectedReplyRow = detail.locator(
@@ -561,7 +561,7 @@ test("cancelling an empty Inbox edit deletion preserves content and edit mode", 
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   const { detail, rootRow } = await seedEmptyDeleteThread(page);
   const editsBefore = await editCommandCount(page);
@@ -601,7 +601,7 @@ test("cold Inbox open drops an edit that was itself deleted", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(() => {
     const win = window as MockWindow;

@@ -1,11 +1,11 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 test("settings sections share the Appearance rhythm", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "appearance");
 
   const appearanceList = page
@@ -84,7 +84,7 @@ test("Profile sections keep visible cards and aligned actions", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "profile");
 
   const identity = page.getByTestId("profile-identity-card");

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -56,7 +56,7 @@ async function expectAppAliveAfterDialogClose(
 async function openReminderDialogFromMessageMenu(
   page: import("@playwright/test").Page,
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -121,7 +121,7 @@ test.describe("reminder set → app stays clickable", () => {
   // dismissable layer are ever bundled again — body pointer-events stays
   // "none" after the dialog closes and the sidebar click below times out.
   test("03 — inbox row right-click → Remind me later", async ({ page }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(page.getByTestId("home-inbox")).toBeVisible();
 
     const row = page.getByTestId(INBOX_MENTION_ROW);

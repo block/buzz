@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { parse as parseYaml } from "yaml";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -11,7 +11,7 @@ async function openCreateWorkflow(
   page: import("@playwright/test").Page,
   name: string,
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-workflows-view").click();
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });

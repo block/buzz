@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -28,7 +28,7 @@ async function openEditDialog(
   page: import("@playwright/test").Page,
   agentName: string,
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await page
     .getByRole("button", { name: `${agentName} agent profile` })

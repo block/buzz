@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -30,7 +30,7 @@ async function loadTheme(page: Page, theme: string) {
     window.localStorage.setItem("buzz-theme", selectedTheme);
   }, theme);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 }
 
 async function openAddCommunityDialog(page: Page) {
@@ -197,7 +197,7 @@ test("sidebar rows separate hover, selected, and reorder states", async ({
 
 test("add community starts with create and join choices", async ({ page }) => {
   await installMockBridge(page, {});
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openAddCommunityDialog(page);
 
@@ -241,7 +241,7 @@ test("automatically shows community join requirements near the community URL", a
       version: "policy-v1",
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openAddCommunityDialog(page);
   await page.getByTestId("add-community-join").click();
@@ -290,7 +290,7 @@ test("automatically shows community join requirements near the community URL", a
 
 test("joins a community URL without an API token field", async ({ page }) => {
   await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openAddCommunityDialog(page);
   await page.getByTestId("add-community-join").click();
@@ -314,7 +314,7 @@ test("joins a community URL without an API token field", async ({ page }) => {
 });
 
 test("hides Invites settings on open relays", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page);
 
   await expect(page.getByTestId("settings-nav-community-members")).toHaveCount(
@@ -325,7 +325,7 @@ test("hides Invites settings on open relays", async ({ page }) => {
 test("leaving a channel from the context menu never freezes the app", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   // Cancel path: dialog opens from the context menu, then is dismissed.
@@ -348,7 +348,7 @@ test("leaving a channel from the context menu never freezes the app", async ({
 test("channel context menu only shows owner actions to the owner", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click({ button: "right" });
   await expect(
@@ -388,7 +388,7 @@ test("channel context menu explains when owner actions are loading", async ({
   page,
 }) => {
   await installMockBridge(page, { channelMembersReadDelayMs: 500 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click({ button: "right" });
   await expect(
@@ -403,7 +403,7 @@ test("channel context menu explains when owner actions are loading", async ({
 });
 
 test("channel owner can archive from the context menu", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click({ button: "right" });
   await page.getByRole("menuitem", { name: "Archive channel" }).click();
@@ -412,7 +412,7 @@ test("channel owner can archive from the context menu", async ({ page }) => {
 });
 
 test("channel owner can delete from the context menu", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
 
   await page.getByTestId("channel-general").click({ button: "right" });
@@ -575,7 +575,7 @@ test("keeps only search pinned while primary navigation scrolls", async ({
 test("scales the sidebar backward while its chrome closes", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const sidebar = page.getByTestId("app-sidebar");
   const sidebarSurface = sidebar.locator("[data-sidebar-transition-content]");
@@ -626,7 +626,7 @@ test("disables the sidebar collapse transition for reduced motion", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const sidebarSurface = page
     .getByTestId("app-sidebar")
@@ -642,7 +642,7 @@ test("disables the sidebar collapse transition for reduced motion", async ({
 });
 
 test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const rail = page.getByRole("button", { name: "Resize sidebar" });
   await rail.click();
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
@@ -654,7 +654,7 @@ test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {
 test("resizes, persists, and snaps to the default sidebar width", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   await expect.poll(() => sidebarWidth(page)).toBe(DEFAULT_SIDEBAR_WIDTH);
@@ -680,7 +680,7 @@ test("resizes, persists, and snaps to the default sidebar width", async ({
 test("shows a sidebar update card when an update is ready", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   await page.evaluate(() => {
@@ -775,7 +775,7 @@ test("shows a sidebar update card when an update is ready", async ({
 test("reflects an install started from the header update button on the sidebar card", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   await page.evaluate(() => {
@@ -824,7 +824,7 @@ test("reflects an install started from the header update button on the sidebar c
 test("shows manual-required update card and never auto-downloads on non-AppImage installs", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   // Override the bridge to report an update available AND auto-update not

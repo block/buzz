@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -125,7 +125,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const runtimeList = page.getByTestId("doctor-runtime-list");
@@ -243,7 +243,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-claude");
@@ -286,7 +286,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
@@ -331,7 +331,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-claude");
@@ -379,7 +379,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     // Node-gated entries never get a Your-harnesses row (and thus never an
@@ -481,7 +481,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
@@ -563,7 +563,7 @@ test.describe("Doctor panel state screenshots", () => {
       },
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const installButton = page.getByTestId("doctor-runtime-install-codex");
@@ -630,7 +630,7 @@ test.describe("Doctor panel state screenshots", () => {
       },
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
@@ -683,7 +683,7 @@ test.describe("Doctor panel state screenshots", () => {
       },
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-claude");
@@ -716,7 +716,7 @@ test.describe("Doctor panel state screenshots", () => {
       },
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     await expect(page.getByTestId("doctor-runtime-error-codex")).toContainText(
@@ -750,7 +750,7 @@ test.describe("Doctor panel state screenshots", () => {
       connectAcpRuntimeError: "The browser could not be opened.",
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     await page.getByTestId("doctor-runtime-menu-codex").click();
@@ -786,7 +786,7 @@ test.describe("Doctor panel state screenshots", () => {
       connectAcpRuntimeResult: { launched: true },
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     await page.getByTestId("doctor-runtime-menu-codex").click();
@@ -815,7 +815,7 @@ test.describe("Doctor panel state screenshots", () => {
       installAcpRuntimeDelayMs: 250,
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
@@ -924,7 +924,7 @@ test.describe("Doctor panel state screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const claudeRow = page.getByTestId("doctor-runtime-claude");
@@ -1010,7 +1010,7 @@ test.describe("Doctor panel state screenshots", () => {
       },
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");

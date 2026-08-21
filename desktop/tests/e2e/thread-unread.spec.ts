@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
@@ -112,7 +112,7 @@ async function expandReply(
 test.describe("thread unread indicator", () => {
   test("01-thread-unread-badge", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // Open general — catch-up adds mock-general-welcome to authoredRootIds
     await page.getByTestId("channel-general").click();
@@ -169,7 +169,7 @@ test.describe("thread unread indicator", () => {
 
   test("02-thread-new-divider", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -220,7 +220,7 @@ test.describe("thread unread indicator", () => {
 
   test("03-thread-badge-casual-browse", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -270,7 +270,7 @@ test.describe("thread unread indicator", () => {
 
   test("04-thread-deep-nested-unread", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -403,7 +403,7 @@ test.describe("thread unread indicator", () => {
 
   test("05-thread-in-panel-subtree-badge", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -504,7 +504,7 @@ test.describe("thread unread indicator", () => {
 
   test("06-in-panel-badge-bumps-on-live-reply", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -569,7 +569,7 @@ test.describe("thread unread indicator", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -664,7 +664,7 @@ test.describe("thread unread indicator", () => {
   // filter on activeReadAt this fails on the second entry.
   test("10-thread-badge-survives-channel-reentry", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -717,7 +717,7 @@ test.describe("thread unread indicator", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // Open general and read its thread frontier, so the only thing that can be
     // unread afterward is a NEW reply — not the channel timeline.
@@ -763,7 +763,7 @@ test.describe("thread unread indicator", () => {
   // window.
   test("12-thread-reply-lights-all-replies-sidebar-badge", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // Emit ONE reply whose parent root is NOT in the window (orphan parent id),
     // so the loaded window is all-replies: no top-level message exists for
@@ -808,7 +808,7 @@ test.describe("thread unread indicator", () => {
   // while staying in general.
   test("13-thread-badge-clears-on-read-without-reentry", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -872,7 +872,7 @@ test.describe("thread unread indicator", () => {
   // after the subtree-count fix does it reach 2. Asserting `2` gates both.
   test("14-mention-only-nested-thread-badge", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -950,7 +950,7 @@ test.describe("thread unread indicator", () => {
   // which is exactly what the toggle's forced-unread overlay exists to drive.
   test("15-mark-read-unread-menu-single-toggle", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");

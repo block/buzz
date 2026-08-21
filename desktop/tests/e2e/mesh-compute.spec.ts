@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -18,7 +18,7 @@ type E2eWindow = Window & {
 test("Share compute chooses a model before sharing", async ({ page }) => {
   const modelRef = "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M";
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "compute");
 
   const card = page.getByTestId("settings-mesh-share-compute");
@@ -102,7 +102,7 @@ test("a consuming client can switch to sharing its saved local model", async ({
     window.localStorage.setItem("buzz.mesh-compute.share.model.v1", model);
   }, localModel);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   // The mesh seed hook is installed when the mock bridge boots; calling it
   // before then silently no-ops (optional chaining) and the seed is lost.
   await page.waitForFunction(

@@ -1,12 +1,23 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Page,
+  type TestInfo,
+  bootstrapE2ePage,
+} from "../helpers/test";
 
 import { installRelayBridge } from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
 import { denseSecondWall, seedScenario } from "../helpers/seedRelay";
-import { measureAction, type ActionMeasurement } from "./perf/metrics";
+import {
+  beginActionMeasurement,
+  closeActionMeasurement,
+  finishActionMeasurement,
+  type ActionMeasurement,
+} from "./perf/metrics";
 
 const RELAY_HTTP = process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000";
 const GENERAL_CHANNEL_ID = "9f28288a-d724-587a-9709-92dc7f967110";
@@ -55,7 +66,7 @@ async function writeArtifact(testInfo: TestInfo, artifact: ScenarioArtifact) {
 
 async function openGeneral(page: Page) {
   await installRelayBridge(page, "tyler");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.locator('[data-render-pending="true"]')).toHaveCount(0);
@@ -68,32 +79,12 @@ async function mountedRowCount(page: Page) {
   return page.getByTestId("message-row").count();
 }
 
-test.beforeAll(async () => {
-  test.setTimeout(90_000);
-  await assertRelaySeeded();
-});
-
-test("deep local-relay timeline remains bounded and every row is reachable", async ({
-  page,
-}, testInfo) => {
-  testInfo.setTimeout(10 * 60_000);
-
-  const fixtureSecond = Math.floor(Date.now() / 1000) - 1;
-  const fixture = denseSecondWall({
-    channelId: GENERAL_CHANNEL_ID,
-    count: DEEP_ROW_COUNT,
-    second: fixtureSecond,
-  });
-  const expected = await seedScenario(fixture, {
-    relayHttpUrl: RELAY_HTTP,
-    concurrency: 64,
-  });
-  expect(expected).toHaveLength(DEEP_ROW_COUNT);
-  const expectedIdHash = await sha256(expected.map(({ id }) => id));
-  const expectedOrder = expected.map(({ id }) => id).sort();
-  const expectedRank = new Map(expectedOrder.map((id, index) => [id, index]));
-
-  const measurement = await measureAction(page, async () => {
+async function measureDeepTimeline(
+  page: Page,
+  expectedRank: Map<string, number>,
+) {
+  const activeMeasurement = await beginActionMeasurement(page);
+  try {
     const timeline = await openGeneral(page);
     const initialMountedRows = await mountedRowCount(page);
     let duplicateSnapshots = 0;
@@ -197,7 +188,7 @@ test("deep local-relay timeline remains bounded and every row is reachable", asy
 
     if (seen.size >= DEEP_ROW_COUNT) stallReason = "row-target-reached";
 
-    return {
+    return await finishActionMeasurement(page, activeMeasurement, {
       initialMountedRows,
       finalMountedRows: await mountedRowCount(page),
       maxMountedRows,
@@ -218,8 +209,38 @@ test("deep local-relay timeline remains bounded and every row is reachable", asy
       passCount: passes.length,
       stallReason,
       passes,
-    };
+    });
+  } finally {
+    await closeActionMeasurement(activeMeasurement);
+  }
+}
+
+test.beforeAll(async () => {
+  test.setTimeout(90_000);
+  await assertRelaySeeded();
+});
+
+test("deep local-relay timeline remains bounded and every row is reachable", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(10 * 60_000);
+
+  const fixtureSecond = Math.floor(Date.now() / 1000) - 1;
+  const fixture = denseSecondWall({
+    channelId: GENERAL_CHANNEL_ID,
+    count: DEEP_ROW_COUNT,
+    second: fixtureSecond,
   });
+  const expected = await seedScenario(fixture, {
+    relayHttpUrl: RELAY_HTTP,
+    concurrency: 64,
+  });
+  expect(expected).toHaveLength(DEEP_ROW_COUNT);
+  const expectedIdHash = await sha256(expected.map(({ id }) => id));
+  const expectedOrder = expected.map(({ id }) => id).sort();
+  const expectedRank = new Map(expectedOrder.map((id, index) => [id, index]));
+
+  const measurement = await measureDeepTimeline(page, expectedRank);
 
   await writeArtifact(testInfo, {
     schemaVersion: 1,

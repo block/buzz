@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import {
   createMockAgentMemoryListing,
@@ -276,7 +276,7 @@ test.beforeEach(async ({ page }) => {
 test("profile panel shows communication actions as quick action tiles", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -346,7 +346,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
     agentMemory: createMockAgentMemoryListing(),
     oaOwnerIsMe: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const agentName = "Parity Bot";
   const agentPubkey = await addGenericAgent(
     page,
@@ -437,7 +437,7 @@ test("keeps the saved profile description after a community round trip", async (
     window.localStorage.setItem("buzz-communities", JSON.stringify(seed));
     window.localStorage.setItem("buzz-active-community-id", seed[0].id);
   }, communities);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const description = "Description that should survive switching";
   await openSettings(page, "profile");
@@ -467,7 +467,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   const displayName = `Tyler QA ${stamp}`;
   const avatarUrl = `https://example.com/avatar-${stamp}.png`;
   const about = `Coordinating relay profile setup ${stamp}`;
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await expect(
@@ -524,7 +524,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
 });
 
 test("saves profile metadata from the block Done button", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
@@ -578,7 +578,7 @@ test("saves profile metadata from the block Done button", async ({ page }) => {
 });
 
 test("shows profile save feedback as a toast", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-metadata-edit").click();
@@ -601,7 +601,7 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
   await page.addInitScript(() => {
     window.localStorage.setItem("buzz-theme", "github-light");
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
 
@@ -632,7 +632,7 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
 test("swaps the avatar preview and mode tabs while editing", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
 
@@ -677,7 +677,7 @@ test("swaps the avatar preview and mode tabs while editing", async ({
 test("highlights the avatar drop target while dragging an image", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
@@ -763,7 +763,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
@@ -814,7 +814,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
 test("renders emoji avatars with a static background layer", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
@@ -840,7 +840,7 @@ test("renders emoji avatars with a static background layer", async ({
 test("offers emoji search and skin-tone controls for profile avatars", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
@@ -913,7 +913,7 @@ test("reveals emoji background colors only after choosing an emoji", async ({
   page,
 }) => {
   const imageAvatarUrl = `https://example.com/avatar-color-controls-${Date.now()}.png`;
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
@@ -954,7 +954,7 @@ test("reveals emoji background colors only after choosing an emoji", async ({
 });
 
 test("snaps custom avatar colors to the dot grid", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
@@ -1001,7 +1001,7 @@ test("snaps custom avatar colors to the dot grid", async ({ page }) => {
 });
 
 test("opens Send feedback from the profile menu", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openProfileMenu(page);
   await page.getByTestId("profile-popover-send-feedback").click();
   await expect(page.getByTestId("send-feedback-dialog")).toBeVisible();
@@ -1025,7 +1025,7 @@ test("keeps Send disabled when a stale attachment attempt finishes", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openProfileMenu(page);
   await page.getByTestId("profile-popover-send-feedback").click();
@@ -1068,7 +1068,7 @@ test("proxies feedback attachment previews", async ({ page }) => {
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openProfileMenu(page);
   await page.getByTestId("profile-popover-send-feedback").click();
@@ -1084,7 +1084,7 @@ test("proxies feedback attachment previews", async ({ page }) => {
 });
 
 test("updates presence from the profile menu", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openProfileMenu(page);
   await expect(
@@ -1116,7 +1116,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     oaOwnerIsMe: true,
   });
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const longAgentInstruction = [
     "Watch the channel and help when asked.",
@@ -1868,7 +1868,7 @@ test("an older agent message opens the same persona instance as the Agents libra
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId(`persona-agent-row-${personaId}`).click();
@@ -1921,7 +1921,7 @@ test("restored Inbox deep link hides the back arrow", async ({ page }) => {
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
@@ -1966,7 +1966,7 @@ test("declared owner sees runtime tab for a remote relay agent", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
@@ -2003,7 +2003,7 @@ test("declared owner sees runtime tab for a remote relay agent", async ({
 test("declared owner sees runtime tab without a relay-agent record", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
@@ -2048,7 +2048,7 @@ test("declared owner sees runtime tab without a relay-agent record", async ({
 test("non-owner agent profile shows only reported public agent data", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
@@ -2093,7 +2093,7 @@ test("owned agent absent from relay/managed lists still renders agent framing", 
       { pubkey: ednaPubkey, displayName: "Edna", isAgent: true },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -2133,7 +2133,7 @@ test("owned agent absent from relay/managed lists still renders agent framing", 
 test("renders settings in the app shell with a back button", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const inboxNavButton = page
     .getByTestId("app-sidebar")
@@ -2194,7 +2194,7 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
     });
   }
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
 
   await openSettings(page, "notifications");
@@ -2322,7 +2322,7 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
 test("desktop notification clicks open the matching forum thread", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "notifications");
   await expect(page.getByTestId("notifications-desktop-state")).toContainText(
@@ -2396,7 +2396,7 @@ test("desktop notification clicks open the matching forum thread", async ({
 test("opens settings with the keyboard shortcut and updates theme", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expectHomeView(page);
 
   await page.keyboard.press(
@@ -2484,7 +2484,7 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
 });
 
 test("supports webview zoom keyboard shortcuts", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expectHomeView(page);
 
   const getTextScaleState = () =>
@@ -2562,7 +2562,7 @@ test("storage clear resets composed font size and keyboard zoom across windows",
   context,
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "appearance");
   await page.getByTestId("font-size-larger").click();
 
@@ -2604,7 +2604,7 @@ test("storage clear resets composed font size and keyboard zoom across windows",
 
   const peerPage = await context.newPage();
   await installMockBridge(peerPage);
-  await peerPage.goto("/");
+  await bootstrapE2ePage(peerPage, "/");
   await peerPage.evaluate(() => localStorage.clear());
 
   await expect
@@ -2641,7 +2641,7 @@ test("storage clear resets composed font size and keyboard zoom across windows",
 });
 
 test("shows agent runtimes in agent settings", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openSettings(page, "agents");
 
@@ -2696,7 +2696,7 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
 test("settings subtitles share the Appearance secondary color", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "appearance");
 
   const appearancePanel = page.getByTestId("settings-panel-appearance");

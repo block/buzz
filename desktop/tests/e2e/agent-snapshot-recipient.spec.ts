@@ -5,7 +5,7 @@
  * when an .agent.json or .agent.png attachment is detected, and the full
  * Add agent → preview → confirm flow.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 
 type CommandLogEntry = { command: string; payload: unknown };
@@ -107,7 +107,7 @@ async function seedAndSendSnapshot(
       ? { snapshotFetchError: opts.snapshotFetchError }
       : {}),
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // JSON snapshots can still arrive from saved files or older clients, even
   // though new in-app shares always encode PNG. Seed one directly so this

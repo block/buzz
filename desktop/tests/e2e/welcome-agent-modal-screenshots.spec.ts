@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, openCreateChannelDialog } from "../helpers/bridge";
@@ -20,7 +20,7 @@ const editorPersona = {
 };
 
 async function openChannel(page: Page, name: string) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId(`channel-${name}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(name);
 }
@@ -63,7 +63,7 @@ test.describe("welcome and channel agent entry points", () => {
         },
       ],
     });
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openCreateChannelDialog(page);
     await page.getByTestId("create-channel-name").fill("Welcome");
     await page
@@ -106,7 +106,7 @@ test.describe("welcome and channel agent entry points", () => {
         },
       ],
     });
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openCreateChannelDialog(page);
     await page.getByTestId("create-channel-name").fill("Welcome");
     await page.getByTestId("create-channel-permissions").click();

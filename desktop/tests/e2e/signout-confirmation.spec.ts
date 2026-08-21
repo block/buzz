@@ -6,7 +6,7 @@
  *   1. backup — check "I have saved my private key"
  *   2. typed confirmation — type the exact phrase "wipe all my data"
  */
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -25,7 +25,7 @@ test("delete button unlocks only after backup + typed phrase", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSignOutDialog(page);
 
   const deleteButton = page.getByTestId("signout-confirm");
@@ -55,7 +55,7 @@ test("delete button unlocks only after backup + typed phrase", async ({
 
 test("completing both gates invokes sign_out", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSignOutDialog(page);
 
   await page.getByTestId("signout-backup-confirm").click();
@@ -79,7 +79,7 @@ test("completing both gates invokes sign_out", async ({ page }) => {
 
 test("cancel resets the gates for the next open", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSignOutDialog(page);
 
   // Satisfy both gates, then cancel.
@@ -100,7 +100,7 @@ test("nsec load failure still allows sign-out (backup step degrades)", async ({
   page,
 }) => {
   await installMockBridge(page, { nsecError: "Keychain locked" });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSignOutDialog(page);
 
   // Error shown in place of the key; checkbox is still usable so the user is

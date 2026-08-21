@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -27,7 +27,7 @@ async function waitForInvokeBridge(page: import("@playwright/test").Page) {
  * Returns the dialog locator.
  */
 async function openNewPersonaDialog(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await waitForInvokeBridge(page);
 
   await page.getByTestId("open-agents-view").click();

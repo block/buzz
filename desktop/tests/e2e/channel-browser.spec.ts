@@ -1,5 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
+import { E2E_APP_ORIGIN } from "../helpers/bootstrap";
 import { installMockBridge, openChannelBrowser } from "../helpers/bridge";
 
 const MOCK_PUBKEY = "deadbeef".repeat(8);
@@ -7,13 +8,18 @@ const CUSTOM_SECTION = { id: "sec-projects", name: "Projects", order: 0 };
 
 async function seedCustomSection(page: Page) {
   await page.addInitScript(
-    ({ pubkey, section }) => {
+    ({ expectedOrigin, pubkey, section }) => {
+      if (location.origin !== expectedOrigin) return;
       window.localStorage.setItem(
         `buzz-channel-sections.v1:${pubkey}`,
         JSON.stringify({ version: 1, sections: [section], assignments: {} }),
       );
     },
-    { pubkey: MOCK_PUBKEY, section: CUSTOM_SECTION },
+    {
+      expectedOrigin: E2E_APP_ORIGIN,
+      pubkey: MOCK_PUBKEY,
+      section: CUSTOM_SECTION,
+    },
   );
 }
 
@@ -24,10 +30,17 @@ test.beforeEach(async ({ page }, testInfo) => {
       ? { createChannelErrors: ["Create failed"] }
       : undefined,
   );
+  if (
+    testInfo.title.includes("custom section") ||
+    testInfo.title.includes("canceling section create") ||
+    testInfo.title.includes("failed section create")
+  ) {
+    await seedCustomSection(page);
+  }
+  await bootstrapE2ePage(page);
 });
 
 test("keyboard shortcut opens the channel browser dialog", async ({ page }) => {
-  await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   const isMacBrowser = await page.evaluate(() =>
@@ -53,8 +66,6 @@ test("keyboard shortcut opens the channel browser dialog", async ({ page }) => {
 });
 
 test("channel browser shows channels not yet joined", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await expect(
@@ -72,8 +83,6 @@ test("channel browser shows channels not yet joined", async ({ page }) => {
 test("channel browser sorts alphabetically or by member count", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   const rows = page.locator('[data-testid^="browse-channel-"]');
 
@@ -112,8 +121,6 @@ test("channel browser sorts alphabetically or by member count", async ({
 });
 
 test("channel browser sorts by recent activity", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   const rows = page.locator('[data-testid^="browse-channel-"]');
 
@@ -139,8 +146,6 @@ test("channel browser sorts by recent activity", async ({ page }) => {
 });
 
 test("channel browser search filters by name", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 
@@ -152,8 +157,6 @@ test("channel browser search filters by name", async ({ page }) => {
 });
 
 test("channel browser search filters by description", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("pipeline");
 
@@ -165,8 +168,6 @@ test("channel browser search filters by description", async ({ page }) => {
 test("channel browser shows no results for unmatched search", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("zzz-nonexistent");
 
@@ -174,8 +175,6 @@ test("channel browser shows no results for unmatched search", async ({
 });
 
 test("channel browser fuzzy-matches a subsequence", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   // "engr" is not a substring of "engineering", but it is an in-order
   // subsequence — plain includes() would miss it, fuzzy matching finds it.
@@ -186,8 +185,6 @@ test("channel browser fuzzy-matches a subsequence", async ({ page }) => {
 });
 
 test("channel browser matches a scattered subsequence", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   // "sls" is neither a substring nor a prefix of "sales" — it only matches as
   // an in-order subsequence (s·a·l·e·s). Proves fuzzy matching end-to-end.
@@ -198,8 +195,6 @@ test("channel browser matches a scattered subsequence", async ({ page }) => {
 });
 
 test("channel browser ranks the best match first", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   // "gen" is a prefix of "general" (strong match) but only a substring of
   // "agents" and a subsequence of "engineering" (weaker). The prefix match
@@ -216,7 +211,6 @@ test("channel browser ranks the best match first", async ({ page }) => {
 test("sidebar add-channel button creates without treating the click as a callback", async ({
   page,
 }) => {
-  await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   await page.getByTestId("section-actions-channels-quick-create").click();
@@ -234,9 +228,6 @@ test("sidebar add-channel button creates without treating the click as a callbac
 test("custom section add button creates directly into that section", async ({
   page,
 }) => {
-  await seedCustomSection(page);
-  await page.goto("/");
-
   const addButton = page.getByTestId(
     `section-actions-${CUSTOM_SECTION.id}-quick-create`,
   );
@@ -260,9 +251,6 @@ test("custom section add button creates directly into that section", async ({
 test("canceling section create does not affect the next global create", async ({
   page,
 }) => {
-  await seedCustomSection(page);
-  await page.goto("/");
-
   await page
     .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
     .click();
@@ -289,9 +277,6 @@ test("canceling section create does not affect the next global create", async ({
 test("failed section create retry still assigns to the section", async ({
   page,
 }) => {
-  await seedCustomSection(page);
-  await page.goto("/");
-
   await page
     .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
     .click();
@@ -309,8 +294,6 @@ test("failed section create retry still assigns to the section", async ({
 });
 
 test("create affordance is visible on open before typing", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
 
   // The create row is present from the get-go so it's clear you can browse OR
@@ -323,8 +306,6 @@ test("create affordance is visible on open before typing", async ({ page }) => {
 test("typing a partial match surfaces a persistent create row", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   // "desig" matches "design" by substring but is not an exact channel name,
   // so both the matching channel AND the create row are shown.
@@ -337,8 +318,6 @@ test("typing a partial match surfaces a persistent create row", async ({
 });
 
 test("exact name match hides the create row", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("general");
 
@@ -349,8 +328,6 @@ test("exact name match hides the create row", async ({ page }) => {
 test("no-match search pins a create row above the empty state", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("zzz-nonexistent");
 
@@ -361,8 +338,6 @@ test("no-match search pins a create row above the empty state", async ({
 });
 
 test("create row leads to the prefilled create form", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("desig");
   await page.getByTestId("channel-browser-create-row").click();
@@ -379,8 +354,6 @@ test("creating from the browser adds the channel to the sidebar", async ({
   page,
 }) => {
   const channelName = `browse-created-${Date.now()}`;
-
-  await page.goto("/");
 
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill(channelName);
@@ -399,8 +372,6 @@ test("creating from the browser adds the channel to the sidebar", async ({
 test("Enter with no matches jumps to create", async ({ page }) => {
   const channelName = `enter-created-${Date.now()}`;
 
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill(channelName);
   await page.keyboard.press("Enter");
@@ -413,8 +384,6 @@ test("Enter with no matches jumps to create", async ({ page }) => {
 test("arrow keys reach the pinned create row and Enter activates it", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   // "desig" keeps a channel match (#design) AND the create row visible, so the
   // create row is not the only actionable item — it must be reachable by
@@ -436,8 +405,6 @@ test("arrow keys reach the pinned create row and Enter activates it", async ({
 test("Enter selects a channel when create row is not highlighted", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   // With the create row present but NOT highlighted, Enter should still select
   // the first channel match rather than jumping to create.
@@ -453,8 +420,6 @@ test("Enter selects a channel when create row is not highlighted", async ({
 test("joining a channel from browser adds it to the sidebar", async ({
   page,
 }) => {
-  await page.goto("/");
-
   // Verify "design" is not in the sidebar
   const streamList = page.getByTestId("stream-list");
   await expect(streamList).not.toContainText("design");
@@ -479,8 +444,6 @@ test("joining a channel from browser adds it to the sidebar", async ({
 test("clicking a joined channel in browser navigates to it", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 
@@ -495,8 +458,6 @@ test("clicking a joined channel in browser navigates to it", async ({
 test("channel browser does not show DM or private channels", async ({
   page,
 }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 
@@ -509,8 +470,6 @@ test("channel browser does not show DM or private channels", async ({
 });
 
 test("channel browser closes on escape", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 
@@ -519,8 +478,6 @@ test("channel browser closes on escape", async ({ page }) => {
 });
 
 test("keyboard navigation works in channel browser", async ({ page }) => {
-  await page.goto("/");
-
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 
@@ -536,8 +493,6 @@ test("keyboard navigation works in channel browser", async ({ page }) => {
 });
 
 test("sidebar only shows channels the user has joined", async ({ page }) => {
-  await page.goto("/");
-
   const streamList = page.getByTestId("stream-list");
 
   // Channels the mock user IS a member of

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -45,7 +45,7 @@ test.describe("channel shared header backdrop", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId(`channel-${CHANNEL_NAME}`).click();
     await expect(page.getByTestId("chat-title")).toHaveText(CHANNEL_NAME);
     await waitForMockLiveSubscription(page, CHANNEL_NAME);

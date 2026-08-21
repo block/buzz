@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import {
   installMockBridge,
@@ -18,7 +18,7 @@ test("profile panel Public key row reveals its copy action on hover", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -62,7 +62,7 @@ test("new-DM agent name swaps to its public key on name hover", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openNewMessagePage(page);
   await expect(page.getByTestId("new-message-page")).toBeVisible();
@@ -135,7 +135,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openNewMessagePage(page);
   await expect(page.getByTestId("new-message-page")).toBeVisible();
@@ -230,7 +230,7 @@ test("selected new-DM recipient can be verified again through search", async ({
 
 test("member removal confirm shows the full npub inline", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");

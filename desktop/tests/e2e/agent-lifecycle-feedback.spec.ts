@@ -9,7 +9,7 @@
  *    the old "Running agents keep their current settings…" text is gone.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -29,7 +29,7 @@ const CASCADE_AGENT_B_PUBKEY = "bb".repeat(32);
  * Navigate to the Agents view and wait for its unified list to mount.
  */
 async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await expect(page.getByTestId("unified-agents-groups")).toBeVisible({
     timeout: 10_000,
@@ -37,7 +37,7 @@ async function openAgentsView(page: import("@playwright/test").Page) {
 }
 
 async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();

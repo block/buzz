@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -30,7 +30,7 @@ test.beforeEach(async ({ page }) => {
 test("copies a freshly minted invite link from the link field", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "community-members");
   await expect(page.getByTestId("settings-community-members")).toBeVisible();
 
@@ -68,7 +68,7 @@ test("copies a freshly minted invite link from the link field", async ({
 });
 
 test("sets a selected invite-use limit", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "community-members");
   await page.getByTestId("community-invite-dialog-trigger").click();
 
@@ -112,7 +112,7 @@ test("retries a failed invite-link generation", async ({ page }) => {
     });
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "community-members");
   await page.getByTestId("community-invite-dialog-trigger").click();
 
@@ -136,7 +136,7 @@ test("retries a failed invite-link generation", async ({ page }) => {
 test("reopens with the default expiry before generating a new link", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "community-members");
   await page.getByTestId("community-invite-dialog-trigger").click();
 

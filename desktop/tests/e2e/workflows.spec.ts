@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function navigateToWorkflows(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-workflows-view").click();
   await expect(page).toHaveURL(/#\/workflows$/);
   await expect(page.getByTestId("workflows-view")).toBeVisible();
@@ -164,7 +164,8 @@ test("Escape closes the selected inspector before the workflow modal", async ({
 }) => {
   for (const width of [760, 1280]) {
     await page.setViewportSize({ width, height: 820 });
-    await page.goto(
+    await bootstrapE2ePage(
+      page,
       "/#/workflows?view=create&channel=94a444a4-c0a3-5966-ab05-530c6ddc2301&pane=trigger",
     );
 

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
@@ -61,7 +61,7 @@ async function gotoApp(page: import("@playwright/test").Page) {
   let lastError: unknown = null;
 
   for (const attempt of [0, 1]) {
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await waitForInvokeBridge(page);
 
     try {

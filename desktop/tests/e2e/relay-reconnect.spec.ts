@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -173,7 +173,7 @@ test("stalled early AUTH signing times out and starts a replacement dial", async
     websocketAuthBeforeConnectResolves: true,
     stallFirstAuthSigning: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect
     .poll(() => getMockWebsocketConnectAttempts(page), { timeout: 32_000 })
@@ -193,7 +193,7 @@ test("AUTH arriving before connect resolves does not lose the first send", async
   await installMockBridge(page, {
     websocketAuthBeforeConnectResolves: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect
     .poll(
       () =>
@@ -215,7 +215,7 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["mock relay pod unavailable"],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // App-shell preconnect owns a keep-alive request. The first native dial is
   // rejected before a socket ID exists; the session must still enter its
@@ -240,7 +240,7 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
 test("routine traffic cannot bypass outage backoff and recovery stays automatic", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("channel-general")).toBeVisible();
 
   await setMockWebsocketUnavailable(page, true);
@@ -289,7 +289,7 @@ test("routine traffic cannot bypass outage backoff and recovery stays automatic"
 test("authenticated reconnect reports connected while replay is rate-limited", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("channel-general")).toBeVisible();
 
   await activateRelayRateLimit(page, 5);
@@ -311,7 +311,7 @@ test("authenticated reconnect reports connected while replay is rate-limited", a
 test("rate-limited reconnect backfill does not tear down the authenticated socket", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -367,7 +367,7 @@ test("service restart close resets accumulated backoff", async ({ page }) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["down 1", "down 2", "down 3"],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("channel-general")).toBeVisible({
     timeout: 15_000,
   });
@@ -387,7 +387,7 @@ test("service restart close resets accumulated backoff", async ({ page }) => {
 test("passive relay watchdog does not write while the websocket is half-open", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
@@ -413,7 +413,7 @@ test("passive relay watchdog does not write while the websocket is half-open", a
 test("sidebar reconnect prompt flips on live relay degradation without a query error", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Healthy boot: channels render from the mock bridge and the reconnect
   // prompt is absent (no query error, connection healthy).
@@ -439,7 +439,7 @@ test("sidebar reconnect prompt flips on live relay degradation without a query e
 test("profile popover does not show relay reconnect controls", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("channel-general")).toBeVisible();
   await page.getByTestId("sidebar-profile-avatar-button").click();
@@ -458,7 +458,7 @@ test("profile popover does not show relay reconnect controls", async ({
 test("resume event short-circuits accumulated reconnect backoff", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("channel-general")).toBeVisible();
 
   await setMockWebsocketUnavailable(page, true);
@@ -485,7 +485,7 @@ test("resume event short-circuits accumulated reconnect backoff", async ({
 test("resume events during repeated AUTH rejection cannot defeat the terminal cap", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -545,7 +545,7 @@ test("resume events during repeated AUTH rejection cannot defeat the terminal ca
 test("sub-2s degraded flap invalidates relay queries on recovery", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("channel-general")).toBeVisible();
 
   await page.evaluate(() => {
@@ -587,7 +587,7 @@ test("sub-2s degraded flap invalidates relay queries on recovery", async ({
 test("transient AUTH rejection reconnects and restores live traffic", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -622,7 +622,7 @@ test("transient AUTH rejection reconnects and restores live traffic", async ({
 test("auth-required CLOSED restores the active live subscription", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -650,7 +650,7 @@ test("auth-required CLOSED restores the active live subscription", async ({
 test("reconnect backfills more missed channel messages than the live subscription limit", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

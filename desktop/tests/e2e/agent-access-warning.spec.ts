@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -50,7 +50,7 @@ test("open agent access explains the available access before save", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("channel-members-trigger").click();
   const accessBadge = page.getByTestId(
@@ -181,7 +181,7 @@ test("full agent editor tightens the exact sidebar agent instance", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("channel-members-trigger").click();
   const accessBadge = page.getByTestId(
@@ -272,7 +272,7 @@ test("a provider-backed agent's warning names the server, not this computer", as
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openAgentAccessDialog(page, agent.pubkey);
 
   await page.getByTestId("agent-respond-to-select").selectOption("anyone");
@@ -299,7 +299,7 @@ test("persona-backed edit warns before saving open access", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await page.getByRole("button", { name: "Tyler Agent agent profile" }).click();
   await page.getByTestId("user-profile-edit-agent").click();

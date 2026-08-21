@@ -16,7 +16,7 @@
  *       Previously, the seeding effect bailed in edit mode, leaving the runtime
  *       empty and the model dropdown silently blank.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -29,7 +29,7 @@ const SHOTS = "test-results/screenshots-dialogs";
  * direct `/settings` request.
  */
 async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
@@ -156,7 +156,7 @@ test.describe("agent provider dropdown screenshots", () => {
       ],
     });
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
     await expect(page.getByTestId("agents-library-personas")).toBeVisible({
       timeout: 10_000,
@@ -229,7 +229,7 @@ test.describe("agent provider dropdown screenshots", () => {
       ],
     });
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
     await page
       .getByRole("button", { name: "Open actions for Codex Definition" })

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, openCreateChannelDialog } from "../helpers/bridge";
 
@@ -85,7 +85,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("loads the app shell with mocked channels", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
   await expect(page.getByTestId("stream-list")).toContainText("general");
@@ -111,7 +111,7 @@ async function chooseSharedComputeProvider(
 test("creates a new mocked stream", async ({ page }) => {
   const channelName = `release-notes-${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
@@ -126,7 +126,7 @@ test("creates a new mocked stream", async ({ page }) => {
 test("Buzz shared compute explains automatic model selection", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     (
       window as Window & {
@@ -163,7 +163,7 @@ test("create agent persists Buzz shared compute with auto model", async ({
 }) => {
   const agentName = `Shared compute agent ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
   await page.locator("#persona-display-name").fill(agentName);
@@ -209,7 +209,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
 }) => {
   const agentName = `Parallel agent ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
 
@@ -282,7 +282,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
 test("opens a mocked channel from the inbox feed", async ({ page }) => {
   const inboxList = page.getByTestId("home-inbox-list");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expectHomeView(page);
   await expect(inboxList).toContainText("Please review the release checklist.");
@@ -302,7 +302,7 @@ test("Inbox excludes generic channel and unowned agent traffic", async ({
 }) => {
   const inboxList = page.getByTestId("home-inbox-list");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expectHomeView(page);
 
   await expect(inboxList).not.toContainText(
@@ -317,7 +317,7 @@ test("Inbox excludes generic channel and unowned agent traffic", async ({
 });
 
 test("inbox feed renders resolved author labels", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("home-inbox-list")).toContainText("alice");
   await expect(page.getByTestId("home-inbox-list")).not.toContainText("You");
@@ -326,7 +326,7 @@ test("inbox feed renders resolved author labels", async ({ page }) => {
 test("opens sidebar search with the shortcut and loads the exact result", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await focusSidebarSearchWithShortcut(page);
 
@@ -347,7 +347,7 @@ test("opens sidebar search with the shortcut and loads the exact result", async 
 });
 
 test("opens channel matches from search", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await focusSidebarSearchWithShortcut(page);
 
@@ -382,7 +382,7 @@ test("opens channel matches from search", async ({ page }) => {
 test("global search offers an optional current-channel scope", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page).toHaveURL(
@@ -475,7 +475,7 @@ test("global search offers a conversation-specific scope in direct messages", as
 }) => {
   const directMessageId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
   await expect(page).toHaveURL(
@@ -555,7 +555,7 @@ test("global search offers a conversation-specific scope in direct messages", as
 test("channel find shortcut opens unified search with scope selected", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page).toHaveURL(
     /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
@@ -576,7 +576,7 @@ test("channel find shortcut opens unified search with scope selected", async ({
 test("global search omits channel scoping when no channel is active", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expectHomeView(page);
 
   await focusSidebarSearchWithShortcut(page);
@@ -590,7 +590,7 @@ test("global search omits channel scoping when no channel is active", async ({
 test("global one-character search does not query the relay", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await focusSidebarSearchWithShortcut(page);
 
   await page.getByTestId("search-dialog-input").fill("x");
@@ -611,7 +611,7 @@ test("global one-character search does not query the relay", async ({
 test("global search tolerates small channel and people typos", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await focusSidebarSearchWithShortcut(page);
 
   const input = page.getByTestId("search-dialog-input");
@@ -626,7 +626,7 @@ test("global search tolerates small channel and people typos", async ({
 test("global search exposes a larger scrollable result window", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
   await expect(
@@ -667,7 +667,7 @@ test("global search exposes a larger scrollable result window", async ({
 });
 
 test("closes sidebar search with Escape", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await focusSidebarSearchWithShortcut(page);
   await page.getByTestId("search-dialog-input").fill("shipped");
@@ -681,7 +681,7 @@ test("closes sidebar search with Escape", async ({ page }) => {
 test("search shortcut opens search without disturbing the collapsed sidebar", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("open-search")).toBeVisible();
 
@@ -716,7 +716,7 @@ test("search shortcut opens search without disturbing the collapsed sidebar", as
 test("search results use your resolved profile label instead of You", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await focusSidebarSearchWithShortcut(page);
 
@@ -731,7 +731,7 @@ test("search results use your resolved profile label instead of You", async ({
 test("opens accessible unjoined channels from search in read-only mode", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await focusSidebarSearchWithShortcut(page);
 
@@ -751,7 +751,7 @@ test("opens accessible unjoined channels from search in read-only mode", async (
 });
 
 test("replaces the channel pane when switching channels", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -781,7 +781,7 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
 test("sends a mocked channel message", async ({ page }) => {
   const message = `Smoke message ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.getByTestId("message-input").fill(message);
@@ -819,7 +819,7 @@ test("supports multiline drafts with Ctrl+Enter and sends with Enter", async ({
   ];
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(
@@ -858,7 +858,7 @@ test("does not shift the timeline when the composer grows", async ({
   const input = page.getByTestId("message-input");
   const prefix = `Composer growth ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

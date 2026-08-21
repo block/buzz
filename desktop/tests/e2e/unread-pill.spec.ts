@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
@@ -101,7 +101,7 @@ async function scrollTimelineUp(page: import("@playwright/test").Page) {
 test.describe("unread pill & divider", () => {
   test("01-unread-pill-visible", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // Open general, then switch to random so general becomes inactive
     await page.getByTestId("channel-general").click();
@@ -149,7 +149,7 @@ test.describe("unread pill & divider", () => {
 
   test("02-unread-divider-visible", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -173,7 +173,7 @@ test.describe("unread pill & divider", () => {
 
   test("03-pill-dismissed-after-scroll", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -205,7 +205,7 @@ test.describe("unread pill & divider", () => {
 
   test("04-mark-unread-suppresses-pill", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");

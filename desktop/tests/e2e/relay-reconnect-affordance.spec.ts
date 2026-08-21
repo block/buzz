@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -52,7 +52,7 @@ test.describe("relay reconnect affordance", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
@@ -71,7 +71,7 @@ test.describe("relay reconnect affordance", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await driveConnectionState(page, "stalled");

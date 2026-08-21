@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import {
   installMockBridge,
@@ -276,7 +276,7 @@ test("@ trigger prioritizes channel members before runnable personas and other m
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -349,7 +349,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     async ({ channelId, pubkey }) => {
@@ -429,7 +429,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
 test("relay-only shared agents emit an outbound mention tag when selected", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -479,7 +479,7 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
   await page.addInitScript(() => {
     window.sessionStorage.setItem("buzz.desktop.thread-panel-width", "300");
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.setViewportSize({ width: 760, height: 640 });
@@ -528,7 +528,7 @@ test("blocks non-participant persona mentions in DM threads", async ({
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
   await waitForMockLiveSubscription(page, "bob-tyler");
@@ -588,7 +588,7 @@ test("defers agent mentions until DM members finish loading", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
   await waitForMockLiveSubscription(page, "alice-tyler");
@@ -650,7 +650,7 @@ test("autocomplete filters managed-agent suggestions as user types", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -673,7 +673,7 @@ test("autocomplete searches global non-member people from the first typed charac
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -695,7 +695,7 @@ test("mention autocomplete caps global people search at 50 results", async ({
   }));
   await installMockBridge(page, { searchProfiles });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -729,7 +729,7 @@ test("mention autocomplete caps global people search at 50 results", async ({
 test("selecting a person mention inserts @Name into input", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -805,7 +805,7 @@ test("clicking a person mention chip edge is not treated as after the trailing s
 test("channel references keep caret movement through the channel name", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -848,7 +848,7 @@ test("selecting a managed agent mention inserts @Name into input", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -875,7 +875,7 @@ test("selecting a persona mention creates a channel agent before sending", async
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -964,7 +964,7 @@ test("selecting a persona mention reuses an existing persona agent", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1028,7 +1028,7 @@ test("managed relay-profile agents with member roles use the agent composer styl
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
@@ -1067,7 +1067,7 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
     ],
     userSearchDelayMs: 1_000,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1083,7 +1083,7 @@ test("stale channel-member agents absent from managed and relay directories stay
   page,
 }) => {
   await installMockBridge(page, { userSearchDelayMs: 1_000 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1113,7 +1113,7 @@ test("managed relay agents are visible in channel mentions regardless of relay p
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1128,7 +1128,7 @@ test("managed relay agents are visible in channel mentions regardless of relay p
 test("relay-only shared agents stay hidden from DM mentions", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 
@@ -1141,7 +1141,7 @@ test("cached relay-agent suggestions are removed when channel authorization disa
   page,
 }) => {
   await installMockBridge(page, { userSearchDelayMs: 10_000 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1188,7 +1188,7 @@ test("relay-only shared agents appear in forum mentions", async ({ page }) => {
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-watercooler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
   await page.getByRole("button", { name: "Start a new post..." }).click();
@@ -1225,7 +1225,7 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-watercooler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
   await page.getByRole("button", { name: "Start a new post..." }).click();
@@ -1282,7 +1282,7 @@ test("relay-only allowlisted agents are visible in channel mentions", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1309,7 +1309,7 @@ test("relay-agent directory errors fail closed and recover after a fresh fetch",
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
@@ -1347,7 +1347,7 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     async ({ channelId, pubkey }) => {
@@ -1414,7 +1414,7 @@ test("managed agents keep their p tag when relay discovery fails before send", a
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
 
   const input = page.getByTestId("message-input");
@@ -1453,7 +1453,7 @@ test("targeted revocation before send causes no agent side effects", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     async ({ channelId, pubkey }) => {
@@ -1526,7 +1526,7 @@ test("selected relay agents revoked after the invite prompt cause no side effect
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
@@ -1583,7 +1583,7 @@ test("selected relay agents revoked during send emit no p tag", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
@@ -1637,7 +1637,7 @@ test("owner-only builds admit cross-owner relay agents authorized by allowlist",
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.evaluate(
     async ({ channelId, pubkey }) => {
@@ -1693,7 +1693,7 @@ test("owner-only builds show verified same-owner relay agents", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill("@quinn");
 
@@ -1714,7 +1714,7 @@ test("relay-only allowlisted agents stay hidden outside their channel", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1746,7 +1746,7 @@ test("owner-only builds admit cross-owner relay agents authorized for anyone", a
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1769,7 +1769,7 @@ test("relay-only excluded agents stay hidden from channel mentions", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1793,7 +1793,7 @@ test("shared agents wait for initial directory authorization", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1818,7 +1818,7 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1868,7 +1868,7 @@ test("mentioning an in-channel provider managed agent deploys it before sending"
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1912,7 +1912,7 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1973,7 +1973,7 @@ test("mentioning a non-member provider managed agent deploys it before sending",
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2034,7 +2034,7 @@ test("system add rows use plain names while remove rows retain agent mention sty
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
@@ -2103,7 +2103,7 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await installMockBridge(page, {
     searchProfiles: [actor, ...targets],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
@@ -2178,7 +2178,7 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
 });
 
 test("system agent profile exposes owned agent actions", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
@@ -2223,7 +2223,7 @@ test("system agent profile exposes owned agent actions", async ({ page }) => {
 });
 
 test("system agent activity avatar stack is decorative", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
@@ -2259,7 +2259,7 @@ test("system agent activity avatar stack is decorative", async ({ page }) => {
 test("membership activity folds a member joining then leaving", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
@@ -2309,7 +2309,7 @@ test("profile-only agent author hides actions without agent access", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2338,7 +2338,7 @@ test("profile-only agent author hides actions without agent access", async ({
 test("system member-joined rows render the joined person as a plain profile name", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
@@ -2381,7 +2381,7 @@ test("selecting a managed non-member agent from a DM inserts @Name into input", 
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
 
@@ -2401,7 +2401,7 @@ test("selecting a managed non-member agent from a DM inserts @Name into input", 
 test("global non-member people can be selected from channel mentions", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2429,7 +2429,7 @@ test("duplicate global people with the same visible identity collapse in channel
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2443,7 +2443,7 @@ test("duplicate global people with the same visible identity collapse in channel
 test("sent non-member person mention uses the normal mention style", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
 
@@ -2476,7 +2476,7 @@ test("sent managed non-member agent mention uses the agent mention style", async
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
 
@@ -2501,7 +2501,7 @@ test("sent managed non-member agent mention uses the agent mention style", async
 test("mention button opens autocomplete and inserts a selected member", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2524,7 +2524,7 @@ test("inserting a mention preserves Shift+Enter newlines (regression: bug #2)", 
   // break to a single space. After the fix, autocomplete uses a
   // native ProseMirror `tr.insertText` transaction and the line
   // breaks survive.
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2545,7 +2545,7 @@ test("inserting a mention preserves Shift+Enter newlines (regression: bug #2)", 
 });
 
 test("keyboard navigation selects mention with Enter", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2563,7 +2563,7 @@ test("keyboard navigation selects mention with Enter", async ({ page }) => {
 });
 
 test("Escape dismisses autocomplete dropdown", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2581,7 +2581,7 @@ test("Escape dismisses autocomplete dropdown", async ({ page }) => {
 test("mention text is highlighted in sent messages", async ({ page }) => {
   const suffix = ` check this out ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2604,7 +2604,7 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
 });
 
 test("clicking author name opens user profile panel", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2624,7 +2624,7 @@ test("clicking author name opens user profile panel", async ({ page }) => {
 test("hovering avatar opens popover, clicking opens profile panel", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2647,7 +2647,7 @@ test("hovering avatar opens popover, clicking opens profile panel", async ({
 test("clicking a mention chip in the timeline opens the profile panel", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2675,7 +2675,7 @@ test("mention text matching the kind-0 name alias resolves and opens the profile
   // bob's mock profile has display_name "bob" and kind-0 name "bobby". A
   // message that says "@bobby" (how agents/CLI resolve mentions at send time)
   // must still render a clickable chip bound to bob's pubkey.
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2700,7 +2700,7 @@ test("mention text matching the kind-0 name alias resolves and opens the profile
 test("clicking a mention chip in a forum post opens the profile panel", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   // Seed the forum post before entering the channel — forum views load from
   // the mock store on fetch, so no live subscription is needed.
   await page.getByTestId("channel-general").click();
@@ -2737,7 +2737,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2777,7 +2777,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2817,7 +2817,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2845,7 +2845,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
 });
 
 test("human profile popover does not show an owner", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2882,7 +2882,7 @@ test("owned bot profile exposes message and huddle actions", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
@@ -2930,7 +2930,7 @@ test("owned agent mention profile exposes message and huddle actions", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -2962,7 +2962,7 @@ test("profile popover wave sends a direct message for a human profile", async ({
 }) => {
   await installMockBridge(page, { sendMessageDelayMs: 2_500 });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -3056,7 +3056,7 @@ test("delayed inaccessible agent profile keeps all actions hidden", async ({
     ],
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");

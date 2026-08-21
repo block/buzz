@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -11,7 +11,7 @@ const SHOTS = "test-results/global-agent-config";
  * `/settings` directly returns a 404 before the client router can start.
  */
 async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
@@ -29,7 +29,7 @@ async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
  * "New agent" menu item, then fill a placeholder name.
  */
 async function openCreateDialog(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
   await page.locator("#persona-display-name").fill("Test Agent");
@@ -704,7 +704,7 @@ test.describe("global agent config screenshots", () => {
   test("create with a missing name has no footer message", async ({ page }) => {
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
     await page.getByTestId("new-agent-card").click();
 
@@ -840,7 +840,7 @@ test.describe("global agent config screenshots", () => {
     });
 
     // Agents view → persona-grouped agent card → Edit quick action.
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
     const agentButton = page.getByRole("button", {
       name: "Codex Editor agent profile",
@@ -931,7 +931,7 @@ test.describe("global agent config screenshots", () => {
     });
 
     // Agents view → persona-grouped agent card → Edit quick action.
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
     const agentButton = page.getByRole("button", {
       name: "Legacy Editor agent profile",

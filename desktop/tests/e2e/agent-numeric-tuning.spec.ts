@@ -15,13 +15,13 @@
  *      visible as generic rows (never the "unsupported" empty state).
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
@@ -38,7 +38,7 @@ async function openEditAgentDialog(
   page: import("@playwright/test").Page,
   agentName: string,
 ) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
 
   const agentButton = page.getByRole("button", {
@@ -195,7 +195,7 @@ test("goose_per_agent_advanced_max_tokens_shows_inherited_global_placeholder", a
   ).toBeDisabled({ timeout: 5_000 });
 
   // Step 3: navigate back and open the per-agent edit dialog for the Goose
-  // agent. We use the app's Back link rather than page.goto("/") to preserve
+  // agent. We use the app's Back link rather than bootstrapE2ePage(page, "/") to preserve
   // the in-memory mock state (page.goto causes a full reload that resets it).
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByTestId("open-agents-view").click();

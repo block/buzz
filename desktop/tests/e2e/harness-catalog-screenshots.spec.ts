@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -140,7 +140,7 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1280, height: 2400 });
   await installMockBridge(page, { acpRuntimesCatalog: CATALOG });
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await openSettings(page, "agents");
   await expect(page.getByTestId("settings-harnesses")).toBeVisible({
     timeout: 10_000,

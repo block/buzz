@@ -1,4 +1,10 @@
-import { expect, test, type Browser, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Browser,
+  type Page,
+  bootstrapE2ePage,
+} from "../helpers/test";
 
 import {
   installRelayBridge,
@@ -191,7 +197,7 @@ test.beforeAll(async () => {
 
 test("loads channels from the relay", async ({ page }) => {
   await installRelayBridge(page, "tyler");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("stream-list")).toContainText("general");
   await expect(page.getByTestId("stream-list")).toContainText("random");
@@ -209,8 +215,8 @@ test("loads the home feed from the relay", async ({ browser }) => {
   try {
     await installRelayBridge(page, "tyler");
     await installRelayBridge(senderPage, "alice");
-    await page.goto("/");
-    await senderPage.goto("/");
+    await bootstrapE2ePage(page, "/");
+    await bootstrapE2ePage(senderPage, "/");
 
     await expect(page.getByTestId("home-inbox")).toBeVisible();
     await expect(page.getByTestId("home-inbox-list")).toBeVisible();
@@ -242,8 +248,8 @@ test("shows sent inbox replies immediately in the inbox detail pane", async ({
   try {
     await installRelayBridge(page, "tyler");
     await installRelayBridge(senderPage, "alice");
-    await page.goto("/");
-    await senderPage.goto("/");
+    await bootstrapE2ePage(page, "/");
+    await bootstrapE2ePage(senderPage, "/");
 
     await sendChannelMessage(senderPage, {
       channelName: "general",
@@ -269,7 +275,7 @@ test("creates a relay-backed stream", async ({ page }) => {
   const channelName = `desktop-e2e-${Date.now()}`;
 
   await installRelayBridge(page, "tyler");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
@@ -285,7 +291,7 @@ test("sends a message through the real relay", async ({ page }) => {
   const message = `Integration message ${Date.now()}`;
 
   await installRelayBridge(page, "tyler");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.getByTestId("message-input").fill(message);
@@ -310,8 +316,8 @@ test("delivers a message to a second browser context in real time", async ({
     await installRelayBridge(pageOne, "tyler");
     await installRelayBridge(pageTwo, "alice");
 
-    await pageOne.goto("/");
-    await pageTwo.goto("/");
+    await bootstrapE2ePage(pageOne, "/");
+    await bootstrapE2ePage(pageTwo, "/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName);
 
     await pageOne.getByTestId("message-input").fill(message);
@@ -343,8 +349,8 @@ test("stays pinned to the latest message when new messages arrive at the bottom"
     await installRelayBridge(pageOne, "tyler");
     await installRelayBridge(pageTwo, "alice");
 
-    await pageOne.goto("/");
-    await pageTwo.goto("/");
+    await bootstrapE2ePage(pageOne, "/");
+    await bootstrapE2ePage(pageTwo, "/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
@@ -388,8 +394,8 @@ test("stays pinned after you send a message and a remote reply arrives right aft
     await installRelayBridge(pageOne, "tyler");
     await installRelayBridge(pageTwo, "alice");
 
-    await pageOne.goto("/");
-    await pageTwo.goto("/");
+    await bootstrapE2ePage(pageOne, "/");
+    await bootstrapE2ePage(pageTwo, "/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
@@ -437,8 +443,8 @@ test("keeps bottom-pinned scrolling after the composer grows", async ({
     await installRelayBridge(pageOne, "tyler");
     await installRelayBridge(pageTwo, "alice");
 
-    await pageOne.goto("/");
-    await pageTwo.goto("/");
+    await bootstrapE2ePage(pageOne, "/");
+    await bootstrapE2ePage(pageTwo, "/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
@@ -493,8 +499,8 @@ test("keeps scroll position when new messages arrive above the fold", async ({
     await installRelayBridge(pageOne, "tyler");
     await installRelayBridge(pageTwo, "alice");
 
-    await pageOne.goto("/");
-    await pageTwo.goto("/");
+    await bootstrapE2ePage(pageOne, "/");
+    await bootstrapE2ePage(pageTwo, "/");
     const minAwayDistance = 80;
     await createAndJoinSharedStream(pageOne, pageTwo, channelName, {
       prefix,

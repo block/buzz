@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -77,7 +77,7 @@ async function driveConnectionDegraded(
 test.describe("relay connectivity", () => {
   test("01 — sidebar unreachable card", async ({ page }) => {
     await installMockBridge(page, { channelsReadError: RELAY_UNREACHABLE });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // Wait for the E2E seam to be installed (bridge init is complete), then force
     // the relay into a degraded state. The card is gated on !isRelayConnectionConnected:
@@ -113,7 +113,7 @@ test.describe("relay connectivity", () => {
 
   test("02 — sidebar reconnect card while reconnecting", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // Wait for a healthy boot, then force the relay into "reconnecting" state.
     await expect(page.getByTestId("channel-general")).toBeVisible();
@@ -134,7 +134,7 @@ test.describe("relay connectivity", () => {
 
   test("03 — canvas unreachable in management sheet", async ({ page }) => {
     await installMockBridge(page, { canvasReadError: RELAY_UNREACHABLE });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -186,7 +186,7 @@ test.describe("relay connectivity", () => {
       },
     );
     await installMockBridge(page, { profileReadError: RELAY_UNREACHABLE });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     // The profile card should show the cached display name.
     const profileCard = page.getByTestId("sidebar-profile-card");
@@ -197,7 +197,7 @@ test.describe("relay connectivity", () => {
   test("05 — no-cache npub fallback when offline", async ({ page }) => {
     // No cache seeded — profile card falls back to the mock identity npub name.
     await installMockBridge(page, { profileReadError: RELAY_UNREACHABLE });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     const profileCard = page.getByTestId("sidebar-profile-card");
     // Default mock identity display name is "npub1mock...".
@@ -209,7 +209,7 @@ test.describe("relay connectivity", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
 
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await driveConnectionDegraded(page);

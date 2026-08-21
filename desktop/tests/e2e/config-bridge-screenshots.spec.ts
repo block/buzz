@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -113,7 +113,7 @@ async function openAgentProfileFromChannel(
     tab?: "Info" | "Runtime";
   } = {},
 ) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await waitForInvokeBridge(page);
   await activatePersonas(page);
 
@@ -326,7 +326,7 @@ test.describe("config bridge screenshots", () => {
         },
       ],
     });
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await waitForInvokeBridge(page);
     await page.getByTestId("channel-agents").click();
     await expect(page.getByTestId("chat-title")).toHaveText("agents");

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import {
   installMockBridge,
@@ -24,7 +24,7 @@ async function readCommandLog(page: import("@playwright/test").Page) {
 }
 
 async function gotoAgentsPage(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
 }
 

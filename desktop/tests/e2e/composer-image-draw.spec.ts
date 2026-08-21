@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -70,7 +70,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("image annotation overlay and editor controls", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByRole("button", { name: "Attach file" }).click();
 
@@ -97,7 +97,7 @@ test("image annotation overlay and editor controls", async ({ page }) => {
 test("draw on an uploaded image, save replaces it, revert restores in place", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -178,7 +178,7 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
 });
 
 test("spoiler marking survives drawing on the attachment", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -17,7 +17,7 @@ async function openActivityFromChannel(
   channelTestId: string,
   channelTitle: string,
 ) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId(channelTestId).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelTitle);
 
@@ -118,7 +118,8 @@ test.describe("activity panel scope label", () => {
       ],
     });
 
-    await page.goto(
+    await bootstrapE2ePage(
+      page,
       `/#/channels/${AGENTS_CHANNEL_ID}?agentSession=${AGENT_PUBKEY}`,
       { waitUntil: "domcontentloaded" },
     );

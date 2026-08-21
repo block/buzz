@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, openChannelBrowser } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -10,7 +10,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("capture: add-channel default state", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-dialog").waitFor();
   await waitForAnimations(page);
@@ -18,7 +18,7 @@ test("capture: add-channel default state", async ({ page }) => {
 });
 
 test("capture: create row on partial match", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("desig");
   await page.getByTestId("channel-browser-create-row").waitFor();
@@ -27,7 +27,7 @@ test("capture: create row on partial match", async ({ page }) => {
 });
 
 test("capture: create row on no match", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("release-notes");
   await page.getByTestId("channel-browser-create-row").waitFor();
@@ -36,7 +36,7 @@ test("capture: create row on no match", async ({ page }) => {
 });
 
 test("capture: prefilled create form", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill("release-notes");
   await page.getByTestId("channel-browser-create-row").click();

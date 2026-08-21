@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import type { Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
@@ -91,7 +91,7 @@ async function uploadCommandCount(page: Page) {
 test("picker survives cancel, same-file retry, and multiple selection", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const attach = page.getByRole("button", { name: "Attach file" });
 
@@ -125,7 +125,7 @@ test("picker survives cancel, same-file retry, and multiple selection", async ({
 test("photos upload before Send without a queued spoiler control", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     const e2e = (
       window as Window & {
@@ -165,7 +165,7 @@ test("photos upload before Send without a queued spoiler control", async ({
 test("opening edit during an immediate photo upload preserves the draft", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     const e2e = (
       window as Window & {
@@ -199,7 +199,7 @@ test("opening edit during an immediate photo upload preserves the draft", async 
 });
 
 test("upload a file and see a FileCard in the timeline", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -240,7 +240,7 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
 test("sends immediately and keeps upload progress across channels", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     const e2e = (
       window as Window & {
@@ -286,7 +286,7 @@ test("sends immediately and keeps upload progress across channels", async ({
 test("shows upload feedback before transferring a large file", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     const e2e = (
       window as Window & {
@@ -373,7 +373,7 @@ test("shows upload feedback before transferring a large file", async ({
 test("canceling a background upload prevents the message from publishing", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     const e2e = (
       window as Window & {
@@ -395,7 +395,7 @@ test("canceling a background upload prevents the message from publishing", async
 test("upload progress floats above the dock and lifts Jump to latest", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.evaluate(() => {
     const e2e = (
       window as Window & {
@@ -450,7 +450,7 @@ test("upload progress floats above the dock and lifts Jump to latest", async ({
 test("dropping a file on the channel column attaches it to the composer", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -524,7 +524,7 @@ for (const theme of ["buzz", "buzz-dark", "github-light", "github-dark"]) {
   test(`drop prompt has accessible text contrast in ${theme}`, async ({
     page,
   }) => {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.evaluate((selectedTheme) => {
       window.localStorage.setItem("buzz-theme", selectedTheme);
     }, theme);
@@ -583,7 +583,7 @@ test("forum posts emit a FileCard for generic attachments, not a broken image", 
   // and lost its label. The fix routes forum/notes posts through the same
   // `buildOutgoingMessage` builder as chat. This test would fail (no FileCard)
   // if ForumComposer ever drifts back to hand-building media markdown.
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // "watercooler" is a seeded forum the mock identity is a member of.
   await page.getByTestId("channel-watercooler").click();
@@ -620,7 +620,7 @@ test("a queued attachment can be removed without a mouse", async ({ page }) => {
   // Regression: the queued remove badge is revealed on hover, but hiding it
   // with `display: none` made it unfocusable, leaving keyboard-only users no
   // way to drop a queued video before sending.
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await chooseLargeVideo(page);
 
@@ -662,7 +662,7 @@ test("an uploaded attachment's remove button is named and keyboard-operable", as
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
 
   const composer = page.getByTestId("message-composer");
@@ -686,7 +686,7 @@ test("a non-media attachment's remove button is named and keyboard-operable", as
 }) => {
   // The file-card branch renders its own remove badge, so it needs the same
   // accessible name as the image and queued ones.
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await chooseQuarterlyReport(page);
 

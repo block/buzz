@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 import { mkdirSync } from "node:fs";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -38,7 +38,7 @@ async function emitPairingEvent(page: Page, event: string, payload?: unknown) {
 test("mobile pairing starts on demand and reveals the QR code", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await page.getByTestId("settings-nav-mobile").click();
@@ -231,7 +231,7 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
 test("pairing completion updates the final step and resets after leaving", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await page.getByTestId("settings-nav-mobile").click();
@@ -397,7 +397,7 @@ test("pairing completion updates the final step and resets after leaving", async
 });
 
 test("late pairing events are ignored after canceling", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await page.getByTestId("settings-nav-mobile").click();
@@ -432,7 +432,7 @@ test("late pairing events are ignored after canceling", async ({ page }) => {
 
 test("step completion respects reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await page.getByTestId("settings-nav-mobile").click();

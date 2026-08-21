@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -102,7 +102,7 @@ test.describe("list virtualization", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-pulse-view").click();
 
     // The seeded feed overflows the viewport (30 notes), so the windowed list
@@ -138,7 +138,8 @@ test.describe("list virtualization", () => {
 
   test("02 — forum deep-link lands on an offscreen reply", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto(
+    await bootstrapE2ePage(
+      page,
       `/#/channels/${WATERCOOLER_CHANNEL_ID}/posts/${FORUM_THREAD_ID}?replyId=${FORUM_DEEPLINK_REPLY_ID}`,
     );
 
@@ -174,7 +175,7 @@ test.describe("list virtualization", () => {
         },
       ],
     });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByTestId("channel-members-trigger").click();
@@ -202,7 +203,7 @@ test.describe("list virtualization", () => {
   }) => {
     await seedChannelSections(page);
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -258,7 +259,10 @@ test.describe("list virtualization", () => {
       deepHistoryMessageCount: 1_800,
       channelWindowDelayMs: 300,
     });
-    await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
+    await bootstrapE2ePage(
+      page,
+      "/#/channels/feedf00d-0000-4000-8000-000000000007",
+    );
     const timeline = page.getByTestId("message-timeline");
     await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
     // Initial bottom positioning can momentarily cross the start threshold. Let
@@ -500,7 +504,10 @@ test.describe("list virtualization", () => {
       deepHistoryMessageCount: 1_800,
       channelWindowDelayMs: 300,
     });
-    await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
+    await bootstrapE2ePage(
+      page,
+      "/#/channels/feedf00d-0000-4000-8000-000000000007",
+    );
     const timeline = page.getByTestId("message-timeline");
     await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
     await page.waitForTimeout(1_000);
@@ -623,7 +630,7 @@ test.describe("list virtualization", () => {
 
 test("thread-heavy history mounts every loaded row", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -675,7 +682,7 @@ test("channel switches settle the last row above the composer", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -725,7 +732,7 @@ test("offscreen rich-row resize preserves the viewport-center anchor", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -810,7 +817,7 @@ test("live tail arrivals keep a bottom-pinned virtual timeline settled", async (
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -860,7 +867,7 @@ test("live tail arrivals stay buffered while reading and release on jump", async
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );

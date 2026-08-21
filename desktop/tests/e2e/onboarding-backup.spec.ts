@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
 import {
@@ -12,7 +12,7 @@ async function enterMachineBackup(page: import("@playwright/test").Page) {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 }
 
@@ -358,7 +358,7 @@ test("reveal shows inline error when get_nsec fails and Next still advances", as
     { nsecError: "Keychain locked" },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
@@ -379,7 +379,7 @@ test("reveal retry succeeds after initial failure", async ({ page }) => {
     { nsecErrors: ["Keychain locked", null] },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await page.getByTestId("backup-key-reveal-toggle").click();

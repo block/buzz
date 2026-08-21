@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -129,7 +129,7 @@ test.describe("composer overlays mask scrolled content", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId(`channel-${CHANNEL}`).click();
     await expect(page.getByTestId("message-timeline")).toBeVisible();
     await waitForMockLiveSubscription(page, CHANNEL);
@@ -168,7 +168,7 @@ test.describe("composer overlays mask scrolled content", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId(`channel-${CHANNEL}`).click();
     await waitForMockLiveSubscription(page, CHANNEL);
     await waitForMockLiveSubscription(page, CHANNEL, TYPING_KIND);
@@ -203,7 +203,7 @@ test.describe("composer overlays mask scrolled content", () => {
   test("reduced motion removes dock geometry transitions", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId(`channel-${CHANNEL}`).click();
 
     const dock = page
@@ -216,7 +216,7 @@ test.describe("composer overlays mask scrolled content", () => {
 
   test("bottom-pinned messages clear a growing composer", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId(`channel-${CHANNEL}`).click();
     await expect(page.getByTestId("message-timeline")).toBeVisible();
     await waitForMockLiveSubscription(page, CHANNEL);
@@ -281,7 +281,7 @@ test.describe("composer overlays mask scrolled content", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId(`channel-${CHANNEL}`).click();
     await expect(page.getByTestId("message-timeline")).toBeVisible();
     await waitForMockLiveSubscription(page, CHANNEL);

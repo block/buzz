@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -28,7 +28,7 @@ function seedStarState(
 test.describe("channel starring", () => {
   test("01 — context menu shows Star channel", async ({ page }) => {
     await installMockBridge(page);
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -49,7 +49,7 @@ test.describe("channel starring", () => {
     await seedStarState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -64,7 +64,7 @@ test.describe("channel starring", () => {
     await seedStarState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -90,7 +90,7 @@ test.describe("channel starring", () => {
     await seedStarState(page, ENGINEERING_CHANNEL_ID);
     await installMockBridge(page);
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 

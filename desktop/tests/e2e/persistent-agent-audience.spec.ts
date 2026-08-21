@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -26,14 +26,15 @@ async function seedAudience(page: Page, pubkeys: string[], theme = "buzz") {
 }
 
 async function openGeneral(page: Page) {
-  await page.goto(`/#/channels/${CHANNEL_ID}`, {
+  await bootstrapE2ePage(page, `/#/channels/${CHANNEL_ID}`, {
     waitUntil: "domcontentloaded",
   });
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }
 
 async function openThread(page: Page, threadRootId = THREAD_ROOT_ID) {
-  await page.goto(
+  await bootstrapE2ePage(
+    page,
     `/#/channels/${CHANNEL_ID}?messageId=${threadRootId}&thread=${threadRootId}`,
     { waitUntil: "domcontentloaded" },
   );

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { parseChannelWindowResponse } from "@/features/messages/lib/channelWindowResponse";
 import type { RelayEvent } from "@/shared/api/types";
@@ -42,7 +42,7 @@ test("mock-mode channel window pages parse with no dup or loss across page-1/pag
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -103,7 +103,7 @@ test("mock-mode channel window includes summaries and the two-hop aux closure", 
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&

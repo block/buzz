@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
+import { E2E_APP_ORIGIN } from "./bootstrap";
 
 export const TEST_IDENTITIES = {
   tyler: {
@@ -744,7 +745,14 @@ async function seedOnboardingCompletionForKnownIdentities(
     ...Object.values(TEST_IDENTITIES).map(({ pubkey }) => pubkey),
   ];
   await page.addInitScript(
-    ({ onboardingPrefix, pubkeys: pubkeysToSeed, relayUrl, welcomePrefix }) => {
+    ({
+      expectedOrigin,
+      onboardingPrefix,
+      pubkeys: pubkeysToSeed,
+      relayUrl,
+      welcomePrefix,
+    }) => {
+      if (location.origin !== expectedOrigin) return;
       const welcomeScope = encodeURIComponent(relayUrl);
       for (const pubkey of pubkeysToSeed) {
         window.localStorage.setItem(`${onboardingPrefix}${pubkey}`, "true");
@@ -755,6 +763,7 @@ async function seedOnboardingCompletionForKnownIdentities(
       }
     },
     {
+      expectedOrigin: E2E_APP_ORIGIN,
       onboardingPrefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX,
       pubkeys,
       relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
@@ -769,7 +778,8 @@ async function seedDefaultCommunity(
   relayWsUrl?: string,
 ) {
   await page.addInitScript(
-    ({ fallback, identityOverrideKey, relayUrl }) => {
+    ({ expectedOrigin, fallback, identityOverrideKey, relayUrl }) => {
+      if (location.origin !== expectedOrigin) return;
       // If seedActiveIdentity() ran before this script (the normal ordering),
       // use its pubkey so the community matches the active identity and
       // migrateMachineOnboardingCompletion's strict voucher accepts it.
@@ -810,6 +820,7 @@ async function seedDefaultCommunity(
       window.localStorage.setItem("buzz-active-community-id", communityId);
     },
     {
+      expectedOrigin: E2E_APP_ORIGIN,
       fallback: fallbackPubkey,
       identityOverrideKey: "buzz:e2e-identity-override.v1",
       relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
@@ -819,12 +830,17 @@ async function seedDefaultCommunity(
 
 async function seedPreviewFeaturesEnabled(page: Page) {
   await page.addInitScript(
-    ({ key, ids }) => {
+    ({ expectedOrigin, key, ids }) => {
+      if (location.origin !== expectedOrigin) return;
       const overrides: Record<string, boolean> = {};
       for (const id of ids) overrides[id] = true;
       window.localStorage.setItem(key, JSON.stringify(overrides));
     },
-    { key: FEATURE_OVERRIDES_STORAGE_KEY, ids: PREVIEW_FEATURE_IDS },
+    {
+      expectedOrigin: E2E_APP_ORIGIN,
+      key: FEATURE_OVERRIDES_STORAGE_KEY,
+      ids: PREVIEW_FEATURE_IDS,
+    },
   );
 }
 

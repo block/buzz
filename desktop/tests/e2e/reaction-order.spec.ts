@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -30,7 +30,7 @@ function reactionTargetRow(page: import("@playwright/test").Page) {
 }
 
 async function openGeneral(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }

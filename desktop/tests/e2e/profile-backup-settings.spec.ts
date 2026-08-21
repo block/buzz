@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 import { npubEncode } from "nostr-tools/nip19";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -28,7 +28,7 @@ async function openBackupSettings(
   mock?: Parameters<typeof installMockBridge>[1],
 ) {
   await installMockBridge(page, mock);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "profile");
   await openIdentity(page);
 }

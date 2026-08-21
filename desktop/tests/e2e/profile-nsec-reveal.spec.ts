@@ -2,7 +2,7 @@
  * Compact E2E tests for NsecRevealRow in ProfileSettingsCard.
  * Covers: reveal fetches + renders masked value, error state, collapse clears state.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
@@ -22,7 +22,7 @@ test("reveal shows masked nsec value and hides it again on collapse", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "profile");
   await expandIdentity(page);
 
@@ -49,7 +49,7 @@ test("reveal shows masked nsec value and hides it again on collapse", async ({
 
 test("reveal shows error when get_nsec fails", async ({ page }) => {
   await installMockBridge(page, { nsecError: "Keychain locked" });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "profile");
   await expandIdentity(page);
 

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installRelayBridge } from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
@@ -66,7 +66,7 @@ test("live relay: an ancestor island does not strand the history frontier", asyn
   expect(expectedGap.size).toBe(GAP_COUNT);
 
   await installRelayBridge(page, "tyler");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

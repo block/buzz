@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import {
   KIND_HUDDLE_ENDED,
@@ -122,7 +122,7 @@ test("keeps the drawer open until the huddle is expanded", async ({ page }) => {
     },
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const gradientUnderlay = page.locator(".buzz-theme-gradient-underlay");
   const openGradient = await gradientUnderlay.evaluate(
@@ -288,7 +288,7 @@ test("floats the in-app huddle tray over the glass background", async ({
     },
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const root = page.locator("html");
   const shell = page.locator('.buzz-huddle-shell[data-huddle-window="false"]');
@@ -360,7 +360,7 @@ test("keeps the popped-out huddle dock full-width over glass", async ({
     },
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const root = page.locator("html");
   const shell = page.locator('.buzz-huddle-shell[data-huddle-window="true"]');
@@ -392,7 +392,7 @@ test("shows speaker identity on every huddle chat message", async ({
     },
     mock: { threadRepliesDelayMs: 1_500 },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect
     .poll(() =>
@@ -488,7 +488,7 @@ test("ignores persisted community onboarding in the huddle room", async ({
   });
 
   for (let load = 0; load < 2; load += 1) {
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await expect(page.getByTestId("huddle-transcript-intro")).toBeVisible();
     await expect(
       page.getByText("Setting up your community", { exact: true }),
@@ -534,7 +534,7 @@ test("keeps main-app shortcuts from navigating the huddle room", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page).toHaveURL(
     new RegExp(`/channels/${HUDDLE_CHANNEL_ID.replaceAll("-", "\\-")}`),
@@ -592,7 +592,7 @@ test("speaks the first eligible agent reply with its participant identity", asyn
       ttsEnabled: true,
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await waitForMockLiveSubscription(page, "huddle");
 
   await page.evaluate((agentPubkey) => {
@@ -637,7 +637,7 @@ test("animates the responding agent with the shared speaker ring", async ({
       ],
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const agentAvatar = page
     .getByTestId("huddle-participant-strip")
@@ -685,7 +685,7 @@ test("stops the speaking agent from the huddle controls", async ({ page }) => {
       ],
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const roomMicButton = page.getByRole("button", {
     name: "Microphone unavailable",
   });
@@ -777,7 +777,7 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
       ttsEnabled: true,
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const voiceMenus = page.getByTestId("huddle-agent-voice-menu-trigger");
   await expect(voiceMenus).toHaveCount(2);
@@ -865,7 +865,7 @@ test("adds channel-mentioned agents to the live huddle roster", async ({
       ],
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const participantTiles = page.getByTestId("huddle-participant-tile");
   await expect(participantTiles).toHaveCount(2);
@@ -917,7 +917,7 @@ test("does not enroll available agents when sending an ordinary message", async 
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const participantTiles = page.getByTestId("huddle-participant-tile");
   await expect(participantTiles).toHaveCount(1);
@@ -952,7 +952,7 @@ test("keeps the colored startup surface while huddle controls connect", async ({
       members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("huddle-starting-view")).toBeVisible();
   await expect(
@@ -982,7 +982,7 @@ test("returns the companion transcript to the same channel in the main app", asy
       transcriptionEnabled: true,
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.locator(".buzz-huddle-shell")).toHaveAttribute(
     "data-huddle-open",
@@ -1049,7 +1049,7 @@ test("returns to the parent channel when leaving a huddle channel in view", asyn
       members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.locator(".buzz-huddle-shell")).toHaveAttribute(
     "data-huddle-open",
@@ -1087,7 +1087,7 @@ test("keeps the huddle avatar strip compact and exposes the full roster", async 
       members,
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const participantStrip = page.getByTestId("huddle-participant-strip");
   const participantTrigger = page.getByRole("button", {
@@ -1123,7 +1123,7 @@ test("removes an agent from its menu without showing an extra participant contro
       ],
     },
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(
     page.getByRole("button", { name: "Manage huddle participants" }),
@@ -1166,7 +1166,7 @@ test("keeps a newer huddle event over a delayed hydration snapshot", async ({
     },
     huddleStateReadDelayMs: 250,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -1210,7 +1210,7 @@ test("keeps a starting huddle in the drawer after its companion closes", async (
     openHuddleWindowDelayMs: 500,
     startHuddleReturnDelayMs: 1_500,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await page.getByTestId("channel-start-huddle-trigger").click();
 
@@ -1279,7 +1279,7 @@ test("starts muted with Push to Talk while preserving manual microphone control"
     openHuddleWindowDelayMs: 10_000,
     startHuddleReturnDelayMs: 1_500,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await page.getByTestId("channel-start-huddle-trigger").click();
 
@@ -1390,7 +1390,7 @@ test("toggles the current channel huddle with Control+Shift+Space", async ({
   await installMockBridge(page, {
     openHuddleWindowDelayMs: 10_000,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("channel-start-huddle-trigger")).toBeEnabled();
   const pressHuddleShortcut = () =>
@@ -1449,7 +1449,7 @@ test("starts an agent DM huddle and hides its backing channel after it ends", as
     openHuddleWindowDelayMs: 500,
     startHuddleReturnDelayMs: 1_500,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
   await expect
@@ -1651,7 +1651,7 @@ test("closes add-agent dialog when parent membership is already satisfied", asyn
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Add agent to huddle" }).click();
   const dialog = page.getByRole("dialog", { name: "Add agents" });
@@ -1687,7 +1687,7 @@ test("starts an available stopped agent before adding it to the huddle", async (
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Add agent to huddle" }).click();
   const dialog = page.getByRole("dialog", { name: "Add agents" });
@@ -1738,7 +1738,7 @@ test("stops an agent started solely for a failed huddle add", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Add agent to huddle" }).click();
   const dialog = page.getByRole("dialog", { name: "Add agents" });
@@ -1786,7 +1786,7 @@ test("does not deploy a provider agent when its huddle add fails", async ({
       },
     ],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Add agent to huddle" }).click();
   const dialog = page.getByRole("dialog", { name: "Add agents" });

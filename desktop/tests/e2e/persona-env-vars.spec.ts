@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function gotoApp(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await waitForInvokeBridge(page);
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
     timeout: 10_000,

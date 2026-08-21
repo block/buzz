@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -34,7 +34,7 @@ test.beforeEach(async ({ page }) => {
 test("locks viewport rubber-band outside conversation scrollers", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("message-timeline")).toBeVisible();
 
@@ -82,7 +82,7 @@ test("locks viewport rubber-band outside conversation scrollers", async ({
 });
 
 test("locks horizontal viewport pan everywhere", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("message-timeline")).toBeVisible();
 

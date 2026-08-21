@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -22,7 +22,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const gate = page.getByTestId("machine-onboarding-gate");
   await expect(gate).toBeVisible();
@@ -141,7 +141,7 @@ test("machine key import remains usable in a short viewport", async ({
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByRole("button", { name: "Use an existing key" }).click();
 
   const heading = page.getByRole("heading", { name: "Enter your private key" });
@@ -183,7 +183,7 @@ test("backup options keep one-column geometry on narrow windows", async ({
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByRole("button", { name: "Create a new identity key" }).click();
   await expect(
     page.getByRole("heading", {
@@ -212,7 +212,7 @@ test("backup options keep one-column geometry on narrow windows", async ({
 test("relay onboarding: profile and avatar docked CTAs", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
   await page.getByTestId("onboarding-display-name").fill("Ada Lovelace");

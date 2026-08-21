@@ -1,4 +1,10 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  bootstrapE2ePage,
+} from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 
 type NostrBindPayload = {
@@ -56,7 +62,7 @@ async function openNostrBind(
   mock?: Parameters<typeof installMockBridge>[1],
 ) {
   await installMockBridge(page, mock);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof (

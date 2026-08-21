@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import type { Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -13,7 +13,7 @@ import { installMockBridge } from "../helpers/bridge";
 // - With focus outside the composer → quick search, unchanged.
 
 async function openGeneral(page: Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }

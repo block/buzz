@@ -1,9 +1,9 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
 async function openLocalArchiveSettings(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
@@ -153,7 +153,7 @@ test.describe("observer archive policy — reconciliation gate", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
 
     // Wait for the channel list (proves AppShell mounted fully).
     await expect(page.getByTestId("channel-general")).toBeVisible({
@@ -232,7 +232,7 @@ test.describe("observer archive policy — reconciliation gate", () => {
       saveSubscriptions: [],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await expect(page.getByTestId("channel-general")).toBeVisible({
       timeout: 10_000,
     });

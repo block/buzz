@@ -39,30 +39,60 @@ function delta(after: BrowserMetrics, before: BrowserMetrics): BrowserMetrics {
   };
 }
 
+export type ActiveActionMeasurement = {
+  before: BrowserMetrics;
+  client: CDPSession;
+  startedAt: number;
+};
+
+export async function beginActionMeasurement(
+  page: Page,
+): Promise<ActiveActionMeasurement> {
+  const client = await page.context().newCDPSession(page);
+  await client.send("Performance.enable");
+  return {
+    before: await readBrowserMetrics(client),
+    client,
+    startedAt: performance.now(),
+  };
+}
+
+export async function finishActionMeasurement<T>(
+  page: Page,
+  measurement: ActiveActionMeasurement,
+  result: T,
+): Promise<ActionMeasurement<T>> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  return {
+    metrics: delta(
+      await readBrowserMetrics(measurement.client),
+      measurement.before,
+    ),
+    result,
+    wallMs: performance.now() - measurement.startedAt,
+  };
+}
+
+export async function closeActionMeasurement(
+  measurement: ActiveActionMeasurement,
+): Promise<void> {
+  await measurement.client.send("Performance.disable");
+  await measurement.client.detach();
+}
+
 export async function measureAction<T>(
   page: Page,
   action: () => Promise<T>,
 ): Promise<ActionMeasurement<T>> {
-  const client = await page.context().newCDPSession(page);
-  await client.send("Performance.enable");
+  const measurement = await beginActionMeasurement(page);
   try {
-    const before = await readBrowserMetrics(client);
-    const startedAt = performance.now();
-    const result = await action();
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-        ),
-    );
-    const wallMs = performance.now() - startedAt;
-    return {
-      metrics: delta(await readBrowserMetrics(client), before),
-      result,
-      wallMs,
-    };
+    return await finishActionMeasurement(page, measurement, await action());
   } finally {
-    await client.send("Performance.disable");
-    await client.detach();
+    await closeActionMeasurement(measurement);
   }
 }

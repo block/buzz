@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -139,7 +139,7 @@ test.describe("doctor CTA nudge card screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
 
     const content = makeNudgeSentinel(AGENT_NAME, AGENT_PUBKEY, [
       {
@@ -182,7 +182,7 @@ test.describe("doctor CTA nudge card screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
 
     const content = makeNudgeSentinel(AGENT_NAME, AGENT_PUBKEY, [
       {
@@ -225,7 +225,7 @@ test.describe("doctor CTA nudge card screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
 
     const content = makeNudgeSentinel(AGENT_NAME, AGENT_PUBKEY, [
       {
@@ -273,7 +273,7 @@ test.describe("doctor CTA nudge card screenshots", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
 
     const content = makeNudgeSentinel(AGENT_NAME, AGENT_PUBKEY, [
       {

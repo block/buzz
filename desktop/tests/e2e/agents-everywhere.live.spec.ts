@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { expect, test } from "@playwright/test";
+import { expect, test } from "../helpers/test";
 
 import { TwoRelayHarness, type RelaySpec } from "./helpers/twoRelayHarness";
 

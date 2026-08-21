@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -42,7 +42,7 @@ const PERSONA_ID = "persona-edit-e2e";
  * only mount path.
  */
 async function openEditDialog(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("open-agents-view").click();
 
   const agentButton = page.getByRole("button", {
@@ -86,7 +86,7 @@ test.describe("agent definition dialog", () => {
       ownerOnlyAccessBuild: true,
       bakedBuildEnv: BAKED_DEFAULTS,
     });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
     await page.getByTestId("new-agent-card").click();
 
@@ -381,7 +381,7 @@ test.describe("edit agent dialog", () => {
       ],
     });
 
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("open-agents-view").click();
 
     // Persona-linked agents render grouped under the persona's card name.

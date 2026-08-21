@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -70,7 +70,7 @@ test.beforeEach(async ({ page }) => {
 test("reaction popover resolves a reactor with no authored message in the window", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.waitForFunction(
@@ -118,7 +118,7 @@ test("reaction popover resolves a reactor with no authored message in the window
 test("maximum-length reaction name wraps inside a fixed-width popover", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.waitForFunction(

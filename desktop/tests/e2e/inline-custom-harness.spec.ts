@@ -14,7 +14,7 @@
  * selection untouched. The three surfaces share the same routing, so those
  * checks are not repeated on every one.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -47,7 +47,7 @@ async function registerHarness(page: Page) {
 
 /** Open the create-agent dialog (AgentDefinitionDialog, create mode). */
 async function openCreateDialog(page: Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
   const dialog = page.getByTestId("persona-dialog");
@@ -58,7 +58,7 @@ async function openCreateDialog(page: Page) {
 
 /** Open the edit dialog for a saved definition (same dialog, edit mode). */
 async function openDefinitionEditDialog(page: Page, name: string) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-agents-view").click();
   await expect(page.getByTestId("agents-library-personas")).toBeVisible({
     timeout: 10_000,
@@ -159,7 +159,7 @@ test.describe("inline add custom harness", () => {
       ],
     });
 
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await page.getByTestId("open-agents-view").click();
     await page
       .getByRole("button", { name: "Instance Agent agent profile" })

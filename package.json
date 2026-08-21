@@ -3,7 +3,8 @@
   "private": true,
   "packageManager": "pnpm@11.4.0",
   "scripts": {
-    "check": "pnpm -r check"
+    "check": "pnpm -r check",
+    "test:e2e:smoke": "pnpm --dir desktop test:e2e:smoke"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.6"

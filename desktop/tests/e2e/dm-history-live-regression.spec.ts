@@ -1,4 +1,10 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Page,
+  type Route,
+  bootstrapE2ePage,
+} from "../helpers/test";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { finalizeEvent, type VerifiedEvent } from "nostr-tools/pure";
 
@@ -132,7 +138,7 @@ test("existing DM history remains when the first live DM reaches a pageless wind
   const historyIds = history.map((event) => event.id);
 
   await installRelayBridge(page, "tyler");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
   await expect.poll(() => timelineIds(page)).toEqual(historyIds);

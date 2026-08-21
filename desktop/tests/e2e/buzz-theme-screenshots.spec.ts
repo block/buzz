@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -51,7 +51,7 @@ async function seedIconChannelSection(page: Page) {
 }
 
 async function openChannel(page: Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
@@ -465,7 +465,7 @@ test("custom section icon and name align with channel columns", async ({
 async function openAppearance(page: Page, mode: "system" | "light" | "dark") {
   // Settings renders at the AppShell level; open it via the profile card
   // button, then select the Appearance section.
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await page.getByTestId("settings-nav-appearance").click();
@@ -1171,7 +1171,7 @@ test("appearance picker — dark tab (Buzz Dark)", async ({ page }) => {
 test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   const sidebar = page.getByTestId("settings-sidebar");
@@ -1202,7 +1202,7 @@ test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
 test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
   await seedTheme(page, "buzz-dark");
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   const sidebar = page.getByTestId("settings-sidebar");
@@ -1431,7 +1431,7 @@ test("settings content uses the same inset surface as the main app", async ({
 }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   const searchBox = await page.getByTestId("open-search").boundingBox();
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();

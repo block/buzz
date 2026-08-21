@@ -10,11 +10,13 @@
     "check:file-sizes": "node ./scripts/check-file-sizes.mjs",
     "check:pubkey-truncation": "node ./scripts/check-pubkey-truncation.mjs",
     "lint": "biome lint .",
-    "check": "biome check . && pnpm check:pubkey-truncation",
+    "check": "biome check . && pnpm check:e2e-bootstrap && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
     "preview": "vite preview",
     "test:e2e": "pnpm build && playwright test",
-    "test:e2e:smoke": "pnpm build && playwright test --project=smoke"
+    "test:e2e:smoke": "pnpm build && playwright test --project=smoke",
+    "check:e2e-bootstrap": "pnpm test:check-e2e-bootstrap && node ./scripts/check-e2e-bootstrap.mjs",
+    "test:check-e2e-bootstrap": "node --test ./scripts/check-e2e-bootstrap.test.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",

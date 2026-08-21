@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -72,7 +72,7 @@ test("channel switch settles at the newest message after virtualized rows measur
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -127,7 +127,7 @@ test("first channel load paints the first window without waiting for the row-flo
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -177,7 +177,7 @@ test("preserves user scroll while older channel history loads", async ({
 }, testInfo) => {
   testInfo.setTimeout(60_000);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -357,7 +357,7 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -571,7 +571,7 @@ test("reserves real buzz-bugs imeta image height before image loads", async ({
 }) => {
   await page.route("**/media/**", () => new Promise(() => {}));
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -633,7 +633,7 @@ test("deep-link to a message in older history scrolls and highlights it", async 
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -842,7 +842,7 @@ test("unified channel search opens rows regardless of history position", async (
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -1075,7 +1075,7 @@ test("composer expansion does not push bottom row out of viewport", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -1197,7 +1197,7 @@ test("mounted rows cover the viewport beneath the composer in both directions", 
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -1288,7 +1288,7 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -1402,7 +1402,7 @@ test("in-viewport reflow above the anchor row does not push it down", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
@@ -1521,7 +1521,7 @@ test("channel intro stays hidden while older history is loading", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -1622,7 +1622,7 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
 }, testInfo) => {
   testInfo.setTimeout(90_000);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -1755,7 +1755,7 @@ test("older-history fetches never overlap (no concurrent in-flight requests)", a
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -1821,7 +1821,7 @@ test("older-history spinner stays visible in viewport while fetching mid-scroll"
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -1906,7 +1906,7 @@ test("one scroll-up gesture pages older history once, not to the channel top", a
 }, testInfo) => {
   testInfo.setTimeout(60_000);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -2001,7 +2001,7 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
 }, testInfo) => {
   testInfo.setTimeout(60_000);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () =>
       typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
@@ -2124,7 +2124,7 @@ test("thread summary badge survives a retained older-history prepend", async ({
 }, testInfo) => {
   testInfo.setTimeout(60_000);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );

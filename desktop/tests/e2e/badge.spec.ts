@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
@@ -91,7 +91,7 @@ test.beforeEach(async ({ page }) => {
 test("selected Inbox and Agents rows keep their highlight without bold text", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const inbox = page
     .getByTestId("sidebar-primary-menu")
@@ -108,7 +108,7 @@ test("selected Inbox and Agents rows keep their highlight without bold text", as
 test("primary navigation rows share the same inactive emphasis", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
 
   const primaryMenu = page.getByTestId("sidebar-primary-menu");
@@ -140,7 +140,7 @@ test("primary navigation rows share the same inactive emphasis", async ({
 });
 
 test("hovering a channel keeps its text color", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const channel = page.getByTestId("channel-engineering");
   const initialColor = await channel.evaluate(
     (element) => getComputedStyle(element).color,
@@ -156,7 +156,7 @@ test("direct-message rows become prominent only when unread", async ({
   await page.addInitScript(() => {
     window.localStorage.setItem("buzz-theme", "buzz-dark");
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const directMessage = page.getByTestId("channel-alice-tyler");
 
   await directMessage.click();
@@ -182,7 +182,7 @@ test("direct-message rows become prominent only when unread", async ({
 test("light mode reserves full opacity for unread text and avatars", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const directMessage = page.getByTestId("channel-alice-tyler");
   await directMessage.click();
@@ -226,7 +226,7 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   await page.addInitScript(() => {
     window.localStorage.setItem("buzz-theme", "buzz-dark");
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.locator("html")).toHaveClass(/dark/);
   const inbox = page
@@ -283,7 +283,7 @@ test("offscreen top-level unread shows the primary sidebar arrow", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 360 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-random").click();
   await waitForMockLiveSubscription(page, "random");
   await page.getByTestId("channel-general").click();
@@ -332,7 +332,7 @@ test("offscreen top-level unread shows the primary sidebar arrow", async ({
 test("offscreen unread DM shows the primary sidebar arrow", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await waitForMockLiveSubscription(page, "alice-tyler");
   await page.getByTestId("channel-general").click();
@@ -363,7 +363,7 @@ test("offscreen unread DM shows the primary sidebar arrow", async ({
 test("regular message bolds inactive channel without numeric badge", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
@@ -405,7 +405,7 @@ test("regular message bolds inactive channel without numeric badge", async ({
 test("top-level @mention bolds the channel without a row badge", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
@@ -437,7 +437,7 @@ test("top-level @mention bolds the channel without a row badge", async ({
 });
 
 test("numeric badge increments for DM message", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "alice-tyler");
@@ -458,7 +458,7 @@ test("numeric badge increments for DM message", async ({ page }) => {
 test("interested thread reply shows the channel preview dot without incrementing Inbox", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
@@ -499,7 +499,7 @@ test("interested thread reply shows the channel preview dot without incrementing
 test("broadcast reply bolds the channel without a thread dot", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
@@ -533,7 +533,7 @@ test("broadcast reply bolds the channel without a thread dot", async ({
 test("mark-as-read via context menu clears channel unread indicator", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
@@ -573,7 +573,7 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
 });
 
 test("mark-as-unread via context menu bolds the channel", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -595,7 +595,7 @@ test("mark-as-unread via context menu bolds the channel", async ({ page }) => {
 test("marking a message unread bolds its channel after leaving", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await waitForMockLiveSubscription(page, "random");
@@ -645,7 +645,7 @@ test("marking a message unread bolds its channel after leaving", async ({
 test("remote read-state rollback is ignored while local mark-unread still increments badge", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

@@ -11,7 +11,7 @@
  *   - Generic rendering: unknown field ids, number/array values, masked values.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -119,7 +119,7 @@ const START_AGENT = {
 };
 
 async function gotoAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
     timeout: 10_000,
   });

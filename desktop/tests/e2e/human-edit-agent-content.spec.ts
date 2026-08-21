@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -84,7 +84,7 @@ test("owner can edit their owned agent's message", async ({ page }) => {
   const messageId = `mock-agents-managed-${OWNED_AGENT_PUBKEY.slice(0, 8)}`;
   const editedContent = `Edited by owner ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
@@ -119,7 +119,7 @@ test("owner can edit their owned agent's message", async ({ page }) => {
 test("owner can delete their owned agent's message", async ({ page }) => {
   const messageId = `mock-agents-managed-${OWNED_AGENT_PUBKEY.slice(0, 8)}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
@@ -149,7 +149,7 @@ test("owner does NOT see Edit or Delete for an unowned agent's message", async (
   // Charlie is in mockAgentPubkeys but ownerPubkey is NOT the mock identity.
   const charlieMessageId = "mock-agents-charlie";
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
@@ -180,7 +180,7 @@ test("owner can delete their owned agent's message from the thread panel", async
   //   id: `mock-agents-managed-${pubkey.slice(0, 8)}`
   const messageId = `mock-agents-managed-${OWNED_AGENT_PUBKEY.slice(0, 8)}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
@@ -239,7 +239,7 @@ test("owner can edit channel name via owned-agent-owner path", async ({
 }) => {
   const newChannelName = `renamed-${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Add OwnedBot as an owner-role member of #random.
   // In #random the mock identity is only a plain member — selfMember.role !== "owner".
@@ -275,7 +275,7 @@ test("owner can edit channel name via owned-agent-owner path", async ({
 test("owner does NOT see channel Edit button when no owned agent is a channel owner", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // #random has alice as owner; mock identity is a plain member.
   // OwnedBot is NOT added as owner in this test — Edit must not appear.

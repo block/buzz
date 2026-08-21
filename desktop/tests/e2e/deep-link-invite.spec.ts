@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { seedActiveIdentity } from "../helpers/onboarding";
@@ -55,7 +55,7 @@ test("join deep link is acknowledged without claiming before setup", async ({
     { pendingCommunityDeepLinks: [PENDING_JOIN_LINK] },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const gate = page.getByTestId("pending-invite-gate");
   await expect(gate).toBeVisible();
@@ -86,7 +86,7 @@ test("connect deep link shows a static acknowledgment during setup", async ({
     { pendingCommunityDeepLinks: [PENDING_CONNECT_LINK] },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const gate = page.getByTestId("pending-invite-gate");
   await expect(gate).toBeVisible();
@@ -124,7 +124,7 @@ test("add-community deep link starts onboarding when no community is configured"
     },
     { skipCommunitySeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
   await expect(
@@ -159,7 +159,7 @@ test("add-community deep link skips profile step when identity has an existing k
     { pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK] },
     { skipCommunitySeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Onboarding flow must disappear — the skip cleared the transaction.
   await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
@@ -176,7 +176,7 @@ test("add-community deep link opens one editable prefill and acknowledges the qu
     { pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK] },
     { seedPreviewFeatures: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(
     page.getByRole("heading", { name: "Join an existing community" }),
@@ -222,7 +222,7 @@ test("queued add-community links open and acknowledge one at a time", async ({
     },
     { seedPreviewFeatures: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const communityInput = page.getByLabel("Community URL or invite link");
   await expect(communityInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
@@ -300,7 +300,7 @@ test("deleted public starter channels do not strand community onboarding", async
     { ensureStarterChannelsErrors: [starterError] },
     { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Take me to Buzz" }).click();
 
@@ -355,7 +355,7 @@ test("required Welcome creation failure keeps community onboarding open", async 
     { createChannelErrors: [welcomeError] },
     { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Take me to Buzz" }).click();
 
@@ -401,7 +401,7 @@ test("persisted deep-link invite hands off to Joining after machine onboarding",
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Machine onboarding is complete, so the transaction owns the screen.
   await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();

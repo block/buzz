@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 
 const TERM = 'section[aria-label="Buzz Term"]';
@@ -145,7 +145,7 @@ async function reveal(page: Page) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await installTerminalBackend(page);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   // Buzz Term needs a channel: TerminalBootstrap's context is null on Home, so
   // no session spawns and the chord is inert.
@@ -175,7 +175,7 @@ test("project terminal button opens Buzz Term for the repository", async ({
   await page.setViewportSize({ width: 1280, height: 800 });
   await installTerminalBackend(page);
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await page.getByTestId("projects-section-projects").click();
   const projectEntry = page

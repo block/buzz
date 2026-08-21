@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -27,7 +27,7 @@ test.describe("signout screenshots", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "profile");
 
     const section = page.getByTestId("settings-signout");
@@ -49,7 +49,7 @@ test.describe("signout screenshots", () => {
     page,
   }) => {
     await installMockBridge(page);
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "profile");
 
     const section = page.getByTestId("settings-signout");

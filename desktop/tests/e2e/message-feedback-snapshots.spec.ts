@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -31,7 +31,7 @@ test("pending continuation keeps Sending next to its timestamp", async ({
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
@@ -96,7 +96,7 @@ test("pending continuation keeps Sending next to its timestamp", async ({
 
 test("profile hover uses the channel hover surface", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const profile = page.getByTestId("sidebar-profile-card");
   const channel = page.getByTestId("channel-random");

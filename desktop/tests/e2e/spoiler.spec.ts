@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import type { Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -52,7 +52,7 @@ test("no-selection spoiler applies to every composer paragraph", async ({
     origin: "http://127.0.0.1:4173",
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -92,7 +92,7 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   page,
 }) => {
   await installSpoilerBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -128,7 +128,7 @@ test("text spoiler stays usable while attachment upload is pending", async ({
   page,
 }) => {
   await installSpoilerBridge(page, { uploadDelayMs: 1_000 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -163,7 +163,7 @@ test("hidden spoiler links reveal without opening on the first click", async ({
   page,
 }) => {
   await installSpoilerBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -213,7 +213,7 @@ test("hidden spoilers stay masked on hover and focus until reveal", async ({
   page,
 }) => {
   await installSpoilerBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -254,7 +254,7 @@ test("masked link inside a hidden spoiler does not leak its URL until revealed",
 }) => {
   const SECRET_URL = "https://private.example/leak-path";
   await installSpoilerBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -312,7 +312,7 @@ test("non-interactive inbox preview spoilers let row clicks pass through", async
   page,
 }) => {
   await installSpoilerBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
     () =>

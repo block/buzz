@@ -22,7 +22,7 @@
  * after the probe resolves; it is pinned at the unit level in
  * whereToRunIntent.test.mjs (applyProbeResult).
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -89,7 +89,7 @@ async function selectRunOnOption(
 
 /** Open Advanced in the create-agent dialog and select the mocked provider. */
 async function openCreateDialogOnProvider(page: Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
   const dialog = page.getByTestId("persona-dialog");

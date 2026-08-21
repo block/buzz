@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { installBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { TwoRelayHarness, type RelaySpec } from "./helpers/twoRelayHarness";
@@ -166,7 +166,7 @@ test.describe("relay restart live gate", () => {
         relayHttpUrl,
         relayWsUrl: `ws://127.0.0.1:${spec.ports.main}`,
       });
-      await page.goto("/");
+      await bootstrapE2ePage(page, "/");
 
       // Baseline: the app converges to a live authenticated session and sees
       // the channel created for this fresh database.

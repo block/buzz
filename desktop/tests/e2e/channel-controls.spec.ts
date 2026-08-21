@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -6,7 +6,7 @@ import { installMockBridge } from "../helpers/bridge";
 // visibility + ephemeral controls are editable. Visibility is a deferred
 // draft: selecting a value only updates local state; it persists on Save.
 async function openManagementSheet(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.getByTestId("channel-management-trigger").click();

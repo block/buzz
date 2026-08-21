@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import {
@@ -15,7 +15,7 @@ test("captures the new-message loading skeleton", async ({ page }) => {
     relayAgents: [],
     userSearchDelayMs: 10_000,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openNewMessagePage(page);
 
   const search = page.getByTestId("new-dm-search");
@@ -32,7 +32,7 @@ test("captures the new-message loading skeleton", async ({ page }) => {
 
 test("captures selected recipients with the picker open", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openNewMessagePage(page);
 
   for (const identity of [TEST_IDENTITIES.charlie, TEST_IDENTITIES.bob]) {
@@ -54,7 +54,7 @@ test("captures selected recipients with the picker open", async ({ page }) => {
 
 test("captures the enabled first-message composer", async ({ page }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openNewMessagePage(page);
 
   await page.getByTestId("new-dm-search").fill("charlie");

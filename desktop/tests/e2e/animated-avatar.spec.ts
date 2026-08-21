@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { installFakeCamera } from "../helpers/fakeCamera";
@@ -24,7 +24,7 @@ async function openAnimatedTab(
   await installMockBridge(page, {
     uploadDescriptors: [UPLOADED_PNG_DESCRIPTOR],
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
   await page.getByRole("tab", { name: "Animated" }).click();

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, openNewMessagePage } from "../helpers/bridge";
 
@@ -24,7 +24,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     page,
   }) => {
     await installMockBridge(page, { archivedIdentities: [ALICE_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByTestId("channel-members-trigger").click();
@@ -51,7 +51,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     page,
   }) => {
     await installMockBridge(page, { archivedIdentities: [] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();
@@ -62,7 +62,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     page,
   }) => {
     await installMockBridge(page, { archivedIdentities: [ALICE_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -88,7 +88,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     page,
   }) => {
     await installMockBridge(page, { archivedIdentities: [ALICE_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await openNewMessagePage(page);
     await expect(page.getByTestId("new-message-page")).toBeVisible();
 
@@ -110,7 +110,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     // Alice has a seeded message in #general from the prior PR's e2e setup
     // (see e2eBridge.ts seed). Archiving her must not remove that message.
     await installMockBridge(page, { archivedIdentities: [ALICE_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -128,7 +128,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     // self-exemption is what enforces this — without it, the user would lose
     // their own seat in the members sidebar.
     await installMockBridge(page, { archivedIdentities: [SELF_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();
@@ -151,7 +151,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     // self from their own autocomplete — that would be the shadowban NIP-IA
     // exists to prevent.
     await installMockBridge(page, { archivedIdentities: [SELF_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -174,7 +174,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     page,
   }) => {
     await installMockBridge(page, { archivedIdentities: [BOB_PUBKEY] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-agents").click();
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();
@@ -191,7 +191,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     // companion that makes the test above non-vacuous (proves he was dropped
     // by the archive filter, not by member-exclusion or a broken search).
     await installMockBridge(page, { archivedIdentities: [] });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-agents").click();
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();

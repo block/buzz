@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { installMockBridge } from "../helpers/bridge";
 
 // Cold-boot splash hold: on a real boot the community resolves in well under
@@ -23,7 +23,7 @@ test("boot splash overlay holds with a flapping bee, then dismisses", async ({
       bootSplashHoldMs: 1_500,
     };
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const overlay = page.getByTestId("boot-splash-overlay");
   await expect(overlay).toBeVisible();
@@ -50,7 +50,7 @@ test("boot splash overlay is skipped when the hold is zero (e2e default)", async
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await expect(page.getByTestId("boot-splash-overlay")).toHaveCount(0);

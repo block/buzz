@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -250,7 +250,7 @@ test("cold boot paints the complete snapshot, sends its hash, and revalidates", 
   });
 
   const navigationStartedAt = performance.now();
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   const rows = page.locator('[data-channel-id^="snapshot-"]');
   await expect(rows).toHaveCount(FULL_SNAPSHOT.length, { timeout: 2_000 });
   const snapshotPaintedAt = performance.now();
@@ -298,7 +298,7 @@ test("matching not-modified preserves display mutations without persisting them"
     channelsReadDelayMs: READ_DELAY_MS,
     honorChannelsKnownHash: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
     FULL_SNAPSHOT.length,
@@ -330,7 +330,7 @@ test("first-ever boot without a snapshot sends null and shows loading", async ({
   page,
 }) => {
   await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("sidebar-loading")).toBeVisible({
     timeout: 500,
@@ -363,7 +363,7 @@ test("a different identity's snapshot is ignored", async ({ page }) => {
     ownerPubkey: STALE_COMMUNITY_PUBKEY,
   });
   await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("sidebar-loading")).toBeVisible({
     timeout: 500,
@@ -395,7 +395,7 @@ test("display-only community pubkey cannot expose another identity's snapshot", 
     { skipCommunitySeed: true },
   );
   await seedCommunities(page, STALE_COMMUNITY_PUBKEY);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("channel-general")).toBeVisible();
   expect(await getTrackedSnapshotRows(page)).toEqual([]);
@@ -421,7 +421,7 @@ test("partial hash/list write fails toward a full fetch", async ({ page }) => {
     channelsReadDelayMs: READ_DELAY_MS,
     honorChannelsKnownHash: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("sidebar-loading")).toBeVisible({
     timeout: 500,
@@ -446,7 +446,7 @@ test("unexpected not-modified response retries without a hash", async ({
   await installMockBridge(page, {
     channelsNotModifiedResponses: 1,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("channel-general")).toBeVisible();
   await expect
@@ -462,7 +462,7 @@ test("mismatched not-modified hash falls back to a full list", async ({
     channelsReadDelayMs: READ_DELAY_MS,
     channelsNotModifiedResponses: 1,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const snapshotRows = page.locator('[data-channel-id^="snapshot-"]');
   await expect(snapshotRows).toHaveCount(FULL_SNAPSHOT.length, {
@@ -507,7 +507,7 @@ test("hash mismatch replaces the snapshot with the full live list", async ({
     channelsReadDelayMs: READ_DELAY_MS,
     honorChannelsKnownHash: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
     FULL_SNAPSHOT.length,
@@ -561,7 +561,7 @@ test("community switch validates a stale relay snapshot and replaces it", async 
     { skipCommunitySeed: true },
   );
   await seedCommunities(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   const payloadCountBeforeSwitch = (await getChannelsPayloads(page)).length;

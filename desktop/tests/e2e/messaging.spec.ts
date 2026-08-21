@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -379,7 +379,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 });
 
 test("agent owner label identifies the agent and owner", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
 
   const aliceMessage = page
@@ -401,7 +401,7 @@ test("agent owner label identifies the agent and owner", async ({ page }) => {
 test("send a message and see it in timeline", async ({ page }) => {
   const message = `Hello timeline ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -417,7 +417,7 @@ test("send a message and see it in timeline", async ({ page }) => {
 test("long autolink wraps without widening the timeline", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 600 });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -458,7 +458,7 @@ test("markdown tables overflow wide content and fill the message when narrow", a
   page,
 }) => {
   await page.setViewportSize({ width: 900, height: 600 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.waitForFunction(
@@ -531,7 +531,7 @@ test("sent link preview media uses the authenticated proxy in compact and rich c
     }),
   );
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
   await waitForReadyComposerSnapshots(page);
@@ -599,7 +599,7 @@ test("link preview style defaults to compact and Rich unfurls descriptions", asy
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?inline=1";
   await page.setViewportSize({ width: 800, height: 900 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
   const composerPreview = page
@@ -713,7 +713,7 @@ for (const [pasteShape, wrapUrl] of [
     page,
   }) => {
     const previewUrl = `https://github.com/block/buzz/pull/3246?paste=${pasteShape}`;
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     const input = page.getByTestId("message-input");
     await input.focus();
@@ -759,7 +759,7 @@ test("display-text link preview produces and sends its preview", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?display=text";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
 
   const input = page.getByTestId("message-input");
@@ -801,7 +801,7 @@ test("rich link preview preserves description newlines after sending", async ({
   await page.addInitScript(() =>
     localStorage.setItem("buzz.appearance.linkPreviewStyle", "rich"),
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
   await waitForReadyComposerSnapshots(page);
@@ -835,7 +835,7 @@ test("completed link previews normalize a trailing-fragment URL and still send",
     "https://x.com/tellaho/status/1884289176381841506",
   ];
   const pastedText = previewUrls.join("\n");
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.focus();
@@ -881,7 +881,7 @@ test("unresolvable preview disappears after the terminal miss", async ({
   page,
 }) => {
   const previewUrl = "https://x.com/tellaho/status";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
 
@@ -902,7 +902,7 @@ test("explicit cancellation suppresses a pending link preview and sends without 
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?send=pending";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
 
@@ -976,7 +976,7 @@ test("Enter during an in-flight snapshot upload hands off and sends once", async
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1016,7 +1016,7 @@ test("async metadata beyond old cutoff still produces preview image", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?slow=metadata";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1039,7 +1039,7 @@ test("async upload beyond metadata budget retains preview image", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?slow=image";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1070,7 +1070,7 @@ test("Skip wins the upload race and sends without preview", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?skip=1";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1102,7 +1102,7 @@ test("promoted link preview send clears Sending after REST publication", async (
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?pending=preview";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1129,7 +1129,7 @@ test("settled-empty promoted link preview send uses REST and clears Sending afte
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?pending=empty";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1202,7 +1202,7 @@ test("draft auto-send promotes link preview preparation and sends exactly once",
   // Drive the real Drafts-panel "Send message" confirm flow. This does an
   // in-app client navigation to the channel with ?autoSend=<draftKey>, arming
   // the main composer's auto-submit effect — the exact production path.
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("home-inbox")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("inbox-filter-trigger").click();
   await page.getByRole("menuitemradio", { name: "Drafts" }).click();
@@ -1245,7 +1245,7 @@ test("rapid Enter presses on a ready link preview send exactly once", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?rapid=1";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1282,7 +1282,7 @@ test("pasting a link and immediately pressing Enter prepares it after submit", a
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?fast=send";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
 
@@ -1306,7 +1306,7 @@ test("a snapshot media upload failure preserves a metadata-only preview", async 
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?upload=fail";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
@@ -1337,7 +1337,7 @@ test("a snapshot media upload failure preserves a metadata-only preview", async 
 test("editing a message excludes link previews entirely", async ({ page }) => {
   const message = `Edit-me ${Date.now()}`;
   const previewUrl = "https://github.com/block/buzz/pull/3246?edit=1";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
 
@@ -1377,7 +1377,7 @@ test("hiding composer link previews suppresses the whole draft and emits the bla
 }) => {
   const firstUrl = "https://github.com/block/buzz/pull/3246?hide=all";
   const secondUrl = "https://linear.app/acme/issue/ABC-123/hidden-too";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(firstUrl);
   await expect(page.locator("[data-composer-link-previews]")).toBeVisible();
@@ -1414,7 +1414,7 @@ test("composer link preview embeds stay attachment-sized while loading and ready
 
   for (const width of [800, 420]) {
     await page.setViewportSize({ width: 800, height: 700 });
-    await page.goto("/");
+    await bootstrapE2ePage(page, "/");
     await page.getByTestId("channel-general").click();
     await page.setViewportSize({ width, height: 700 });
     await page
@@ -1486,7 +1486,7 @@ test("compact link preview image geometry truncates long titles to one line", as
     }),
   );
   await page.setViewportSize({ width: 800, height: 700 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
   await waitForReadyComposerSnapshots(page);
@@ -1525,7 +1525,7 @@ test("composer no-image link embeds keep the attachment footprint", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?inline=none";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page.getByTestId("message-input").fill(previewUrl);
   const card = page
@@ -1544,7 +1544,7 @@ test("mixed link preview image outcomes keep Compact and Rich fallbacks stable",
 }) => {
   const loadedUrl = "https://github.com/block/buzz/pull/4001";
   const rateLimitedUrl = "https://github.com/block/buzz/pull/4002";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page
     .getByTestId("message-input")
@@ -1596,7 +1596,7 @@ test("fragment link previews render a card per canonical URL", async ({
     "https://github.com/block/buzz/pull/3767#pullrequestreview-4857569498";
   const fragmentUrlB = "https://github.com/block/buzz/pull/3767#issuecomment-1";
   const plainUrl = "https://github.com/block/buzz/pull/3867";
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page
     .getByTestId("message-input")
@@ -1625,7 +1625,7 @@ test("fragment link previews render a card per canonical URL", async ({
 test("link preview browser image errors render a fallback", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await page
     .getByTestId("message-input")
@@ -1661,7 +1661,7 @@ test("supported Compact link previews keep the message link visible with square 
 }) => {
   const previewUrl = "https://github.com/block/sprout/pull/1334";
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1688,7 +1688,7 @@ test("send multiple messages in sequence", async ({ page }) => {
   const input = page.getByTestId("message-input");
   const sendButton = page.getByTestId("send-message");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1713,7 +1713,7 @@ test("copy a rendered code block and paste it back as code", async ({
 
   const code = "# not a heading\nconst answer = 42;\n  indented();";
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1759,7 +1759,7 @@ test("pasting a long copied code block scrolls composer to cursor", async ({
     (_, index) => `const line${index} = ${index};`,
   ).join("\n");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1798,7 +1798,7 @@ test("code block shows language label when language is specified", async ({
     origin: "http://127.0.0.1:4173",
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1820,7 +1820,7 @@ test("code block shows language label when language is specified", async ({
 test("typing triple backticks and Enter creates a code block in composer", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1841,7 +1841,7 @@ test("message input clears after send", async ({ page }) => {
   const message = `Clear after send ${Date.now()}`;
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1856,7 +1856,7 @@ test("message input clears after send", async ({ page }) => {
 test("emoji picker inserts emoji into the draft and keeps focus in the composer", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1880,7 +1880,7 @@ test("emoji picker inserts emoji into the draft and keeps focus in the composer"
 });
 
 test("empty message cannot be sent", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1892,7 +1892,7 @@ test("send message with Enter key", async ({ page }) => {
   const message = `Enter key send ${Date.now()}`;
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1905,7 +1905,7 @@ test("send message with Enter key", async ({ page }) => {
 test("messages persist across channel switches", async ({ page }) => {
   const message = `Persist across switch ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1925,7 +1925,7 @@ test("draft is preserved when switching channels", async ({ page }) => {
   const draft = `Unsent draft ${Date.now()}`;
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1948,7 +1948,7 @@ test("sending a message clears the draft", async ({ page }) => {
   const message = `Sent message ${Date.now()}`;
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -1970,7 +1970,7 @@ test("different channels have independent messages", async ({ page }) => {
   const generalMessage = `General only ${ts}`;
   const randomMessage = `Random only ${ts}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.getByTestId("message-input").fill(generalMessage);
@@ -2002,7 +2002,7 @@ test("different channels have independent messages", async ({ page }) => {
 });
 
 test("day divider appears in timeline", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2021,7 +2021,7 @@ test("day divider appears in timeline", async ({ page }) => {
 test("send message to DM channel p-tags the recipient", async ({ page }) => {
   const message = `DM message ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 
@@ -2093,7 +2093,7 @@ test("sends a thread message to its parent channel with a root-thread link", asy
     }),
   );
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.waitForFunction(
@@ -2333,7 +2333,7 @@ test("shows your avatar on your own message when profile avatar is set", async (
   const avatarUrl =
     'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E';
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
@@ -2367,7 +2367,7 @@ test("opens a single-level thread panel with inline expansion", async ({
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
   );
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
@@ -2651,7 +2651,7 @@ test("thread panel width uses session storage and reset handle", async ({
     );
   }, customWidthPx);
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2708,7 +2708,7 @@ test("narrow thread view collapses channel header actions into a menu", async ({
 }) => {
   await page.setViewportSize({ width: 980, height: 720 });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
@@ -2753,7 +2753,7 @@ test("narrow thread view collapses channel header actions into a menu", async ({
 test("single-panel thread view hides channel actions", async ({ page }) => {
   await page.setViewportSize({ width: 860, height: 720 });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
@@ -2774,7 +2774,7 @@ test("single-panel thread view hides channel actions", async ({ page }) => {
 });
 
 test("composer is focused after selecting a channel", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2789,7 +2789,7 @@ test("composer is focused after selecting a channel", async ({ page }) => {
 test("composer is focused after switching to a different channel", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2803,7 +2803,7 @@ test("composer is focused after switching to a different channel", async ({
 test("thread composer is focused after clicking the reply icon", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2835,7 +2835,7 @@ test("thread refetch preserves a live reply and reaction received in flight", as
   page,
 }) => {
   await installMockBridge(page, { threadRepliesDelayMs: 800 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2892,7 +2892,7 @@ test("thread reply appears after relay closes and restores its live subscription
   page,
 }) => {
   await installMockBridge(page, { closeChannelLiveSubscriptionOnce: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2920,7 +2920,7 @@ test("thread reply appears after relay closes and restores its live subscription
 test("thread composer keeps focus after sending a thread reply", async ({
   page,
 }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -2980,7 +2980,7 @@ test("ArrowUp in an empty composer edits your last message right after sending",
   const message = `Edit-last via arrow up ${Date.now()}`;
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -3009,7 +3009,7 @@ test("ArrowUp does not edit when the composer has draft text", async ({
   const draft = `Half-typed draft ${Date.now()}`;
   const input = page.getByTestId("message-input");
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -3033,7 +3033,7 @@ test("ArrowUp edits your last thread reply right after sending it", async ({
   const seed = `Thread arrow-up seed ${Date.now()}`;
   const reply = `Thread reply to edit ${Date.now()}`;
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -3075,7 +3075,7 @@ test("action bar stays within the timeline when the thread panel is open", async
   // or the right-anchored action bar is pushed offscreen (regression: #1081
   // fixed the wrap but rows still expanded to content min-width).
   await page.setViewportSize({ width: 1024, height: 800 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

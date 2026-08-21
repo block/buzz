@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -10,7 +10,7 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const trigger = page.getByTestId("identity-key-help-trigger");
   // No initial opacity-0 assertion: on a slow runner the 2s reveal timer can
@@ -65,7 +65,7 @@ test("identity key help stays readable when the app resolves dark mode", async (
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Fresh profiles follow the system scheme, so the emulated dark scheme is
   // the first-run repro: the app resolves the dark theme while onboarding.

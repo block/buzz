@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 test("home page loads with Buzz branding", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page);
   await expect(
     page.getByRole("main").getByRole("img", { name: "Buzz" }),
   ).toBeVisible();
 });
 
 test("home page shows repositories section", async ({ page }) => {
-  await page.goto("/");
+  await bootstrapE2ePage(page);
   await expect(page.getByText("Repositories")).toBeVisible();
 });
 
@@ -66,7 +66,7 @@ test("invite requires age and legal consent before opening Buzz", async ({
       ]),
     });
   });
-  await page.goto("/invite/demo-code");
+  await bootstrapE2ePage(page, "/invite/demo-code");
 
   await expect(
     page.getByRole("link", { name: "Download it now" }),
@@ -124,30 +124,32 @@ test("invite can enroll a NIP-07 identity for browser access", async ({
   page,
 }) => {
   const pubkey = "ab".repeat(32);
-  await page.addInitScript((extensionPubkey) => {
-    (
-      window as Window & {
-        nostr?: {
-          getPublicKey(): Promise<string>;
-          signEvent(
-            event: Record<string, unknown>,
-          ): Promise<Record<string, unknown>>;
-        };
-      }
-    ).nostr = {
-      async getPublicKey() {
-        return extensionPubkey;
-      },
-      async signEvent(event) {
-        return {
-          ...event,
-          id: "cd".repeat(32),
-          pubkey: extensionPubkey,
-          sig: "ef".repeat(64),
-        };
-      },
-    };
-  }, pubkey);
+  const installNip07Extension = async () => {
+    await page.addInitScript((extensionPubkey) => {
+      (
+        window as Window & {
+          nostr?: {
+            getPublicKey(): Promise<string>;
+            signEvent(
+              event: Record<string, unknown>,
+            ): Promise<Record<string, unknown>>;
+          };
+        }
+      ).nostr = {
+        async getPublicKey() {
+          return extensionPubkey;
+        },
+        async signEvent(event) {
+          return {
+            ...event,
+            id: "cd".repeat(32),
+            pubkey: extensionPubkey,
+            sig: "ef".repeat(64),
+          };
+        },
+      };
+    }, pubkey);
+  };
   await page.route("**/api/join-policy", async (route) => {
     await route.fulfill({
       status: 200,
@@ -195,7 +197,8 @@ test("invite can enroll a NIP-07 identity for browser access", async ({
     });
   });
 
-  await page.goto("/invite/browser-code");
+  await installNip07Extension();
+  await bootstrapE2ePage(page, "/invite/browser-code");
   await page.getByRole("button", { name: "Join in browser" }).click();
   await expect(page).toHaveURL("/");
   expect(claimObserved).toBe(true);
@@ -227,7 +230,7 @@ test("invite asks Safari users to choose their Mac download", async ({
     await route.fulfill({ status: 500 });
   });
 
-  await page.goto("/invite/demo-code");
+  await bootstrapE2ePage(page, "/invite/demo-code");
   const download = page.getByRole("link", { name: "Download it now" });
   await expect(download).toHaveAttribute("aria-haspopup", "dialog");
   await download.click();
@@ -339,7 +342,7 @@ test("invite download falls back for mobile and non-desktop devices", async ({
       });
     });
 
-    await page.goto("/invite/demo-code");
+    await bootstrapE2ePage(page, "/invite/demo-code");
     await expect(
       page.getByRole("link", { name: "Download it now" }),
       device.name,

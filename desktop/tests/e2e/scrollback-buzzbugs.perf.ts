@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { decode } from "nostr-tools/nip19";
 import { getPublicKey } from "nostr-tools/pure";
 
@@ -179,7 +179,7 @@ test("MEASURE: scroll-back pagination latency in target channel", async ({
   );
 
   // ---- Boot to sidebar, open the target channel ----
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
   const chan = page.getByTestId(`channel-${TARGET_CHANNEL}`).first();
   await chan.waitFor({ state: "visible", timeout: 45_000 });

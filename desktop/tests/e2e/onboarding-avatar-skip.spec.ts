@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -17,7 +17,7 @@ test("avatar step always shows Skip for now button without an error", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -44,7 +44,7 @@ test("avatar step shares the profile emoji picker controls", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -80,7 +80,7 @@ test("avatar step skip button completes community profile setup", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -96,7 +96,7 @@ test("avatar Next button still requires an avatar to be chosen", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -120,7 +120,7 @@ test("avatar Next button still requires an avatar to be chosen", async ({
 test("normal profile setup keeps the existing identity", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
   await expect(page.getByTestId("onboarding-import-key")).toHaveCount(0);
@@ -137,7 +137,7 @@ test("Back from the community avatar step returns to profile", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();

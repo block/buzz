@@ -18,7 +18,7 @@
  *  - Preset rows render bundled logos, never initials
  *  - Onboarding navigate: setup-page "More harnesses" click → Settings → Agents (F8)
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
@@ -130,7 +130,7 @@ function makeCustomEntry(
  * before the client router starts.
  */
 async function openHarnessSettings(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
@@ -667,7 +667,7 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
     );
     window.localStorage.setItem("buzz-active-community-id", communityId);
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Reach setup by creating a new identity key and continuing past the
   // created-key page without opening the optional backup options.

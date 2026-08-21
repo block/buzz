@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { finalizeEvent } from "nostr-tools/pure";
 
@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function gotoApp(page: import("@playwright/test").Page) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await bootstrapE2ePage(page, "/", { waitUntil: "domcontentloaded" });
   await waitForInvokeBridge(page);
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
     timeout: 10_000,

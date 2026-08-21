@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -206,7 +206,7 @@ test("timeline does not recompute row estimates during ordinary scroll", async (
   page,
 }) => {
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await waitForMockTimelineBridge(page);
   await page.evaluate(() => {
     for (let index = 0; index < 120; index += 1) {
@@ -265,7 +265,7 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
       contentType: "image/svg+xml",
     });
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await waitForMockTimelineBridge(page);
   await page.evaluate(() => {
     window.__BUZZ_E2E__ = {
@@ -446,7 +446,7 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   testInfo.setTimeout(45_000);
 
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await waitForMockTimelineBridge(page);
   await seedNoShiftTimeline(page);
 
@@ -603,7 +603,7 @@ test("thread panel late row reflow keeps the reading reply stable", async ({
   testInfo.setTimeout(45_000);
 
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await waitForMockTimelineBridge(page);
 
   const rootId = await page.evaluate(() => {
@@ -696,7 +696,7 @@ test("thread panel stays put while replies stream in mid-scroll", async ({
   testInfo.setTimeout(45_000);
 
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await waitForMockTimelineBridge(page);
 
   page.on("console", (msg) => {

@@ -10,7 +10,7 @@
  * handler open long enough for the channel click to race the in-flight send.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test, bootstrapE2ePage } from "../helpers/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -68,7 +68,7 @@ test("message with agent mention lands in compose-time channel despite mid-send 
     ],
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -156,7 +156,7 @@ test("message with agent mention delivers correctly when no channel switch occur
     ],
   });
 
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 

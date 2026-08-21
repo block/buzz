@@ -12,7 +12,7 @@
     "check:px-text": "node ./scripts/check-px-text.mjs",
     "check:pubkey-truncation": "node ./scripts/check-pubkey-truncation.mjs",
     "lint": "biome lint .",
-    "check": "biome check . && pnpm check:px-text && pnpm check:pubkey-truncation",
+    "check": "biome check . && pnpm check:px-text && pnpm check:e2e-bootstrap && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
     "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\"",
     "preview": "vite preview",
@@ -22,7 +22,9 @@
     "test:e2e:integration": "pnpm build:e2e && playwright test --project=integration",
     "test:e2e:release-smoke": "pnpm build:e2e && playwright test --config=playwright.release-smoke.config.ts",
     "test:e2e:report": "playwright show-report",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "check:e2e-bootstrap": "pnpm test:check-e2e-bootstrap && node ./scripts/check-e2e-bootstrap.mjs",
+    "test:check-e2e-bootstrap": "node --test ./scripts/check-e2e-bootstrap.test.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

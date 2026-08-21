@@ -1,5 +1,5 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, bootstrapE2ePage } from "../helpers/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
 import {
@@ -694,7 +694,7 @@ test("completed users skip the loading gate while profile is still settling", as
   await installMockBridge(page, {
     profileReadDelayMs: 3_000,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
@@ -707,7 +707,7 @@ test("fresh existing-identity path leads with private-key recovery", async ({
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
   await expect(
@@ -798,7 +798,7 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
@@ -821,7 +821,7 @@ test("key import locks host navigation and ignores rapid duplicate submits", asy
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
@@ -845,7 +845,7 @@ test("imported-key users can skip out of harness setup", async ({ page }) => {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
@@ -869,7 +869,7 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
@@ -923,7 +923,7 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
 
@@ -1046,7 +1046,7 @@ test("non-local runtime override keeps community selection without release flag"
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(
     page.getByRole("button", { name: /Join a community/ }),
@@ -1072,7 +1072,7 @@ test("non-local default auto-connects when the release flag is enabled", async (
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expectIncompleteOnboarding(page);
   await expect
@@ -1112,7 +1112,7 @@ test("first-community choices route join, create, owner, and member intents", as
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(
     page.getByRole("button", { name: /Join a community/ }),
@@ -1199,7 +1199,7 @@ test("first-community owner can connect an existing hosted community", async ({
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await expect(page.getByText("North Star")).toBeVisible();
@@ -1257,7 +1257,7 @@ test("first-community owner can create and connect a hosted community", async ({
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Sign in to continue" }).click();
@@ -1333,7 +1333,7 @@ test("hosted community address line stays within the card for a long name", asyn
   );
   // The 800px app minimum is the worst case for the full-width address line.
   await page.setViewportSize({ width: 800, height: 720 });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Sign in to continue" }).click();
@@ -1402,7 +1402,7 @@ test("first-community reports a created community without a relay address", asyn
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
@@ -1433,7 +1433,7 @@ test("first-community X cancels a pending sign-in", async ({ page }) => {
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Sign in to continue" }).click();
@@ -1475,7 +1475,7 @@ test("first-community owner can replace a mismatched account identity", async ({
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await expect(
@@ -1525,7 +1525,7 @@ test("first-community explains when the local identity belongs to another accoun
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await page
@@ -1566,7 +1566,7 @@ test("back clears Builderlab auth before returning to first-community choices", 
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Back" }).click();
@@ -1613,7 +1613,7 @@ test("first-community shows the scenario cards for localhost", async ({
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(
     page.getByRole("button", { name: "Join default community" }),
@@ -1673,7 +1673,7 @@ test("first-community direct join reaches profile", async ({ page }) => {
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: /Join a community/ }).click();
   await page
@@ -1748,7 +1748,7 @@ test("community onboarding reuses an existing relay profile", async ({
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect
     .poll(() =>
@@ -1803,7 +1803,7 @@ test("first-community direct join cancel returns to request access", async ({
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByRole("button", { name: /Join a community/ }).click();
   await page
@@ -1878,7 +1878,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
       skipCommunitySeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.evaluate((transactionStorageKey) => {
     const timestamp = new Date().toISOString();
@@ -1981,7 +1981,7 @@ test("connected first-community profile keeps Back bottom-left and balances the 
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
   await expect(
@@ -2361,7 +2361,7 @@ test("name-only community profile save preserves an existing avatar", async ({
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
   });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   const existingAvatarUrl =
     "https://mock.relay/media/existing-community-avatar.png";
@@ -2428,7 +2428,7 @@ test("pending avatar stays navigable, clears failures, and retries", async ({
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-profile-name-key").fill("Tyler");
   await uploadCommunityAvatar(page, "pending-community-avatar.png");
@@ -2554,7 +2554,7 @@ test("a pending avatar never becomes durable if propagation fails after onboardi
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-profile-name-key").fill("Tyler");
   await uploadCommunityAvatar(page, "saved-pending-community-avatar.png");
@@ -2626,7 +2626,7 @@ test("a pending avatar becomes durable after onboarding unmounts once ready", as
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-profile-name-key").fill("Tyler");
   await uploadCommunityAvatar(page, "ready-after-unmount-community-avatar.png");
@@ -2700,7 +2700,7 @@ test("a failed pending replacement leaves the confirmed avatar untouched", async
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
   await seedCurrentAvatar(page, existingAvatarUrl);
 
   await page.getByTestId("community-profile-name-key").fill("Tyler");
@@ -2768,7 +2768,7 @@ test("replacing a pending upload disposes its verifier and local preview", async
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-profile-name-key").fill("Tyler");
   await uploadCommunityAvatar(page, "superseded-community-avatar.png");
@@ -2840,7 +2840,7 @@ test("membership denial on community profile save offers recovery", async ({
       skipOnboardingSeed: true,
     },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("community-profile-name-key").fill("Kalvin");
   await page.getByTestId("community-profile-next").click();
@@ -2872,7 +2872,7 @@ test("identity fallback text does not count as a real onboarding name", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expectIncompleteOnboarding(page);
   await expect(page.getByTestId("onboarding-next")).toBeDisabled();
@@ -2889,7 +2889,7 @@ test("first-run blank identity with no profile event sees onboarding", async ({
   // Do NOT seed searchProfiles for tyler's pubkey, so ensureMockProfile
   // constructs a synthesised profile with has_profile_event: false.
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expectIncompleteOnboarding(page);
 });
@@ -2916,7 +2916,7 @@ test("returning user with blank display name and real profile event skips onboar
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Profile event exists → onboarding is skipped, app renders.
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
@@ -2954,7 +2954,7 @@ test("no-event profile cached then reloaded still sees onboarding", async ({
   );
   // No profile event on the relay either — ensureMockProfile uses false.
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Cache seed must NOT promote hasProfileEvent to true. Onboarding shows.
   await expectIncompleteOnboarding(page);
@@ -2965,7 +2965,7 @@ test("avatar step uses an add-image placeholder before an avatar is chosen", asy
 }) => {
   await seedActiveIdentity(page, BLANK_AVATAR_PLACEHOLDER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -2982,7 +2982,7 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
 }) => {
   await seedActiveIdentity(page, BLANK_AVATAR_EMOJI_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3008,7 +3008,7 @@ test("avatar step accepts an avatar URL before completing onboarding", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3033,7 +3033,7 @@ test("failed avatar saves can continue without saving the avatar", async ({
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, {}, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3088,7 +3088,7 @@ test("avatar upload rejects a file whose server-detected MIME is not an image", 
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3125,7 +3125,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3148,7 +3148,7 @@ test("first-run onboarding keeps the shell hidden and lands on private Welcome a
 }) => {
   await seedActiveIdentity(page, FIRST_RUN_ALICE);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
@@ -3182,7 +3182,7 @@ test("failed public starter channel setup does not show a retry toast", async ({
     { ensureStarterChannelsErrors: [starterError, starterError] },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
@@ -3209,7 +3209,7 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
@@ -3234,7 +3234,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
     { createManagedAgentDelayMs: 1_000 },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
@@ -3268,7 +3268,7 @@ test("existing relay profile with display name auto-skips onboarding without loc
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
@@ -3281,7 +3281,7 @@ test("onboarding uses the existing identity when the community is already set up
   // this identity. Profile setup must not offer to create or replace it.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-display-name")).toHaveValue("");
   await expect(page.getByTestId("onboarding-next")).toHaveText("Continue");
@@ -3295,7 +3295,7 @@ test("completed onboarding backfills missing starter channels", async ({
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await seedOnboardingCompletion(page, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
@@ -3310,7 +3310,7 @@ test("finishing onboarding creates starter channels and focuses welcome-everyone
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
@@ -3327,7 +3327,7 @@ test("welcome-everywhere banner: X dismiss removes the guidance surface", async 
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
@@ -3353,7 +3353,7 @@ test("welcome-everywhere banner: dismiss persists after channel re-entry", async
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
@@ -3388,7 +3388,7 @@ test("initial profile read failures still hold incomplete users in onboarding", 
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expectIncompleteOnboarding(page);
 });
@@ -3404,7 +3404,7 @@ test("failed first profile saves can be skipped for the current session", async 
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expect(page.getByTestId("onboarding-display-name")).toHaveValue("");
@@ -3430,7 +3430,7 @@ test("generic relay save failures use the generic reconnect card", async ({
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3458,7 +3458,7 @@ test("custom relay proxy sign-in failures use the generic reconnect card", async
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3482,7 +3482,7 @@ test("community access failures use the generic reconnect card", async ({
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3505,7 +3505,7 @@ test("dismissed relay save failures reappear on retry", async ({ page }) => {
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3546,7 +3546,7 @@ test("existing relay profile with display name auto-completes onboarding", async
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
@@ -3564,7 +3564,7 @@ test("open relay skips membership gating during onboarding", async ({
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3585,7 +3585,7 @@ test("membership denial can import a different invited key", async ({
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3664,7 +3664,7 @@ test("same-relay identity replacement rebuilds the community boundary (A→B→A
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Seed a draft in tyler's identity-scoped bucket after boot, as if typed in
   // an earlier session. Written directly to localStorage (not through the
@@ -3805,7 +3805,7 @@ test("same-relay identity replacement rebuilds the community boundary (A→B→A
   // reach general through the channel browser.
   await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await installMockBridge(page);
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
@@ -3830,7 +3830,7 @@ test("onboarding relay reconnect — click shows Connected then auto-dismisses",
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3875,7 +3875,7 @@ test("onboarding relay reconnect — connected without a prior click does not sh
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
@@ -3910,7 +3910,7 @@ test("membership denied shows all four affordances and change-community edits no
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Fill the display name and advance — membership check triggers denial.
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
@@ -3986,7 +3986,7 @@ test("cancel from profile Back preserves drafts and denied Back returns to inter
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // --- Profile step: Back opens community-change overlay ---
   const nameInput = page.getByTestId("onboarding-display-name");
@@ -4030,7 +4030,7 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
     },
     { skipOnboardingSeed: true },
   );
-  await page.goto("/");
+  await bootstrapE2ePage(page, "/");
 
   // Record the initial relay URL (relay A).
   const initialRelayUrl = await page.evaluate(() => {
