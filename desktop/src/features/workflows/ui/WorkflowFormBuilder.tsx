@@ -387,8 +387,8 @@ export const WorkflowFormBuilder = React.forwardRef<
     );
 
   React.useEffect(() => {
-    onValidityChange?.(conditionDraftsValid);
-  }, [conditionDraftsValid, onValidityChange]);
+    onValidityChange?.(mode !== "form" || conditionDraftsValid);
+  }, [conditionDraftsValid, mode, onValidityChange]);
   const selectedNode =
     selectedRouteNode?.type === "trigger" ||
     (selectedRouteNode?.type === "step" &&
@@ -430,6 +430,7 @@ export const WorkflowFormBuilder = React.forwardRef<
     previousModeRef.current = mode;
 
     if (mode === "yaml") {
+      setTriggerConditionDrafts(null);
       onSelectedNodeChange(null);
       return;
     }

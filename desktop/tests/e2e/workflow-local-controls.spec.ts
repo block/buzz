@@ -396,6 +396,18 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
   await dialog.getByLabel("Author pubkey").fill("still-not-hex");
   await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const correctionEditor = dialog.getByRole("textbox", {
+    name: "Workflow YAML",
+  });
+  const correctedDefinition = parseYaml(await correctionEditor.inputValue());
+  delete correctedDefinition.trigger.filter;
+  await correctionEditor.fill(stringifyYaml(correctedDefinition));
+  await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
+  await dialog.getByRole("tab", { name: "Form" }).click();
+  await openTriggerInspector(dialog);
+  await dialog.getByRole("button", { name: "Author pubkey" }).click();
+  await expect(dialog.getByLabel("Author pubkey")).toHaveValue("");
   await dialog.getByLabel("Author pubkey").fill(author);
   await dialog
     .getByRole("group", { name: "Match" })
