@@ -342,7 +342,26 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 /// the default cannot drift from the provider definition. Falls back to the id
 /// if the catalog entry is missing. (Previous default was bare `goose`, which
 /// is not on PATH on a stock Windows install; buzz-agent ships with the app.)
+///
+/// Operators can override the default engine with `BUZZ_DEFAULT_RUNTIME`
+/// (e.g. `BUZZ_DEFAULT_RUNTIME=opencode`): the value is resolved through the
+/// same three-tier lookup as persona runtime ids (static builtins → static
+/// presets → loaded custom registry), so any registered harness can be made
+/// the site default. An unresolvable value logs a warning and falls back to
+/// the bundled default rather than pinning new agents to a dangling command.
 pub fn default_agent_command() -> String {
+    if let Ok(raw) = std::env::var("BUZZ_DEFAULT_RUNTIME") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            if let Some(cmd) = presets::command_for_runtime_id(trimmed) {
+                return cmd;
+            }
+            tracing::warn!(
+                runtime = trimmed,
+                "BUZZ_DEFAULT_RUNTIME does not resolve to a known harness — using bundled buzz-agent"
+            );
+        }
+    }
     known_acp_runtime_exact("buzz-agent")
         .and_then(|p| p.commands.first().copied())
         .unwrap_or("buzz-agent")
