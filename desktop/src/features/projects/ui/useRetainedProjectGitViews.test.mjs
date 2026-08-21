@@ -169,6 +169,7 @@ Object.assign(globalThis, {
   MutationObserver: dom.window.MutationObserver,
   ResizeObserver: NoopObserver,
   document: dom.window.document,
+  getComputedStyle: (...args) => dom.window.getComputedStyle(...args),
   localStorage: dom.window.localStorage,
   self: dom.window,
   window: dom.window,
@@ -216,14 +217,42 @@ dom.window.__TAURI_EVENT_PLUGIN_INTERNALS__ =
 
 after(() => dom.window.close());
 
+const workspaceTabsStub = {
+  commitDiff: null,
+  commitDiffError: null,
+  commitDiffLoading: false,
+  contributorActivityCounts: {},
+  contributorPubkeys: [],
+  createIssueAction: { onCreate: async () => {}, pending: false },
+  localSnapshot: null,
+  localSnapshotError: null,
+  localSnapshotLoading: false,
+  onSelectedCommitHashChange: noop,
+  onSelectedIssueIdChange: noop,
+  onSelectedPullRequestIdChange: noop,
+  projectId: "project-id",
+  repoContributors: [],
+  repoDiff: null,
+  repoDiffError: null,
+  repoDiffLoading: false,
+  repoHost: { kind: "unresolved" },
+  repoSource: "remote",
+  selectedCommitHash: null,
+  selectedIssueId: null,
+  snapshot: null,
+  snapshotError: null,
+  snapshotLoading: false,
+};
+
 let React;
 let act;
 let createRoot;
 let hookModule;
-let panelModule;
+let workspaceTabsModule;
 let QueryClient;
 let QueryClientProvider;
 let CommunitiesProvider;
+let HuddleProvider;
 let TooltipProvider;
 let createMemoryHistory;
 let createRootRoute;
@@ -235,13 +264,14 @@ before(async () => {
   ({ default: React, act } = await import("react"));
   ({ createRoot } = await import("react-dom/client"));
   hookModule = await import("./useRetainedProjectGitViews.ts");
-  panelModule = await import("./ProjectPullRequestsPanel.tsx");
+  workspaceTabsModule = await import("./ProjectWorkspaceTabs.tsx");
   ({ QueryClient, QueryClientProvider } = await import(
     "@tanstack/react-query"
   ));
   ({ CommunitiesProvider } = await import(
     "@/features/communities/useCommunities.tsx"
   ));
+  ({ HuddleProvider } = await import("@/features/huddle"));
   ({ TooltipProvider } = await import("@/shared/ui/tooltip"));
   ({
     createMemoryHistory,
@@ -283,9 +313,9 @@ async function renderSelection(initialProps) {
   };
 }
 
-async function renderReviewsPanel(initialProps) {
+async function renderWorkspaceReviews(initialProps) {
   let setPanelProps = noop;
-  const { PullRequestsPanel } = panelModule;
+  const { WorkspaceTabs } = workspaceTabsModule;
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -294,13 +324,15 @@ async function renderReviewsPanel(initialProps) {
   function Panel() {
     const [props, setProps] = React.useState(initialProps);
     setPanelProps = setProps;
-    return React.createElement(PullRequestsPanel, {
-      error: null,
-      isLoading: props.isLoading,
-      onSelectedPullRequestIdChange: noop,
+    return React.createElement(WorkspaceTabs, {
+      ...workspaceTabsStub,
+      initialTab: "prs",
       project: repository,
       pullRequests: props.pullRequests,
+      pullRequestsError: null,
+      pullRequestsLoading: props.isLoading,
       selectedPullRequest: props.selectedPullRequest,
+      selectedPullRequestId: props.selectedPullRequestId,
     });
   }
   const rootRoute = createRootRoute({ component: Panel });
@@ -327,7 +359,11 @@ async function renderReviewsPanel(initialProps) {
         React.createElement(
           CommunitiesProvider,
           null,
-          React.createElement(RouterProvider, { router }),
+          React.createElement(
+            HuddleProvider,
+            null,
+            React.createElement(RouterProvider, { router }),
+          ),
         ),
       ),
     );
@@ -381,10 +417,14 @@ test("selected review chrome and diff query stay aligned across fetch phases", a
     diffWorkspaceBranch: "main",
     kind: "detail",
   });
-  const panel = await renderReviewsPanel({
+  // Drive the production WorkspaceTabs → PullRequestsPanel handoff
+  // (ProjectWorkspaceTabs.tsx selectedPullRequest={selectedPullRequest}).
+  // Hardcoding that prop to null makes the fetching-empty assertions fail.
+  const panel = await renderWorkspaceReviews({
     isLoading: false,
     pullRequests: populated.pullRequests,
     selectedPullRequest: result.current.selectedPullRequest,
+    selectedPullRequestId: REVIEW_A_ID,
   });
   try {
     assert.equal(globalThis.__FORUM_COMPOSER_STUBBED__, true);
@@ -410,25 +450,7 @@ test("selected review chrome and diff query stay aligned across fetch phases", a
       isLoading: false,
       pullRequests: [],
       selectedPullRequest: result.current.selectedPullRequest,
-    });
-    assertRetainedReviewDetail(screen);
-    // Production wiring mutation: drop selectedPullRequest while the hook still
-    // retains review A. The pane must go empty — this is the gap the prior
-    // surface-only render could not catch.
-    await panel.rerender({
-      isLoading: false,
-      pullRequests: [],
-      selectedPullRequest: null,
-    });
-    assert.equal(
-      screen.getByTestId("project-pull-requests-empty").textContent,
-      "No reviews yet.",
-    );
-    assert.equal(screen.queryByTestId("project-pull-request-detail"), null);
-    await panel.rerender({
-      isLoading: false,
-      pullRequests: [],
-      selectedPullRequest: result.current.selectedPullRequest,
+      selectedPullRequestId: REVIEW_A_ID,
     });
     assertRetainedReviewDetail(screen);
 
@@ -456,6 +478,7 @@ test("selected review chrome and diff query stay aligned across fetch phases", a
       isLoading: false,
       pullRequests: [],
       selectedPullRequest: result.current.selectedPullRequest,
+      selectedPullRequestId: REVIEW_A_ID,
     });
     assert.equal(
       screen.getByTestId("project-pull-requests-empty").textContent,
