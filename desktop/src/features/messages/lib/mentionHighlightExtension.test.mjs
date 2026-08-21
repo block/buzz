@@ -10,6 +10,8 @@ import {
   createMentionCaretSettlement,
   findHighlightMatches,
   insertPosForMentionTextInput,
+  mentionTextInputInsertPos,
+  positionAfterArrowLeftThroughMentionSpace,
   selectionAfterMentionTrailingSpace,
   shouldAdvanceMentionCaret,
 } from "./mentionHighlightExtension.ts";
@@ -271,6 +273,29 @@ test("insertPosForMentionTextInput keeps a selected trailing space", () => {
   assert.equal(
     insertPosForMentionTextInput(doc, spacePos, spacePos + 1),
     spacePos + 1,
+  );
+});
+
+test("mentionTextInputInsertPos honors a deliberate caret after settlement", () => {
+  const doc = document(paragraph(text("@bob ")));
+  const spacePos = 1 + "@bob".length;
+  assert.equal(mentionTextInputInsertPos(doc, spacePos, spacePos, false), null);
+  assert.equal(
+    mentionTextInputInsertPos(doc, spacePos, spacePos, true),
+    spacePos + 1,
+  );
+});
+
+test("positionAfterArrowLeftThroughMentionSpace steps onto the token end", () => {
+  const doc = document(paragraph(text("@bob ")));
+  const afterSpace = 1 + "@bob".length + 1;
+  assert.equal(
+    positionAfterArrowLeftThroughMentionSpace(doc, afterSpace),
+    afterSpace - 1,
+  );
+  assert.equal(
+    positionAfterArrowLeftThroughMentionSpace(doc, afterSpace - 1),
+    null,
   );
 });
 

@@ -76,6 +76,34 @@ export function insertPosForMentionTextInput(
   return null;
 }
 
+/**
+ * Redirect chip-edge typing only while autocomplete is settling. After a
+ * deliberate ArrowLeft or chip click, honor the caret so `x` lands in the
+ * token (`@bobx`) instead of after the space (`@bob x`).
+ */
+export function mentionTextInputInsertPos(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+  settling: boolean,
+): number | null {
+  if (!settling) return null;
+  return insertPosForMentionTextInput(doc, from, to);
+}
+
+/** Caret just after a mention trailing space: ArrowLeft lands on the token end. */
+export function positionAfterArrowLeftThroughMentionSpace(
+  doc: ProseMirrorNode,
+  from: number,
+): number | null {
+  if (from <= 0) return null;
+  const chipEnd = from - 1;
+  if (selectionAfterMentionTrailingSpace(doc, chipEnd) === from) {
+    return chipEnd;
+  }
+  return null;
+}
+
 export function setDomCaretAtPos(
   view: {
     domAtPos: (pos: number) => { node: Node; offset: number };
@@ -354,9 +382,6 @@ export const MentionHighlightExtension = Extension.create({
                 }
               }
               setDomCaretAtPos(view, view.state.selection.from);
-              // Consume after the intended remap so a following ArrowLeft
-              // is not bounced back past the trailing space.
-              settlement.cancel();
             },
             destroy() {
               settlement.cancel();
@@ -368,10 +393,11 @@ export const MentionHighlightExtension = Extension.create({
             return this.getState(state) ?? DecorationSet.empty;
           },
           handleTextInput(view, from, to, text) {
-            const insertAt = insertPosForMentionTextInput(
+            const insertAt = mentionTextInputInsertPos(
               view.state.doc,
               from,
               to,
+              settlement.peek() !== null,
             );
             if (insertAt == null) {
               settlement.cancel();
@@ -385,9 +411,8 @@ export const MentionHighlightExtension = Extension.create({
             setDomCaretAtPos(view, caret);
             return true;
           },
-          handleKeyDown(_view, event) {
+          handleKeyDown(view, event) {
             if (
-              event.key === "ArrowLeft" ||
               event.key === "ArrowRight" ||
               event.key === "ArrowUp" ||
               event.key === "ArrowDown" ||
@@ -395,12 +420,44 @@ export const MentionHighlightExtension = Extension.create({
               event.key === "End"
             ) {
               settlement.cancel();
+              return false;
             }
-            return false;
-          },
-          handleClick() {
+            if (event.key !== "ArrowLeft" || !view.state.selection.empty) {
+              return false;
+            }
             settlement.cancel();
-            return false;
+            const chipEnd = positionAfterArrowLeftThroughMentionSpace(
+              view.state.doc,
+              view.state.selection.from,
+            );
+            if (chipEnd == null) return false;
+            view.dispatch(
+              view.state.tr.setSelection(
+                TextSelection.create(view.state.doc, chipEnd),
+              ),
+            );
+            setDomCaretAtPos(view, chipEnd);
+            return true;
+          },
+          handleClick(view, pos, event) {
+            const target = event.target;
+            const onChip =
+              target instanceof Element &&
+              Boolean(target.closest(".mention-chip"));
+            settlement.cancel();
+            if (!onChip) return false;
+            const chipEnd = positionAfterArrowLeftThroughMentionSpace(
+              view.state.doc,
+              pos,
+            );
+            if (chipEnd == null) return false;
+            view.dispatch(
+              view.state.tr.setSelection(
+                TextSelection.create(view.state.doc, chipEnd),
+              ),
+            );
+            setDomCaretAtPos(view, chipEnd);
+            return true;
           },
         },
       }),
