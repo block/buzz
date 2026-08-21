@@ -49,7 +49,6 @@ import {
   type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
-import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
   CHANNEL_MEMBERS_STALE_TIME_MS,
   channelMembersQueryKey,
@@ -794,32 +793,6 @@ export function useDeleteChannelMutation(channelId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);
     },
-  });
-}
-
-/**
- * Whether the signed-in identity may add *another* identity to this channel,
- * per {@link canAddChannelMembers}. Both queries are the ones the channel UI
- * already holds, so this shares their cache rather than fetching again.
- */
-export function useCanAddChannelMembers(channelId: string | null) {
-  const channelsQuery = useChannelsQuery();
-  const membersQuery = useChannelMembersQuery(channelId);
-  const identityQuery = useIdentityQuery();
-
-  const channel =
-    channelsQuery.data?.find((candidate) => candidate.id === channelId) ?? null;
-  const selfPubkey = identityQuery.data?.pubkey ?? null;
-  const selfRole = selfPubkey
-    ? (membersQuery.data?.find(
-        (member) => member.pubkey.toLowerCase() === selfPubkey.toLowerCase(),
-      )?.role ?? null)
-    : null;
-
-  return canAddChannelMembers({
-    channelType: channel?.channelType,
-    visibility: channel?.visibility,
-    selfRole,
   });
 }
 
