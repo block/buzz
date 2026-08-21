@@ -48,10 +48,7 @@ import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useStableSendToChannel } from "./useStableSendToChannel";
 import { useAnchoredScroll } from "./useAnchoredScroll";
-import {
-  selectDeferredListRenderState,
-  selectThreadRepliesSurface,
-} from "@/features/messages/lib/timelineSnapshot";
+import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 import { selectThreadRowHighlight } from "@/features/messages/lib/threadReplyHighlight";
 
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
@@ -317,13 +314,6 @@ export function MessageThreadPanel({
     deferredThreadReplies.length,
     threadReplies.length,
   );
-  // One paint decision: a terminal error never falls through to "No replies".
-  const repliesSurface = selectThreadRepliesSurface({
-    isPending: threadRepliesPending,
-    isError: threadRepliesError,
-    renderState: repliesRenderState,
-    isHuddleTranscript,
-  });
   const threadHeadSummary = React.useMemo(() => {
     if (!threadHeadId) {
       return null;
@@ -598,7 +588,11 @@ export function MessageThreadPanel({
           data-testid="message-thread-replies"
         >
           <ThreadReplyRegion
-            surface={repliesSurface}
+            isPending={threadRepliesPending}
+            isError={threadRepliesError}
+            deferredCount={deferredThreadReplies.length}
+            liveCount={threadReplies.length}
+            isHuddleTranscript={isHuddleTranscript}
             onRetry={onRetryThreadReplies}
             renderSkeleton={() => (
               <div

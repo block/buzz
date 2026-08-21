@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 
-import type { ThreadRepliesSurface } from "@/features/messages/lib/timelineSnapshot";
+import {
+  selectDeferredListRenderState,
+  selectThreadRepliesSurface,
+} from "@/features/messages/lib/timelineSnapshot";
 import { Button } from "@/shared/ui/button";
 
 /**
@@ -66,31 +69,49 @@ export function ThreadRepliesEmptyCard() {
 }
 
 /**
- * The single paint decision for the thread reply region, keyed off the surface
- * `selectThreadRepliesSurface` resolved. Owning the branching here — rather than
- * inline in `MessageThreadPanel` — keeps the load-bearing invariant inside a
- * cheap-to-mount unit: a terminal fetch "error" renders the retry card and NEVER
- * the "empty" "No replies" state (the false-empty guard this change exists to
- * hold), while "pending" paints nothing (rows stream in on the deferred commit).
+ * The single paint decision for the thread reply region. This unit owns BOTH
+ * the surface selection (`selectThreadRepliesSurface`, keyed off the same raw
+ * query/render state the panel already holds) AND the surface→content dispatch.
+ * Fusing them here removes the last falsifiable seam: the panel passes only its
+ * raw state — pending/error flags, the deferred vs. live reply counts, and the
+ * huddle-transcript flag — so there is no precomputed `surface` prop at the
+ * panel boundary to statically mis-set (e.g. a stray `surface="empty"` that would
+ * silently restore the false-empty bug on every fetch failure). The load-bearing
+ * invariant holds by construction: a terminal fetch "error" renders the retry
+ * card and NEVER the "empty" "No replies" state, while "pending" paints nothing
+ * (rows stream in on the deferred commit).
  *
  * The two heavy branches take render callbacks so the panel keeps ownership of
  * its skeleton and list construction (Tiptap/React-Query bound, not mountable in
  * node:test) without dragging them into this component. The mount test drives
- * the real surface→content mapping through this exported unit, so an unwire in
- * the panel drops the whole region — a louder regression than a silently dead
- * card, and one a source scan could not prove reachable.
+ * the real raw-state→surface→content mapping through this exported unit, so both
+ * the selection and the dispatch are covered under a cheap mount.
  */
 export function ThreadReplyRegion({
-  surface,
+  isPending,
+  isError,
+  deferredCount,
+  liveCount,
+  isHuddleTranscript = false,
   onRetry,
   renderSkeleton,
   renderList,
 }: {
-  surface: ThreadRepliesSurface;
+  isPending: boolean;
+  isError: boolean;
+  deferredCount: number;
+  liveCount: number;
+  isHuddleTranscript?: boolean;
   onRetry?: () => void;
   renderSkeleton: () => ReactNode;
   renderList: () => ReactNode;
 }) {
+  const surface = selectThreadRepliesSurface({
+    isPending,
+    isError,
+    renderState: selectDeferredListRenderState(deferredCount, liveCount),
+    isHuddleTranscript,
+  });
   if (surface === "skeleton") return <>{renderSkeleton()}</>;
   if (surface === "list") return <>{renderList()}</>;
   if (surface === "error") return <ThreadRepliesErrorCard onRetry={onRetry} />;
