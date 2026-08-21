@@ -547,23 +547,17 @@ fn nonempty_s3_region(region: String) -> Option<String> {
     (!region.is_empty()).then(|| region.to_string())
 }
 
-fn s3_region_from_env() -> String {
-    resolve_s3_region(
-        std::env::var("BUZZ_S3_REGION").ok(),
-        std::env::var("AWS_REGION").ok(),
-    )
-}
-
 async fn connect_services() -> Result<Services> {
     let store = connect_store().await?;
     connect_services_with_store(store).await
 }
 
 async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
+    let (s3_access_key, s3_secret_key) = s3_key_pair_from_env();
     let media_config = buzz_media::MediaConfig {
         s3_endpoint: required_env("BUZZ_S3_ENDPOINT")?,
-        s3_access_key: required_env("BUZZ_S3_ACCESS_KEY")?,
-        s3_secret_key: required_env("BUZZ_S3_SECRET_KEY")?,
+        s3_access_key,
+        s3_secret_key,
         s3_bucket: required_env("BUZZ_S3_BUCKET")?,
         s3_region: s3_region_from_env(),
         s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
@@ -596,12 +590,36 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     })
 }
 
+fn s3_region_from_env() -> String {
+    resolve_s3_region(
+        std::env::var("BUZZ_S3_REGION").ok(),
+        std::env::var("AWS_REGION").ok(),
+    )
+}
+
+fn s3_key_pair_from_env() -> (String, String) {
+    s3_key_pair_from(|name| std::env::var(name).ok())
+}
+
+fn s3_key_pair_from(get_env: impl Fn(&str) -> Option<String>) -> (String, String) {
+    (
+        optional_env_from(&get_env, "BUZZ_S3_ACCESS_KEY"),
+        optional_env_from(&get_env, "BUZZ_S3_SECRET_KEY"),
+    )
+}
+
 fn required_env(name: &str) -> Result<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{name} is required for community deletion"))
+}
+
+fn optional_env_from(get_env: impl Fn(&str) -> Option<String>, name: &str) -> String {
+    get_env(name)
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn env_parse<T>(name: &str, default: T) -> T
@@ -1543,6 +1561,33 @@ mod tests {
         (db, services, claim)
     }
 
+    fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    fn media_config(access: &str, secret: &str) -> buzz_media::MediaConfig {
+        buzz_media::MediaConfig {
+            s3_endpoint: "http://localhost:9000".to_string(),
+            s3_access_key: access.to_string(),
+            s3_secret_key: secret.to_string(),
+            s3_bucket: "buzz-media".to_string(),
+            s3_region: "us-west-2".to_string(),
+            s3_addressing_style: buzz_media::S3AddressingStyle::Path,
+            max_image_bytes: 1,
+            max_gif_bytes: 1,
+            max_video_bytes: 1,
+            max_file_bytes: 1,
+            public_base_url: "http://localhost/media".to_string(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
+        }
+    }
+
     fn deletion_test_media_storage() -> Arc<MediaStorage> {
         let endpoint = std::env::var("BUZZ_TEST_S3_ENDPOINT")
             .or_else(|_| std::env::var("BUZZ_S3_ENDPOINT"))
@@ -1769,6 +1814,46 @@ mod tests {
             "configured"
         );
         std::env::remove_var(&variable);
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_allows_empty_pair_for_default_credentials() {
+        let (access_key, secret_key) = s3_key_pair_from(env_of(&[
+            ("BUZZ_S3_ACCESS_KEY", ""),
+            ("BUZZ_S3_SECRET_KEY", "   "),
+        ]));
+
+        assert_eq!(access_key, "");
+        assert_eq!(secret_key, "");
+        if let Err(error) = MediaStorage::new(&media_config(&access_key, &secret_key)) {
+            assert!(
+                !error.to_string().contains("must be configured together"),
+                "empty pair must reach the default credential path, not partial-key validation: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_preserves_static_and_partial_pairs() {
+        let (access_key, secret_key) = s3_key_pair_from(env_of(&[
+            ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+            ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+        ]));
+        assert_eq!(access_key, "buzz_dev");
+        assert_eq!(secret_key, "buzz_dev_secret");
+        MediaStorage::new(&media_config(&access_key, &secret_key))
+            .expect("static pair reaches media static credential path");
+
+        for (access_key, secret_key) in [("buzz_dev", ""), ("", "buzz_dev_secret")] {
+            let error = match MediaStorage::new(&media_config(access_key, secret_key)) {
+                Ok(_) => panic!("partial S3 key pair must fail closed"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("must be configured together"),
+                "unexpected error for access={access_key:?} secret={secret_key:?}: {error}"
+            );
+        }
     }
 
     #[test]
