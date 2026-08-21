@@ -82,6 +82,12 @@ pub enum AcpError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("failed to spawn agent command: {source}")]
+    Spawn {
+        command: String,
+        source: std::io::Error,
+    },
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -534,7 +540,10 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
-        let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn().map_err(|source| AcpError::Spawn {
+            command: command.to_string(),
+            source,
+        })?;
 
         let stdin = child
             .stdin
@@ -5026,5 +5035,73 @@ mod tests {
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+}
+
+#[cfg(test)]
+mod spawn_error_tests {
+    use super::{AcpClient, AcpError};
+
+    const MISSING_BINARY: &str = "buzz-acp-nonexistent-binary-6473";
+
+    // #6473: a failed spawn must name the command and, when the binary is
+    // simply absent, say so in PATH terms an operator recognises.
+    #[tokio::test]
+    async fn spawn_error_names_missing_command_and_says_not_on_path() {
+        let err = AcpClient::spawn(MISSING_BINARY, &[], &[], false)
+            .await
+            .err()
+            .expect("spawn of a nonexistent binary must fail");
+        match &err {
+            AcpError::Spawn { command, .. } => {
+                assert_eq!(command, MISSING_BINARY);
+            }
+            other => panic!("expected AcpError::Spawn, got {other}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains(MISSING_BINARY),
+            "message must contain the command name, got: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("not found") && msg.to_lowercase().contains("path"),
+            "message must identify the binary as not found on PATH, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_error_names_command_on_non_notfound_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A path that exists but is not executable: io::ErrorKind::PermissionDenied.
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-notexec-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("not-executable-script");
+        std::fs::write(&path, "#!/usr/bin/env bash\necho hi\n").expect("write file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissions");
+
+        let err = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
+            .await
+            .err()
+            .expect("spawn of a non-executable file must fail");
+        match &err {
+            AcpError::Spawn { command, .. } => {
+                assert_eq!(command, path.to_str().expect("utf8 path"));
+            }
+            other => panic!("expected AcpError::Spawn, got {other}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains(path.to_str().expect("utf8 path")),
+            "non-NotFound spawn failures must also name the command, got: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
