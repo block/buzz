@@ -300,6 +300,103 @@ fn authorize_or_defer_queued_text(
     }
 }
 
+struct TtsAppendContext<'a> {
+    playback: &'a PlaybackCoordinator,
+    #[cfg(test)]
+    human_floor: &'a HumanFloor,
+    cancel: &'a AtomicBool,
+    voice_cancel: &'a AtomicBool,
+    shutdown: &'a AtomicBool,
+    tts_active: &'a AtomicBool,
+    speaker_generations: &'a SpeakerGenerations,
+    active_speaker: &'a ActiveSpeaker,
+    activity_frames: &'a Mutex<VecDeque<TtsSpeakerActivityFrame>>,
+    channels: NonZero<u16>,
+    rate: NonZero<u32>,
+}
+
+fn append_worker_audio(
+    context: &TtsAppendContext<'_>,
+    prepared: PreparedModelAudio,
+    route_id: u64,
+    speaker_pubkey: Option<&str>,
+    speaker_generation: u64,
+    floor_epoch: u64,
+) -> bool {
+    // Keep the shared floor in this context so the regression can mutation-check
+    // that authorization never moves back inside the coordinator callback.
+    #[cfg(test)]
+    let _ = context.human_floor;
+    let sample_count = prepared.sample_count;
+    let chunk_index = prepared.chunk_index;
+    let activity = speaker_pubkey.map(|pubkey| {
+        build_tts_speaker_activity_frames(&prepared.buffer, pubkey, SAMPLE_RATE as usize)
+    });
+    let floor_authorization = context.playback.append_if_human_floor_permits(
+        rodio::buffer::SamplesBuffer::new(context.channels, context.rate, prepared.buffer),
+        floor_epoch,
+        |player_empty| {
+            if context.cancel.load(Ordering::Acquire)
+                || context.voice_cancel.load(Ordering::Acquire)
+                || context.shutdown.load(Ordering::Acquire)
+            {
+                let reason = if context.shutdown.load(Ordering::Acquire) {
+                    "shutdown"
+                } else if context.cancel.load(Ordering::Acquire) {
+                    "barge_in"
+                } else {
+                    "voice_switch"
+                };
+                eprintln!(
+                    "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
+                );
+                return false;
+            }
+            if speaker_pubkey.is_some_and(|pubkey| {
+                current_speaker_generation(context.speaker_generations, pubkey)
+                    != speaker_generation
+            }) {
+                eprintln!(
+                    "buzz-desktop: tts stage=synthesis status=cancelled reason=speaker_removed route_id={route_id}"
+                );
+                return false;
+            }
+            if let Some(pubkey) = speaker_pubkey {
+                let mut active = context
+                    .active_speaker
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if player_empty {
+                    active.take();
+                }
+                if active
+                    .as_deref()
+                    .is_some_and(|current| !current.eq_ignore_ascii_case(pubkey))
+                {
+                    return false;
+                }
+                active.get_or_insert_with(|| pubkey.to_ascii_lowercase());
+                context
+                    .activity_frames
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .extend(activity.unwrap_or_default());
+            }
+            true
+        },
+        // Publish activity under the coordinator: an append and the mic gate it
+        // implies are one transition, so cancellation cannot overwrite it.
+        || context.tts_active.store(true, Ordering::Release),
+    );
+    if floor_authorization != HumanFloorAuthorization::Permitted {
+        return false;
+    }
+    eprintln!(
+        "buzz-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={chunk_index} sample_count={sample_count}"
+    );
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tts_worker(
     model_dir: PathBuf,
@@ -470,78 +567,33 @@ fn tts_worker(
     let tts_streaming = streaming_emit_frames();
     let mut last_route_id = 0;
     let mut deferred_text = VecDeque::new();
+    let append_context = TtsAppendContext {
+        playback: &playback,
+        #[cfg(test)]
+        human_floor: &human_floor,
+        cancel: &cancel,
+        voice_cancel: &voice_cancel,
+        shutdown: &shutdown,
+        tts_active: &tts_active,
+        speaker_generations: &speaker_generations,
+        active_speaker: &active_speaker,
+        activity_frames: &activity_frames,
+        channels,
+        rate,
+    };
     let append_audio = |prepared: PreparedModelAudio,
                         route_id: u64,
                         speaker_pubkey: Option<&str>,
                         speaker_generation: u64,
                         floor_epoch: u64| {
-        let sample_count = prepared.sample_count;
-        let chunk_index = prepared.chunk_index;
-        let activity = speaker_pubkey.map(|pubkey| {
-            build_tts_speaker_activity_frames(&prepared.buffer, pubkey, SAMPLE_RATE as usize)
-        });
-        let floor_authorization = playback.append_if_human_floor_permits(
-            SamplesBuffer::new(channels, rate, prepared.buffer),
+        append_worker_audio(
+            &append_context,
+            prepared,
+            route_id,
+            speaker_pubkey,
+            speaker_generation,
             floor_epoch,
-            |player_empty| {
-                if cancel.load(Ordering::Acquire)
-                    || voice_cancel.load(Ordering::Acquire)
-                    || shutdown.load(Ordering::Acquire)
-                {
-                    let reason = if shutdown.load(Ordering::Acquire) {
-                        "shutdown"
-                    } else if cancel.load(Ordering::Acquire) {
-                        "barge_in"
-                    } else {
-                        "voice_switch"
-                    };
-                    eprintln!(
-                        "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
-                    );
-                    return false;
-                }
-                if speaker_pubkey.is_some_and(|pubkey| {
-                    current_speaker_generation(&speaker_generations, pubkey) != speaker_generation
-                }) {
-                    eprintln!(
-                        "buzz-desktop: tts stage=synthesis status=cancelled reason=speaker_removed route_id={route_id}"
-                    );
-                    return false;
-                }
-                if let Some(pubkey) = speaker_pubkey {
-                    let mut active = active_speaker
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    if player_empty {
-                        active.take();
-                    }
-                    if active
-                        .as_deref()
-                        .is_some_and(|current| !current.eq_ignore_ascii_case(pubkey))
-                    {
-                        return false;
-                    }
-                    active.get_or_insert_with(|| pubkey.to_ascii_lowercase());
-                    activity_frames
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .extend(activity.unwrap_or_default());
-                }
-                true
-            },
-            // Publish activity under the coordinator: an append and the mic
-            // gate it implies are one transition, so a cancellation that
-            // replaces this player cannot have its release overwritten by a
-            // `true` landing after the fact.
-            || tts_active.store(true, Ordering::Release),
-        );
-        if floor_authorization != HumanFloorAuthorization::Permitted {
-            return false;
-        }
-        eprintln!(
-            "buzz-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={chunk_index} sample_count={sample_count}"
-        );
-        true
+        )
     };
 
     loop {

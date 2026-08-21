@@ -27,6 +27,64 @@ fn queued_text(route_id: u64, floor_epoch: u64) -> QueuedText {
 }
 
 #[test]
+fn production_worker_append_authorization_completes() {
+    let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let human_floor = HumanFloor::new();
+        let playback = human_floor.playback();
+        let channels = NonZero::new(1).expect("nonzero channels");
+        let rate = NonZero::new(SAMPLE_RATE).expect("nonzero rate");
+        let (mixer, _unpulled_source) = rodio::mixer::mixer(channels, rate);
+        playback.bind_mixer(&mixer);
+        let floor_epoch = human_floor.epoch();
+        let cancel = AtomicBool::new(false);
+        let voice_cancel = AtomicBool::new(false);
+        let shutdown = AtomicBool::new(false);
+        let tts_active = AtomicBool::new(false);
+        let speaker_generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(None));
+        let activity_frames = Mutex::new(VecDeque::new());
+        let context = TtsAppendContext {
+            playback: &playback,
+            human_floor: &human_floor,
+            cancel: &cancel,
+            voice_cancel: &voice_cancel,
+            shutdown: &shutdown,
+            tts_active: &tts_active,
+            speaker_generations: &speaker_generations,
+            active_speaker: &active_speaker,
+            activity_frames: &activity_frames,
+            channels,
+            rate,
+        };
+
+        let accepted = append_worker_audio(
+            &context,
+            PreparedModelAudio {
+                buffer: vec![0.25; SAMPLE_RATE as usize],
+                sample_count: SAMPLE_RATE as usize,
+                chunk_index: 0,
+            },
+            40,
+            None,
+            0,
+            floor_epoch,
+        );
+        completed_tx
+            .send((accepted, tts_active.load(Ordering::Acquire)))
+            .expect("completion receiver");
+    });
+
+    assert_eq!(
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("production worker append authorization must not deadlock"),
+        (true, true)
+    );
+    worker.join().expect("append worker");
+}
+
+#[test]
 fn worker_queue_defers_text_while_floor_is_held_then_releases_it() {
     let human_floor = HumanFloor::new();
     assert!(human_floor.enter_local(true, false));
