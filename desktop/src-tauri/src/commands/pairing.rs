@@ -280,18 +280,11 @@ async fn pairing_ws_task<R: Runtime>(
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: PairingTaskContext,
     cancel: CancellationToken,
-    mut outbound_rx: mpsc::Receiver<String>,
+    outbound_rx: mpsc::Receiver<String>,
     app: AppHandle<R>,
 ) {
-    if let Err(e) = pairing_ws_task_inner(
-        &relay_url,
-        &session,
-        &context,
-        &cancel,
-        &mut outbound_rx,
-        &app,
-    )
-    .await
+    if let Err(e) =
+        pairing_ws_task_inner(&relay_url, &session, &context, &cancel, outbound_rx, &app).await
     {
         if pairing_task_is_current(&context.generation, context.task_generation) {
             let _ = app.emit("pairing-error", PairingErrorPayload { message: e });
@@ -305,7 +298,7 @@ async fn pairing_ws_task_inner<R: Runtime>(
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: &PairingTaskContext,
     cancel: &CancellationToken,
-    outbound_rx: &mut mpsc::Receiver<String>,
+    outbound_rx: mpsc::Receiver<String>,
     app: &AppHandle<R>,
 ) -> Result<(), String> {
     let (ws, _) = connect_async(relay_url)
@@ -314,26 +307,20 @@ async fn pairing_ws_task_inner<R: Runtime>(
     pairing_ws_task_on_socket(ws, relay_url, session, context, cancel, outbound_rx, app).await
 }
 
-async fn pairing_ws_task_on_socket<R, S>(
+async fn pairing_ws_session_loop<R, S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     relay_url: &str,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: &PairingTaskContext,
     cancel: &CancellationToken,
-    outbound_rx: &mut mpsc::Receiver<String>,
+    mut outbound_rx: mpsc::Receiver<String>,
     app: &AppHandle<R>,
 ) -> Result<(), String>
 where
     R: Runtime,
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut write, mut read) = ws.split();
-
-    // Start the hard timeout as soon as the transport is live so NIP-42 and
-    // EOSE setup cannot consume the desktop budget before the relay's
-    // CONN_TIMEOUT fires.
-    let hard_timeout = tokio::time::sleep(PAIRING_HARD_TIMEOUT);
-    tokio::pin!(hard_timeout);
 
     handle_nip42_auth(&mut read, &mut write, session, relay_url).await?;
 
@@ -359,14 +346,6 @@ where
 
         tokio::select! {
             _ = cancel.cancelled() => break,
-            _ = &mut hard_timeout => {
-                if pairing_task_is_current(&context.generation, context.task_generation) {
-                    let _ = app.emit("pairing-error", PairingErrorPayload {
-                        message: "Session timed out".into(),
-                    });
-                }
-                break;
-            }
             Some(json_msg) = outbound_rx.recv() => {
                 if let Err(e) = write.send(Message::Text(json_msg.into())).await {
                     return Err(format!("publish failed: {e}"));
@@ -481,6 +460,64 @@ where
     }
 
     Ok(())
+}
+
+async fn pairing_ws_task_on_socket<R, S>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
+    relay_url: &str,
+    session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
+    context: &PairingTaskContext,
+    cancel: &CancellationToken,
+    outbound_rx: mpsc::Receiver<String>,
+    app: &AppHandle<R>,
+) -> Result<(), String>
+where
+    R: Runtime,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let relay_url = relay_url.to_string();
+    let session = Arc::clone(session);
+    let context = context.clone();
+    let cancel = cancel.clone();
+    let worker_app = app.clone();
+    let timeout_app = app.clone();
+    let generation = Arc::clone(&context.generation);
+    let task_generation = context.task_generation;
+
+    // Abort the worker on deadline so a stalled write.send cannot outlive the
+    // desktop hard timeout. timeout() alone only drops the future in-place and
+    // does not cancel an in-flight sink await on the same task.
+    let mut worker = tokio::spawn(async move {
+        pairing_ws_session_loop(
+            ws,
+            &relay_url,
+            &session,
+            &context,
+            &cancel,
+            outbound_rx,
+            &worker_app,
+        )
+        .await
+    });
+
+    tokio::select! {
+        result = &mut worker => match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(message),
+            Err(err) if err.is_cancelled() => Ok(()),
+            Err(err) => Err(format!("pairing task failed: {err}")),
+        },
+        _ = tokio::time::sleep(PAIRING_HARD_TIMEOUT) => {
+            worker.abort();
+            let _ = worker.await;
+            if pairing_task_is_current(&generation, task_generation) {
+                let _ = timeout_app.emit("pairing-error", PairingErrorPayload {
+                    message: "Session timed out".into(),
+                });
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn import_recovered_identity<R: Runtime>(
