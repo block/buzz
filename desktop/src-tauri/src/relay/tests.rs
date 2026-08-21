@@ -255,14 +255,21 @@ fn evil_suffix_does_not_match_cloudflare() {
 // ── /query per-request timeout → classified error ────────────────────────
 //
 // A stalled `/query` connection (headers never arrive) must not hang the
-// caller forever. The per-request `.timeout(...)` on the `/query` builders
-// bounds the wait, and the resulting `reqwest::Error` must classify to the
-// stable `"relay unreachable: request timed out"` string the frontend keys
-// on. This exercises the real timeout path with a short deadline against a
-// loopback server that accepts the connection but never sends a response.
+// caller forever. Both production `/query` builders funnel through
+// `send_query_request`, which owns the per-request `.timeout(...)`; this test
+// drives that exact helper against a loopback server that accepts the
+// connection but never responds. It asserts two things the frontend depends
+// on: (1) the helper returns instead of hanging, and (2) the failure is the
+// stable `"relay unreachable: request timed out"` classified string.
+//
+// The outer `tokio::time::timeout` is the regression guard: if the production
+// `.timeout(...)` is ever removed from `send_query_request`, this call would
+// hang forever, so the guard fires and the test fails fast rather than
+// stalling CI. A short 200ms deadline keeps the happy path fast.
 #[tokio::test]
 async fn stalled_query_request_times_out_with_classified_error() {
     use std::io::Read as _;
+    use std::time::Duration;
 
     // A listener that accepts the connection and then holds it open without
     // ever writing a response — the "headers never arrive" stall.
@@ -274,23 +281,32 @@ async fn stalled_query_request_times_out_with_classified_error() {
             // the socket until the client aborts on its own timeout.
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(Duration::from_secs(2));
         }
     });
 
     let client = reqwest::Client::new();
-    let err = client
-        .post(format!("http://{addr}/query"))
-        .timeout(std::time::Duration::from_millis(200))
-        .body("[]")
-        .send()
-        .await
-        .expect_err("request must fail on the per-request timeout");
+    let url = format!("http://{addr}/query");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::send_query_request(
+            &client,
+            &url,
+            "Nostr test-auth",
+            None,
+            b"[]".to_vec(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect(
+        "send_query_request must honor its per-request timeout and resolve within 5s; \
+         if this guard fires, the production .timeout(...) was lost",
+    );
 
-    assert!(err.is_timeout(), "stalled request must be a timeout error");
+    let err = result.expect_err("a stalled /query must surface an error, not succeed");
     assert_eq!(
-        super::classify_request_error(&err),
-        "relay unreachable: request timed out",
+        err, "relay unreachable: request timed out",
         "a timed-out /query must surface the stable classified string"
     );
 

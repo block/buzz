@@ -4,6 +4,7 @@ import { ArrowDown } from "lucide-react";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import {
   buildThreadSummaryFromVisibleEntries,
+  getActiveContinuationDepths,
   hasNestedThreadBranches,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
@@ -143,55 +144,21 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = 0;
 
-function hasLaterVisibleSibling(
-  entries: readonly MainTimelineEntry[],
-  entryIndex: number,
-): boolean {
-  const depth = entries[entryIndex]?.message.depth;
-  if (depth == null) {
-    return false;
-  }
-
-  for (let index = entryIndex + 1; index < entries.length; index += 1) {
-    const nextDepth = entries[index].message.depth;
-    if (nextDepth <= depth) {
-      return nextDepth === depth;
-    }
-  }
-
-  return false;
-}
-
-function getActiveContinuationDepths({
-  ancestors,
-  entries,
-  index,
-  message,
+// The reply region's terminal (non-skeleton, non-list) surface. A terminal
+// fetch "error" renders the retry card, NEVER the "empty" "No replies" state —
+// that is the false-empty guard this whole change exists to hold. "pending"
+// paints nothing (rows are streaming in on the deferred commit). Exported so
+// the surface→card mapping is mount-tested without the panel's composer stack.
+export function ThreadRepliesTerminalCard({
+  surface,
+  onRetry,
 }: {
-  ancestors: readonly { index: number; message: TimelineMessage }[];
-  entries: readonly MainTimelineEntry[];
-  index: number;
-  message: TimelineMessage;
-}): number[] {
-  const depths: number[] = [];
-
-  for (const ancestor of ancestors) {
-    if (ancestor.message.depth === 0) {
-      continue;
-    }
-
-    const childDepth = ancestor.message.depth + 1;
-    const pathChild =
-      message.depth === childDepth
-        ? { index, message }
-        : ancestors.find((candidate) => candidate.message.depth === childDepth);
-
-    if (pathChild && hasLaterVisibleSibling(entries, pathChild.index)) {
-      depths.push(ancestor.message.depth);
-    }
-  }
-
-  return depths;
+  surface: "error" | "empty" | "pending";
+  onRetry?: () => void;
+}) {
+  if (surface === "error") return <ThreadRepliesErrorCard onRetry={onRetry} />;
+  if (surface === "empty") return <ThreadRepliesEmptyCard />;
+  return null;
 }
 
 export function MessageThreadPanel({
@@ -816,14 +783,12 @@ export function MessageThreadPanel({
                 })}
               </div>
             )
-          ) : repliesSurface === "error" ? (
-            <ThreadRepliesErrorCard onRetry={onRetryThreadReplies} />
-          ) : repliesSurface === "empty" ? (
-            <ThreadRepliesEmptyCard />
-          ) : // "pending": deferred list is empty but the live list has content —
-          // rows are streaming in on the deferred commit. Paint nothing rather
-          // than flashing the empty state.
-          null}
+          ) : (
+            <ThreadRepliesTerminalCard
+              surface={repliesSurface}
+              onRetry={onRetryThreadReplies}
+            />
+          )}
         </div>
       </div>
     </AuxiliaryPanelBody>

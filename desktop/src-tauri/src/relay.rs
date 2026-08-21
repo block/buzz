@@ -341,23 +341,15 @@ pub async fn query_relay_at(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
-
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .timeout(QUERY_REQUEST_TIMEOUT)
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    parse_json_response(response).await
+    send_query_request(
+        &state.http_client,
+        &url,
+        &auth,
+        None,
+        body_bytes,
+        QUERY_REQUEST_TIMEOUT,
+    )
+    .await
 }
 
 pub async fn query_relay_at_with_keys(
@@ -372,12 +364,38 @@ pub async fn query_relay_at_with_keys(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
-    let mut request = state
-        .http_client
-        .post(&url)
+    send_query_request(
+        &state.http_client,
+        &url,
+        &auth,
+        auth_tag,
+        body_bytes,
+        QUERY_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+/// Issue an authenticated `POST /query` and parse the response, applying the
+/// per-request `timeout` that bounds a stalled or half-open relay connection.
+///
+/// Both `/query` builders funnel through this one helper so the timeout can
+/// never be applied to one builder and dropped from the other, and so a test
+/// can drive the real send/timeout/classify path with a short deadline against
+/// a stalled loopback. A timeout surfaces through `classify_request_error` as
+/// the stable `"relay unreachable: request timed out"` string.
+async fn send_query_request(
+    http_client: &reqwest::Client,
+    url: &str,
+    auth: &str,
+    auth_tag: Option<&str>,
+    body_bytes: Vec<u8>,
+    timeout: std::time::Duration,
+) -> Result<Vec<nostr::Event>, String> {
+    let mut request = http_client
+        .post(url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
-        .timeout(QUERY_REQUEST_TIMEOUT);
+        .timeout(timeout);
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
