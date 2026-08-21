@@ -3,7 +3,7 @@
 //!
 //! This module has **zero S3 I/O** — [`classify_key`] and [`BucketAggregate`]
 //! operate on plain `(key, size)` pairs, and [`fold_bucket_listing`] takes a
-//! caller-supplied page-fetching closure so the pagination/cap logic is
+//! caller-supplied page-fetching closure so continuation-token pagination is
 //! testable against synthetic listings. The relay wires a real
 //! [`crate::storage::MediaStorage::list_page`] closure at the call site (see
 //! `buzz-relay`'s storage sweep task).
@@ -339,9 +339,11 @@ impl BucketAggregate {
 /// sweep, keep the old snapshot" to the caller — never a partial one.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
-    /// Cumulative listed-object count exceeded `cap` mid-listing.
-    #[error("object cap exceeded: {seen} listed objects > cap {cap}")]
-    CapExceeded { seen: u64, cap: u64 },
+    /// The deletion taxonomy sweep exceeded its fleet safety cap. Storage
+    /// metrics sweeps do not have an object cap; they rely on paginated LIST
+    /// responses plus the caller's whole-sweep timeout.
+    #[error("taxonomy object cap exceeded: {seen} listed objects > cap {cap}")]
+    TaxonomyObjectCap { seen: u64, cap: u64 },
     /// The page source (S3, or a test double) failed.
     #[error("storage error during listing: {0}")]
     Storage(#[from] MediaError),
@@ -367,32 +369,24 @@ pub struct Page {
     pub is_truncated: bool,
 }
 
-/// Fold an entire paginated bucket listing, checking the object cap BEFORE
-/// folding each page and never retaining the full listing — only the
-/// bounded per-sha/per-binding aggregate state.
+/// Fold an entire paginated bucket listing without retaining the full listing
+/// — only the per-sha/per-binding aggregate state. Each call consumes one S3
+/// response page and follows continuation tokens until the listing completes;
+/// callers bound stalled or pathological listings with a whole-sweep timeout.
 ///
 /// `fetch_page` is called with `None` for the first page and the previous
 /// page's continuation token thereafter; production callers close over a
 /// [`crate::storage::MediaStorage`], tests close over canned [`Page`]s.
-pub async fn fold_bucket_listing<F, Fut>(
-    cap: u64,
-    mut fetch_page: F,
-) -> Result<BucketSnapshot, SweepError>
+pub async fn fold_bucket_listing<F, Fut>(mut fetch_page: F) -> Result<BucketSnapshot, SweepError>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = Result<Page, MediaError>>,
 {
     let mut aggregate = BucketAggregate::default();
     let mut continuation_token = None;
-    let mut seen: u64 = 0;
 
     loop {
         let page = fetch_page(continuation_token.take()).await?;
-
-        seen += page.objects.len() as u64;
-        if seen > cap {
-            return Err(SweepError::CapExceeded { seen, cap });
-        }
 
         for (key, size) in &page.objects {
             aggregate.fold(key, *size);
@@ -649,11 +643,11 @@ mod tests {
         assert_eq!(snap.unknown_key_objects, 0);
     }
 
-    // --- fold_bucket_listing (pagination + cap) ---
+    // --- fold_bucket_listing (pagination) ---
 
     #[tokio::test]
     async fn empty_bucket_listing_yields_zero_snapshot() {
-        let snapshot = fold_bucket_listing(100, |_token| async {
+        let snapshot = fold_bucket_listing(|_token| async {
             Ok(Page {
                 objects: vec![],
                 next_continuation_token: None,
@@ -682,7 +676,7 @@ mod tests {
             },
         ]));
 
-        let snapshot = fold_bucket_listing(100, {
+        let snapshot = fold_bucket_listing({
             let pages = std::sync::Arc::clone(&pages);
             move |token| {
                 let pages = std::sync::Arc::clone(&pages);
@@ -705,32 +699,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cap_breach_mid_listing_fails_the_sweep_before_folding_the_page() {
-        let objects: Vec<(String, u64)> = (0..5).map(|i| (format!("obj-{i}"), 1)).collect();
-        let result = fold_bucket_listing(3, move |_token| {
-            let objects = objects.clone();
-            async move {
-                Ok(Page {
-                    objects,
-                    next_continuation_token: None,
-                    is_truncated: false,
-                })
+    async fn paginated_listing_has_no_cumulative_object_cap() {
+        let old_default_cap = 1_000_000u64;
+        let page_size = 1_000usize;
+        let total_pages_past_old_cap = old_default_cap as usize / page_size + 1;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let snapshot = fold_bucket_listing({
+            let calls = std::sync::Arc::clone(&calls);
+            move |token| {
+                let calls = std::sync::Arc::clone(&calls);
+                async move {
+                    let page_index = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if page_index == 0 {
+                        assert!(token.is_none());
+                    } else {
+                        assert_eq!(
+                            token.as_deref(),
+                            Some(format!("page-{page_index}").as_str())
+                        );
+                    }
+
+                    Ok(Page {
+                        objects: std::iter::repeat_with(|| ("unknown".to_string(), 1))
+                            .take(page_size)
+                            .collect(),
+                        next_continuation_token: (page_index + 1 < total_pages_past_old_cap)
+                            .then(|| format!("page-{}", page_index + 1)),
+                        is_truncated: page_index + 1 < total_pages_past_old_cap,
+                    })
+                }
             }
         })
-        .await;
+        .await
+        .expect("listing past the former storage-sweep cap must succeed");
 
-        match result {
-            Err(SweepError::CapExceeded { seen, cap }) => {
-                assert_eq!(seen, 5);
-                assert_eq!(cap, 3);
-            }
-            other => panic!("expected CapExceeded, got {other:?}"),
-        }
+        let expected_objects = total_pages_past_old_cap as u64 * page_size as u64;
+        assert!(expected_objects > old_default_cap);
+        assert_eq!(snapshot.physical_objects, expected_objects);
+        assert_eq!(snapshot.physical_bytes, expected_objects);
+        assert_eq!(snapshot.unknown_key_objects, expected_objects);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            total_pages_past_old_cap
+        );
     }
 
     #[tokio::test]
     async fn storage_error_propagates_from_page_source() {
-        let result: Result<BucketSnapshot, SweepError> = fold_bucket_listing(10, |_token| async {
+        let result: Result<BucketSnapshot, SweepError> = fold_bucket_listing(|_token| async {
             Err(MediaError::StorageError("boom".to_string()))
         })
         .await;
@@ -739,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_page_with_no_continuation_token_fails_the_sweep() {
-        let result = fold_bucket_listing(100, |_token| async {
+        let result = fold_bucket_listing(|_token| async {
             Ok(Page {
                 objects: vec![("some-key".to_string(), 1)],
                 next_continuation_token: None,
@@ -811,7 +828,8 @@ pub struct TaxonomySweepOutcome {
 /// does not understand is unsafe — but that is a *fleet* invariant, not a
 /// per-request one. This sweep records it once; deletion stages then gate on
 /// a recent clean sweep instead of re-listing the whole bucket per request.
-/// Same pagination/cap contract as [`fold_bucket_listing`]; memory is
+/// Same continuation-token pagination contract as [`fold_bucket_listing`];
+/// this fleet safety sweep still enforces its explicit cap, and memory is
 /// bounded by `sample_limit`, never the listing size.
 pub async fn sweep_bucket_taxonomy<F, Fut>(
     cap: u64,
@@ -828,7 +846,7 @@ where
         let page = fetch_page(continuation_token.take()).await?;
         outcome.listed_objects += page.objects.len() as u64;
         if outcome.listed_objects > cap {
-            return Err(SweepError::CapExceeded {
+            return Err(SweepError::TaxonomyObjectCap {
                 seen: outcome.listed_objects,
                 cap,
             });
@@ -1005,6 +1023,6 @@ mod deletion_taxonomy_tests {
             })
         })
         .await;
-        assert!(matches!(result, Err(SweepError::CapExceeded { .. })));
+        assert!(matches!(result, Err(SweepError::TaxonomyObjectCap { .. })));
     }
 }

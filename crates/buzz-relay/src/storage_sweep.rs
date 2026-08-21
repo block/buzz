@@ -37,9 +37,6 @@ pub struct StorageSweepConfig {
     /// independent — the usage tick never awaits the sweep, so this bounds
     /// how long a stalled attempt occupies the single in-flight slot.
     pub timeout: Duration,
-    /// Cumulative listed-object cap; a listing that exceeds it fails the
-    /// attempt (old snapshot kept) rather than growing memory unbounded.
-    pub max_objects: u64,
     /// Kill switch. `false` ⇒ no sweep ever spawns and no storage-family
     /// gauge (including the health gauges) is ever emitted — a relay whose
     /// deployment lacks `s3:ListBucket` can turn the whole feature off.
@@ -48,8 +45,7 @@ pub struct StorageSweepConfig {
 
 impl StorageSweepConfig {
     /// Reads `BUZZ_STORAGE_SWEEP_INTERVAL_SECS` (default 3600, floor 60),
-    /// `BUZZ_STORAGE_SWEEP_TIMEOUT_SECS` (default 120),
-    /// `BUZZ_STORAGE_SWEEP_MAX_OBJECTS` (default 1_000_000), and the
+    /// `BUZZ_STORAGE_SWEEP_TIMEOUT_SECS` (default 120), and the
     /// `BUZZ_STORAGE_METRICS` kill switch (`off` ⇒ disabled, anything else
     /// including unset ⇒ enabled).
     pub fn from_env() -> Self {
@@ -62,10 +58,6 @@ impl StorageSweepConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(120);
-        let max_objects = std::env::var("BUZZ_STORAGE_SWEEP_MAX_OBJECTS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1_000_000);
         let enabled = std::env::var("BUZZ_STORAGE_METRICS")
             .ok()
             .map(|v| v.trim().to_ascii_lowercase())
@@ -74,7 +66,6 @@ impl StorageSweepConfig {
         Self {
             interval: Duration::from_secs(interval_secs),
             timeout: Duration::from_secs(timeout_secs),
-            max_objects,
             enabled,
         }
     }
@@ -155,8 +146,8 @@ pub struct StorageSweepState {
 /// permanently failing sweep (e.g. missing `s3:ListBucket`) will retry on
 /// every usage tick (default 300 s), not at the sweep-interval cadence.
 /// This is intentional: a permission failure (the common persistent case)
-/// costs a single cheap LIST call per retry, other failures (timeout, cap,
-/// malformed page) are bounded by the sweep's own timeout and object caps,
+/// costs a single cheap LIST call per retry, other failures (timeout or
+/// malformed page) are bounded by the sweep's own timeout,
 /// and tick-cadence retry means the sweep self-heals as soon as the
 /// underlying cause is fixed. The tick cadence is documented in values.yaml.
 fn should_spawn(
@@ -387,7 +378,6 @@ mod tests {
         for key in [
             "BUZZ_STORAGE_SWEEP_INTERVAL_SECS",
             "BUZZ_STORAGE_SWEEP_TIMEOUT_SECS",
-            "BUZZ_STORAGE_SWEEP_MAX_OBJECTS",
             "BUZZ_STORAGE_METRICS",
         ] {
             if std::env::var(key).is_ok() {
@@ -397,7 +387,6 @@ mod tests {
         let config = StorageSweepConfig::from_env();
         assert_eq!(config.interval, Duration::from_secs(3600));
         assert_eq!(config.timeout, Duration::from_secs(120));
-        assert_eq!(config.max_objects, 1_000_000);
         assert!(config.enabled);
     }
 
@@ -513,7 +502,7 @@ mod tests {
                 &state,
                 Duration::from_secs(3600),
                 Duration::from_secs(5),
-                async { Err(SweepError::CapExceeded { seen: 5, cap: 1 }) },
+                async { Err(SweepError::MalformedPage) },
             )
             .await;
             tokio::task::yield_now().await;
@@ -564,7 +553,7 @@ mod tests {
             &state,
             Duration::from_secs(3600),
             Duration::from_secs(5),
-            async { Err(SweepError::CapExceeded { seen: 5, cap: 1 }) },
+            async { Err(SweepError::MalformedPage) },
         )
         .await;
         tokio::task::yield_now().await;
@@ -572,7 +561,7 @@ mod tests {
             &state,
             Duration::from_secs(3600),
             Duration::from_secs(5),
-            async { Err(SweepError::CapExceeded { seen: 5, cap: 1 }) },
+            async { Err(SweepError::MalformedPage) },
         )
         .await;
 

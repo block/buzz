@@ -286,8 +286,8 @@ impl MediaStorage {
     /// [`crate::bucket_index::Page`] shape the pure fold consumes.
     ///
     /// `max_keys` bounds one HTTP response, not the sweep's total object
-    /// cap — the caller (`fold_bucket_listing`) enforces the cumulative cap
-    /// across pages.
+    /// count. Callers keep page memory bounded by following continuation
+    /// tokens one page at a time.
     pub async fn list_page(
         &self,
         continuation_token: Option<String>,
