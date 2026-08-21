@@ -41,12 +41,20 @@ import {
 import type { ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadRow } from "./MessageThreadRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
+import {
+  ThreadRepliesEmptyCard,
+  ThreadRepliesErrorCard,
+} from "./MessageThreadReplyState";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useStableSendToChannel } from "./useStableSendToChannel";
 import { useAnchoredScroll } from "./useAnchoredScroll";
-import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
+import {
+  selectDeferredListRenderState,
+  selectThreadRepliesSurface,
+} from "@/features/messages/lib/timelineSnapshot";
+import { selectThreadRowHighlight } from "@/features/messages/lib/threadReplyHighlight";
 
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channel: Channel | null;
@@ -106,6 +114,10 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
   threadRepliesPending?: boolean;
+  /** True when the thread-reply query terminally failed (all retries exhausted). */
+  threadRepliesError?: boolean;
+  /** Retries the failed thread-reply load; wired to the query's `refetch`. */
+  onRetryThreadReplies?: () => void;
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
@@ -233,6 +245,8 @@ export function MessageThreadPanel({
   videoReviewPresentation,
   threadReplies,
   threadRepliesPending = false,
+  threadRepliesError = false,
+  onRetryThreadReplies,
   threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
@@ -356,6 +370,13 @@ export function MessageThreadPanel({
     deferredThreadReplies.length,
     threadReplies.length,
   );
+  // One paint decision: a terminal error never falls through to "No replies".
+  const repliesSurface = selectThreadRepliesSurface({
+    isPending: threadRepliesPending,
+    isError: threadRepliesError,
+    renderState: repliesRenderState,
+    isHuddleTranscript,
+  });
   const threadHeadSummary = React.useMemo(() => {
     if (!threadHeadId) {
       return null;
@@ -629,7 +650,7 @@ export function MessageThreadPanel({
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {threadRepliesPending && !isHuddleTranscript ? (
+          {repliesSurface === "skeleton" ? (
             <div
               className="space-y-2.5 pt-1"
               data-testid="message-thread-replies-loading"
@@ -637,7 +658,7 @@ export function MessageThreadPanel({
               <ThreadMessageSkeleton />
               <ThreadMessageSkeleton />
             </div>
-          ) : repliesRenderState === "list" ? (
+          ) : repliesSurface === "list" ? (
             visibleThreadHeadSummary ? (
               <div
                 className="space-y-0"
@@ -670,24 +691,13 @@ export function MessageThreadPanel({
                   } = item;
                   const showUnreadDivider =
                     index > 0 && entry.message.id === firstUnreadReplyId;
-                  const isHighlightedBranchOwner =
-                    highlightedBranch?.id === entry.message.id;
-                  const isInsideHighlightedBranch =
-                    highlightedBranch != null &&
-                    index > highlightedBranch.startIndex &&
-                    index <= highlightedBranch.endIndex;
-                  const isDirectChildOfHighlightedBranch =
-                    isInsideHighlightedBranch &&
-                    highlightedBranch != null &&
-                    index > highlightedBranch.startIndex &&
-                    index <= highlightedBranch.endIndex &&
-                    entry.message.depth === highlightedBranch.depth + 1;
-                  const highlightedLineDepths =
-                    shouldShowThreadBranchGuides &&
-                    isInsideHighlightedBranch &&
-                    highlightedBranch
-                      ? [highlightedBranch.depth]
-                      : undefined;
+                  const highlight = selectThreadRowHighlight({
+                    branch: highlightedBranch,
+                    index,
+                    messageId: entry.message.id,
+                    messageDepth: entry.message.depth,
+                    showGuides: shouldShowThreadBranchGuides,
+                  });
                   return (
                     <div
                       className={cn(
@@ -713,14 +723,14 @@ export function MessageThreadPanel({
                         }
                         highlightDescendantRail={
                           shouldShowThreadBranchGuides &&
-                          isHighlightedBranchOwner &&
+                          highlight.isBranchOwner &&
                           connectsToVisibleChild
                         }
                         highlightReplyConnector={
                           shouldShowThreadBranchGuides &&
-                          isDirectChildOfHighlightedBranch
+                          highlight.isDirectChild
                         }
-                        highlightThreadLineDepths={highlightedLineDepths}
+                        highlightThreadLineDepths={highlight.lineDepths}
                         hoverBackground={!entry.summary}
                         huddleMemberPubkeys={huddleMemberPubkeys}
                         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
@@ -784,7 +794,7 @@ export function MessageThreadPanel({
                               ? continuationDepths
                               : undefined
                           }
-                          highlightThreadLineDepths={highlightedLineDepths}
+                          highlightThreadLineDepths={highlight.lineDepths}
                           message={entry.message}
                           onCollapseDepthGuide={handleCollapseDepthGuide}
                           onCollapseDepthGuideHoverChange={
@@ -806,18 +816,10 @@ export function MessageThreadPanel({
                 })}
               </div>
             )
-          ) : repliesRenderState === "empty" && !isHuddleTranscript ? (
-            // Only show the empty state when the thread is GENUINELY empty.
-            // Keying off `deferredThreadReplies` would flash "No replies" for a
-            // frame while a non-empty list streams in on the deferred commit.
-            <div className="rounded-2xl border border-dashed border-border/70 bg-card/40 px-4 py-6 text-center">
-              <p className="text-sm font-medium text-foreground/80">
-                No replies in this branch yet
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Reply in the thread to continue this branch.
-              </p>
-            </div>
+          ) : repliesSurface === "error" ? (
+            <ThreadRepliesErrorCard onRetry={onRetryThreadReplies} />
+          ) : repliesSurface === "empty" ? (
+            <ThreadRepliesEmptyCard />
           ) : // "pending": deferred list is empty but the live list has content —
           // rows are streaming in on the deferred commit. Paint nothing rather
           // than flashing the empty state.

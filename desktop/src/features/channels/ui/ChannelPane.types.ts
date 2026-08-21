@@ -170,6 +170,8 @@ export type ChannelPaneProps = {
   threadAllMessages: TimelineMessage[];
   threadMessages: MainTimelineEntry[];
   threadMessagesPending?: boolean;
+  threadMessagesError?: boolean;
+  onRetryThreadReplies?: () => void;
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
