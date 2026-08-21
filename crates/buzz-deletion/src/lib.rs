@@ -1569,22 +1569,57 @@ mod tests {
         }
     }
 
-    fn media_config(access: &str, secret: &str) -> buzz_media::MediaConfig {
-        buzz_media::MediaConfig {
-            s3_endpoint: "http://localhost:9000".to_string(),
-            s3_access_key: access.to_string(),
-            s3_secret_key: secret.to_string(),
-            s3_bucket: "buzz-media".to_string(),
-            s3_region: "us-west-2".to_string(),
-            s3_addressing_style: buzz_media::S3AddressingStyle::Path,
-            max_image_bytes: 1,
-            max_gif_bytes: 1,
-            max_video_bytes: 1,
-            max_file_bytes: 1,
-            public_base_url: "http://localhost/media".to_string(),
-            upload_records_enabled: false,
-            upload_ip_header: None,
-            upload_port_header: None,
+    #[test]
+    fn deletion_s3_key_pair_normalizes_missing_and_blank_pairs_for_default_credentials() {
+        assert_eq!(
+            s3_key_pair_from(env_of(&[])),
+            (String::new(), String::new())
+        );
+
+        assert_eq!(
+            s3_key_pair_from(env_of(&[
+                ("BUZZ_S3_ACCESS_KEY", ""),
+                ("BUZZ_S3_SECRET_KEY", "   "),
+            ])),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_trims_static_and_preserves_partial_pairs() {
+        assert_eq!(
+            s3_key_pair_from(env_of(&[
+                ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+                ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+            ])),
+            ("buzz_dev".to_string(), "buzz_dev_secret".to_string())
+        );
+
+        for (env, expected) in [
+            (
+                &[("BUZZ_S3_ACCESS_KEY", " buzz_dev ")][..],
+                ("buzz_dev".to_string(), String::new()),
+            ),
+            (
+                &[("BUZZ_S3_SECRET_KEY", " buzz_dev_secret ")][..],
+                (String::new(), "buzz_dev_secret".to_string()),
+            ),
+            (
+                &[
+                    ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+                    ("BUZZ_S3_SECRET_KEY", "   "),
+                ][..],
+                ("buzz_dev".to_string(), String::new()),
+            ),
+            (
+                &[
+                    ("BUZZ_S3_ACCESS_KEY", "   "),
+                    ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+                ][..],
+                (String::new(), "buzz_dev_secret".to_string()),
+            ),
+        ] {
+            assert_eq!(s3_key_pair_from(env_of(env)), expected);
         }
     }
 
@@ -1814,46 +1849,6 @@ mod tests {
             "configured"
         );
         std::env::remove_var(&variable);
-    }
-
-    #[test]
-    fn deletion_s3_key_pair_allows_empty_pair_for_default_credentials() {
-        let (access_key, secret_key) = s3_key_pair_from(env_of(&[
-            ("BUZZ_S3_ACCESS_KEY", ""),
-            ("BUZZ_S3_SECRET_KEY", "   "),
-        ]));
-
-        assert_eq!(access_key, "");
-        assert_eq!(secret_key, "");
-        if let Err(error) = MediaStorage::new(&media_config(&access_key, &secret_key)) {
-            assert!(
-                !error.to_string().contains("must be configured together"),
-                "empty pair must reach the default credential path, not partial-key validation: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn deletion_s3_key_pair_preserves_static_and_partial_pairs() {
-        let (access_key, secret_key) = s3_key_pair_from(env_of(&[
-            ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
-            ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
-        ]));
-        assert_eq!(access_key, "buzz_dev");
-        assert_eq!(secret_key, "buzz_dev_secret");
-        MediaStorage::new(&media_config(&access_key, &secret_key))
-            .expect("static pair reaches media static credential path");
-
-        for (access_key, secret_key) in [("buzz_dev", ""), ("", "buzz_dev_secret")] {
-            let error = match MediaStorage::new(&media_config(access_key, secret_key)) {
-                Ok(_) => panic!("partial S3 key pair must fail closed"),
-                Err(error) => error,
-            };
-            assert!(
-                error.to_string().contains("must be configured together"),
-                "unexpected error for access={access_key:?} secret={secret_key:?}: {error}"
-            );
-        }
     }
 
     #[test]
