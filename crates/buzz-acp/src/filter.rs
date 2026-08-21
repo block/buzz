@@ -365,11 +365,24 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// After [`MAX_CONSECUTIVE_TIMEOUTS`] consecutive timeouts on a single rule,
 /// that rule is logged at ERROR and the call returns `None` immediately to
 /// avoid blocking the event loop indefinitely.
+#[cfg(test)]
 pub async fn match_event(
     event: &nostr::Event,
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+) -> Option<MatchedRule> {
+    match_event_with_display_name(event, channel_id, rules, agent_pubkey_hex, None).await
+}
+
+/// Match an event while allowing legacy visible-name mentions for a managed
+/// Agent. See [`event_mentions_agent`] for the compatibility rules.
+pub async fn match_event_with_display_name(
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    rules: &[SubscriptionRule],
+    agent_pubkey_hex: &str,
+    agent_display_name: Option<&str>,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
@@ -384,15 +397,12 @@ pub async fn match_event(
             continue;
         }
 
-        // 3. Mention check — look for a `p` tag whose first element equals
-        //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
-        //    access — avoids relying on the Display impl of tag kind.
+        // 3. Mention check. A matching `p` tag is authoritative. For managed
+        //    agents with a display name, also accept a boundary-delimited
+        //    textual `@Name` mention. This is compatibility for older Buzz
+        //    clients that rendered mention text but omitted the Nostr tag.
         if rule.require_mention {
-            let mentioned = event.tags.iter().any(|tag| {
-                let s = tag.as_slice();
-                s.first().map(|k| k.as_str()) == Some("p")
-                    && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
-            });
+            let mentioned = event_mentions_agent(event, agent_pubkey_hex, agent_display_name);
             if !mentioned {
                 continue;
             }
@@ -457,6 +467,54 @@ pub async fn match_event(
     }
 
     None
+}
+
+/// Return whether an event explicitly mentions this agent.
+///
+/// Modern clients encode mentions as Nostr `p` tags. Older Buzz clients could
+/// publish only the visible `@Display Name` text, so managed agents also accept
+/// a case-insensitive textual mention with identifier boundaries. The leading
+/// boundary prevents email-like text (`user@Agent`) from waking an agent; the
+/// trailing boundary prevents `@Debugging` from matching `Debug`.
+pub(crate) fn event_mentions_agent(
+    event: &nostr::Event,
+    agent_pubkey_hex: &str,
+    agent_display_name: Option<&str>,
+) -> bool {
+    for tag in event.tags.iter() {
+        let s = tag.as_slice();
+        if s.first().map(|k| k.as_str()) != Some("p") {
+            continue;
+        }
+        if s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex) {
+            return true;
+        }
+    }
+
+    let Some(name) = agent_display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return false;
+    };
+    text_mentions_name(&event.content, name)
+}
+
+fn text_mentions_name(content: &str, display_name: &str) -> bool {
+    let folded_content = content.to_lowercase();
+    let needle = format!("@{}", display_name.to_lowercase());
+
+    folded_content
+        .match_indices(&needle)
+        .any(|(start, matched)| {
+            let before = folded_content[..start].chars().next_back();
+            let after = folded_content[start + matched.len()..].chars().next();
+            before.is_none_or(is_mention_boundary) && after.is_none_or(is_mention_boundary)
+        })
+}
+
+fn is_mention_boundary(ch: char) -> bool {
+    !ch.is_alphanumeric() && ch != '_'
 }
 
 #[cfg(test)]
@@ -661,6 +719,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_accepts_legacy_text_mention() {
+        let event = make_event(9, "@Debug hi");
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            Some("mentioned"),
+        )];
+
+        let matched = match_event_with_display_name(
+            &event,
+            channel_id,
+            &rules,
+            "agent-pubkey",
+            Some("Debug"),
+        )
+        .await
+        .expect("legacy visible mention should match");
+        assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_legacy_text_mention_requires_boundaries() {
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+
+        for content in ["mail@Debug hi", "@Debugging hi", "@Debug_agent hi"] {
+            let event = make_event(9, content);
+            assert!(
+                match_event_with_display_name(
+                    &event,
+                    channel_id,
+                    &rules,
+                    "agent-pubkey",
+                    Some("Debug"),
+                )
+                .await
+                .is_none(),
+                "must not match {content:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_legacy_text_recovers_when_old_client_tagged_duplicate_identity() {
+        let other_pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let event = make_event_with_p_tag(9, "@Debug hi", other_pubkey);
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+
+        assert!(
+            match_event_with_display_name(
+                &event,
+                channel_id,
+                &rules,
+                "agent-pubkey",
+                Some("Debug"),
+            )
+            .await
+            .is_some(),
+            "the working same-name Agent must recover an old client's stale identity tag"
+        );
     }
 
     #[tokio::test]

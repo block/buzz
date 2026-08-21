@@ -73,7 +73,7 @@ pub(crate) enum AcpAvailabilityStatus {
 use crate::{
     author_allowed,
     config::Config,
-    event_mentions_agent, filter,
+    filter,
     relay::{HarnessRelay, RelayEventPublisher},
 };
 
@@ -421,7 +421,11 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
         // Require an explicit @mention of this agent — setup mode must not
         // nudge on every channel event even if subscribe_mode is "all".
-        if !event_mentions_agent(&buzz_event.event, &pubkey_hex) {
+        if !filter::event_mentions_agent(
+            &buzz_event.event,
+            &pubkey_hex,
+            config.session_title.as_deref(),
+        ) {
             continue;
         }
 
@@ -441,11 +445,12 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         .await;
 
         // Apply channel/kind filter rules.
-        let filter_matched = filter::match_event(
+        let filter_matched = filter::match_event_with_display_name(
             &buzz_event.event,
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            config.session_title.as_deref(),
         )
         .await
         .is_some();

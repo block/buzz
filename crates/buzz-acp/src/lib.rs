@@ -2770,7 +2770,14 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let matched = filter::match_event_with_display_name(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                config.session_title.as_deref(),
+                            )
+                            .await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {

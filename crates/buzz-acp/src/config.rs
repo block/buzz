@@ -1352,7 +1352,12 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
+            // Managed Desktop agents carry their visible name in
+            // `session_title`. Subscribe to the channel stream for those
+            // agents so older clients whose visible `@Name` mention omitted
+            // the Nostr `p` tag can still be matched locally. Agents without
+            // a name retain the efficient relay-side `#p` filter.
+            let require_mention = !config.no_mention_filter && config.session_title.is_none();
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1377,7 +1382,7 @@ pub fn resolve_channel_filters(
         SubscribeMode::Config => {
             for ch in discovered_channels {
                 let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
-                let mut require_mention = true;
+                let mut require_mention = config.session_title.is_none();
                 let mut has_rule = false;
 
                 for rule in rules {
@@ -1457,7 +1462,7 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            require_mention: !config.no_mention_filter && config.session_title.is_none(),
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1468,7 +1473,7 @@ pub fn resolve_dynamic_channel_filter(
             // evaluate ALL rules against this specific channel (including
             // channel-specific rules, not just ChannelScope::All).
             let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
-            let mut require_mention = true;
+            let mut require_mention = config.session_title.is_none();
             let mut has_rule = false;
 
             for rule in rules {
@@ -1606,6 +1611,22 @@ mod tests {
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
         }
+    }
+
+    #[test]
+    fn test_managed_agent_name_disables_relay_pubkey_prefilter() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.session_title = Some("Debug".into());
+        let channel = Uuid::new_v4();
+
+        let filters = resolve_channel_filters(&config, &[channel], &[]);
+        assert!(
+            !filters.get(&channel).unwrap().require_mention,
+            "managed Agent must receive legacy visible-name mentions for local matching"
+        );
+
+        let dynamic = resolve_dynamic_channel_filter(&config, channel, &[]).unwrap();
+        assert!(!dynamic.require_mention);
     }
 
     #[test]
