@@ -9,7 +9,7 @@ use crate::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
         resolve_effective_mcp_command, spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime,
-        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary, DEFAULT_ACP_COMMAND,
     },
     util::now_iso,
 };
@@ -27,6 +27,27 @@ pub(crate) use metadata::{
     apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
     DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
+
+fn bundled_harness_candidate() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = if cfg!(windows) {
+        "buzz-acp.exe"
+    } else {
+        DEFAULT_ACP_COMMAND
+    };
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+fn resolve_acp_harness_command(command: &str) -> Option<std::path::PathBuf> {
+    if command.trim() == DEFAULT_ACP_COMMAND {
+        if let Some(candidate) = bundled_harness_candidate() {
+            return Some(candidate);
+        }
+    }
+    resolve_command(command)
+}
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -497,7 +518,7 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = resolve_command(&record.acp_command)
+    let resolved_acp_command = resolve_acp_harness_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command =
         resolve_effective_mcp_command(effective_command, &record.mcp_command);

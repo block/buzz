@@ -184,24 +184,24 @@ export function CodexTaskAgentDialog({
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
-      <DialogContent className="max-w-2xl overflow-hidden p-0">
+      <DialogContent className="w-[min(92vw,48rem)] max-w-none overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
             <DialogTitle>Add a Codex task as an agent</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="max-w-full">
               Create an independent Buzz identity that resumes one existing
               Codex task across every Channel it joins.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+          <div className="min-h-0 min-w-0 flex-1 space-y-5 overflow-y-auto overflow-x-hidden px-6 py-5">
             {!codexSetupReady ? (
               <CodexSharedRuntimePanel enabled={open} />
             ) : (
               <>
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm">
-                  Connected through the Codex shared runtime
-                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm leading-5">
+                  <span>Connected through the Codex shared runtime</span>
+                  <span className="ml-2 break-all font-mono text-xs text-muted-foreground">
                     {sharedRuntimeQuery.data?.url}
                   </span>
                 </div>
@@ -264,7 +264,7 @@ export function CodexTaskAgentDialog({
                       return (
                         <button
                           aria-selected={selected}
-                          className={`flex w-full items-start gap-3 border-b border-border/50 px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/50 ${
+                          className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 border-b border-border/50 px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/50 ${
                             selected ? "bg-primary/10" : ""
                           }`}
                           disabled={
@@ -276,7 +276,7 @@ export function CodexTaskAgentDialog({
                           type="button"
                         >
                           <span className="min-w-0 flex-1">
-                            <span className="flex items-center gap-2">
+                            <span className="flex min-w-0 items-center gap-2">
                               <span className="truncate text-sm font-medium">
                                 {taskLabel(task)}
                               </span>
@@ -298,7 +298,7 @@ export function CodexTaskAgentDialog({
                               </span>
                             ) : null}
                           </span>
-                          <span className="shrink-0 pt-0.5 font-mono text-xs text-muted-foreground">
+                          <span className="max-w-24 truncate pt-0.5 font-mono text-xs text-muted-foreground">
                             {task.id.slice(0, 8)}
                           </span>
                         </button>
@@ -317,10 +317,12 @@ export function CodexTaskAgentDialog({
                 </div>
 
                 {selectedTask ? (
-                  <div className="space-y-1 text-xs text-muted-foreground">
+                  <div className="min-w-0 space-y-1 text-xs text-muted-foreground">
                     <p className="break-all">{selectedTask.workspace}</p>
-                    <p className="font-mono">{selectedTask.id}</p>
-                    <p>Codex model: {selectedTask.model ?? "Not recorded"}</p>
+                    <p className="break-all font-mono">{selectedTask.id}</p>
+                    <p className="break-words">
+                      Codex model: {selectedTask.model ?? "Not recorded"}
+                    </p>
                   </div>
                 ) : null}
 
@@ -339,7 +341,7 @@ export function CodexTaskAgentDialog({
                   />
                 </div>
 
-                <p className="text-sm leading-6 text-muted-foreground">
+                <p className="break-words text-sm leading-6 text-muted-foreground">
                   The agent is created offline and connects this task to Buzz
                   through the computer shared runtime. Task history and
                   workspace files stay on this computer.

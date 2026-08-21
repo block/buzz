@@ -19,6 +19,7 @@ use super::{atomic_write_json_restricted, managed_agents_base_dir};
 const SHARED_RUNTIME_CONFIG_VERSION: u32 = 1;
 const SHARED_RUNTIME_COMMAND_ENV: &str = "BUZZ_CODEX_APP_SERVER_COMMAND";
 const SHARED_RUNTIME_ERROR_TAIL_BYTES: u64 = 4096;
+const CODEX_CODE_MODE_HOST_FLAG: &str = "features.code_mode_host=true";
 #[cfg(windows)]
 const WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT: &str = r#"
 param([Parameter(Mandatory=$true)][string]$ConfigPath)
@@ -502,6 +503,67 @@ fn is_usable_codex_app_server_executable(path: &Path) -> bool {
 #[cfg(not(windows))]
 fn is_usable_codex_app_server_executable(path: &Path) -> bool {
     path.is_file()
+        && path
+            .parent()
+            .map(|parent| parent.join("codex-code-mode-host").is_file())
+            .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_codex_app_server_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(PathBuf::from(
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+    ));
+    candidates.push(PathBuf::from(
+        "/Applications/Codex.app/Contents/Resources/codex",
+    ));
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(
+            home.join("Applications")
+                .join("ChatGPT.app")
+                .join("Contents")
+                .join("Resources")
+                .join("codex"),
+        );
+        candidates.push(
+            home.join("Applications")
+                .join("Codex.app")
+                .join("Contents")
+                .join("Resources")
+                .join("codex"),
+        );
+        candidates.push(home.join(".cargo").join("bin").join("codex"));
+        candidates.push(home.join(".local").join("bin").join("codex"));
+        candidates.push(home.join(".codex").join("bin").join("codex"));
+    }
+    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+    candidates.push(PathBuf::from("/usr/local/bin/codex"));
+    candidates
+}
+
+fn path_codex_app_server_candidates(executable: &str) -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join(executable))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn codex_app_server_candidates(executable: &str) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    candidates.extend(macos_codex_app_server_candidates());
+
+    candidates.extend(path_codex_app_server_candidates(executable));
+    candidates
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
 }
 
 fn find_codex_app_server_executable() -> Result<PathBuf, String> {
@@ -543,11 +605,10 @@ fn find_codex_app_server_executable() -> Result<PathBuf, String> {
     }
 
     let executable = if cfg!(windows) { "codex.exe" } else { "codex" };
-    if let Some(path) = std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join(executable))
-            .find(|candidate| is_usable_codex_app_server_executable(candidate))
-    }) {
+    if let Some(path) = codex_app_server_candidates(executable)
+        .into_iter()
+        .find(|candidate| is_usable_codex_app_server_executable(candidate))
+    {
         return Ok(path);
     }
 
@@ -555,6 +616,16 @@ fn find_codex_app_server_executable() -> Result<PathBuf, String> {
         "A complete Codex runtime was not found. Open Codex Desktop normally once to finish runtime setup, then retry."
             .to_string(),
     )
+}
+
+fn codex_shared_runtime_args(url: &str) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        CODEX_CODE_MODE_HOST_FLAG.to_string(),
+        "app-server".to_string(),
+        "--listen".to_string(),
+        url.to_string(),
+    ]
 }
 
 fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> {
@@ -641,7 +712,7 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
             .map_err(|error| format!("failed to open Codex runtime error log: {error}"))?;
         let mut command = Command::new(&executable);
         command
-            .args(["app-server", "--listen", url])
+            .args(codex_shared_runtime_args(url))
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
@@ -964,6 +1035,53 @@ mod tests {
         fs::write(dir.path().join("codex-code-mode-host.exe"), []).unwrap();
         assert!(is_usable_codex_app_server_executable(&codex));
     }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shared_runtime_requires_matching_code_mode_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex");
+        fs::write(&codex, []).unwrap();
+
+        assert!(!is_usable_codex_app_server_executable(&codex));
+
+        fs::write(dir.path().join("codex-code-mode-host"), []).unwrap();
+        assert!(is_usable_codex_app_server_executable(&codex));
+    }
+
+    #[test]
+    fn shared_runtime_launch_args_enable_code_mode_host() {
+        assert_eq!(
+            codex_shared_runtime_args(DEFAULT_CODEX_SHARED_APP_SERVER_URL),
+            vec![
+                "-c",
+                CODEX_CODE_MODE_HOST_FLAG,
+                "app-server",
+                "--listen",
+                DEFAULT_CODEX_SHARED_APP_SERVER_URL,
+            ]
+        );
+        #[cfg(windows)]
+        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains(CODEX_CODE_MODE_HOST_FLAG));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_candidates_include_desktop_and_homebrew_runtime_locations() {
+        let candidates = macos_codex_app_server_candidates()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(candidates
+            .iter()
+            .any(|path| path == "/Applications/ChatGPT.app/Contents/Resources/codex"));
+        assert!(candidates
+            .iter()
+            .any(|path| path == "/opt/homebrew/bin/codex"));
+        assert!(candidates.iter().any(|path| path == "/usr/local/bin/codex"));
+    }
+
     #[test]
     fn parses_zero_one_and_multiple_windows_processes() {
         let empty = r#"{
