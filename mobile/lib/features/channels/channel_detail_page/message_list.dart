@@ -69,9 +69,11 @@ class _MessageList extends HookConsumerWidget {
     );
     final isAutoScrolling = useRef(false);
     final latestNavigationRequest = useState(0);
+    final latestNavigationTargetId = useRef<String?>(null);
     final latestRealignmentQueued = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
+    final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
     final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
     final isUnreadNavigationDismissed = useState(false);
@@ -341,14 +343,16 @@ class _MessageList extends HookConsumerWidget {
         return;
       }
       try {
+        final targetIndex =
+            reversedIndexOf(latestNavigationTargetId.value) ?? 0;
         await itemScrollController.scrollTo(
-          index: 0,
+          index: targetIndex,
           alignment: latestAlignment(),
           duration: jumpToLatestScrollDuration,
           curve: jumpToLatestScrollCurve,
         );
         if (context.mounted && !hasUserScrolled.value) {
-          isAtLatest.value = true;
+          isAtLatest.value = targetIndex == 0;
           isJumpToLatestVisible.value = false;
         }
       } finally {
@@ -356,12 +360,13 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
-    void scrollToLatest() {
+    void scrollToLatest({String? targetMessageId}) {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
       isAutoScrolling.value = true;
       followsLatest.value = true;
       hasUserScrolled.value = false;
       hasUnseenLatestEntry.value = false;
+      latestNavigationTargetId.value = targetMessageId;
       latestNavigationRequest.value += 1;
     }
 
@@ -620,16 +625,26 @@ class _MessageList extends HookConsumerWidget {
     useEffect(() {
       final previous = previousLatestEntryId.value;
       previousLatestEntryId.value = latestEntryId;
-      if (previous == null ||
-          latestEntryId == null ||
-          previous == latestEntryId) {
+      final entryIds = entries.map((entry) => entry.message.id).toSet();
+      final newlyInsertedLocalSendIds = localSendAnimations.keys
+          .where(
+            (eventId) =>
+                !observedLocalSendIds.value.contains(eventId) &&
+                entryIds.contains(eventId),
+          )
+          .toList();
+      observedLocalSendIds.value
+        ..removeWhere((eventId) => !localSendAnimations.containsKey(eventId))
+        ..addAll(newlyInsertedLocalSendIds);
+      final localSendId = newlyInsertedLocalSendIds.firstOrNull;
+      final latestEntryChanged =
+          previous != null &&
+          latestEntryId != null &&
+          previous != latestEntryId;
+      if (!latestEntryChanged && localSendId == null) {
         return null;
       }
-      final isLocalSend = isRecentLocalMessageSendAnimation(
-        localSendAnimations,
-        latestEntryId,
-      );
-      if (isLocalSend) {
+      if (localSendId != null) {
         followsLatest.value = true;
         hasUserScrolled.value = false;
       }
@@ -639,7 +654,7 @@ class _MessageList extends HookConsumerWidget {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
         if (followsLatest.value && !hasUserScrolled.value) {
-          scrollToLatest();
+          scrollToLatest(targetMessageId: localSendId);
           return;
         }
         final positions = itemPositionsListener.itemPositions.value;

@@ -8,13 +8,16 @@ const _localMessageSendAnimationClaimWindow = Duration(seconds: 1);
 /// example after opening its channel) from looking newly sent.
 class LocalMessageSendAnimationNotifier
     extends Notifier<Map<String, DateTime>> {
+  /// The channel whose outgoing messages are tracked by this notifier.
   final String channelId;
 
+  /// Creates animation state scoped to [channelId].
   LocalMessageSendAnimationNotifier(this.channelId);
 
   @override
   Map<String, DateTime> build() => const {};
 
+  /// Marks [eventId] as a newly signed local message eligible for animation.
   void mark(String eventId) {
     final now = DateTime.now();
     state = {
@@ -27,6 +30,7 @@ class LocalMessageSendAnimationNotifier
   }
 }
 
+/// Whether [eventId] was marked recently enough to animate as a local send.
 bool isRecentLocalMessageSendAnimation(
   Map<String, DateTime> animations,
   String eventId, {
@@ -38,6 +42,7 @@ bool isRecentLocalMessageSendAnimation(
       _localMessageSendAnimationClaimWindow;
 }
 
+/// Recent local-send animation claims keyed by channel and event ID.
 final localMessageSendAnimationProvider =
     NotifierProvider.family<
       LocalMessageSendAnimationNotifier,
