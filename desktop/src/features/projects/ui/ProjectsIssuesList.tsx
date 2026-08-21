@@ -14,6 +14,11 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import {
+  countGroupedRows,
+  sliceGroupedRows,
+  useIncrementalMount,
+} from "@/shared/hooks/useIncrementalMount";
 import { cn } from "@/shared/lib/cn";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Card } from "@/shared/ui/card";
@@ -201,7 +206,7 @@ export function ProjectsIssuesList({
 }: ProjectsIssuesListProps) {
   // Grouping and per-group selection arrays are identity-stable across
   // re-renders so the memoized rows only re-render when their data changes.
-  const groups = React.useMemo(
+  const allGroups = React.useMemo(
     () =>
       groupProjectWorkItemsByProject(issues).map((group) => ({
         ...group,
@@ -210,6 +215,27 @@ export function ProjectsIssuesList({
         ),
       })),
     [issues],
+  );
+  // Mount rows progressively: a one-shot mount of hundreds of rows blocked
+  // the main thread for over a second on tab entry.
+  // Each layout's counter grows only while that layout is active: otherwise
+  // a layout switch would find the other counter already grown and mount the
+  // whole collection in one commit.
+  const mountedRowCount = useIncrementalMount(
+    countGroupedRows(allGroups),
+    30,
+    60,
+    viewMode !== "grid",
+  );
+  const mountedGridCount = useIncrementalMount(
+    issues.length,
+    30,
+    60,
+    viewMode === "grid",
+  );
+  const groups = React.useMemo(
+    () => sliceGroupedRows(allGroups, mountedRowCount),
+    [allGroups, mountedRowCount],
   );
 
   if (isLoading) {
@@ -251,15 +277,17 @@ export function ProjectsIssuesList({
       <div className="space-y-3">
         {loadNotice}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {issues.map(({ project, issue, repository }) => (
-            <IssueGridCard
-              issue={issue}
-              key={`${repository.id}:${issue.id}`}
-              onOpen={onOpen}
-              project={project}
-              repository={repository}
-            />
-          ))}
+          {issues
+            .slice(0, mountedGridCount)
+            .map(({ project, issue, repository }) => (
+              <IssueGridCard
+                issue={issue}
+                key={`${repository.id}:${issue.id}`}
+                onOpen={onOpen}
+                project={project}
+                repository={repository}
+              />
+            ))}
         </div>
       </div>
     );
