@@ -180,6 +180,16 @@ with a TypeScript lookup table or an id comparison in a component.
    import boundary. Do not silently strip them: rejection keeps the reviewed
    string identical to the executed string. New sharing paths must reuse the
    same validation before they persist or activate a definition.
+13. **Definition and instance access can be reconciled explicitly.** A managed
+   instance stores the effective `Who can send instructions` policy used by its
+   running harness, while its linked Agent definition stores the default for
+   current and future linked instances. The instance edit surface offers both
+   directions: apply the definition policy to this instance, or apply this
+   instance's policy to the definition (which then propagates through the
+   existing linked-instance update path). Prefer an exact `personaId` link;
+   legacy instances may use a unique case-insensitive non-built-in display-name
+   match, but ambiguous names must not expose a sync target. Running instances
+   still require a restart after either persisted policy changes.
 
 ## The tests that enforce this
 

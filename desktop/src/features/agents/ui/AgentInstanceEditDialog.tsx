@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, RefreshCw } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
@@ -10,6 +10,7 @@ import {
   usePersonasQuery,
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
+  useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -114,6 +115,7 @@ export function AgentInstanceEditDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const updatePersonaMutation = useUpdatePersonaMutation();
   const startMutation = useStartManagedAgentMutation();
   const isCodexTaskBound = agent.codexTaskBinding != null;
   const isCodexRuntime = agent.runtime?.trim() === "codex";
@@ -155,6 +157,16 @@ export function AgentInstanceEditDialog({
         : null,
     [agent.personaId, personasQuery.data],
   );
+  const accessSourcePersona = React.useMemo(() => {
+    if (linkedPersona) return linkedPersona;
+    const sameName = (personasQuery.data ?? []).filter(
+      (persona) =>
+        !persona.isBuiltIn &&
+        persona.displayName.trim().toLocaleLowerCase() ===
+          agent.name.trim().toLocaleLowerCase(),
+    );
+    return sameName.length === 1 ? sameName[0] : null;
+  }, [agent.name, linkedPersona, personasQuery.data]);
   const inheritedEnvVars = linkedPersona?.envVars ?? {};
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
@@ -165,6 +177,8 @@ export function AgentInstanceEditDialog({
   const [allowNonOwnerDm, setAllowNonOwnerDm] = React.useState(
     agent.allowNonOwnerDm,
   );
+  const [isSyncingPersonaAccess, setIsSyncingPersonaAccess] =
+    React.useState(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -630,6 +644,64 @@ export function AgentInstanceEditDialog({
     (respondTo === "allowlist" &&
       respondToAllowlist.join(",") !== agent.respondToAllowlist.join(","));
 
+  async function handleUsePersonaAccess() {
+    if (!accessSourcePersona || isSyncingPersonaAccess) return;
+    const nextRespondTo = accessSourcePersona.respondTo ?? "owner-only";
+    const nextAllowlist =
+      nextRespondTo === "allowlist"
+        ? accessSourcePersona.respondToAllowlist
+        : [];
+    setIsSyncingPersonaAccess(true);
+    try {
+      const result = await updateMutation.mutateAsync({
+        pubkey: agent.pubkey,
+        respondTo: nextRespondTo,
+        respondToAllowlist: nextAllowlist,
+      });
+      setRespondTo(result.agent.respondTo);
+      setRespondToAllowlist(result.agent.respondToAllowlist);
+      onUpdated?.(result.agent);
+      toast(
+        "Who can send instructions synced from the linked Agent definition. Restart the agent to apply it.",
+      );
+    } catch {
+      // The mutation surface reports its own error state; keep the dialog open.
+    } finally {
+      setIsSyncingPersonaAccess(false);
+    }
+  }
+
+  async function handleApplyAccessToPersona() {
+    if (!accessSourcePersona || isSyncingPersonaAccess) return;
+    setIsSyncingPersonaAccess(true);
+    try {
+      await updatePersonaMutation.mutateAsync({
+        id: accessSourcePersona.id,
+        displayName: accessSourcePersona.displayName,
+        avatarUrl: accessSourcePersona.avatarUrl ?? undefined,
+        systemPrompt: accessSourcePersona.systemPrompt,
+        runtime: accessSourcePersona.runtime ?? undefined,
+        model: accessSourcePersona.model ?? undefined,
+        provider: accessSourcePersona.provider ?? undefined,
+        namePool: accessSourcePersona.namePool,
+        envVars: accessSourcePersona.envVars,
+        behavior: {
+          respondTo,
+          respondToAllowlist:
+            respondTo === "allowlist" ? respondToAllowlist : [],
+          parallelism: accessSourcePersona.parallelism ?? undefined,
+        },
+      });
+      toast(
+        "Who can send instructions applied to the Agent definition and its linked instances. Restart running agents to apply it.",
+      );
+    } catch {
+      // The mutation surface reports its own error state; keep the dialog open.
+    } finally {
+      setIsSyncingPersonaAccess(false);
+    }
+  }
+
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -645,6 +717,7 @@ export function AgentInstanceEditDialog({
     }) &&
     (providerValid || accessSettingsChanged) &&
     !updateMutation.isPending &&
+    !isSyncingPersonaAccess &&
     !isAvatarUploadPending;
 
   async function handleSubmit() {
@@ -757,7 +830,9 @@ export function AgentInstanceEditDialog({
             ? respondToAllowlist
             : undefined,
         allowNonOwnerDm:
-          allowNonOwnerDm !== agent.allowNonOwnerDm ? allowNonOwnerDm : undefined,
+          allowNonOwnerDm !== agent.allowNonOwnerDm
+            ? allowNonOwnerDm
+            : undefined,
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -773,7 +848,9 @@ export function AgentInstanceEditDialog({
       handleOpenChange(false);
       onUpdated?.(result.agent);
       if (accessSettingsChanged && isManagedAgentActive(result.agent)) {
-        toast(`${result.agent.name} access settings saved. Restart the agent to apply them.`);
+        toast(
+          `${result.agent.name} access settings saved. Restart the agent to apply them.`,
+        );
       }
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
@@ -980,6 +1057,44 @@ export function AgentInstanceEditDialog({
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
             />
+            {accessSourcePersona ? (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Sync access with the Agent definition "
+                  {accessSourcePersona.displayName}".
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    disabled={
+                      updateMutation.isPending || isSyncingPersonaAccess
+                    }
+                    onClick={() => void handleUsePersonaAccess()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "mr-2 size-4",
+                        isSyncingPersonaAccess && "animate-spin",
+                      )}
+                    />
+                    Use Agent definition
+                  </Button>
+                  <Button
+                    disabled={
+                      updateMutation.isPending || isSyncingPersonaAccess
+                    }
+                    onClick={() => void handleApplyAccessToPersona()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Apply to Agent definition
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <label className="flex items-center gap-2 text-sm text-muted-foreground">
               <input
                 checked={allowNonOwnerDm}
