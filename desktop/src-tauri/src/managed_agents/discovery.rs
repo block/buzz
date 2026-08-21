@@ -26,15 +26,13 @@ pub(crate) use presets::{
     preset_harness_ids,
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{KnownAcpRuntime, OPENCODE_RUNTIME};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
-const OPENCODE_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/desktop/public/harness-logos/opencode.svg";
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -57,8 +55,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
                 home.join(".bun/bin"),
-                // opencode's native installer writes here and only appends to
-                // shell rc files, so this is the deterministic probe location.
+                // opencode's native installer target; it only edits rc files.
                 home.join(".opencode/bin"),
             ]);
         }
@@ -191,48 +188,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
-    KnownAcpRuntime {
-        id: "opencode",
-        label: "OpenCode",
-        commands: &["opencode"],
-        aliases: &[],
-        avatar_url: OPENCODE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("opencode"),
-        // The vendor installer is one cross-platform bash script (Git Bash on
-        // Windows); opencode publishes no PowerShell installer to route
-        // through the Defender-safe two-step form, so both OSes use the pipe.
-        cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash"],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://opencode.ai/docs",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to OpenCode through the OpenCode CLI's ACP mode (opencode acp).",
-        adapter_install_hint: "",
-        skill_dir: Some(".opencode/skills"),
-        supports_acp_model_switching: false,
-        // No native model env var: opencode resolves its model from config
-        // (`~/.config/opencode/opencode.json`, `provider/model` ids), so model
-        // pinning is config-side rather than env-side.
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.config/opencode/opencode.json"),
-        config_file_format: Some("json"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        max_rounds_env_var: None,
-        required_normalized_fields: &[],
-        // `opencode auth list` exits 0 even with zero credentials, so an
-        // exit-code probe cannot tell logged out from logged in; report
-        // NotApplicable (goose pattern) until a faithful probe exists.
-        login_hint: None,
-        auth_probe_args: None,
-    },
+    OPENCODE_RUNTIME,
     KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
@@ -338,34 +294,12 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 }
 
 /// The agent command a freshly-created agent defaults to when the create
-/// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
-/// the default cannot drift from the provider definition. Falls back to the id
-/// if the catalog entry is missing. (Previous default was bare `goose`, which
-/// is not on PATH on a stock Windows install; buzz-agent ships with the app.)
-///
-/// Operators can override the default engine with `BUZZ_DEFAULT_RUNTIME`
-/// (e.g. `BUZZ_DEFAULT_RUNTIME=opencode`): the value is resolved through the
-/// same three-tier lookup as persona runtime ids (static builtins → static
-/// presets → loaded custom registry), so any registered harness can be made
-/// the site default. An unresolvable value logs a warning and falls back to
-/// the bundled default rather than pinning new agents to a dangling command.
+/// request supplies none: the bundled `buzz-agent`, unless the operator set
+/// `BUZZ_DEFAULT_RUNTIME` to a resolvable harness id (three-tier lookup —
+/// builtins, presets, custom registry; unresolvable ids warn and fall back).
 pub fn default_agent_command() -> String {
-    if let Ok(raw) = std::env::var("BUZZ_DEFAULT_RUNTIME") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            if let Some(cmd) = presets::command_for_runtime_id(trimmed) {
-                return cmd;
-            }
-            tracing::warn!(
-                runtime = trimmed,
-                "BUZZ_DEFAULT_RUNTIME does not resolve to a known harness — using bundled buzz-agent"
-            );
-        }
-    }
-    known_acp_runtime_exact("buzz-agent")
-        .and_then(|p| p.commands.first().copied())
-        .unwrap_or("buzz-agent")
-        .to_string()
+    runtime_metadata::default_runtime_override()
+        .unwrap_or_else(runtime_metadata::bundled_default_agent_command)
 }
 
 /// Record-first harness resolution (unified agent model, Phase 1A).

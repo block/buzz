@@ -45,44 +45,12 @@ fn returns_none_for_unknown_commands() {
 
 #[test]
 fn default_agent_command_resolves_bundled_buzz_agent() {
-    // Serialized against the BUZZ_DEFAULT_RUNTIME tests below: they mutate the
-    // env this reads.
-    let _guard = crate::managed_agents::lock_path_mutex();
     // The default must be bundled buzz-agent, never bare `goose` on a stock Windows install.
     assert_eq!(default_agent_command(), "buzz-agent");
     assert_eq!(
         normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
         Vec::<String>::new()
     );
-}
-
-/// `BUZZ_DEFAULT_RUNTIME` is read live from the process environment, so these
-/// tests mutate env under the same serialized lock the PATH tests use and
-/// restore the previous value before any assertion can panic.
-#[test]
-fn default_runtime_env_override_selects_known_harness() {
-    let _guard = crate::managed_agents::lock_path_mutex();
-    let previous = std::env::var("BUZZ_DEFAULT_RUNTIME").ok();
-    std::env::set_var("BUZZ_DEFAULT_RUNTIME", "opencode");
-    let resolved = default_agent_command();
-    match previous {
-        Some(value) => std::env::set_var("BUZZ_DEFAULT_RUNTIME", value),
-        None => std::env::remove_var("BUZZ_DEFAULT_RUNTIME"),
-    }
-    assert_eq!(resolved, "opencode");
-}
-
-#[test]
-fn default_runtime_env_override_falls_back_on_unknown_id() {
-    let _guard = crate::managed_agents::lock_path_mutex();
-    let previous = std::env::var("BUZZ_DEFAULT_RUNTIME").ok();
-    std::env::set_var("BUZZ_DEFAULT_RUNTIME", "definitely-not-a-harness");
-    let resolved = default_agent_command();
-    match previous {
-        Some(value) => std::env::set_var("BUZZ_DEFAULT_RUNTIME", value),
-        None => std::env::remove_var("BUZZ_DEFAULT_RUNTIME"),
-    }
-    assert_eq!(resolved, "buzz-agent");
 }
 
 #[test]
@@ -98,16 +66,6 @@ fn normalizes_claude_and_codex_args_to_empty() {
     assert_eq!(
         normalize_agent_args("codex-acp", vec!["acp".into()]),
         Vec::<String>::new()
-    );
-}
-
-#[test]
-fn opencode_defaults_to_acp_mode_args() {
-    // Bare `opencode` starts the TUI; ACP needs the `acp` subcommand, so the
-    // empty-args default must be `["acp"]` (goose pattern).
-    assert_eq!(
-        normalize_agent_args("opencode", Vec::new()),
-        vec!["acp".to_string()]
     );
 }
 

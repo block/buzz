@@ -83,6 +83,95 @@ impl KnownAcpRuntime {
     }
 }
 
+const OPENCODE_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/desktop/public/harness-logos/opencode.svg";
+
+/// Compiled-in opencode runtime (tier-1). Native ACP: the CLI is the agent, so
+/// `underlying_cli` doubles as the Phase-1 auto-install marker. Two deliberate
+/// `None`s, verified against opencode source: `auth_probe_args` (`opencode
+/// auth list` exits 0 even with zero credentials — no faithful probe) and
+/// `model_env_var` (opencode core reads no model env var; pinning is
+/// config-side via `~/.config/opencode/opencode.json`).
+pub(crate) const OPENCODE_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "opencode",
+    label: "OpenCode",
+    commands: &["opencode"],
+    aliases: &[],
+    avatar_url: OPENCODE_AVATAR_URL,
+    mcp_command: None,
+    mcp_hooks: false,
+    underlying_cli: Some("opencode"),
+    // The vendor installer is one cross-platform bash script (Git Bash on
+    // Windows); opencode publishes no PowerShell installer to route through
+    // the Defender-safe two-step form, so both OSes use the pipe.
+    cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash"],
+    cli_install_commands_windows: &[],
+    adapter_install_commands: &[],
+    cli_install_instructions_url: "https://opencode.ai/docs",
+    adapter_install_instructions_url: "",
+    cli_install_hint: "Buzz talks to OpenCode through the OpenCode CLI's ACP mode (opencode acp).",
+    adapter_install_hint: "",
+    skill_dir: Some(".opencode/skills"),
+    supports_acp_model_switching: false,
+    model_env_var: None,
+    provider_env_var: None,
+    provider_locked: false,
+    default_env: &[],
+    config_file_path: Some("~/.config/opencode/opencode.json"),
+    config_file_format: Some("json"),
+    supports_acp_native_config: false,
+    thinking_env_var: None,
+    max_tokens_env_var: None,
+    context_limit_env_var: None,
+    max_rounds_env_var: None,
+    required_normalized_fields: &[],
+    login_hint: None,
+    auth_probe_args: None,
+};
+
+/// Resolve a `BUZZ_DEFAULT_RUNTIME` value to a harness command via the
+/// authoritative three-tier lookup (builtins → presets → loaded registry).
+/// Empty or unresolvable values yield `None` so callers keep the bundled
+/// default; unknown ids log a warning rather than pinning agents to a
+/// dangling command.
+pub(super) fn resolve_default_runtime(id: &str) -> Option<String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match super::presets::command_for_runtime_id(trimmed) {
+        Some(cmd) => Some(cmd),
+        None => {
+            tracing::warn!(
+                runtime = trimmed,
+                "BUZZ_DEFAULT_RUNTIME does not resolve to a known harness — using bundled buzz-agent"
+            );
+            None
+        }
+    }
+}
+
+/// `BUZZ_DEFAULT_RUNTIME` engine override for newly-created agents, read live
+/// from the process environment. Documented in crates/buzz-acp/README.md.
+pub(super) fn default_runtime_override() -> Option<String> {
+    resolve_default_runtime(&std::env::var("BUZZ_DEFAULT_RUNTIME").ok()?)
+}
+
+/// The bundled default engine: buzz-agent ships with the app, so it is safe
+/// on a stock install where no third-party CLI is on PATH.
+pub(super) fn bundled_default_agent_command() -> String {
+    super::known_acp_runtime_exact("buzz-agent")
+        .and_then(|p| p.commands.first().copied())
+        .unwrap_or("buzz-agent")
+        .to_string()
+}
+
+/// opencode runtime tests live in a sibling file (file-size ratchet keeps
+/// discovery.rs/tests.rs at their merge-base sizes; this module has headroom).
+#[cfg(test)]
+#[path = "tests/opencode.rs"]
+mod opencode_tests;
+
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
