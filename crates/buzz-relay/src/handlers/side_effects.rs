@@ -22,6 +22,10 @@ use crate::state::AppState;
 use buzz_core::tenant::TenantContext;
 use buzz_pubsub::EventTopic;
 
+fn default_channel_member_role() -> MemberRole {
+    MemberRole::Bot
+}
+
 /// Check if a kind is an admin kind (9000-9022) that needs pre-storage validation.
 pub fn is_admin_kind(kind: u32) -> bool {
     matches!(kind, 9000..=9022)
@@ -343,8 +347,9 @@ pub async fn validate_admin_event(
         9000 => {
             // An absent role tag means "no role change requested": for an existing
             // member that preserves the role they already hold, and only defaults
-            // to Member for a genuinely new member. Defaulting unconditionally to
-            // Member made a bare self-targeted PUT_USER silently demote an owner.
+            // to Bot for a genuinely new member. Applying the default
+            // unconditionally would let a bare self-targeted PUT_USER silently
+            // demote an owner.
             let role_str = extract_tag_value(event, "role");
             let requested_role = match role_str {
                 Some(ref s) => match s.parse::<buzz_db::channel::MemberRole>() {
@@ -1350,8 +1355,9 @@ async fn handle_put_user(
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
     // No role tag = no role change: preserve an existing member's current role and
-    // fall back to Member only for a new member. Unconditionally defaulting to
-    // Member let a bare PUT_USER silently demote an existing owner/admin.
+    // fall back to Bot only for a new member. Applying the default
+    // unconditionally would let a bare PUT_USER silently demote an existing
+    // owner/admin.
     let role: MemberRole = match extract_tag_value(event, "role") {
         Some(role_str) => role_str
             .parse()
@@ -1363,7 +1369,7 @@ async fn handle_put_user(
             .iter()
             .find(|m| m.pubkey == target_pubkey)
             .and_then(|m| m.role.parse().ok())
-            .unwrap_or(MemberRole::Member),
+            .unwrap_or_else(default_channel_member_role),
     };
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
@@ -2017,14 +2023,15 @@ async fn handle_join_request(
         return Ok(());
     }
 
-    // Add as member (idempotent — add_member handles duplicates).
+    // A roleless self-join uses the channel's default role. This is idempotent —
+    // add_member handles duplicates.
     state
         .db
         .add_member(
             tenant.community(),
             channel_id,
             &actor_bytes,
-            buzz_db::channel::MemberRole::Member,
+            default_channel_member_role(),
             None,
         )
         .await?;
@@ -3590,6 +3597,11 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roleless_new_channel_membership_defaults_to_bot() {
+        assert_eq!(default_channel_member_role(), MemberRole::Bot);
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {
