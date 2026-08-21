@@ -187,10 +187,17 @@ pub async fn run(
     set_process_group(&mut cmd);
     crate::configure_no_window_async(&mut cmd);
 
+    // Registry slots for the two directories this command can reach: the shim
+    // dir (first on its PATH) and the session dir. Reserved *before* the
+    // spawn, because the window this closes is a live command with nothing on
+    // disk recording that it exists — see `sweep::register_command`.
+    let pending = crate::sweep::register_command(&[state.shim.dir(), state.session_dir.path()]);
+
     let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
+            pending.abandon();
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "failed to spawn shell: {e}"
             ))]));
@@ -204,15 +211,26 @@ pub async fn run(
     // child so the Windows job can take the process handle, which only exists
     // after spawn. Held for the whole run; its Drop is the last-resort reaper.
     let mut kill_group = KillGroup::new(&child, pid);
-    if !kill_group.armed() {
-        // Nothing left ties this command's lifetime to ours, and nothing
-        // records that it is using the shim and session dirs. A later startup
-        // sweep would see a dead owner pid and a free lease and delete both
-        // directories out from under it, so give up the right to reclaim them
-        // instead. Costs disk; never costs a live command its binaries.
-        crate::sweep::surrender_claim(state.shim.dir());
-        crate::sweep::surrender_claim(state.session_dir.path());
-    }
+    // Bind the reserved slots to this command's lifetime handle: on Unix the
+    // process group, which `set_process_group` made equal to the child's own
+    // pid, and on Windows the pid. Held for the rest of `run`, so the entries
+    // disappear when the command is done and the directories go back to being
+    // reclaimable.
+    let _registered = match pid.filter(|_| kill_group.armed()) {
+        Some(handle) => Some(pending.confirm(handle)),
+        None => {
+            // Nothing left ties this command's lifetime to ours, and nothing
+            // can record that it is using the shim and session dirs. A later
+            // startup sweep would see a dead owner and an empty registry and
+            // delete both directories out from under it, so give up the right
+            // to reclaim them instead. Costs disk; never costs a live command
+            // its binaries.
+            pending.abandon();
+            crate::sweep::surrender_claim(state.shim.dir());
+            crate::sweep::surrender_claim(state.session_dir.path());
+            None
+        }
+    };
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -747,14 +765,13 @@ impl KillGroup {
     /// Whether this command's use of the shim/session dirs stays observable
     /// after a hard kill of this process.
     ///
-    /// Always true on Unix, for a reason that has nothing to do with the
-    /// process group: the command inherited the directory lease at spawn
-    /// (`sweep::acquire_lease`), so even a fully orphaned command keeps the
-    /// directories claimed until it exits. Windows does not inherit that
-    /// handle and leans on the job object instead, so there the answer can be
-    /// false.
+    /// On Unix that is exactly the question "do we know the process group",
+    /// because the group id is what goes into the command registry
+    /// (`sweep::register_command`) and what a later sweep asks about. Without
+    /// it the command is untrackable, and the caller surrenders the claim
+    /// rather than let a sweep guess.
     fn armed(&self) -> bool {
-        true
+        self.0.is_some()
     }
 }
 
