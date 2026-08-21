@@ -54,13 +54,54 @@ function repeatedFieldCount(field: string, maximum: number): number | null {
   return /^\d+$/.test(field) ? 1 : null;
 }
 
+/**
+ * Reports whether an hour field selects every hour of the day, so schedules
+ * written as `*`, `*\/1`, `0-23`, or an equivalent list still classify as
+ * hourly. Unrecognized fields are treated as not matching every hour.
+ */
+function matchesEveryHour(field: string): boolean {
+  const HOURS = 24;
+  const selected = new Set<number>();
+  for (const segment of field.split(",")) {
+    const [base, step] = segment.split("/");
+    if (step !== undefined && (!/^\d+$/.test(step) || Number(step) < 1)) {
+      return false;
+    }
+    const size = step === undefined ? 1 : Number(step);
+    let start: number, end: number;
+    if (base === "*") {
+      start = 0;
+      end = HOURS - 1;
+    } else {
+      const bounds = base.split("-");
+      if (bounds.length > 2 || bounds.some((part) => !/^\d+$/.test(part))) {
+        return false;
+      }
+      start = Number(bounds[0]);
+      end = bounds.length === 2 ? Number(bounds[1]) : start;
+      if (start > end || end >= HOURS) return false;
+      // A bare hour selects only itself; a stepped one runs to end of day.
+      if (bounds.length === 1) {
+        if (step === undefined) {
+          selected.add(start);
+          continue;
+        }
+        end = HOURS - 1;
+      }
+    }
+    for (let hour = start; hour <= end; hour += size) selected.add(hour);
+  }
+  return selected.size === HOURS;
+}
+
 function frequentCronDescription(cron: string): string | null {
   const fields = normalizedCronFields(cron);
   if (!fields) return null;
   const [second, minute, hour] = fields;
   const secondRuns = repeatedFieldCount(second, 59);
   const minuteRuns = repeatedFieldCount(minute, 59);
-  if (secondRuns === null || minuteRuns === null || hour !== "*") return null;
+  if (secondRuns === null || minuteRuns === null) return null;
+  if (!matchesEveryHour(hour)) return null;
 
   if (secondRuns > 1) {
     return "It is scheduled to run multiple times a minute. Review the schedule before turning it on.";

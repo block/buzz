@@ -65,6 +65,39 @@ test("warns for clear hourly-or-faster cron schedules", () => {
   );
 });
 
+test("warns for stepped, ranged, and listed hourly cron schedules", () => {
+  for (const cron of [
+    "0 0 */1 * * *",
+    "0 0 * * * *",
+    "0 0 0-23 * * *",
+    "0 0 0-11,12-23 * * *",
+    "0 0 */1 * * * *",
+  ]) {
+    assert.equal(
+      getWorkflowActivationWarning(
+        workflowYaml(`  on: schedule\n  cron: "${cron}"`),
+      )?.description,
+      "It is scheduled to run every hour. Review the schedule before turning it on.",
+      cron,
+    );
+  }
+  assert.equal(
+    getWorkflowActivationWarning(
+      workflowYaml('  on: schedule\n  cron: "*/5 0-23 * * *"'),
+    )?.description,
+    "It is scheduled to run every 5 minutes. Review the schedule before turning it on.",
+  );
+  for (const cron of ["0 */3 * * *", "0 0 0,12 * * *", "0 0 8-17 * * *"]) {
+    assert.equal(
+      getWorkflowActivationWarning(
+        workflowYaml(`  on: schedule\n  cron: "${cron}"`),
+      ),
+      null,
+      cron,
+    );
+  }
+});
+
 test("returns no warning for malformed or unrelated definitions", () => {
   assert.equal(getWorkflowActivationWarning("not: [valid"), null);
   assert.equal(
