@@ -19,13 +19,15 @@ export function ProjectWorkItemGroup({
 }) {
   return (
     <ProjectSelectableGroup
-      contentClassName="px-2"
+      contentClassName="px-4"
       count={count}
       groupKey={label}
+      headerClassName="mx-4 gap-3 px-4"
       headerTestId="project-work-item-group-header"
       icon={icon}
       items={items}
       label={label}
+      labelTestId="project-work-item-group-label"
       testId="project-work-item-group"
     >
       {children}

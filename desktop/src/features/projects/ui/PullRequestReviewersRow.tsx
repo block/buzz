@@ -289,63 +289,83 @@ export function PullRequestReviewersRow({
 
   return (
     <ProjectDetailMetaRow icon={Users} label="Reviewers">
-      <div className="grid min-w-0 gap-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          {showSummary ? (
-            <span className="font-medium" data-testid={summaryTestId}>
+      <div
+        className="flex min-w-0 items-center gap-2"
+        data-testid="project-reviewers-content"
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden whitespace-nowrap">
+          {showSummary && displayedDecisionActors.length === 0 ? (
+            <span className="truncate font-medium" data-testid={summaryTestId}>
               {reviewSummary}
             </span>
           ) : null}
+          {displayedDecisionActors.map((pubkey, index) => {
+            const label = labelForPubkey(pubkey, profiles);
+            const hasApproved = approvedBy.has(pubkey);
+            const hasRequestedChanges = changesRequestedBy.has(pubkey);
+            const needsRereview = staleDecisionActors.has(pubkey);
+            const DecisionIcon = hasApproved
+              ? Check
+              : hasRequestedChanges
+                ? TriangleAlert
+                : needsRereview
+                  ? History
+                  : null;
+            const decisionLabel = hasApproved
+              ? `Approved by ${label}`
+              : hasRequestedChanges
+                ? `Changes requested by ${label}`
+                : needsRereview
+                  ? `Re-review needed from ${label}`
+                  : `Awaiting review from ${label}`;
+            return (
+              <React.Fragment key={pubkey}>
+                {index > 0 ? (
+                  <span
+                    aria-hidden="true"
+                    className="shrink-0 text-muted-foreground/50"
+                  >
+                    ·
+                  </span>
+                ) : null}
+                <span
+                  className={cn(
+                    "flex min-w-0 shrink items-center gap-1 text-sm",
+                    hasApproved && "text-green-600 dark:text-green-400",
+                    hasRequestedChanges && "text-amber-600 dark:text-amber-400",
+                    !hasApproved &&
+                      !hasRequestedChanges &&
+                      "text-muted-foreground",
+                  )}
+                  data-testid="project-reviewer-decision"
+                  title={decisionLabel}
+                >
+                  <span className="sr-only">{decisionLabel}</span>
+                  {DecisionIcon ? (
+                    <DecisionIcon
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0"
+                    />
+                  ) : null}
+                  <span
+                    aria-hidden="true"
+                    className="truncate"
+                    data-testid="project-reviewer-name"
+                  >
+                    {label}
+                  </span>
+                </span>
+              </React.Fragment>
+            );
+          })}
           {hasHistoricalDecision ? (
-            <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+            <span className="flex min-w-0 items-center gap-1 truncate text-xs text-amber-600 dark:text-amber-400">
               <History className="h-3.5 w-3.5 shrink-0" />
               Earlier decision applies to another commit
             </span>
           ) : null}
-          {requestAction}
         </div>
-        {displayedDecisionActors.map((pubkey) => {
-          const label = labelForPubkey(pubkey, profiles);
-          const hasApproved = approvedBy.has(pubkey);
-          const hasRequestedChanges = changesRequestedBy.has(pubkey);
-          const needsRereview = staleDecisionActors.has(pubkey);
-          const DecisionIcon = hasApproved
-            ? Check
-            : hasRequestedChanges
-              ? TriangleAlert
-              : needsRereview
-                ? History
-                : null;
-          const decisionLabel = hasApproved
-            ? "Approved"
-            : hasRequestedChanges
-              ? "Changes requested"
-              : needsRereview
-                ? "Re-review needed"
-                : "Pending";
-          return (
-            <span
-              className="flex min-w-0 items-center gap-2"
-              data-testid="project-reviewer-decision"
-              key={pubkey}
-            >
-              <span className="truncate text-sm text-foreground">{label}</span>
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center gap-0.5 text-sm",
-                  hasApproved && "text-green-600 dark:text-green-400",
-                  hasRequestedChanges && "text-amber-600 dark:text-amber-400",
-                  !hasApproved &&
-                    !hasRequestedChanges &&
-                    "text-muted-foreground",
-                )}
-              >
-                {DecisionIcon ? <DecisionIcon className="h-3.5 w-3.5" /> : null}
-                {decisionLabel}
-              </span>
-            </span>
-          );
-        })}
+        {requestAction}
       </div>
     </ProjectDetailMetaRow>
   );

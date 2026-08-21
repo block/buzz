@@ -4,6 +4,7 @@ use crate::managed_agents::{
     DEFAULT_ACP_COMMAND,
 };
 
+mod forced_single_flight;
 mod post_install_verification;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -49,23 +50,15 @@ pub(crate) fn plan_adapter_install<'c>(
     }
 }
 
+/// Discover the ACP runtime catalog. `force: false` (the default) serves the
+/// cheap cached path; `force: true` runs the expensive re-discovery. See
+/// [`forced_single_flight`] for the split and single-flight coalescing.
 #[tauri::command]
 pub async fn discover_acp_providers(
     app: tauri::AppHandle,
+    force: Option<bool>,
 ) -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
-    tokio::task::spawn_blocking(move || {
-        use tauri::Manager;
-        crate::managed_agents::clear_resolve_cache();
-        crate::managed_agents::refresh_login_shell_path();
-        let custom_dir = app
-            .path()
-            .app_data_dir()
-            .ok()
-            .map(|d| d.join("custom_harnesses"));
-        crate::managed_agents::discover_acp_runtimes_from(custom_dir.as_deref())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))
+    forced_single_flight::discover(app, force.unwrap_or(false)).await
 }
 
 /// Write a user-defined harness definition to `<app-data>/custom_harnesses/<id>.json`.

@@ -1,14 +1,7 @@
 import { Bot, GitPullRequest, Link2, X } from "lucide-react";
 import * as React from "react";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
-  loadDraftEntry,
-  saveDraftEntry,
-} from "@/features/messages/lib/useDrafts";
-import {
-  mergeSelectionDiscussDraft,
-  projectSelectionDiscussContent,
   projectSelectionShareLinks,
   type ProjectSelectionAction,
   type ProjectSelectionItem,
@@ -18,6 +11,7 @@ import { useProjectSelection } from "@/features/projects/lib/useProjectSelection
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { ProjectSelectionDiscussAction } from "./ProjectSelectionDiscussAction";
+import { useProjectDiscussInChannel } from "./useProjectDiscussInChannel";
 
 function selectionActionIcon(id: ProjectSelectionAction["id"]) {
   if (id === "chat-agent") return Bot;
@@ -37,33 +31,15 @@ export function ProjectsSelectionCountMenu({
   presentation: ProjectSelectionPresentation;
   selectionItems: ProjectSelectionItem[];
 }) {
-  const { goChannel } = useAppNavigation();
   const selection = useProjectSelection();
+  const openChannelWithDraft = useProjectDiscussInChannel(selectionItems);
 
   const discussInChannel = React.useCallback(
     (channelId: string) => {
-      const now = new Date().toISOString();
-      const existing = loadDraftEntry(channelId);
-      const content = mergeSelectionDiscussDraft(
-        existing?.content,
-        projectSelectionDiscussContent(selectionItems),
-      );
-      saveDraftEntry(channelId, {
-        channelId,
-        content,
-        createdAt: existing?.createdAt ?? now,
-        mentionRefs: existing?.mentionRefs ?? [],
-        pendingImeta: existing?.pendingImeta ?? [],
-        selectionEnd: content.length,
-        selectionStart: content.length,
-        spoileredAttachmentUrls: existing?.spoileredAttachmentUrls ?? [],
-        status: "active",
-        updatedAt: now,
-      });
-      void goChannel(channelId);
+      openChannelWithDraft(channelId);
       selection?.clear();
     },
-    [goChannel, selection, selectionItems],
+    [openChannelWithDraft, selection],
   );
 
   const handleAction = React.useCallback(

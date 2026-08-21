@@ -35,6 +35,7 @@ import { resetAvatarPresentations } from "@/features/profile/avatarPresentationS
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
+import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import {
@@ -79,6 +80,7 @@ async function resetCommunityState({
   resetPersistentAgentAudienceStore();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetMessageLinkMetadataCache();
 }
 
 type CommunityInitResult =

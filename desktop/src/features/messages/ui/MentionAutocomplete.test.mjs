@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
 
 import { JSDOM } from "jsdom";
-import { mentionAgentLabel } from "./MentionAutocomplete.tsx";
+import { showMentionAgentProvenanceMarker } from "./MentionAutocomplete.tsx";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
@@ -324,21 +324,27 @@ function suggestion(agentProvenance) {
   };
 }
 
-test("duplicate owned agents show their management provenance", () => {
+test("duplicate owned agents mark only the other setup", () => {
   assert.equal(
-    mentionAgentLabel(suggestion("managed-here"), true),
-    "agent · managed here",
+    showMentionAgentProvenanceMarker(suggestion("managed-here"), true),
+    false,
   );
   assert.equal(
-    mentionAgentLabel(suggestion("managed-elsewhere"), true),
-    "agent · managed elsewhere",
+    showMentionAgentProvenanceMarker(suggestion("managed-elsewhere"), true),
+    true,
   );
 });
 
-test("unique agents keep the compact generic label", () => {
-  assert.equal(mentionAgentLabel(suggestion("managed-here"), false), "agent");
+test("unique agents omit management provenance", () => {
+  assert.equal(
+    showMentionAgentProvenanceMarker(suggestion("managed-here"), false),
+    false,
+  );
 });
 
-test("agents without trustworthy provenance keep the generic label", () => {
-  assert.equal(mentionAgentLabel(suggestion(undefined), true), "agent");
+test("agents without trustworthy provenance omit management provenance", () => {
+  assert.equal(
+    showMentionAgentProvenanceMarker(suggestion(undefined), true),
+    false,
+  );
 });

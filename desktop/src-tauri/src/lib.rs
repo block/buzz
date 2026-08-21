@@ -293,13 +293,12 @@ pub fn run() {
             // present), all owner-keyed side effects (event sync, agent restore,
             // relay publish) are skipped. The frontend shows a recovery screen;
             // the user must relaunch after restoring the identity.
-            let identity_lost = state
+            let recovery_mode = state
                 .identity_lost
-                .load(std::sync::atomic::Ordering::Acquire);
-            let keyring_locked = state
-                .keyring_locked
-                .load(std::sync::atomic::Ordering::Acquire);
-            let recovery_mode = identity_lost || keyring_locked;
+                .load(std::sync::atomic::Ordering::Acquire)
+                || state
+                    .keyring_locked
+                    .load(std::sync::atomic::Ordering::Acquire);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -619,6 +618,7 @@ pub fn run() {
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
             get_channels,
+            get_open_channel_directory,
             create_channel,
             ensure_starter_channels,
             open_dm,
@@ -646,6 +646,7 @@ pub fn run() {
             get_forum_posts,
             get_forum_thread,
             get_thread_replies,
+            get_channel_reconnect_repair,
             get_channel_window,
             get_channel_messages_before,
             edit_message,
@@ -913,7 +914,6 @@ pub fn run() {
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);

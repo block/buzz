@@ -136,6 +136,7 @@ export function ProjectConversationPanelController({
             open={fallbackVisible}
             panelWidthPx={fallbackPanelWidthPx}
             resizing={fallbackPanelResizing}
+            rounded={detached}
           >
             {fallbackPanel}
           </ProjectContextRail>

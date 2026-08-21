@@ -1,6 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "minimumReleaseAge": "3 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict",
   "prCreation": "immediate",
   "automerge": true,
   "rebaseWhen": "conflicted",
@@ -30,6 +33,12 @@
       "matchPackageNames": ["redis", "deadpool-redis"],
       "matchManagers": ["cargo"],
       "groupName": "redis"
+    },
+    {
+      "description": "earshot 1.2.x is a quantized re-implementation, not a tuning release: RNN weights move f32 -> i16 and the probability scale shifts, so the huddle VAD's calibrated threshold regresses at the shipped operating point (TPR 89.57% -> 88.46%, FPR 1.54% -> 2.79% on a matched 121-clip corpus). Unpin only together with a threshold re-pick against that corpus — see the VAD threshold constants in desktop/src-tauri/src/huddle/stt.rs.",
+      "matchPackageNames": ["earshot"],
+      "matchManagers": ["cargo"],
+      "allowedVersions": "<1.2.0"
     },
     {
       "description": "tiptap 3.23.x breaks editor lifecycle under real relay latency — pin until upstream stabilizes.",

@@ -46,6 +46,7 @@ import {
   PROJECT_DETAIL_PANEL_CLASS,
   PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
 } from "./projectPanelStyles";
+import { ProjectRepositoryLatestCommitRow } from "./ProjectRepositoryLatestCommitRow";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
@@ -617,6 +618,7 @@ export function RepositoryFilesPanel({
   profiles,
   fallbackAuthorPubkey,
   onContextChange,
+  onOpenCommit,
   sourceControls,
   unavailableMessage,
 }: {
@@ -631,6 +633,7 @@ export function RepositoryFilesPanel({
     kind: "file" | "folder";
     path: string;
   }) => void;
+  onOpenCommit?: (commitHash: string) => void;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
   unavailableMessage?: string;
@@ -850,12 +853,22 @@ export function RepositoryFilesPanel({
       ) : null}
 
       <div className="overflow-x-auto px-2 pb-2">
-        <table className="w-full border-separate border-spacing-y-0.5 caption-bottom text-sm">
+        <table className="w-full border-collapse caption-bottom text-sm">
           <thead>
-            <tr className="border-border/50 border-b bg-muted/20">
+            <ProjectRepositoryLatestCommitRow
+              commitShortHash={latestCommit?.shortHash}
+              onOpen={
+                latestCommit && onOpenCommit
+                  ? () => onOpenCommit(latestCommit.hash)
+                  : undefined
+              }
+            >
               <th className="px-4 py-3 text-left font-normal" colSpan={3}>
                 {latestCommit ? (
-                  <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
+                  <div
+                    className="flex min-w-0 items-center justify-between gap-3 text-xs"
+                    data-testid="project-repository-latest-commit-summary"
+                  >
                     <div className="flex min-w-0 items-center gap-2">
                       <UserAvatar
                         accent={latestCommitProfile?.isAgent === true}
@@ -901,12 +914,11 @@ export function RepositoryFilesPanel({
                   </p>
                 )}
               </th>
-            </tr>
+            </ProjectRepositoryLatestCommitRow>
           </thead>
           <tbody>
-            {visibleEntries.map((entry, index) => {
+            {visibleEntries.map((entry) => {
               const latestCommit = entry.latestCommit;
-              const rowIsLast = index === visibleEntries.length - 1;
               const openEntry = () =>
                 openRepositoryEntry(entry, openPath, setSelectedFile);
 
@@ -914,6 +926,7 @@ export function RepositoryFilesPanel({
                 <tr
                   aria-label={`Open ${entry.type} ${entry.name}`}
                   className="group/repository-entry cursor-pointer text-xs focus-visible:outline-hidden"
+                  data-testid="project-repository-entry-row"
                   key={`${entry.type}:${entry.path}`}
                   onClick={openEntry}
                   onKeyDown={(event) =>
@@ -921,12 +934,7 @@ export function RepositoryFilesPanel({
                   }
                   tabIndex={0}
                 >
-                  <td
-                    className={cn(
-                      "min-w-52 rounded-l-md px-3 py-2 align-middle transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35",
-                      !rowIsLast && "border-border/50 border-b",
-                    )}
-                  >
+                  <td className="min-w-52 px-3 py-2 align-middle transition-colors group-hover/repository-entry:rounded-l-md group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:rounded-l-md group-focus-visible/repository-entry:bg-muted/35">
                     <div className="flex min-w-0 items-center gap-2">
                       <RepositoryEntryIcon entry={entry} />
                       <span className="truncate font-medium text-foreground">
@@ -934,23 +942,13 @@ export function RepositoryFilesPanel({
                       </span>
                     </div>
                   </td>
-                  <td
-                    className={cn(
-                      "max-w-96 p-2 align-middle transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35",
-                      !rowIsLast && "border-border/50 border-b",
-                    )}
-                  >
+                  <td className="max-w-96 p-2 align-middle transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35">
                     <RepositoryCommitCell
                       commit={latestCommit}
                       profiles={profiles}
                     />
                   </td>
-                  <td
-                    className={cn(
-                      "w-36 whitespace-nowrap rounded-r-md p-2 text-right align-middle text-muted-foreground transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35",
-                      !rowIsLast && "border-border/50 border-b",
-                    )}
-                  >
+                  <td className="w-36 whitespace-nowrap p-2 text-right align-middle text-muted-foreground transition-colors group-hover/repository-entry:rounded-r-md group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:rounded-r-md group-focus-visible/repository-entry:bg-muted/35">
                     {latestCommit ? (
                       <time
                         dateTime={new Date(

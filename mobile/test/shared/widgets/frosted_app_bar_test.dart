@@ -1,6 +1,9 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -82,5 +85,114 @@ void main() {
     expect(tester.getSize(clip).height, closeTo(reportedHeight, 0.01));
     expect(reportedHeight, closeTo(titleContentHeight + Grid.xs + 1, 0.01));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('uses the native glass back control on iOS', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const Stack(
+                  children: [FrostedAppBar(title: Text('Destination'))],
+                ),
+              ),
+            ),
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    final nativeBack = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(nativeBack.viewType, 'buzz/navigation_glass');
+    expect(nativeBack.creationParams, containsPair('icon', 'back'));
+    expect(
+      nativeBack.creationParams,
+      containsPair('accessibilityLabel', 'Back'),
+    );
+    expect(nativeBack.creationParams, containsPair('hitTargetWidth', 48.0));
+    expect(nativeBack.creationParams, containsPair('hitTargetHeight', 48.0));
+    expect(find.byTooltip('Back'), findsOneWidget);
+    expect(
+      tester.widget<Tooltip>(find.byTooltip('Back')).excludeFromSemantics,
+      isTrue,
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('replaces native glass while a Flutter backdrop is active', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final suppressNativeView = ValueNotifier(false);
+    addTearDown(suppressNativeView.dispose);
+    var pressCount = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: IosGlassNavigationButton(
+            icon: IosGlassNavigationIcon.back,
+            semanticLabel: 'Back',
+            onPressed: () => pressCount++,
+            nativeViewSuppressed: suppressNativeView,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(UiKitView), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
+      findsNothing,
+    );
+    expect(find.bySemanticsLabel('Back'), findsNothing);
+
+    suppressNativeView.value = true;
+    await tester.pump();
+
+    expect(find.byType(UiKitView), findsNothing);
+    expect(
+      find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
+      findsOneWidget,
+    );
+    final fallbackFinder = find.bySemanticsLabel('Back');
+    expect(fallbackFinder, findsOneWidget);
+    final fallbackSemantics = tester.getSemantics(fallbackFinder);
+    expect(fallbackSemantics.flagsCollection.isButton, isTrue);
+    expect(
+      fallbackSemantics.flagsCollection.isEnabled.toString(),
+      'Tristate.isTrue',
+    );
+    expect(
+      fallbackSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    tester.binding.performSemanticsAction(
+      SemanticsActionEvent(
+        type: SemanticsAction.tap,
+        viewId: tester.view.viewId,
+        nodeId: fallbackSemantics.id,
+      ),
+    );
+    await tester.pump();
+    expect(pressCount, 1);
+
+    suppressNativeView.value = false;
+    await tester.pump();
+
+    expect(find.byType(UiKitView), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
   });
 }

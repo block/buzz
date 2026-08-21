@@ -17,6 +17,7 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -49,6 +50,7 @@ import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
+import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
@@ -264,6 +266,9 @@ class ChannelDetailPage extends HookConsumerWidget {
       context,
       isDm: resolvedChannel.isDm,
     );
+    final usesNativeIosGlassBackButton =
+        Navigator.canPop(context) &&
+        Theme.of(context).platform == TargetPlatform.iOS;
     final readTimestamp = _channelReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
@@ -321,32 +326,50 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        leading: usesNativeIosGlassBackButton
+            ? IosGlassNavigationButton(
+                key: const ValueKey('channel-ios-glass-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back',
+                onPressed: () => Navigator.of(context).maybePop(),
+                width: iosGlassChannelHeaderLeadingWidth,
+                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                nativeViewSuppressed: messageActionBackdropActive,
+              )
+            : null,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
-        title: resolvedChannel.isDm
-            ? _DmAppBarTitle(
-                channel: resolvedChannel,
-                currentPubkey: currentPubkey,
-              )
-            : _ChannelAppBarTitle(
-                channel: resolvedChannel,
-                onTap: () async {
-                  final shouldClose = await showChannelDetailsPage(
-                    context: context,
-                    channel: resolvedChannel,
-                    currentPubkey: currentPubkey,
-                    onMemberTap: showUserProfileSheet,
-                    sectionId: ref
-                        .read(channelSectionsProvider)
-                        .store
-                        .assignments[resolvedChannel.id],
-                  );
-                  if (shouldClose == true && context.mounted) {
-                    Navigator.of(context).pop();
-                  }
-                },
-              ),
+        title: Padding(
+          padding: EdgeInsets.only(
+            left: usesNativeIosGlassBackButton
+                ? iosGlassChannelHeaderTitleSpacing
+                : 0,
+          ),
+          child: resolvedChannel.isDm
+              ? _DmAppBarTitle(
+                  channel: resolvedChannel,
+                  currentPubkey: currentPubkey,
+                )
+              : _ChannelAppBarTitle(
+                  channel: resolvedChannel,
+                  onTap: () async {
+                    final shouldClose = await showChannelDetailsPage(
+                      context: context,
+                      channel: resolvedChannel,
+                      currentPubkey: currentPubkey,
+                      onMemberTap: showUserProfileSheet,
+                      sectionId: ref
+                          .read(channelSectionsProvider)
+                          .store
+                          .assignments[resolvedChannel.id],
+                    );
+                    if (shouldClose == true && context.mounted) {
+                      Navigator.of(context).pop();
+                    }
+                  },
+                ),
+        ),
         actions: resolvedChannel.isDm
             ? [
                 if (_showsMembersAction(resolvedChannel))

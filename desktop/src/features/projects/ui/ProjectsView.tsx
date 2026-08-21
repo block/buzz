@@ -19,11 +19,7 @@ import { useRepositoryActivitySummariesQuery } from "@/features/projects/reposit
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
-import {
-  buildProjectSelectionAgentContext,
-  buildProjectsOverviewAgentContext,
-  type ProjectDetailAgentContext,
-} from "@/features/projects/lib/projectDetailAgentContext";
+import { buildProjectSelectionAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
 import {
   useMemberChannelIds,
@@ -35,7 +31,6 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import { ProjectsChannelsList } from "@/features/projects/ui/ProjectsChannelsList";
-import { ProjectsOverviewChatToggle } from "@/features/projects/ui/ProjectsOverviewChatToggle";
 import {
   ProjectsOverviewContextSheet,
   ProjectsOverviewNarrowContextToggle,
@@ -45,6 +40,7 @@ import {
   ProjectsOverviewContextPanel,
   ProjectsOverviewPanel,
 } from "@/features/projects/ui/ProjectsOverviewPanel";
+import { ProjectsOverviewChromeActions } from "@/features/projects/ui/ProjectsOverviewChromeActions";
 import { ProjectContextRail } from "@/features/projects/ui/ProjectContextRail";
 import {
   openAppSearch,
@@ -115,6 +111,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Button } from "@/shared/ui/button";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
+import { useProjectsOverviewAgentContext } from "./useProjectsOverviewAgentContext";
 
 const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
@@ -139,10 +136,6 @@ export function ProjectsView() {
       : storedFilter;
   });
   const [overviewPanelOpen, setOverviewPanelOpen] = React.useState(true);
-  const [selectionAgentContext, setSelectionAgentContext] =
-    React.useState<ProjectDetailAgentContext | null>(null);
-  // Narrow layouts present the same context as a dismissible sheet instead of
-  // the docked rail; the sheet starts closed so resizing never pops a modal.
   const [narrowContextOpen, setNarrowContextOpen] = React.useState(false);
   const contextToggleRef = React.useRef<HTMLButtonElement | null>(null);
   const isNarrowProjectsLayout = useMediaBreakpoint(
@@ -242,22 +235,6 @@ export function ProjectsView() {
       writeStoredViewMode(nextViewMode);
     },
     [],
-  );
-
-  const handleFilterChange = React.useCallback(
-    (nextFilter: ProjectsFilter) => {
-      if (
-        nextFilter === "projects" &&
-        (repositoryScope === "buzz" || repositoryScope === "linked")
-      ) {
-        setRepositoryScope("all");
-        writeStoredRepositoryScope("all");
-      }
-      setSelectionAgentContext(null);
-      setFilter(nextFilter);
-      writeStoredFilter(nextFilter);
-    },
-    [repositoryScope],
   );
 
   const handleRepositoryScopeChange = React.useCallback(
@@ -487,6 +464,36 @@ export function ProjectsView() {
       return right.issue.updatedAt - left.issue.updatedAt;
     });
   }, [currentPubkey, issueScope, projectsWorkItemsQuery.data, sort]);
+  const {
+    agentContext: selectionAgentContext,
+    overviewContext: overviewAgentContext,
+    setAgentContext: setSelectionAgentContext,
+  } = useProjectsOverviewAgentContext({
+    filter,
+    issues: projectsWorkItemsQuery.data?.issues.items,
+    projects,
+    pullRequests: projectsWorkItemsQuery.data?.pullRequests.items,
+    snapshots: repoSnapshotsQuery.data?.snapshots,
+    visibleIssues,
+    visibleProjects,
+    visiblePullRequests,
+    visibleRepositories,
+  });
+  const handleFilterChange = React.useCallback(
+    (nextFilter: ProjectsFilter) => {
+      if (
+        nextFilter === "projects" &&
+        (repositoryScope === "buzz" || repositoryScope === "linked")
+      ) {
+        setRepositoryScope("all");
+        writeStoredRepositoryScope("all");
+      }
+      setSelectionAgentContext(null);
+      setFilter(nextFilter);
+      writeStoredFilter(nextFilter);
+    },
+    [repositoryScope, setSelectionAgentContext],
+  );
 
   // Route by the canonical `owner:dtag` project ID — a bare dtag is
   // ambiguous across owners (forks can share the same dtag).
@@ -631,7 +638,6 @@ export function ProjectsView() {
   const listHeaderBar = (
     <ProjectsListHeaderBar
       filter={filter}
-      variant="bar"
       issueScope={issueScope}
       onIssueScopeChange={handleIssueScopeChange}
       onPullRequestScopeChange={handlePullRequestScopeChange}
@@ -696,22 +702,31 @@ export function ProjectsView() {
       ) ?? [],
     summaries: activitySummariesQuery.data,
   };
-  const overviewDetached = overviewPanelOpen && !isNarrowProjectsLayout;
   const contextOpen = isNarrowProjectsLayout
     ? narrowContextOpen
     : overviewPanelOpen;
-  const chromeActions = (
-    <>
-      <ProjectsOverviewNarrowContextToggle
-        onToggle={() =>
-          isNarrowProjectsLayout
-            ? setNarrowContextOpen((open) => !open)
-            : setOverviewPanelOpen((open) => !open)
-        }
-        open={contextOpen}
-        ref={contextToggleRef}
-      />
-    </>
+  const overviewChatOpen =
+    selectionAgentContext !== null && !isNarrowProjectsLayout;
+  const overviewContextOpen = overviewPanelOpen && !isNarrowProjectsLayout;
+  const overviewDetached = overviewContextOpen || overviewChatOpen;
+  const chromeActions = isNarrowProjectsLayout ? (
+    <ProjectsOverviewNarrowContextToggle
+      onToggle={() => setNarrowContextOpen((open) => !open)}
+      open={contextOpen}
+      ref={contextToggleRef}
+    />
+  ) : (
+    <ProjectsOverviewChromeActions
+      chatOpen={overviewChatOpen}
+      contextOpen={overviewPanelOpen}
+      onToggleChat={() =>
+        setSelectionAgentContext((context) =>
+          context ? null : overviewAgentContext,
+        )
+      }
+      onToggleContext={() => setOverviewPanelOpen((open) => !open)}
+      sectionTitle={projectsSectionTitle(filter)}
+    />
   );
 
   return (
@@ -833,23 +848,10 @@ export function ProjectsView() {
                           onFilterChange={handleFilterChange}
                         />
                       </div>
-                      <ProjectsOverviewChatToggle
-                        active={selectionAgentContext !== null}
-                        onToggle={() =>
-                          setSelectionAgentContext((context) =>
-                            context
-                              ? null
-                              : buildProjectsOverviewAgentContext(
-                                  projectsSectionTitle(filter),
-                                ),
-                          )
-                        }
-                        sectionTitle={projectsSectionTitle(filter)}
-                      />
                     </div>
                     <div
                       className={
-                        filter === "all" ? "mx-auto w-full max-w-xl" : "w-full"
+                        filter === "all" ? "mx-auto w-full max-w-2xl" : "w-full"
                       }
                     >
                       {filter === "all" ? (
@@ -862,14 +864,16 @@ export function ProjectsView() {
                       ) : (
                         <>
                           <ProjectSectionHeader
-                            className="-mx-4"
+                            className="mb-2 rounded-xl bg-muted/40"
                             icon={projectsSectionIcon(filter)}
                             testId="projects-page-header"
                             title={projectsSectionTitle(filter)}
+                            trailing={
+                              filter === "channels" ? undefined : listHeaderBar
+                            }
                           />
                           <section>
                             <div className="space-y-3">
-                              {filter === "channels" ? null : listHeaderBar}
                               {filter === "prs" ? (
                                 <ProjectsPullRequestsList
                                   embedded={viewMode === "list"}
@@ -928,21 +932,29 @@ export function ProjectsView() {
                 </div>
               </div>
             </div>
-            {selectionAgentContext && !isNarrowProjectsLayout ? (
-              <ProjectAgentChatPanel
-                canResetWidth={overviewAgentPanelWidth.canReset}
-                context={selectionAgentContext}
-                onClose={() => setSelectionAgentContext(null)}
-                onResetWidth={overviewAgentPanelWidth.onResetWidth}
-                onResizeStart={overviewAgentPanelWidth.onResizeStart}
-                sharedHeaderBackdrop
-                widthPx={overviewAgentPanelWidth.widthPx}
-              />
-            ) : null}
           </div>
         </div>
         <ProjectContextRail
-          open={overviewDetached}
+          open={overviewChatOpen}
+          panelWidthPx={overviewAgentPanelWidth.widthPx}
+          resizing={overviewAgentPanelWidth.isResizing}
+          testId="projects-overview-agent-rail"
+        >
+          {selectionAgentContext ? (
+            <ProjectAgentChatPanel
+              canResetWidth={overviewAgentPanelWidth.canReset}
+              constrainToAvailableSpace={false}
+              context={selectionAgentContext}
+              detached
+              onClose={() => setSelectionAgentContext(null)}
+              onResetWidth={overviewAgentPanelWidth.onResetWidth}
+              onResizeStart={overviewAgentPanelWidth.onResizeStart}
+              widthPx={overviewAgentPanelWidth.widthPx}
+            />
+          ) : null}
+        </ProjectContextRail>
+        <ProjectContextRail
+          open={overviewContextOpen}
           panelWidthPx={PROJECT_CONTEXT_PANEL_DEFAULT_WIDTH_PX}
           testId="projects-overview-context-rail"
         >

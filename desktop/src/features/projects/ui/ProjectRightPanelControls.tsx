@@ -28,7 +28,7 @@ export function ProjectChatPanelControl({
     <Button
       aria-label={chatOpen ? "Hide project chat" : "Show project chat"}
       aria-pressed={chatOpen}
-      className="h-7 w-7 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+      className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
       data-testid="project-right-panel-chat-tab"
       onClick={() => {
         if (chatOpen) {
@@ -95,6 +95,13 @@ export function ProjectRightPanelControls({
           open={terminalOpen}
         />
       </Button>
+      <ProjectChatPanelControl
+        collapsed={collapsed}
+        mode={mode}
+        onCollapse={onCollapse}
+        onExpand={onExpand}
+        onModeChange={onModeChange}
+      />
       <Button
         aria-label={
           repositoryOpen ? "Hide project context" : "Show project context"

@@ -1,6 +1,7 @@
 import {
   CircleAlert,
   CircleDot,
+  FolderGit2,
   Folders,
   GitCommit,
   GitPullRequest,
@@ -19,10 +20,8 @@ import type {
   ProjectActivitySummary,
 } from "@/features/projects/hooks";
 import {
-  formatExactTimestamp,
   getProjectUpdatedAt,
   listRowDescription,
-  relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
@@ -53,39 +52,6 @@ import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectEntityListRow } from "./ProjectEntityListRow";
 import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
-
-function ProjectUpdatedLabel({
-  profiles,
-  project,
-  summary,
-}: {
-  profiles?: UserProfileLookup;
-  project: Project;
-  summary: ProjectActivitySummary | undefined;
-}) {
-  const updatedAt = getProjectUpdatedAt(project, summary);
-  const latestCommit = summary?.latestCommit;
-  const authorLabel = latestCommit?.author
-    ? resolveUserLabel({ profiles, pubkey: latestCommit.author })
-    : null;
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
-          {relativeTime(updatedAt)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-96 break-words">
-        {latestCommit
-          ? `${latestCommit.title || latestCommit.commit.slice(0, 7)}${
-              authorLabel ? ` · ${authorLabel}` : ""
-            } · ${formatExactTimestamp(latestCommit.createdAt)}`
-          : `Created ${formatExactTimestamp(project.createdAt)}`}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
 
 export function ProjectPeopleStack({
   pubkeys,
@@ -172,8 +138,7 @@ const PROJECT_STAT_ITEMS = [
 ] as const;
 
 /**
- * Textual commit/PR/issue counts. Repository lists show these next to the
- * activity bar; project lists show the bar alone (counts via its tooltips).
+ * Textual commit/PR/issue counts for project and repository cards.
  */
 export function ProjectStatsRow({
   summary,
@@ -242,7 +207,10 @@ export function ProjectActivityBar({
                 <Tooltip key={item.barClass}>
                   <TooltipTrigger asChild>
                     <div
+                      aria-label={`${item.count} ${item.text}`}
                       className={cn("h-full", item.barClass)}
+                      data-testid="project-activity-segment"
+                      role="img"
                       style={{ width: `${(item.count / total) * 100}%` }}
                     />
                   </TooltipTrigger>
@@ -330,7 +298,7 @@ function RepositoryUnavailableIndicator({
       </TooltipTrigger>
       <TooltipContent className="max-w-64">
         <p className="font-medium">{label}</p>
-        <p className="text-muted-foreground">{description}</p>
+        <p className="text-secondary-foreground">{description}</p>
       </TooltipContent>
     </Tooltip>
   );
@@ -537,12 +505,7 @@ export function ProjectGridCard({
               </div>
             </div>
           </div>
-          <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
-            <ProjectUpdatedLabel
-              profiles={profiles}
-              project={project}
-              summary={summary}
-            />
+          <div className="pointer-events-auto relative z-10 shrink-0">
             <ProjectActionsMenu
               canDelete={canDelete}
               disabled={deleteDisabled}
@@ -604,14 +567,19 @@ export function ProjectListRow({
   });
   return (
     <ProjectEntityListRow
-      affiliation={`${repositoryCount} ${
+      affiliation={
+        <span className="flex items-center justify-end gap-1">
+          <FolderGit2 className="h-3.5 w-3.5" />
+          <span>{repositoryCount}</span>
+        </span>
+      }
+      affiliationClassName="w-auto"
+      affiliationTestId="projects-row-context"
+      affiliationTitle={`${repositoryCount} ${
         repositoryCount === 1 ? "repository" : "repositories"
       }`}
-      affiliationTestId="projects-row-context"
       dateSeconds={getProjectUpdatedAt(project, summary)}
       dateTestId="projects-row-date"
-      description={listRowDescription(project.description, project.name)}
-      descriptionTestId="projects-row-description"
       icon={<Folders className="h-3.5 w-3.5 text-muted-foreground/70" />}
       onClick={() => onOpen(project)}
       people={people}
@@ -635,6 +603,8 @@ export function ProjectListRow({
         </span>
       }
       titleAttr={project.name}
+      titleSecondary={listRowDescription(project.description, project.name)}
+      titleSecondaryTestId="projects-row-description"
       trailing={
         <ProjectActionsMenu
           canDelete={canDelete}

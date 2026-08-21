@@ -24,10 +24,12 @@ export function mapMentionCandidateToSuggestion(opts: {
   label: string;
   channelType?: ChannelType | null;
   currentPubkey?: string | null;
+  agentProvenanceReady: boolean;
   ownerProfiles?: UserProfileLookup;
   profiles?: UserProfileLookup;
 }): MentionSuggestion {
   const {
+    agentProvenanceReady,
     candidate,
     channelType,
     currentPubkey,
@@ -54,7 +56,7 @@ export function mapMentionCandidateToSuggestion(opts: {
       null,
     isAgent: candidate.isAgent,
     agentProvenance:
-      candidate.kind === "identity" && candidate.isAgent
+      agentProvenanceReady && candidate.kind === "identity" && candidate.isAgent
         ? candidate.isManagedAgent
           ? "managed-here"
           : candidate.ownerPubkey &&

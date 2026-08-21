@@ -1,5 +1,6 @@
 import * as React from "react";
 import { AtSign, Bot, ChevronRight, Users } from "lucide-react";
+import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { motion } from "motion/react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
@@ -47,14 +48,11 @@ type MentionAutocompleteProps = {
   position?: "above" | "below";
 };
 
-export function mentionAgentLabel(
+export function showMentionAgentProvenanceMarker(
   suggestion: MentionSuggestion,
   hasNameCollision: boolean,
-) {
-  if (!hasNameCollision || !suggestion.agentProvenance) return "agent";
-  return suggestion.agentProvenance === "managed-here"
-    ? "agent · managed here"
-    : "agent · managed elsewhere";
+): boolean {
+  return hasNameCollision && suggestion.agentProvenance === "managed-elsewhere";
 }
 
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
@@ -249,7 +247,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               suggestion.displayName;
             const hasNameCollision =
               (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
-            const agentLabel = mentionAgentLabel(suggestion, hasNameCollision);
+            const showAgentProvenanceMarker = showMentionAgentProvenanceMarker(
+              suggestion,
+              hasNameCollision,
+            );
+            const ownerLabel =
+              hasNameCollision && suggestion.agentProvenance
+                ? null
+                : suggestion.ownerLabel;
             const collisionNpub =
               hasNameCollision && suggestion.pubkey
                 ? safeNpub(suggestion.pubkey)
@@ -258,7 +263,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               suggestion.kind === "team" ||
                 suggestion.isAgent ||
                 suggestion.role ||
-                suggestion.ownerLabel ||
+                ownerLabel ||
                 suggestion.notInChannel,
             );
             const canAlwaysAddress = Boolean(
@@ -336,7 +341,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                               className="h-3.5 w-3.5"
                               data-testid="mention-agent-icon"
                             />
-                            {agentLabel}
+                            agent
+                            {showAgentProvenanceMarker ? (
+                              <OtherSetupAgentMarker testId="mention-agent-provenance" />
+                            ) : null}
                           </span>
                         ) : suggestion.role ? (
                           <Badge
@@ -346,21 +354,21 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                             {suggestion.role}
                           </Badge>
                         ) : null}
-                        {suggestion.ownerLabel || suggestion.notInChannel ? (
+                        {ownerLabel || suggestion.notInChannel ? (
                           <span
                             className="min-w-0 truncate"
                             title={
-                              suggestion.ownerLabel && suggestion.notInChannel
-                                ? `managed by ${suggestion.ownerLabel} · not in channel`
-                                : suggestion.ownerLabel
-                                  ? `managed by ${suggestion.ownerLabel}`
+                              ownerLabel && suggestion.notInChannel
+                                ? `managed by ${ownerLabel} · not in channel`
+                                : ownerLabel
+                                  ? `managed by ${ownerLabel}`
                                   : "not in channel"
                             }
                           >
-                            {suggestion.ownerLabel && suggestion.notInChannel
-                              ? `managed by ${suggestion.ownerLabel} · not in channel`
-                              : suggestion.ownerLabel
-                                ? `managed by ${suggestion.ownerLabel}`
+                            {ownerLabel && suggestion.notInChannel
+                              ? `managed by ${ownerLabel} · not in channel`
+                              : ownerLabel
+                                ? `managed by ${ownerLabel}`
                                 : "not in channel"}
                           </span>
                         ) : null}
