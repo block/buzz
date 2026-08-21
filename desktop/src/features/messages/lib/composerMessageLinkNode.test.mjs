@@ -21,6 +21,8 @@ const OWNER = "a".repeat(64);
 const REPO_HREF = `buzz://repo?owner=${OWNER}&d=buzz-world`;
 const ISSUE_ID = "b".repeat(64);
 const ISSUE_HREF = `buzz://issue?id=${ISSUE_ID}&owner=${OWNER}&d=buzz-world`;
+const PR_ID = "c".repeat(64);
+const PR_HREF = `buzz://pr?id=${PR_ID}&owner=${OWNER}&d=buzz-world`;
 
 test("resolves a composer preview and canonicalizes the underlying href", () => {
   assert.deepEqual(
@@ -205,7 +207,9 @@ test("composer node uses the sent-message chip presentation", () => {
   assert.match(rendered[1].class, /inline-chip-with-icon/);
   assert.match(rendered[1].class, /inline-chip-icon-message/);
   assert.equal(rendered[1]["data-buzz-link"], "");
-  assert.equal(rendered[2], "general · root-eve");
+  // Channel label only — no event hash, so the chip does not change width when
+  // the draft is sent and the rendered chip resolves its metadata.
+  assert.equal(rendered[2], "general");
 });
 
 test("composer node renders channel and entity chip presentations", () => {
@@ -233,7 +237,14 @@ test("composer node renders channel and entity chip presentations", () => {
   const issue = render(ISSUE_HREF);
   assert.equal(issue[1]["data-buzz-link-kind"], "issue");
   assert.match(issue[1].class, /inline-chip-icon-issue/);
-  assert.equal(issue[2], "buzz-world · bbbbbbbb");
+  // Repository name only — the rendered chip never widens into the issue
+  // title, so the composer must not widen into the event hash either.
+  assert.equal(issue[2], "buzz-world");
+
+  const pullRequest = render(PR_HREF);
+  assert.equal(pullRequest[1]["data-buzz-link-kind"], "pr");
+  assert.match(pullRequest[1].class, /inline-chip-icon-pr/);
+  assert.equal(pullRequest[2], "buzz-world");
 });
 
 test("markdown rendering stores identity in attributes, not visible id text", () => {

@@ -69,6 +69,7 @@ export type StepFormState = {
   duration?: string;
   text?: string;
   channel?: string;
+  replyInThread?: boolean;
   to?: string;
   url?: string;
   method?: string;
@@ -165,6 +166,7 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
     case "send_message":
       if (step.text) fields.text = step.text;
       if (step.channel) fields.channel = step.channel;
+      if (step.replyInThread) fields.reply_in_thread = true;
       break;
     case "send_dm":
       if (step.to) fields.to = step.to;
@@ -192,6 +194,28 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
       break;
   }
   return fields;
+}
+
+export function isThreadReplyEligibleTrigger(trigger: TriggerType): boolean {
+  return trigger !== "webhook" && trigger !== "schedule";
+}
+
+export function withTriggerType(
+  state: WorkflowFormState,
+  triggerType: TriggerType,
+): WorkflowFormState {
+  return {
+    ...state,
+    trigger: { on: triggerType },
+    // Clear threaded-reply state on every step, not just send_message ones:
+    // a hidden `replyInThread` on a step whose action was changed away from
+    // send_message would otherwise resurrect when the action is switched back.
+    steps: isThreadReplyEligibleTrigger(triggerType)
+      ? state.steps
+      : state.steps.map((step) =>
+          step.replyInThread ? { ...step, replyInThread: false } : step,
+        ),
+  };
 }
 
 export function formStateToYaml(state: WorkflowFormState): string {
@@ -268,7 +292,12 @@ const TRIGGER_KEYS: Record<TriggerType, ReadonlySet<string>> = {
 const COMMON_STEP_KEYS = ["id", "name", "action", "if", "timeout_secs"];
 const ACTION_STEP_KEYS: Record<ActionType, ReadonlySet<string>> = {
   delay: new Set([...COMMON_STEP_KEYS, "duration"]),
-  send_message: new Set([...COMMON_STEP_KEYS, "text", "channel"]),
+  send_message: new Set([
+    ...COMMON_STEP_KEYS,
+    "text",
+    "channel",
+    "reply_in_thread",
+  ]),
   send_dm: new Set([...COMMON_STEP_KEYS, "to", "text"]),
   call_webhook: new Set([
     ...COMMON_STEP_KEYS,
@@ -568,6 +597,21 @@ export function yamlToFormState(
         }
       }
 
+      if (step.reply_in_thread !== undefined) {
+        if (typeof step.reply_in_thread !== "boolean") {
+          return {
+            ok: false,
+            error: `Step ${number} reply_in_thread must be a boolean — use the YAML editor`,
+          };
+        }
+        if (step.reply_in_thread && !isThreadReplyEligibleTrigger(triggerOn)) {
+          return {
+            ok: false,
+            error: `reply_in_thread is not supported for ${triggerOn} triggers — use the YAML editor`,
+          };
+        }
+      }
+
       steps.push({
         id: step.id,
         name: step.name as string | undefined,
@@ -579,6 +623,7 @@ export function yamlToFormState(
         duration: step.duration as string | undefined,
         text: step.text as string | undefined,
         channel: step.channel as string | undefined,
+        replyInThread: step.reply_in_thread === true,
         to: step.to as string | undefined,
         url: step.url as string | undefined,
         method: step.method as string | undefined,

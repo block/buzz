@@ -11,11 +11,89 @@ import {
 } from "@/features/messages/lib/channelLink";
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import type { Channel } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/shared/ui/tooltip";
 
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
 import { MessageLinkPill } from "./MessageLinkPill";
 import { useMarkdownRuntime } from "./runtimeContext";
+import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
 import { getReactNodeText } from "./utils";
+
+function formatChannelActivity(timestamp: string): string | null {
+  const activityAt = Date.parse(timestamp);
+  if (!Number.isFinite(activityAt)) return null;
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor((Date.now() - activityAt) / 60_000),
+  );
+  if (elapsedMinutes < 1) return "Active just now";
+  if (elapsedMinutes < 60) return `Active ${elapsedMinutes}m ago`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `Active ${elapsedHours}h ago`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 7) return `Active ${elapsedDays}d ago`;
+  return `Active ${Math.floor(elapsedDays / 7)}w ago`;
+}
+
+export function channelTooltipFooter(channel: Channel) {
+  const details = [
+    channel.visibility === "private" ? "Private channel" : "Public channel",
+    channel.channelType === "forum" ? "Forum" : null,
+    channel.archivedAt ? "Archived" : null,
+    channel.lastMessageAt ? formatChannelActivity(channel.lastMessageAt) : null,
+  ];
+  return details.filter(Boolean).join(" · ");
+}
+
+function ChannelMetadataTooltip({
+  channel,
+  children,
+}: {
+  channel: Channel | undefined;
+  children: React.ReactElement;
+}) {
+  const { contentRef, onPointerMove } = useInlineTooltipPosition();
+  const description = channel?.description?.trim();
+  if (!channel) return children;
+  return (
+    <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+      <Tooltip>
+        <TooltipTrigger asChild onPointerMove={onPointerMove}>
+          {children}
+        </TooltipTrigger>
+        <TooltipContent
+          ref={contentRef}
+          className="max-w-72 p-2 text-left"
+          side="top"
+        >
+          {description ? (
+            <span
+              className="line-clamp-2 [overflow-wrap:anywhere] whitespace-normal"
+              data-buzz-tooltip-metadata-content=""
+            >
+              {description}
+            </span>
+          ) : null}
+          <span
+            className={cn(
+              "line-clamp-2 max-w-full [overflow-wrap:anywhere] whitespace-normal text-2xs text-secondary-foreground/80",
+              description && "mt-1",
+            )}
+            data-buzz-tooltip-metadata-type=""
+          >
+            {channelTooltipFooter(channel)}
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 type ChannelPermalinkChipProps = {
   channelId: string;
@@ -31,28 +109,33 @@ function ChannelPermalinkChipContents({
   channelId,
   dataChannelDeepLink,
   href,
+  channel,
   interactive,
   label,
   onOpenChannel,
   openable = true,
 }: Omit<ChannelPermalinkChipProps, "channels" | "resolveChannelReference"> & {
+  channel?: Channel;
   label: string;
   openable?: boolean;
 }) {
   return (
-    <BuzzLinkChip
-      data-channel-deep-link={dataChannelDeepLink}
-      href={href}
-      icon="channel"
-      title={href}
-      aria-label={openable ? `Open channel ${label}` : `Channel ${label}`}
-      interactive={openable && interactive}
-      onOpenLink={() => {
-        if (openable) onOpenChannel(channelId);
-      }}
-    >
-      {label}
-    </BuzzLinkChip>
+    <ChannelMetadataTooltip channel={channel}>
+      <BuzzLinkChip
+        data-channel-deep-link={dataChannelDeepLink}
+        href={href}
+        icon="channel"
+        title={href}
+        aria-label={openable ? `Open channel ${label}` : `Channel ${label}`}
+        interactive={openable && interactive}
+        onOpenLink={() => {
+          if (openable) onOpenChannel(channelId);
+        }}
+        wrapping
+      >
+        {label}
+      </BuzzLinkChip>
+    </ChannelMetadataTooltip>
   );
 }
 
@@ -63,6 +146,7 @@ function ResolvedChannelPermalinkChip(props: ChannelPermalinkChipProps) {
   return (
     <ChannelPermalinkChipContents
       {...props}
+      channel={openable ? channel : undefined}
       label={label}
       openable={openable}
     />
@@ -193,6 +277,7 @@ function ChannelPermalinkChip(props: ChannelPermalinkChipProps) {
     return (
       <ChannelPermalinkChipContents
         {...props}
+        channel={known}
         label={known?.name ?? props.channelId.slice(0, 8)}
       />
     );
@@ -241,6 +326,7 @@ export function ChannelDeepLinkAnchor({
         href={href}
         interactive={interactive}
         link={messageLink}
+        onOpenChannel={onOpenChannel}
         onOpenMessageLink={onOpenMessageLink}
         resolveChannelReference={resolveChannelReferences}
       />
@@ -288,6 +374,7 @@ export function MarkdownChannelDeepLink({
         href={href}
         interactive={interactive}
         link={messageLink}
+        onOpenChannel={onOpenChannel}
         onOpenMessageLink={onOpenMessageLink}
         resolveChannelReference={resolveChannelReferences}
       />
@@ -320,20 +407,23 @@ function ChannelReferenceChip({
   onOpenChannel,
 }: ChannelReferenceChipProps) {
   return (
-    <BuzzLinkChip
-      data-channel-link=""
-      href={channel ? buildChannelLink(channel.id) : undefined}
-      icon="channel"
-      aria-label={
-        channel ? `Open channel ${channelName}` : `Channel ${channelName}`
-      }
-      interactive={Boolean(channel) && interactive}
-      onOpenLink={() => {
-        if (channel) onOpenChannel(channel.id);
-      }}
-    >
-      {channelName}
-    </BuzzLinkChip>
+    <ChannelMetadataTooltip channel={channel}>
+      <BuzzLinkChip
+        data-channel-link=""
+        href={channel ? buildChannelLink(channel.id) : undefined}
+        icon="channel"
+        aria-label={
+          channel ? `Open channel ${channelName}` : `Channel ${channelName}`
+        }
+        interactive={Boolean(channel) && interactive}
+        onOpenLink={() => {
+          if (channel) onOpenChannel(channel.id);
+        }}
+        wrapping
+      >
+        {channelName}
+      </BuzzLinkChip>
+    </ChannelMetadataTooltip>
   );
 }
 

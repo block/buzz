@@ -863,12 +863,6 @@ export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite
   );
 }
 
-export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
-  return (
-    await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
-  ).map(fromRawAcpRuntimeCatalogEntry);
-}
-
 /** Input shape for creating or updating a custom harness. */
 export type HarnessDefinitionInput = {
   id: string;

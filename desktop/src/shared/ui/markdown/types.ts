@@ -29,6 +29,7 @@ export type MessageLinkPillProps = {
   href?: string;
   interactive: boolean;
   link: ParsedMessageLink;
+  onOpenChannel: (channelId: string) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
   threadExcerpt?: string | null;
   variant?: "default" | "sent-from-thread";

@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { WorkflowDurationField } from "./WorkflowDurationField";
@@ -10,6 +11,7 @@ import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEdit
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
 import {
+  isThreadReplyEligibleTrigger,
   supportsMessageTextCondition,
   type StepFormState,
   type TriggerType,
@@ -183,6 +185,21 @@ function StepConfigFields({
               ) : null}
             </div>
           )}
+          {isThreadReplyEligibleTrigger(triggerType) ? (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                checked={step.replyInThread === true}
+                disabled={disabled}
+                id={`${prefix}-reply-in-thread`}
+                onCheckedChange={(checked) =>
+                  onUpdate({ ...step, replyInThread: checked === true })
+                }
+              />
+              <label className="text-xs" htmlFor={`${prefix}-reply-in-thread`}>
+                Reply to triggering message in thread
+              </label>
+            </div>
+          ) : null}
         </div>
       );
     case "send_dm":
