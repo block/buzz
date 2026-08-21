@@ -50,6 +50,28 @@ test("limits opaque identifiers to equality and validates 64-char hex", () => {
   assert.equal(conditionValueError("trigger_message_id", MESSAGE_ID), null);
 });
 
+test("normalizes generated hex identifiers to lowercase", () => {
+  const uppercaseAuthor = "A".repeat(64);
+  const uppercaseMessageId = "B".repeat(64);
+  assert.equal(
+    buildConditionExpressions([
+      {
+        field: "trigger_author",
+        operator: "equals",
+        value: uppercaseAuthor,
+        webhookField: "",
+      },
+      {
+        field: "trigger_message_id",
+        operator: "not_equals",
+        value: uppercaseMessageId,
+        webhookField: "",
+      },
+    ]),
+    `trigger_author == "${AUTHOR}" && trigger_message_id != "${MESSAGE_ID}"`,
+  );
+});
+
 test("exposes only trigger-relevant local fields", () => {
   assert.deepEqual(
     conditionFieldsForTrigger("reaction_added").map(({ value }) => value),

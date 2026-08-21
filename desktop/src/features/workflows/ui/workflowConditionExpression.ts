@@ -100,7 +100,11 @@ export function buildConditionExpression(
   if (operator === "is_empty") return `str_len(${field}) == 0`;
   const value = condition.value.trim();
   if (!value || conditionValueError(field, value)) return null;
-  const quoted = `"${escapeEvalexprString(value)}"`;
+  const normalizedValue =
+    field === "trigger_author" || field.endsWith("_id")
+      ? value.toLowerCase()
+      : value;
+  const quoted = `"${escapeEvalexprString(normalizedValue)}"`;
   switch (operator) {
     case "contains":
       return `str_contains(${field}, ${quoted})`;
