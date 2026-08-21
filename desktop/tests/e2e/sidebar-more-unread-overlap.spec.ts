@@ -1,0 +1,91 @@
+/**
+ * Visual regression for the sidebar `MoreUnreadButton` (top variant)
+ * overlapping the macOS traffic-light region in the global top chrome.
+ *
+ * The old bug: `position="top"` anchored the pill at `top-0` inside a column
+ * starting at window y=0, so it sat inside the 40px chrome strip where the
+ * macOS traffic lights live on the native window.
+ *
+ * The current layout keeps the global top chrome in normal flow above the
+ * sidebar row, so `top-0` inside the sidebar starts below the traffic-light
+ * strip.
+ *
+ * This spec injects a synthetic pill into the live sidebar channel-content
+ * container (the same relative wrapper that owns the real top unread pill) and
+ * asserts the pill clears the pinned header.
+ */
+import { expect, test } from "@playwright/test";
+
+import { waitForAnimations } from "../helpers/animations";
+import { installMockBridge } from "../helpers/bridge";
+
+const TOP_CLASS = "top-0";
+
+const PILL_BASE =
+  "pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1";
+const PILL_INNER_HTML = `
+  <button
+    type="button"
+    class="pointer-events-auto inline-flex items-center gap-1 rounded-full bg-destructive px-2.5 py-0.5 text-xs font-medium text-destructive-foreground shadow-sm"
+  >
+    <span>↑ 12 new</span>
+  </button>
+`;
+
+async function injectSyntheticPill(
+  page: import("@playwright/test").Page,
+  topClass: string,
+  testId: string,
+) {
+  await page.evaluate(
+    ({ topClass, base, html, testId }) => {
+      const container = document.querySelector(
+        '[data-testid="sidebar-channel-content"]',
+      ) as HTMLElement | null;
+      if (!container) throw new Error("sidebar channel content not found");
+
+      // Remove any prior injection so retries start from a clean sidebar.
+      container
+        .querySelectorAll("[data-synthetic-more-unread]")
+        .forEach((el) => {
+          el.remove();
+        });
+
+      const pill = document.createElement("div");
+      pill.dataset.syntheticMoreUnread = "true";
+      pill.dataset.testid = testId;
+      pill.className = `${base} ${topClass}`;
+      pill.innerHTML = html;
+      container.appendChild(pill);
+    },
+    { topClass, base: PILL_BASE, html: PILL_INNER_HTML, testId },
+  );
+}
+
+test.describe("sidebar MoreUnreadButton top chrome overlap", () => {
+  test.beforeEach(async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+  });
+
+  test("top pill clears the pinned header", async ({ page }) => {
+    await injectSyntheticPill(page, TOP_CLASS, "synthetic-top");
+    const pill = page.getByTestId("synthetic-top");
+    const pinnedHeader = page.getByTestId("sidebar-pinned-header");
+    await expect(pill).toBeVisible();
+    await expect(pinnedHeader).toBeVisible();
+
+    const pillBox = await pill.boundingBox();
+    const pinnedHeaderBox = await pinnedHeader.boundingBox();
+    expect(pillBox).not.toBeNull();
+    expect(pinnedHeaderBox).not.toBeNull();
+    expect(pillBox?.y ?? Number.NaN).toBeGreaterThanOrEqual(
+      pinnedHeaderBox?.y == null || pinnedHeaderBox.height == null
+        ? Number.NaN
+        : pinnedHeaderBox.y + pinnedHeaderBox.height,
+    );
+
+    await waitForAnimations(page);
+  });
+});

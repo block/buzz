@@ -1,0 +1,1539 @@
+import { expect, test } from "@playwright/test";
+
+import { installMockBridge } from "../helpers/bridge";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
+
+const RELAY_URL = "ws://localhost:3000";
+const THEME_STORAGE_KEY = "buzz-theme";
+const OWNER_PUBKEY = "deadbeef".repeat(8);
+
+function snapshotKey(relayUrl: string) {
+  return `buzz-channels.v1:${relayUrl}:${OWNER_PUBKEY.toLowerCase()}`;
+}
+
+const COMMUNITY_A = {
+  id: "ws-a",
+  name: "Alpha",
+  relayUrl: RELAY_URL,
+  addedAt: "2026-01-01T00:00:00.000Z",
+};
+const COMMUNITY_B = {
+  id: "ws-b",
+  name: "Bravo",
+  relayUrl: "ws://localhost:3001",
+  addedAt: "2026-01-02T00:00:00.000Z",
+};
+
+async function expectContentSurfaceHorizontalGutters(
+  page: import("@playwright/test").Page,
+  expectedLeftGutter = 1,
+) {
+  const [mainInsetBox, contentBox] = await Promise.all([
+    page.locator("[data-buzz-glass-inset]").boundingBox(),
+    page.locator("[data-buzz-content-surface]").first().boundingBox(),
+  ]);
+  expect(mainInsetBox).not.toBeNull();
+  expect(contentBox).not.toBeNull();
+  const leftGutter = (contentBox?.x ?? 0) - (mainInsetBox?.x ?? 0);
+  const rightGutter =
+    (mainInsetBox?.x ?? 0) +
+    (mainInsetBox?.width ?? 0) -
+    ((contentBox?.x ?? 0) + (contentBox?.width ?? 0));
+  expect(Math.abs(leftGutter - expectedLeftGutter)).toBeLessThan(0.5);
+  expect(Math.abs(rightGutter - 8)).toBeLessThan(0.5);
+}
+
+async function seedCommunities(
+  page: import("@playwright/test").Page,
+  communities: Array<Record<string, unknown>>,
+  activeId: string,
+) {
+  await page.addInitScript(
+    ({ list, active }) => {
+      window.localStorage.setItem("buzz-communities", JSON.stringify(list));
+      window.localStorage.setItem("buzz-active-community-id", active);
+    },
+    { list: communities, active: activeId },
+  );
+}
+
+test.describe("community rail", () => {
+  test("shows the rail with multiple communities despite a stale opt-out", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, {
+      seedPreviewFeatures: false,
+      skipCommunitySeed: true,
+    });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((overridesKey) => {
+      window.localStorage.setItem(
+        overridesKey,
+        JSON.stringify({ workspaceRail: false }),
+      );
+    }, FEATURE_OVERRIDES_STORAGE_KEY);
+    await page.goto("/");
+
+    const rail = page.getByTestId("community-rail");
+    await expect(rail).toBeVisible();
+    await expect(page.getByTestId("app-sidebar-layer")).toHaveCSS(
+      "z-index",
+      "10",
+    );
+    await expect(page.getByTestId("app-sidebar-layer")).toHaveCSS(
+      "overflow",
+      "visible",
+    );
+    await expect(rail).toHaveCSS("z-index", "20");
+
+    const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    await expect(buttonA).toBeVisible();
+    await expect(buttonB).toBeVisible();
+
+    // The active community is marked semantically and with a persistent rail.
+    await expect(buttonA).toHaveAttribute("aria-current", "true");
+    await expect(buttonB).not.toHaveAttribute("aria-current", "true");
+    const activeIndicator = page.getByTestId(
+      `community-rail-active-${COMMUNITY_A.id}`,
+    );
+    await expect(activeIndicator).toBeVisible();
+    await expect(
+      page.getByTestId(`community-rail-active-${COMMUNITY_B.id}`),
+    ).toHaveCount(0);
+    await expect(activeIndicator).toHaveCSS("height", "20px");
+    await expect(activeIndicator).toHaveCSS("width", "4px");
+    await expect(
+      buttonA.locator(":scope > span:not([data-testid])").first(),
+    ).toHaveCSS("opacity", "1");
+    await expect(buttonB.locator(":scope > span").first()).toHaveCSS(
+      "opacity",
+      "1",
+    );
+    const [activeStyle, inactiveStyle] = await Promise.all(
+      [buttonA, buttonB].map((button) =>
+        button
+          .locator(":scope > span:not([data-testid])")
+          .first()
+          .evaluate((element) => {
+            const style = getComputedStyle(element);
+            return {
+              backgroundColor: style.backgroundColor,
+              borderRadius: style.borderRadius,
+              color: style.color,
+              outlineColor: style.outlineColor,
+              outlineStyle: style.outlineStyle,
+              outlineWidth: style.outlineWidth,
+            };
+          }),
+      ),
+    );
+    expect(activeStyle.backgroundColor).toBe(inactiveStyle.backgroundColor);
+    expect(activeStyle.borderRadius).toBe(inactiveStyle.borderRadius);
+    expect(activeStyle.borderRadius).toBe("12px");
+    expect(activeStyle.color).toBe(inactiveStyle.color);
+    expect(activeStyle.outlineColor).toBe(inactiveStyle.outlineColor);
+    expect(activeStyle.outlineStyle).toBe("solid");
+    expect(activeStyle.outlineWidth).toBe("2px");
+    expect(inactiveStyle.outlineStyle).toBe("solid");
+    expect(inactiveStyle.outlineWidth).toBe("2px");
+
+    const inactiveIcon = buttonB.locator(":scope > span").first();
+    await buttonB.hover();
+    await expect(inactiveIcon).toHaveCSS("outline-width", "2px");
+    const hoverStyle = await inactiveIcon.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderRadius: style.borderRadius,
+        color: style.color,
+        outlineStyle: style.outlineStyle,
+      };
+    });
+    expect(hoverStyle.backgroundColor).toBe(inactiveStyle.backgroundColor);
+    expect(hoverStyle.borderRadius).toBe(inactiveStyle.borderRadius);
+    expect(hoverStyle.color).toBe(inactiveStyle.color);
+    expect(hoverStyle.outlineStyle).toBe("solid");
+
+    // The add-community affordance lives at the bottom of the rail.
+    await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expectContentSurfaceHorizontalGutters(page);
+  });
+
+  test("restores pointer events after dismissing community settings", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const communityButton = page.getByTestId(
+      `community-rail-button-${COMMUNITY_A.id}`,
+    );
+    await communityButton.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toBeVisible();
+    await page.mouse.click(0, 0);
+
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toHaveCount(0);
+    await expect(page.locator("body")).not.toHaveCSS("pointer-events", "none");
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+  });
+
+  test("lets community admins open invite controls from the rail", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "admin",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    const railMenu = page.getByTestId(`community-rail-menu-${COMMUNITY_A.id}`);
+    await expect(railMenu.getByRole("separator")).toHaveCount(1);
+    await expect(railMenu.getByRole("menuitem")).toHaveText([
+      "Mark all as read",
+      "Copy community URL",
+      "Invite to community",
+      "Community settings",
+    ]);
+    await page.getByRole("menuitem", { name: "Invite to community" }).click();
+
+    await expect(page).toHaveURL(/#\/settings\?section=community-members$/);
+    await expect(page.getByTestId("settings-community-members")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Invites", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toHaveCount(0);
+    await expect(
+      page.getByTestId("community-invite-dialog-trigger"),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
+      0,
+    );
+    await page.getByTestId("community-invite-dialog-trigger").click();
+    await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
+    await expect(page.getByTestId("copy-invite-link")).toBeVisible();
+  });
+
+  test("hides rail invite controls from community members", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "member",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+
+    await expect(
+      page.getByRole("menuitem", { name: "Invite to community" }),
+    ).toHaveCount(0);
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toHaveCount(0);
+  });
+
+  test("shows active community actions instead of another switcher in the profile menu", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayMembershipEoseDelayMs: 30_000,
+        relayRequiresMembership: true,
+        relayRole: "admin",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    const communityTrigger = page.getByTestId("community-switcher");
+    const feedback = page.getByTestId("profile-popover-send-feedback");
+    const settings = page.getByTestId("profile-popover-settings");
+    const communityBox = await communityTrigger.boundingBox();
+    const feedbackBox = await feedback.boundingBox();
+    const settingsBox = await settings.boundingBox();
+    expect(communityBox).not.toBeNull();
+    expect(feedbackBox).not.toBeNull();
+    expect(settingsBox).not.toBeNull();
+    expect(communityBox?.y).toBeLessThan(feedbackBox?.y ?? 0);
+    expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await communityTrigger.evaluate((trigger) => {
+      trigger.addEventListener(
+        "mouseenter",
+        () => {
+          trigger.dataset.hoverStartedAt = String(performance.now());
+        },
+        { once: true },
+      );
+      trigger.addEventListener("mouseleave", () => {
+        trigger.dataset.leftAt = String(performance.now());
+      });
+      const observer = new MutationObserver((records) => {
+        if (
+          trigger.getAttribute("aria-expanded") === "true" &&
+          !trigger.dataset.expandedAt
+        ) {
+          trigger.dataset.expandedAt = String(performance.now());
+        }
+        if (
+          records.some(
+            (record) =>
+              record.attributeName === "aria-expanded" &&
+              record.oldValue === "true",
+          )
+        ) {
+          trigger.dataset.closedAfterOpening = "true";
+        }
+      });
+      observer.observe(trigger, {
+        attributeFilter: ["aria-expanded"],
+        attributeOldValue: true,
+        attributes: true,
+      });
+    });
+    await communityTrigger.hover();
+    await expect(menu).toBeVisible({ timeout: 700 });
+    const openDelayMs = await communityTrigger.evaluate((trigger) => {
+      const hoverStartedAt = Number(trigger.dataset.hoverStartedAt);
+      const expandedAt = Number(trigger.dataset.expandedAt);
+      if (!Number.isFinite(hoverStartedAt) || !Number.isFinite(expandedAt)) {
+        throw new Error("Community actions open timing was not recorded");
+      }
+      return expandedAt - hoverStartedAt;
+    });
+    expect(openDelayMs).toBeGreaterThanOrEqual(40);
+    expect(openDelayMs).toBeLessThan(300);
+
+    const openTriggerBox = await communityTrigger.boundingBox();
+    const menuBox = await menu.boundingBox();
+    expect(openTriggerBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    if (!openTriggerBox || !menuBox) {
+      throw new Error("Community actions geometry unavailable");
+    }
+    const triggerExitX = openTriggerBox.x + openTriggerBox.width - 1;
+    const triggerExitY = Math.min(
+      openTriggerBox.y + openTriggerBox.height - 4,
+      menuBox.y + menuBox.height - 4,
+    );
+    await page.mouse.move(triggerExitX, triggerExitY);
+    await page.mouse.move(menuBox.x + 8, menuBox.y - 8);
+    await page.waitForTimeout(80);
+    await page.mouse.move(menuBox.x + 8, menuBox.y + 8);
+    const bridgeDurationMs = await communityTrigger.evaluate((trigger) => {
+      const leftAt = Number(trigger.dataset.leftAt);
+      if (!Number.isFinite(leftAt)) {
+        throw new Error(
+          "Community actions trigger exit timing was not recorded",
+        );
+      }
+      return performance.now() - leftAt;
+    });
+    expect(bridgeDurationMs).toBeGreaterThanOrEqual(60);
+    expect(bridgeDurationMs).toBeLessThan(140);
+    await page.waitForTimeout(180);
+    await expect(menu).toBeVisible();
+    await expect(communityTrigger).not.toHaveAttribute(
+      "data-closed-after-opening",
+      "true",
+    );
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).not.toBeFocused();
+    await expect(
+      menu.getByRole("menuitem", { name: "Invite to community" }),
+    ).toBeVisible({ timeout: 1_000 });
+    await expect(
+      menu.getByRole("menuitem", { name: "Community settings" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Leave community" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toBeVisible();
+    await expect(menu.getByRole("separator")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem", { name: "Alpha" })).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", { name: "Bravo" })).toHaveCount(0);
+
+    await menu.getByRole("menuitem", { name: "Invite to community" }).click();
+    await expect(page).toHaveURL(/#\/settings\?section=community-members$/);
+  });
+
+  test("keeps profile community actions available to members without invite access", async ({
+    page,
+  }) => {
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"], {
+        origin: "http://127.0.0.1:4173",
+      });
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "member",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await expect(
+      menu.getByRole("menuitem", { name: "Invite to community" }),
+    ).toHaveCount(0);
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toBeVisible();
+
+    await menu.getByRole("menuitem", { name: "Copy community URL" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          return (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "copy_text_to_clipboard",
+          )?.payload;
+        }),
+      )
+      .toEqual({ text: COMMUNITY_A.relayUrl });
+
+    await page.getByTestId("community-switcher").click();
+    await menu.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Leave Community" }),
+    ).toHaveCount(0);
+  });
+
+  test("switches the active community on click", async ({ page }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+
+    await page.goto("/");
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    // Switching persists the newly active community id (the app then remounts
+    // against that relay via the existing community-init path).
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+  });
+
+  test("community switch cancels a send after its link preview settles", async ({
+    page,
+  }) => {
+    const agentPubkey =
+      "ee00000000000000000000000000000000000000000000000000000000000001";
+    await installMockBridge(
+      page,
+      {
+        addChannelMembersDelayMs: 10_000,
+        managedAgents: [
+          {
+            pubkey: agentPubkey,
+            name: "SlowBot",
+            status: "running",
+          },
+        ],
+        linkPreviewMetadata: {
+          title: "Ready preview",
+          siteName: "GitHub",
+          description: "Must not cross community boundaries.",
+          imageDataUrl: null,
+          imageDomain: null,
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    const previewUrl =
+      "https://github.com/block/buzz/pull/5697?community=reset";
+    await input.fill("@SlowBot");
+    await expect(page.getByTestId("mention-autocomplete")).toBeVisible();
+    await input.press("Enter");
+    await page.keyboard.type(` ${previewUrl}`);
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "add_channel_members",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    await page.waitForTimeout(250);
+
+    const publications = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ),
+    );
+    expect(publications).toHaveLength(0);
+    await expect(page.getByTestId("message-input")).toHaveText("");
+  });
+
+  test("community switch stops preview media before it reaches the new community", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewMetadata: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Must not upload after reset.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?media=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "fetch_link_preview_metadata",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?.() ?? 0,
+      ),
+    ).toBeGreaterThan(0);
+    await page.waitForTimeout(250);
+
+    const uploadCalls = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "upload_media_bytes",
+      ),
+    );
+    expect(uploadCalls).toHaveLength(0);
+  });
+
+  test("community switch cancellation wins before native upload registration", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewUploadRegistration: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Cancellation must survive native registration.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?native=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "upload_media_bytes",
+            ).length,
+        ),
+      )
+      .toBe(2);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "cancel_media_upload",
+            ).length,
+        ),
+      )
+      .toBe(2);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?.() ?? 0,
+      ),
+    ).toBe(2);
+    await page.waitForTimeout(250);
+
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ ?? 0,
+      ),
+    ).toBe(0);
+  });
+
+  test("restores the last Home or channel destination per community", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const generalUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+
+    await page.getByTestId("channel-random").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const randomUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(randomUrl);
+
+    await page.getByRole("button", { name: "Inbox" }).click();
+    await expect(page).toHaveURL(/#\/$/);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+  });
+
+  test("enters a remembered channel before live validation completes", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    const rememberedChannelId = await page.evaluate(
+      ({ communityId, sourceSnapshotKey, targetSnapshotKey }) => {
+        const source = window.localStorage.getItem(sourceSnapshotKey);
+        if (!source) throw new Error("missing source channel snapshot");
+        const snapshot = JSON.parse(source) as {
+          channels: Array<{ id: string; name: string }>;
+        };
+        const generalChannel = snapshot.channels.find(
+          (channel) => channel.name === "general",
+        );
+        if (!generalChannel)
+          throw new Error("missing general channel snapshot");
+        window.localStorage.setItem(targetSnapshotKey, source);
+        window.localStorage.setItem(
+          "buzz-community-destinations",
+          JSON.stringify({
+            [communityId]: {
+              kind: "channel",
+              channelId: generalChannel.id,
+            },
+          }),
+        );
+        return generalChannel.id;
+      },
+      {
+        communityId: COMMUNITY_B.id,
+        sourceSnapshotKey: snapshotKey(COMMUNITY_A.relayUrl),
+        targetSnapshotKey: snapshotKey(COMMUNITY_B.relayUrl),
+      },
+    );
+
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & {
+        __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
+      };
+      if (!testWindow.__BUZZ_E2E__) {
+        throw new Error("missing E2E config");
+      }
+      testWindow.__BUZZ_E2E__.mock = {
+        ...testWindow.__BUZZ_E2E__.mock,
+        channelsReadDelayMs: 800,
+      };
+    });
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).toHaveURL(
+      new RegExp(`#/channels/${rememberedChannelId}$`),
+      { timeout: 700 },
+    );
+    await expect(page.getByTestId("message-timeline")).toBeVisible({
+      timeout: 700,
+    });
+  });
+
+  test("clears a remembered channel that is unavailable after switching", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "missing-channel" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+
+    await page.goto("/");
+    const sourceSnapshotKey = snapshotKey(COMMUNITY_A.relayUrl);
+    const targetSnapshotKey = snapshotKey(COMMUNITY_B.relayUrl);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (key) => window.localStorage.getItem(key),
+          sourceSnapshotKey,
+        ),
+      )
+      .not.toBeNull();
+    await page.evaluate(
+      ({ sourceKey, targetKey }) => {
+        const source = window.localStorage.getItem(sourceKey);
+        if (!source) throw new Error("missing source channel snapshot");
+        const snapshot = JSON.parse(source);
+        snapshot.channels = snapshot.channels.map(
+          (channel: Record<string, unknown>, index: number) =>
+            index === 0 ? { ...channel, id: "missing-channel" } : channel,
+        );
+        window.localStorage.setItem(targetKey, JSON.stringify(snapshot));
+      },
+      { sourceKey: sourceSnapshotKey, targetKey: targetSnapshotKey },
+    );
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          if (!raw) return null;
+          return JSON.parse(raw)[communityId];
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "home" });
+  });
+
+  test("does not repair a remembered channel until live validation succeeds", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    const sourceSnapshotKey = snapshotKey(COMMUNITY_A.relayUrl);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (key) => window.localStorage.getItem(key),
+          sourceSnapshotKey,
+        ),
+      )
+      .not.toBeNull();
+    expect(
+      await page.evaluate(async () => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+          __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
+          __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+          ) => Promise<unknown>;
+        };
+        const deferNext = testWindow.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
+        const release = testWindow.__BUZZ_E2E_RELEASE_CHANNELS_READ__;
+        const invoke = testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+        if (!deferNext || !release || !invoke) {
+          throw new Error("missing channel-read latch seam");
+        }
+        deferNext();
+        const released = release();
+        await invoke("get_channels");
+        return {
+          released,
+          pending: testWindow.__BUZZ_E2E_CHANNELS_READ_PENDING__,
+        };
+      }),
+    ).toEqual({ released: 0, pending: 0 });
+    await page.evaluate(
+      ({ sourceKey, targetKey }) => {
+        const source = window.localStorage.getItem(sourceKey);
+        if (!source) throw new Error("missing source channel snapshot");
+        const snapshot = JSON.parse(source);
+        snapshot.channels = snapshot.channels.filter(
+          (channel: { id: string }) => channel.id !== "general",
+        );
+        window.localStorage.setItem(targetKey, JSON.stringify(snapshot));
+      },
+      {
+        sourceKey: sourceSnapshotKey,
+        targetKey: snapshotKey(COMMUNITY_B.relayUrl),
+      },
+    );
+    await page.evaluate(() => {
+      const config = (
+        window as Window & {
+          __BUZZ_E2E__?: {
+            mock?: {
+              channelsReadError?: string;
+              channelsReadErrors?: (string | null)[];
+            };
+          };
+        }
+      ).__BUZZ_E2E__;
+      if (!config) throw new Error("missing E2E config");
+      config.mock = {
+        ...config.mock,
+        channelsReadError: "temporary channel read failure",
+        channelsReadErrors: ["temporary channel read failure"],
+      };
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.__BUZZ_E2E__?.mock?.channelsReadErrors?.length ?? 0,
+        ),
+      )
+      .toBe(1);
+    await page.evaluate(() => {
+      const testWindow = window as Window & {
+        __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      };
+      const deferNextChannelsRead =
+        testWindow.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
+      const invalidateChannels = testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__;
+      if (!deferNextChannelsRead) {
+        throw new Error("missing channel-read defer seam");
+      }
+      if (!invalidateChannels) {
+        throw new Error("missing channel invalidation seam");
+      }
+      // Arm and trigger in one browser task so unrelated callbacks cannot
+      // claim the one-shot before the validation read starts.
+      deferNextChannelsRead();
+      void invalidateChannels();
+    });
+    await page.waitForFunction(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+          }
+        ).__BUZZ_E2E_CHANNELS_READ_PENDING__ === 1,
+    );
+    expect(
+      await page.evaluate(async () => {
+        const invoke = (
+          window as Window & {
+            __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+              command: string,
+            ) => Promise<unknown>;
+          }
+        ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+        if (!invoke) throw new Error("missing mock command seam");
+        try {
+          await invoke("get_channels");
+          return null;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }),
+    ).toBe("temporary channel read failure");
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+            }
+          ).__BUZZ_E2E_CHANNELS_READ_PENDING__,
+      ),
+    ).toBe(1);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).not.toHaveURL(/#\/channels\/general$/);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+
+    const released = await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
+          }
+        ).__BUZZ_E2E_RELEASE_CHANNELS_READ__?.() ?? 0,
+    );
+    expect(released).toBe(1);
+    expect(
+      await page.evaluate(async () => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+          ) => Promise<unknown>;
+          __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+        };
+        const invoke = testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+        if (!invoke) throw new Error("missing mock command seam");
+        let message: string | null = null;
+        try {
+          await invoke("get_channels");
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error);
+        }
+        return {
+          message,
+          pending: testWindow.__BUZZ_E2E_CHANNELS_READ_PENDING__,
+        };
+      }),
+    ).toEqual({ message: "temporary channel read failure", pending: 0 });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.__BUZZ_E2E__?.mock?.channelsReadErrors?.length ?? 0,
+        ),
+      )
+      .toBe(0);
+
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+    await page.evaluate(async () => {
+      const testWindow = window as Window & {
+        __BUZZ_E2E__?: {
+          mock?: { channelsReadError?: string };
+        };
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      };
+      const config = testWindow.__BUZZ_E2E__;
+      const invalidateChannels = testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__;
+      if (!config?.mock) throw new Error("missing E2E mock config");
+      if (!invalidateChannels) {
+        throw new Error("missing channel invalidation seam");
+      }
+      config.mock.channelsReadError = undefined;
+      await invalidateChannels();
+    });
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "home" });
+  });
+
+  test("does not restore a remembered destination on cold boot", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_A.id);
+
+    await page.goto("/");
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+  });
+
+  test("removing the active community restores the fallback destination", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await page.getByTestId("channel-random").click();
+    const randomUrl = page.url();
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await page.getByTestId("channel-general").click();
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    await expect(page).toHaveURL(randomUrl);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+  });
+
+  test("shows the quiet switch gate, not the boot splash, while switching", async ({
+    page,
+  }) => {
+    // Slow down apply_workspace so the loading phase is observable.
+    await installMockBridge(
+      page,
+      { applyCommunityDelayMs: 800 },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    // Cold boot still uses the full splash.
+    await expect(page.getByTestId("app-loading-gate")).toBeVisible();
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    await expect(buttonB).toBeVisible();
+
+    await buttonB.click();
+
+    // The switch renders the quiet gate; the "Setting up your community"
+    // splash must not reappear.
+    await expect(page.getByTestId("community-switch-gate")).toBeVisible();
+    await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+
+    // The app settles into the new community once apply completes.
+    await expect(buttonB).toHaveAttribute("aria-current", "true");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_COMMANDS__?.filter(
+              (command) => command === "clear_pending_navigation_deep_links",
+            ).length ?? 0,
+        ),
+      )
+      .toBe(1);
+  });
+
+  test("leaving the final community returns to setup without resetting identity", async ({
+    context,
+    page,
+  }) => {
+    await installMockBridge(page, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => typeof window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__),
+      )
+      .toBe("function");
+    const identityBefore = await page.evaluate(async () =>
+      window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+    );
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect(page.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect(page.getByTestId("community-choice-join")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.localStorage.getItem("buzz-communities")),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-community-discovery-after-leave"),
+        ),
+      )
+      .toBe("1");
+
+    const relaunchPage = await context.newPage();
+    await installMockBridge(relaunchPage, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await relaunchPage.goto("/");
+    await expect(
+      relaunchPage.getByText("Join or create a community"),
+    ).toBeVisible();
+    await expect(relaunchPage.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(() =>
+          window.localStorage.getItem("buzz-communities"),
+        ),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(async () =>
+          window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+        ),
+      )
+      .toEqual(identityBefore);
+  });
+
+  test("shows a recoverable error when leaving the final community cannot clear navigation", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      { clearPendingNavigationDeepLinksError: "queue unavailable" },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    const error = page.getByTestId("community-apply-error");
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(
+      "Could not safely leave community: queue unavailable",
+    );
+    await expect(page.getByText("Join or create a community")).toHaveCount(0);
+    await expect(page.getByTestId("community-switch-gate")).toHaveCount(0);
+    await expect(page.getByTestId("community-apply-error-retry")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Change community" }),
+    ).toBeVisible();
+  });
+
+  test("keeps the gutter when the mobile sidebar closes without a rail", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 740, height: 516 });
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-sidebar="sidebar"][data-mobile="true"]'),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await expect(
+      page.locator('[data-sidebar="sidebar"][data-mobile="true"]'),
+    ).toBeHidden();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "width",
+      "8px",
+    );
+    await expectContentSurfaceHorizontalGutters(page, 9);
+  });
+
+  test("hides the rail with a single community", async ({ page }) => {
+    await page.addInitScript((themeStorageKey) => {
+      window.localStorage.setItem(themeStorageKey, "buzz-dark");
+    }, THEME_STORAGE_KEY);
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    // The channel sidebar still renders; the rail is omitted (a rail of one
+    // adds nothing).
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await expect(page.getByTestId("community-rail")).toHaveCount(0);
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-side="left"][data-state="collapsed"]'),
+    ).toBeVisible();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "width",
+      "8px",
+    );
+    const sidebarBackground = await page
+      .locator("[data-buzz-glass-inset]")
+      .evaluate((element) => getComputedStyle(element).backgroundColor);
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "background-color",
+      sidebarBackground,
+    );
+    await expectContentSurfaceHorizontalGutters(page, 9);
+  });
+
+  test("keeps the rail visible when the sidebar is collapsed", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const rail = page.getByTestId("community-rail");
+    await expect(rail).toBeVisible();
+
+    // Collapse the sidebar via its keyboard shortcut. The rail is a sibling of
+    // the sidebar, not inside it, so it must stay fully visible and unshifted.
+    await page.evaluate(() => {
+      const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "s",
+          ctrlKey: !isMac,
+          metaKey: isMac,
+        }),
+      );
+    });
+
+    await expect(rail).toBeVisible();
+    await expect(
+      page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCount(
+      0,
+    );
+    await expectContentSurfaceHorizontalGutters(page);
+  });
+
+  test("clears the macOS traffic lights", async ({ page }) => {
+    // Spoof macOS so the rail applies its traffic-light top inset.
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
+    });
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    // The first community button must start below the traffic-light band
+    // (native controls sit around y<=31 with trafficLightPosition y:24).
+    const firstButton = page.getByTestId(
+      `community-rail-button-${COMMUNITY_A.id}`,
+    );
+    await expect(firstButton).toBeVisible();
+    const buttonBox = await firstButton.boundingBox();
+    const railBox = await page.getByTestId("community-rail").boundingBox();
+    const searchBox = await page.getByTestId("open-search").boundingBox();
+    const appSurfaceBox = await page
+      .locator(".buzz-huddle-app-surface")
+      .boundingBox();
+    const contentBox = await page
+      .locator("[data-buzz-content-surface]")
+      .first()
+      .boundingBox();
+    expect(buttonBox).not.toBeNull();
+    expect(railBox).not.toBeNull();
+    expect(searchBox).not.toBeNull();
+    expect(appSurfaceBox).not.toBeNull();
+    expect(contentBox).not.toBeNull();
+    expect(buttonBox?.y ?? 0).toBeGreaterThanOrEqual(32);
+    expect(
+      Math.abs((buttonBox?.y ?? 0) - (contentBox?.y ?? 0) - 6),
+    ).toBeLessThan(0.5);
+    expect(Math.abs((railBox?.y ?? 0) - (appSurfaceBox?.y ?? 0))).toBeLessThan(
+      0.5,
+    );
+    expect(
+      Math.abs(
+        (railBox?.y ?? 0) +
+          (railBox?.height ?? 0) -
+          ((appSurfaceBox?.y ?? 0) + (appSurfaceBox?.height ?? 0)),
+      ),
+    ).toBeLessThan(0.5);
+
+    const leftInset = (buttonBox?.x ?? 0) - (railBox?.x ?? 0);
+    const rightInset =
+      (railBox?.x ?? 0) +
+      (railBox?.width ?? 0) -
+      ((buttonBox?.x ?? 0) + (buttonBox?.width ?? 0));
+    expect(Math.abs(leftInset - 10)).toBeLessThan(0.5);
+    expect(Math.abs(leftInset - rightInset)).toBeLessThan(0.5);
+    const visibleRightGap =
+      (searchBox?.x ?? 0) - ((buttonBox?.x ?? 0) + (buttonBox?.width ?? 0));
+    expect(Math.abs(leftInset - visibleRightGap)).toBeLessThan(0.5);
+
+    // With the rail visible, the top-chrome controls (sidebar toggle, back/
+    // forward) sit just past the traffic lights near the rail edge — not
+    // shifted far right by a redundant traffic-light offset.
+    const toggle = page
+      .locator('[data-testid="app-top-chrome"] button')
+      .first();
+    const toggleBox = await toggle.boundingBox();
+    expect(toggleBox).not.toBeNull();
+    expect(toggleBox?.x ?? 0).toBeLessThan(120);
+  });
+
+  test("drag-to-reorder updates the stored community order and survives reload", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    // Seed only if not already set so the persisted order survives page.reload().
+    await page.addInitScript(
+      ({ list, active }) => {
+        if (!window.localStorage.getItem("buzz-communities")) {
+          window.localStorage.setItem("buzz-communities", JSON.stringify(list));
+        }
+        if (!window.localStorage.getItem("buzz-active-community-id")) {
+          window.localStorage.setItem("buzz-active-community-id", active);
+        }
+      },
+      { list: [COMMUNITY_A, COMMUNITY_B], active: COMMUNITY_A.id },
+    );
+    await page.goto("/");
+
+    const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    await expect(buttonA).toBeVisible();
+    await expect(buttonB).toBeVisible();
+
+    // Drag B (lower) up over A (higher) so the order becomes [B, A].
+    const boxA = await buttonA.boundingBox();
+    const boxB = await buttonB.boundingBox();
+    if (!boxA || !boxB) throw new Error("community buttons not laid out");
+
+    const startX = boxB.x + boxB.width / 2;
+    const startY = boxB.y + boxB.height / 2;
+    const targetY = boxA.y + boxA.height / 2;
+
+    // dnd-kit PointerSensor requires a 6px activation distance before it picks
+    // up the drag. Move in small steps so pointermove events fire on every pixel.
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX, startY - 3, { steps: 3 });
+    await page.mouse.move(startX, targetY, { steps: 20 });
+    await page.mouse.up();
+
+    // The community list in localStorage must now be [B, A].
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem("buzz-communities");
+          if (!raw) return null;
+          const list = JSON.parse(raw) as Array<{ id: string }>;
+          return list.map((c) => c.id);
+        }),
+      )
+      .toEqual([COMMUNITY_B.id, COMMUNITY_A.id]);
+
+    // Verify the new order is also reflected in the rendered DOM — B button
+    // must appear above A button.
+    const newBoxA = await buttonA.boundingBox();
+    const newBoxB = await buttonB.boundingBox();
+    if (!newBoxA || !newBoxB)
+      throw new Error("community buttons not laid out after drag");
+    expect(newBoxB.y).toBeLessThan(newBoxA.y);
+
+    // Reload and confirm the order survives restart: addInitScript is
+    // conditional (no-op when data already exists), so the dragged [B, A]
+    // order is what React reads on boot.
+    await page.reload();
+    await expect(page.getByTestId("community-rail")).toBeVisible();
+
+    // Storage must still be [B, A] after reload.
+    const storedOrder = await page.evaluate(() => {
+      const raw = window.localStorage.getItem("buzz-communities");
+      if (!raw) return null;
+      const list = JSON.parse(raw) as Array<{ id: string }>;
+      return list.map((c) => c.id);
+    });
+    expect(storedOrder).toEqual([COMMUNITY_B.id, COMMUNITY_A.id]);
+
+    // DOM order must also be [B, A] after reload.
+    const reloadBoxA = await buttonA.boundingBox();
+    const reloadBoxB = await buttonB.boundingBox();
+    if (!reloadBoxA || !reloadBoxB)
+      throw new Error("community buttons not laid out after reload");
+    expect(reloadBoxB.y).toBeLessThan(reloadBoxA.y);
+  });
+
+  test("keyboard reorder: Space to pick up, ArrowUp to move, Space to drop updates stored order", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    await expect(buttonA).toBeVisible();
+    await expect(buttonB).toBeVisible();
+
+    // Focus B (the second/lower item) and use keyboard to move it above A.
+    // Note: page.keyboard.press("Space") fires the button's native click on this
+    // Chromium build even when React's onKeyDown calls preventDefault — a CDP
+    // input-injection quirk. The synthetic dispatch below goes directly through
+    // React's event system where preventDefault correctly suppresses the click,
+    // while still exercising the real KeyboardSensor path (Thufir verified the
+    // test fails when KeyboardSensor is removed).
+    await buttonB.focus();
+    await page.evaluate((testId) => {
+      const el = document.querySelector(`[data-testid="${testId}"]`);
+      if (!el) throw new Error(`button not found: ${testId}`);
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          code: "Space",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, `community-rail-button-${COMMUNITY_B.id}`);
+    // ArrowUp moves the active item one slot up.
+    await page.keyboard.press("ArrowUp");
+    // Space drops the item — same synthetic dispatch for consistency.
+    await page.evaluate((testId) => {
+      const el = document.querySelector(`[data-testid="${testId}"]`);
+      if (!el) throw new Error(`button not found: ${testId}`);
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          code: "Space",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, `community-rail-button-${COMMUNITY_B.id}`);
+
+    // The community list in localStorage must now be [B, A].
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem("buzz-communities");
+          if (!raw) return null;
+          const list = JSON.parse(raw) as Array<{ id: string }>;
+          return list.map((c) => c.id);
+        }),
+      )
+      .toEqual([COMMUNITY_B.id, COMMUNITY_A.id]);
+  });
+});

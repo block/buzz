@@ -1,0 +1,246 @@
+part of '../channels_page.dart';
+
+class _ChannelTile extends ConsumerWidget {
+  final Channel channel;
+  final bool isUnread;
+  final bool isMuted;
+  final String? currentPubkey;
+  final VoidCallback onTap;
+
+  /// Called when the user requests to mark this channel read (from long-press
+  /// actions menu). Null for channels in built-in sections.
+  final VoidCallback? onMarkRead;
+
+  /// The user-defined section this channel currently belongs to, or null.
+  final String? sectionId;
+
+  const _ChannelTile({
+    required this.channel,
+    required this.isUnread,
+    required this.currentPubkey,
+    required this.onTap,
+    this.isMuted = false,
+    this.onMarkRead,
+    this.sectionId,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final contentColor = isMuted
+        ? navigationSecondaryForeground(context)
+        : navigationPrimaryForeground(
+            context,
+          ).withValues(alpha: isUnread ? 1 : 0.8);
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(Radii.md),
+      onTap: onTap,
+      onLongPress: () => _showChannelActions(context, ref),
+      child: Padding(
+        padding: const EdgeInsets.only(
+          left: _kChannelSectionInset,
+          right: _kChannelSectionInset,
+          top: _kChannelRowVerticalPadding,
+          bottom: _kChannelRowVerticalPadding,
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: _kChannelLeadingWidth,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: channel.isDm
+                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
+                    : Icon(
+                        channelIcon(channel),
+                        key: ValueKey('channel-icon-${channel.id}'),
+                        size: _kChannelIconSize,
+                        color: contentColor,
+                      ),
+              ),
+            ),
+            const SizedBox(width: _kChannelLabelGap),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    resolveDmChannelDisplayLabel(
+                      channel,
+                      currentPubkey: currentPubkey,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: contentListTitleTextStyle.copyWith(
+                      color: contentColor,
+                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (channel.isEphemeral) ...[
+              const SizedBox(width: Grid.xxs),
+              _EphemeralBadge(channel: channel),
+            ],
+            if (isMuted) ...[
+              const SizedBox(width: Grid.xxs),
+              Icon(
+                LucideIcons.bellOff,
+                size: 12,
+                color: context.colors.onSurface.withValues(alpha: 0.4),
+              ),
+            ],
+            if (!channel.isMember && !channel.isDm)
+              Padding(
+                padding: const EdgeInsets.only(right: Grid.xxs),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.half + 2,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.colors.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(Radii.sm),
+                  ),
+                  child: Text(
+                    'Open',
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: context.colors.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showChannelActions(BuildContext context, WidgetRef ref) {
+    showChannelActionsSheet(
+      context: context,
+      channel: channel,
+      isUnread: isUnread,
+      onMarkRead: onMarkRead,
+      sectionId: sectionId,
+    );
+  }
+}
+
+class _DmAvatar extends ConsumerWidget {
+  final Channel channel;
+  final String? currentPubkey;
+
+  const _DmAvatar({required this.channel, required this.currentPubkey});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final normalizedCurrent = currentPubkey?.toLowerCase();
+    final otherPubkeys = [
+      for (final pk in channel.participantPubkeys)
+        if (pk.toLowerCase() != normalizedCurrent) pk.toLowerCase(),
+    ];
+    final visiblePubkeys = otherPubkeys.isNotEmpty
+        ? otherPubkeys
+        : channel.participantPubkeys.map((pk) => pk.toLowerCase()).toList();
+
+    if (visiblePubkeys.length > 1) {
+      return Container(
+        width: _kDmAvatarSize,
+        height: _kDmAvatarSize,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: context.colors.surfaceContainerHighest,
+          shape: BoxShape.circle,
+          border: Border.all(color: context.colors.outlineVariant),
+        ),
+        child: Text(
+          '${visiblePubkeys.length}',
+          style: context.textTheme.labelSmall?.copyWith(
+            fontSize: 9,
+            color: context.colors.onSurface,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
+        ),
+      );
+    }
+
+    final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
+    final profile = ref.watch(
+      userCacheProvider.select(
+        (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
+      ),
+    );
+    final presence = ref.watch(
+      presenceCacheProvider.select(
+        (presenceMap) => otherPubkey == null
+            ? 'offline'
+            : (presenceMap[otherPubkey] ?? 'offline'),
+      ),
+    );
+
+    // Trigger fetches if not cached yet.
+    if (otherPubkey != null) {
+      if (profile == null) {
+        ref.read(userCacheProvider.notifier).preload([otherPubkey]);
+      }
+      ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+    }
+
+    final avatarUrl = profile?.avatarUrl;
+    final initial =
+        profile?.initial ??
+        (channel.participants.isNotEmpty
+            ? channel.participants.first[0].toUpperCase()
+            : '?');
+    return SizedBox(
+      width: _kDmAvatarSize,
+      height: _kDmAvatarSize,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          AvatarImage(
+            imageUrl: avatarUrl,
+            radius: _kDmAvatarSize / 2,
+            backgroundColor: context.colors.primaryContainer,
+            fallback: Text(
+              initial,
+              style: context.textTheme.labelSmall?.copyWith(
+                fontSize: 9,
+                color: context.colors.onPrimaryContainer,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Positioned(
+            right: -1,
+            bottom: -1,
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: _presenceColor(context, presence),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: context.theme.scaffoldBackgroundColor,
+                  width: 1.5,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _presenceColor(BuildContext context, String presence) {
+    return switch (presence) {
+      'online' => context.appColors.success,
+      'away' => context.appColors.warning,
+      _ => context.colors.outline,
+    };
+  }
+}

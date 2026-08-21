@@ -1,0 +1,16 @@
+[package]
+name = "buzz-persona"
+version = "0.1.0"
+edition = "2021"
+description = "Parser and loader for Buzz persona pack files (.persona.md)"
+license = "Apache-2.0"
+repository = "https://github.com/block/sprout"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

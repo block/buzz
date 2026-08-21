@@ -1,0 +1,137 @@
+.buzz-spoiler {
+  --buzz-spoiler-accent: #333;
+
+  -webkit-box-decoration-break: clone;
+  background: transparent;
+  border-radius: 0.3rem;
+  box-decoration-break: clone;
+  cursor: pointer;
+  display: inline-block;
+  line-height: inherit;
+  padding: 0 0.12em;
+  position: relative;
+  transition:
+    background-color 500ms ease-out,
+    color 500ms ease-out;
+  vertical-align: baseline;
+}
+
+.dark .buzz-spoiler {
+  --buzz-spoiler-accent: #fff;
+}
+
+.buzz-spoiler__content {
+  position: relative;
+  transition:
+    opacity 500ms ease-out,
+    filter 500ms ease-out;
+  z-index: 0;
+}
+
+.buzz-spoiler:not([data-revealed="true"]) .buzz-spoiler__content,
+.buzz-spoiler:not([data-revealed="true"]) .buzz-spoiler__content * {
+  color: transparent;
+  filter: blur(0.5px);
+  opacity: 0;
+  text-decoration-color: transparent;
+  text-shadow: none;
+  transition:
+    opacity 200ms ease-out,
+    filter 200ms ease-out;
+}
+
+.buzz-spoiler__particles {
+  background: transparent;
+  border-radius: inherit;
+  color: var(--buzz-spoiler-accent, #333);
+  height: calc(100% + 0.2em);
+  inset: -0.1em -0.1em;
+  opacity: 1;
+  pointer-events: none;
+  position: absolute;
+  transition: opacity 500ms ease-out;
+  width: calc(100% + 0.2em);
+  z-index: 1;
+}
+
+.dark .buzz-spoiler__particles {
+  --buzz-spoiler-accent: #fff;
+}
+
+.buzz-spoiler--block {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.buzz-spoiler--block .buzz-spoiler__content,
+.buzz-spoiler--block [data-block-media] {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.buzz-spoiler--block img[data-spoiler-media-size] {
+  aspect-ratio: var(--buzz-spoiler-media-aspect-ratio);
+  height: auto;
+  width: var(--buzz-spoiler-media-width);
+}
+
+.buzz-spoiler--inert,
+/* biome-ignore lint/style/noDescendingSpecificity: selector order preserved from monolithic globals.css split */
+.buzz-spoiler--inert * {
+  cursor: inherit;
+  pointer-events: none;
+}
+
+.buzz-spoiler[data-revealed="true"],
+.buzz-spoiler:hover,
+.buzz-spoiler:focus-visible {
+  animation: none;
+  background: hsl(var(--muted) / 0.5);
+  color: inherit;
+  text-decoration-color: currentColor;
+}
+
+.buzz-spoiler[data-revealed="true"] .buzz-spoiler__particles {
+  opacity: 0;
+}
+
+.ProseMirror .buzz-spoiler {
+  background: transparent;
+  color: transparent;
+  cursor: text;
+  text-decoration-color: transparent;
+}
+
+.buzz-spoiler-composer-particles {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+
+.buzz-spoiler__particles--composer {
+  border-radius: 0.3rem;
+  height: auto;
+  inset: auto;
+  position: absolute;
+  transition: none;
+  width: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-spoiler__particles {
+    transition: none;
+  }
+}
+
+@keyframes buzz-side-panel-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(24px, 0, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}

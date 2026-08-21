@@ -1,0 +1,102 @@
+[package]
+name = "buzz-relay"
+default-run = "buzz-relay"
+# Independent version: buzz-relay ships as a pinnable artifact
+# (ghcr.io/block/buzz), released on its own cadence via `just release-relay`.
+# It does NOT inherit the workspace version.
+version = "0.2.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebSocket relay server for the Buzz communications platform"
+
+[[bin]]
+name = "buzz-relay"
+path = "src/main.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-conformance = { workspace = true }
+buzz-db = { workspace = true }
+buzz-datastore-tracing = { workspace = true }
+buzz-deletion = { workspace = true }
+buzz-auth = { workspace = true }
+buzz-pubsub = { workspace = true }
+buzz-audit = { workspace = true }
+buzz-search = { workspace = true }
+buzz-relay-mesh = { workspace = true }
+async-trait = "0.1"
+postcard = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+# `io` (ReaderStream) is needed to stream git subprocess stdout straight into
+# the HTTP response body — see api::git::transport read-path streaming. The
+# workspace default only enables rt+codec.
+tokio-util = { workspace = true, features = ["io"] }
+tower = { workspace = true }
+tower-http = { workspace = true }
+nostr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
+# Redis TLS (rediss://, e.g. ElastiCache) uses rustls, which needs a process
+# CryptoProvider installed at startup. Both aws-lc-rs and ring are compiled in
+# transitively, so rustls can't auto-select one — we install ring explicitly in
+# main(). Mirrors buzz-acp's rustls setup for wss://.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+base64 = "0.22"
+buzz-sdk = { workspace = true }
+buzz-workflow = { workspace = true, features = ["reqwest"] }
+buzz-media = { workspace = true }
+s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
+tempfile = "3"
+bytes = "1"
+infer = "0.19"
+serde_yaml      = { workspace = true }
+sha2            = { workspace = true }
+hmac            = { workspace = true }
+subtle          = { workspace = true }
+rand            = { workspace = true }
+hex             = { workspace = true }
+url             = { workspace = true }
+moka            = { workspace = true }
+metrics         = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+metrics-util    = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
+
+[features]
+dev = ["buzz-auth/dev"]
+
+[dev-dependencies]
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
+# Relay-driven mesh lifecycle smoke (examples/mesh_relay_lifecycle_smoke.rs):
+# the relay client for discovery notes and the exact ed25519 the mesh owner
+# keys use for binding verification.
+buzz-test-client = { path = "../buzz-test-client" }
+ed25519-dalek = "=3.0.0-rc.0"
+buzz-core = { workspace = true, features = ["test-utils"] }
+buzz-auth = { workspace = true, features = ["dev"] }
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = "0.3"
+flate2 = "1.1.9"
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
