@@ -49,11 +49,19 @@ the same port, so they cannot run at once.
 ./scripts/start-perf-ingest-rig.sh --reset > /tmp/rig-on.json
 ./perf/relay_ingest_ceiling.py --rig /tmp/rig-on.json --json /tmp/on.json
 
-./scripts/start-perf-ingest-rig.sh --audit off > /tmp/rig-off.json
+./scripts/start-perf-ingest-rig.sh --reset --audit off > /tmp/rig-off.json
 ./perf/relay_ingest_ceiling.py --rig /tmp/rig-off.json --json /tmp/off.json
 
 ./perf/relay_ingest_ceiling.py --combine /tmp/on.json /tmp/off.json
 ```
+
+**`--reset` on both arms is not optional.** Running audit-on first and audit-off
+second against a database that grew in between confounds the arm with time, cache
+state and index size — a difference that has nothing to do with the audit path.
+Restoring the same schema at both boundaries makes the arms comparable, and
+`database_reset` is part of the experiment identity so `--combine` rejects a pair
+where only one arm was reset. Randomised or interleaved ordering is the stronger
+follow-up; the shared snapshot is what makes the immediate comparison valid.
 
 Each half-run exits non-zero on its own — a single arm is a partial experiment by
 construction — and writes its `--json` first, so the workflow above still works.
@@ -120,7 +128,23 @@ surviving evidence to compare the arms.
 6. **The two halves handed to `--combine` are not the same experiment.** Rates,
    duration, repeats, community hosts, both limiter settings, the generator path,
    and the source revision must all match.
-7. **No rate kept two evidence cells in both arms**, so the arms cannot be
+7. **The grid never saturated the audit path.** If no evidence cell reached a busy
+   worker, the run is *inconclusive*, not negative — the audit path was never
+   reached, so nothing here can exonerate it, and the grid needs extending. This
+   is a separate verdict from "compared and found nothing" because the two carry
+   opposite consequences: the first says re-run, the second would say stop.
+8. **Only secondary rates separated.** The pass depends on one predeclared primary
+   contrast, at the highest rate that produced a comparison. Passing on any-of-N
+   rates runs an unadjusted test per rate: with five rates at a two-sided 95%
+   interval that is a **~10% false-pass rate**, measured on this module against
+   identical populations, not the nominal 5%.
+9. **Audit-off did significantly worse than audit-on** at some rate. That
+   contradicts the hypothesis rather than failing to support it, and a separation
+   elsewhere cannot be read past it.
+10. **The audit-off arm did not hold its offer** at the primary contrast. Both arms
+   collapsing is not "removing the audit path restores ingest", however large the
+   gap between them — the control has to be positive, not merely better.
+11. **No rate kept two evidence cells in both arms**, so the arms cannot be
    compared at all and too much of the dataset was excluded — or, when they can be
    compared, **no rate separated them**, so the audit path is not shown to limit
    ingest.
@@ -192,6 +216,16 @@ histogram is a per-pod aggregate, so it cannot be split per community in the
 two-community cells; and it measures the audit worker, which is the subject only
 while the audit path is the binding constraint. Once the worker is fixed, it and
 ingest throughput part ways.
+
+Counters are sampled **by the generator, at its own timed-window edges**, and a
+cell that lacks aligned samples is not evidence. The runner can only bracket the
+whole subprocess: its own "before" lands ahead of the connection phase and its
+"after" after teardown, while every rate divides by the window that starts once
+the connections are authenticated. Backlog draining during setup then lands in the
+delta but not the divisor, which can push a busy fraction above 1.0, overstate
+completions, and — because the exclusion decision reads `outstanding_delta` — flip
+the verdict rather than merely shifting an estimate. `setup_overhead_fraction`
+bounds what is left.
 
 `audit_busy_fraction` is reported explicitly rather than left implicit. Completion
 rate and `1/mean(service)` are `C/T` and `C/S` over the same count, so their ratio

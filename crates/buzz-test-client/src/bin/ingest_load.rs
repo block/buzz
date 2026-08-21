@@ -24,6 +24,9 @@
 //!
 //! Env:
 //!   BENCH_PRIVATE_KEY  hex secret key; must be a channel member on every target
+//!   BENCH_METRICS_URL  when set, the relay's Prometheus endpoint is sampled at
+//!                      this run's timed-window edges and reported as
+//!                      `counters_before`/`counters_after`
 
 use std::time::Duration;
 
@@ -184,6 +187,66 @@ async fn drive_connection(
     Ok(out)
 }
 
+/// Prometheus counters this harness reads, sampled at the timed window's edges.
+///
+/// Sampled here rather than by the caller because the caller can only bracket
+/// the whole process: its "before" lands before the connection phase and its
+/// "after" after teardown, while the rates are divided by the window that starts
+/// once every connection is authenticated. Backlog draining during setup then
+/// lands in the delta but not the divisor, which can push a busy fraction above
+/// 1.0 and overstate completions.
+async fn scrape_counters(metrics_url: &str) -> anyhow::Result<Value> {
+    const WANTED: [(&str, &str); 6] = [
+        ("buzz_audit_log_seconds_count", "audit_count"),
+        ("buzz_audit_log_seconds_sum", "audit_sum"),
+        ("buzz_audit_log_errors_total", "audit_log_errors"),
+        ("buzz_audit_send_errors_total", "audit_send_errors"),
+        (
+            "buzz_admission_rejections_total{transport=\"websocket\",reason=\"quota\"}",
+            "quota",
+        ),
+        (
+            "buzz_admission_rejections_total{transport=\"websocket\",reason=\"unavailable\"}",
+            "unavailable",
+        ),
+    ];
+
+    let parsed = metrics_url
+        .parse::<url::Url>()
+        .map_err(|e| anyhow!("metrics url {metrics_url:?}: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("metrics url {metrics_url:?} has no host"))?;
+    let port = parsed.port().unwrap_or(80);
+    let authority = format!("{host}:{port}");
+
+    // HTTP/1.0 so the server closes the body and a read-to-end terminates. The
+    // endpoint is a local Prometheus exporter; a full HTTP client would be a new
+    // dependency on this crate for one GET.
+    let mut stream = tokio::net::TcpStream::connect(&authority).await?;
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        parsed.path(),
+        authority
+    );
+    tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes()).await?;
+    let mut body = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut body).await?;
+    let text = String::from_utf8_lossy(&body);
+
+    let mut out = serde_json::Map::new();
+    for (needle, name) in WANTED {
+        let value = text
+            .lines()
+            .find_map(|line| line.strip_prefix(needle)?.trim().parse::<f64>().ok())
+            // Absent means never incremented, which is zero. Safe only because
+            // the quota series has been positive-controlled on this rig.
+            .unwrap_or(0.0);
+        out.insert((*name).to_string(), json!(value));
+    }
+    Ok(Value::Object(out))
+}
+
 fn percentiles(samples: &mut [f64]) -> Value {
     samples.sort_by(|a, b| a.total_cmp(b));
     let at = |p: f64| -> Option<f64> {
@@ -275,6 +338,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let metrics_url = std::env::var("BENCH_METRICS_URL").ok();
+    let counters_before = match metrics_url.as_deref() {
+        Some(url) => Some(scrape_counters(url).await.context("metrics before")?),
+        None => None,
+    };
+
     let start = Instant::now();
     let deadline = start + Duration::from_secs(duration_secs);
     let mut tasks = Vec::new();
@@ -311,6 +380,10 @@ async fn main() -> anyhow::Result<()> {
         requested_secs: duration_secs as f64,
         elapsed_secs: start.elapsed().as_secs_f64(),
     };
+    let counters_after = match metrics_url.as_deref() {
+        Some(url) => Some(scrape_counters(url).await.context("metrics after")?),
+        None => None,
+    };
     let mut aggregate = Outcome::default();
     let mut offered_total = 0.0;
     let mut summaries = Vec::new();
@@ -326,6 +399,8 @@ async fn main() -> anyhow::Result<()> {
         json!({
             "duration_secs": duration_secs,
             "elapsed_secs": window.elapsed_secs,
+            "counters_before": counters_before,
+            "counters_after": counters_after,
             "targets": summaries,
             "aggregate": {
                 "offered_per_s": offered_total,

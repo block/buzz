@@ -116,8 +116,11 @@ start_relay() {
   # file from a relay that already exited would otherwise kill a stranger.
   if [[ -f "${PIDFILE}" ]]; then
     stale_pid="$(cat "${PIDFILE}")"
+    # The exact binary this rig launches, not any command containing
+    # "buzz-relay": another checkout's relay must not be killed.
     if [[ "${stale_pid}" =~ ^[0-9]+$ ]] \
-      && ps -p "${stale_pid}" -o command= 2>/dev/null | grep -q 'buzz-relay'; then
+      && ps -p "${stale_pid}" -o command= 2>/dev/null \
+        | grep -qF "${REPO_ROOT}/target/${CARGO_TARGET_PROFILE}/buzz-relay"; then
       kill "${stale_pid}" 2>/dev/null || true
     else
       log "pidfile ${PIDFILE} is stale (pid ${stale_pid} is not our relay); removing it"
@@ -216,13 +219,21 @@ else
   RELAY_PID="$(cat "${PIDFILE}")"
 fi
 SOURCE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+# Two dirty trees at the same commit are two different builds, so the identity
+# carries a digest of the working-tree diff rather than the commit alone.
+SOURCE_DIFF_DIGEST="$(git -C "${REPO_ROOT}" diff HEAD | shasum -a 256 | cut -d' ' -f1)"
+DATABASE_RESET=false
+[[ "${RESET}" == yes ]] && DATABASE_RESET=true
 python3 -c '
 import json, sys
 (pid, log, gen, metrics, db, project, key, audit, ws_limit, msg_limit,
- host_a, chan_a, host_b, chan_b, revision, repo_root) = sys.argv[1:]
+ host_a, chan_a, host_b, chan_b, revision, repo_root, diff_digest,
+ database_reset) = sys.argv[1:]
 print(json.dumps({
     "relay_pid": None if pid == "null" else int(pid),
     "source_revision": revision,
+    "source_diff_digest": diff_digest,
+    "database_reset": database_reset == "true",
     "repo_root": repo_root,
     "relay_log": log,
     "generator": gen,
@@ -244,5 +255,5 @@ print(json.dumps({
   "${PROJECT}" "${BENCH_KEY}" "${AUDIT_ENABLED}" \
   "${WS_EVENTS_PER_SEC}" "${MESSAGES_PER_MIN}" \
   "${HOST_A}" "${CHANNEL_A}" "${HOST_B}" "${CHANNEL_B}" \
-  "${SOURCE_REVISION}" "${REPO_ROOT}"
+  "${SOURCE_REVISION}" "${REPO_ROOT}" "${SOURCE_DIFF_DIGEST}" "${DATABASE_RESET}"
 log "Rig ready. Relay pid ${RELAY_PID}, log ${RELAY_LOG}, revision ${SOURCE_REVISION}"

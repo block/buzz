@@ -64,6 +64,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from typing import Callable
 
@@ -86,8 +87,34 @@ OUTSTANDING_TOLERANCE_FRACTION = 0.05
 # the offer rather than its own limit.
 BUSY_FRACTION_FOR_CAPACITY = 0.95
 
-DEFAULT_RATES = [20.0, 50.0, 100.0, 200.0, 400.0]
+# The audit-off arm must hold its offer, not merely beat the audit-on arm. Both
+# arms collapsing is not "audit removal restores ingest".
+CONTROL_EQUIVALENCE_MARGIN = 0.05
+
+# Counter deltas are read around the whole subprocess, but the generator's own
+# window starts only after every connection is authenticated. A cell is rejected
+# when that setup overhead is a material share of the window, because rates
+# divided by mismatched windows can exceed 1.0 and overstate completions.
+MAX_SETUP_OVERHEAD_FRACTION = 0.05
+
+# Share of its scheduled slots the generator must actually have sent. Signing and
+# scheduler delay are outside `service_ms` by design, so a CPU-bound generator can
+# miss slots while the on-wire headroom gate still passes.
+MIN_ATTEMPTED_FRACTION = 0.98
+
+# The grid has to straddle the drain rate, or the separation contract has nothing
+# to fire on and the run reports "the audit path is not shown to limit ingest" —
+# a false negative phrased as a conclusion. Every drain figure measured on this
+# rig falls in 390-495/s, so 100-200 anchor the unsaturated arm, 400 brackets the
+# ceiling from below, and 800/1600 are in clear saturation. Re-derive this if the
+# rig's drain rate moves: a grid whose top rate sits at the ceiling makes the
+# only informative cell a coin flip.
+DEFAULT_RATES = [100.0, 200.0, 400.0, 800.0, 1600.0]
 DEFAULT_REPEATS = 5
+
+# Drain rate observed on this rig, used only to keep `model()` honest about where
+# its ceiling sits relative to the grid. Not a capacity claim.
+MEASURED_DRAIN_BAND_PER_S = 450.0
 
 # Two-tailed 95% critical values by degrees of freedom; the fallback is the
 # large-sample limit. Enough for the repeat counts this harness runs.
@@ -121,13 +148,18 @@ def sample_stddev(values: list[float]) -> float:
 
 
 def t95(df: float) -> float:
+    """Two-tailed 95% critical value, rounded to the conservative side.
+
+    The table is sparse, so an exact df is often missing. Taking the next *higher*
+    stored df would pick a *smaller* critical value and under-cover: df 11 would
+    get 2.179 against a true 2.201, and df 13 would get 2.131 against 2.160. Take
+    the largest stored df at or below the real one instead, which errs wide.
+    """
     if df < 1:
         raise ValueError("t95 needs at least one degree of freedom")
     key = int(math.floor(df))
-    for cutoff in sorted(_T95):
-        if key <= cutoff:
-            return _T95[cutoff]
-    return 1.960
+    usable = [cutoff for cutoff in _T95 if cutoff <= key]
+    return _T95[max(usable)] if usable else _T95[min(_T95)]
 
 
 def confidence_interval(values: list[float]) -> dict:
@@ -218,6 +250,37 @@ def cell_problems(cell: dict) -> list[str]:
         if cell.get(key):
             problems.append("{:g}/s: {} ({}={})".format(rate, why, key, cell[key]))
 
+    if cell.get("counters_window_aligned") is False:
+        problems.append(
+            "{:g}/s: audit counters were sampled around the whole subprocess "
+            "rather than the timed window, so completion and outstanding-work "
+            "readings are not comparable with the rates".format(rate)
+        )
+
+    overhead = cell.get("setup_overhead_fraction")
+    if overhead is not None and overhead > MAX_SETUP_OVERHEAD_FRACTION:
+        problems.append(
+            "{:g}/s: setup and teardown were {:.1%} of the window, over the {:.0%} "
+            "bound, so window-edge readings are unreliable".format(
+                rate, overhead, MAX_SETUP_OVERHEAD_FRACTION
+            )
+        )
+
+    if cell.get("audit_activity_in_control_arm"):
+        problems.append(
+            "{:g}/s: the audit series moved by {} in the audit-off arm, so that "
+            "relay was still auditing and the control is not a control".format(
+                rate, cell["audit_activity_in_control_arm"]
+            )
+        )
+
+    attempted = cell.get("attempted_over_offered")
+    if attempted is not None and attempted < MIN_ATTEMPTED_FRACTION:
+        problems.append(
+            "{:g}/s: the generator sent only {:.1%} of its scheduled slots, so it "
+            "missed its own offer before the relay saw it".format(rate, attempted)
+        )
+
     headroom = cell.get("generator_headroom")
     if headroom is not None and headroom < GENERATOR_HEADROOM_MARGIN:
         problems.append(
@@ -227,6 +290,20 @@ def cell_problems(cell: dict) -> list[str]:
             )
         )
     return problems
+
+
+def steady_state(cell: dict) -> bool | None:
+    """Whether outstanding audit work held level across the window.
+
+    The criterion is stability, not emptiness. A saturating cell settles with the
+    channel full and backpressure engaged; an unsaturated one settles near zero.
+    Both are steady. Requiring "empty at start" would make every saturated cell -
+    every cell that matters for a ceiling - permanently unmeasurable.
+    """
+    delta = cell.get("outstanding_delta")
+    if delta is None:
+        return None
+    return abs(delta) <= OUTSTANDING_TOLERANCE_FRACTION * AUDIT_CHANNEL_DEPTH
 
 
 # A dead audit worker invalidates every cell after it, not just its own, so this
@@ -261,7 +338,12 @@ def cell_exclusions(cells: list[dict]) -> list[dict]:
     """
     excluded = []
     for cell in cells:
-        reasons = cell_problems(cell)
+        # Fatal problems are reported as run failures; repeating them here would
+        # print the same sentence twice under two different headings.
+        reasons = [
+            r for r in cell_problems(cell)
+            if not any(key in r for key in FATAL_PROBLEM_KEYS)
+        ]
         if steady_state(cell) is False:
             reasons.append(
                 "{:g}/s: outstanding audit work moved by {}, so the cell carries "
@@ -284,20 +366,6 @@ def cell_is_evidence(cell: dict) -> bool:
     return not cell_problems(cell) and steady_state(cell) is not False
 
 
-def steady_state(cell: dict) -> bool | None:
-    """Whether outstanding audit work held level across the window.
-
-    The criterion is stability, not emptiness. A saturating cell settles with the
-    channel full and backpressure engaged; an unsaturated one settles near zero.
-    Both are steady. Requiring "empty at start" would make every saturated cell -
-    every cell that matters for a ceiling - permanently unmeasurable.
-    """
-    delta = cell.get("outstanding_delta")
-    if delta is None:
-        return None
-    return abs(delta) <= OUTSTANDING_TOLERANCE_FRACTION * AUDIT_CHANNEL_DEPTH
-
-
 def arm_separation(on_cells: list[dict], off_cells: list[dict]) -> dict:
     """Per-rate difference in accepted/offered between the arms.
 
@@ -317,6 +385,7 @@ def arm_separation(on_cells: list[dict], off_cells: list[dict]) -> dict:
 
     rates = []
     separated = False
+    contradicted = []
     comparable = 0
     for rate in sorted(by_rate):
         on_vals, off_vals = by_rate[rate]["on"], by_rate[rate]["off"]
@@ -334,11 +403,42 @@ def arm_separation(on_cells: list[dict], off_cells: list[dict]) -> dict:
             if diff["excludes_zero"] and diff["diff"] > 0.0:
                 separated = True
                 entry["separated_here"] = True
+            elif diff["excludes_zero"] and diff["diff"] < 0.0:
+                # Audit-off did significantly *worse*. That contradicts the
+                # hypothesis rather than failing to support it.
+                contradicted.append(rate)
+                entry["contradicted_here"] = True
         else:
             entry["off_minus_on"] = None
             entry["note"] = "fewer than two evidence cells in one arm"
         rates.append(entry)
-    return {"separated": separated, "comparable_rates": comparable, "by_rate": rates}
+
+    # One predeclared primary contrast, at the highest rate that produced a
+    # comparison. Passing on "any of N rates" runs an unadjusted test per rate:
+    # with five rates at a two-sided 95% interval the false-pass rate is ~10%,
+    # measured on this code with identical populations, not the nominal 5%.
+    comparisons = [e for e in rates if e.get("off_minus_on")]
+    primary = comparisons[-1] if comparisons else None
+    primary_separated = bool(primary and primary.get("separated_here"))
+
+    control_holds = None
+    if primary and primary["audit_off"]:
+        lo = primary["audit_off"]["lo"]
+        control_holds = lo is not None and lo >= 1.0 - CONTROL_EQUIVALENCE_MARGIN
+
+    return {
+        "separated": separated,
+        "comparable_rates": comparable,
+        "primary_rate": primary["offered_per_s"] if primary else None,
+        "primary_separated": primary_separated,
+        "primary_control_holds_offer": control_holds,
+        "contradicted_rates": contradicted,
+        "secondary_separated_rates": [
+            e["offered_per_s"] for e in rates
+            if e.get("separated_here") and e is not primary
+        ],
+        "by_rate": rates,
+    }
 
 
 def worker_rate(on_cells: list[dict]) -> dict:
@@ -359,8 +459,25 @@ def worker_rate(on_cells: list[dict]) -> dict:
             "estimate": None,
             "note": "no cell had a demonstrably busy worker in steady state",
         }
+    by_rate: dict = {}
+    for c in usable:
+        by_rate.setdefault(c["offered_per_s"], []).append(c)
     return {
         "cells": len(usable),
+        # Per rate, not pooled: different offered rates are different load and
+        # database regimes, not repeats of one estimand.
+        "per_rate": [
+            {
+                "offered_per_s": rate,
+                "completed_per_s": confidence_interval(
+                    [c["audit_completed_per_s"] for c in cells]
+                ),
+                "service_ms": confidence_interval(
+                    [c["audit_service_mean_ms"] for c in cells]
+                ),
+            }
+            for rate, cells in sorted(by_rate.items())
+        ],
         "estimate": confidence_interval([c["audit_completed_per_s"] for c in usable]),
         "service_ms": confidence_interval(
             [c["audit_service_mean_ms"] for c in usable]
@@ -385,6 +502,10 @@ def verdict(
     failures = fatal_problems(all_cells)
     excluded = cell_exclusions(all_cells)
 
+    busy = [c.get("audit_busy_fraction") or 0.0 for c in on_cells if cell_is_evidence(c)]
+    max_busy = max(busy) if busy else 0.0
+    any_saturated = max_busy >= BUSY_FRACTION_FOR_CAPACITY
+
     if not control_ran:
         failures.append(
             "the audit-off control did not run: this dataset is a partial "
@@ -396,22 +517,91 @@ def verdict(
         if control_ran and off_cells
         else {"separated": False, "comparable_rates": 0, "by_rate": []}
     )
-    if control_ran and not separation["comparable_rates"]:
-        failures.append(
-            "no rate kept two evidence cells in both arms, so the arms cannot be "
-            "compared at all: too much of this dataset was excluded"
-        )
-    elif control_ran and not separation["separated"]:
-        failures.append(
-            "no rate where audit-off exceeded audit-on with the difference "
-            "interval excluding zero: the audit path is not shown to limit ingest"
-        )
+    # These states carry different program consequences, so the run must say
+    # which one it is in. "Compared and found nothing" exonerates the audit path
+    # and would stop the work; "never saturated" or "lost the informative cells"
+    # mean re-run. A single message covering all three makes the loudest line the
+    # one a reader acts on hardest, and it is only correct for the first.
+    uncomparable = [
+        entry["offered_per_s"]
+        for entry in separation.get("by_rate", [])
+        if entry.get("off_minus_on") is None and entry["dropped_cells"]
+    ]
+    if control_ran:
+        if not separation["comparable_rates"]:
+            failures.append(
+                "no rate kept two evidence cells in both arms, so the arms were "
+                "never compared: too much of this dataset was excluded to conclude "
+                "anything"
+            )
+        elif not any_saturated:
+            failures.append(
+                "inconclusive, not negative: no audit-on cell reached a busy "
+                "worker (max busy fraction {:.2f} against the {:.2f} gate), so "
+                "this grid never saturated the audit path and cannot exonerate "
+                "it. Extend the rates above the drain rate and re-run".format(
+                    max_busy, BUSY_FRACTION_FOR_CAPACITY
+                )
+            )
+        elif separation["contradicted_rates"]:
+            failures.append(
+                "audit-off was significantly *worse* than audit-on at {}: that "
+                "contradicts the hypothesis rather than failing to support it, "
+                "and no separation elsewhere can be read past it".format(
+                    ", ".join(
+                        "{:g}/s".format(r) for r in separation["contradicted_rates"]
+                    )
+                )
+            )
+        elif uncomparable and not separation["separated"]:
+            failures.append(
+                "inconclusive rather than negative: {} rate(s) ({}) lost their "
+                "evidence to exclusions, so a missing separation cannot be told "
+                "apart from missing data. A bracket-refinement run near the "
+                "ceiling drops its most informative cells exactly this way".format(
+                    len(uncomparable),
+                    ", ".join("{:g}".format(r) for r in uncomparable),
+                )
+            )
+        elif not separation["separated"]:
+            failures.append(
+                "every rate was comparable and none separated: the audit path is "
+                "not shown to limit ingest at these rates"
+            )
+        elif not separation["primary_separated"]:
+            failures.append(
+                "only secondary rates separated; the predeclared primary contrast "
+                "at {:g}/s did not. Passing on any-of-N rates runs an unadjusted "
+                "test per rate: with five rates at a two-sided 95% interval that "
+                "is a ~10% false-pass rate, measured on this code with identical "
+                "populations".format(separation["primary_rate"])
+            )
+        elif separation["primary_control_holds_offer"] is False:
+            failures.append(
+                "the audit-off arm did not hold its offer at the primary contrast "
+                "({:g}/s): a control that also collapsed does not show that "
+                "removing the audit path restores ingest, however large the gap "
+                "between the arms".format(separation["primary_rate"])
+            )
+        elif uncomparable:
+            failures.append(
+                "separation was found, but {} rate(s) ({}) lost their evidence to "
+                "exclusions and contributed nothing".format(
+                    len(uncomparable),
+                    ", ".join("{:g}".format(r) for r in uncomparable),
+                )
+            )
 
     return {
         "ok": not failures,
         "control": {"ran": control_ran, "arm": "audit_off"},
         "failures": failures,
         "excluded_cells": excluded,
+        "saturation": {
+            "max_busy_fraction": max_busy,
+            "gate": BUSY_FRACTION_FOR_CAPACITY,
+            "any_rate_saturated": any_saturated,
+        },
         "arm_separation": separation,
         "worker_rate": worker_rate(on_cells),
         "lock_ceiling": (
@@ -495,10 +685,23 @@ def run_generator(rig: dict, duration: int, offers: list) -> dict:
 
 
 def run_cell(rig: dict, duration: int, offers: list, audit_on: bool) -> dict:
-    before = scrape(rig["metrics_url"])
     load_before = load_per_cpu()
+    outer_before = scrape(rig["metrics_url"])
+    outer_start = time.monotonic()
     result = run_generator(rig, duration, offers)
-    after = scrape(rig["metrics_url"])
+    outer_elapsed = time.monotonic() - outer_start
+    outer_after = scrape(rig["metrics_url"])
+
+    # Prefer the counters the generator sampled at its own timed-window edges.
+    # The runner's own pair brackets the whole subprocess — connection setup and
+    # teardown included — while every rate is divided by the post-connect window,
+    # so backlog draining during setup lands in the delta but not the divisor.
+    # That can push a busy fraction above 1.0 and overstate completions, and it
+    # feeds the exclusion decision, so it can change the verdict rather than only
+    # the estimate.
+    aligned = bool(result.get("counters_before") and result.get("counters_after"))
+    before = result["counters_before"] if aligned else outer_before
+    after = result["counters_after"] if aligned else outer_after
 
     agg = result["aggregate"]
     window = result["elapsed_secs"]
@@ -518,11 +721,16 @@ def run_cell(rig: dict, duration: int, offers: list, audit_on: bool) -> dict:
         # understates it on a skewed distribution.
         headroom = conns * (1000.0 / mean(service_means)) / agg["offered_per_s"]
 
+    setup_overhead = max(0.0, outer_elapsed - window) / window if window else None
+
     cell = {
         "offered_per_s": agg["offered_per_s"],
         "audit_enabled": audit_on,
         "duration_secs": duration,
         "elapsed_secs": window,
+        "outer_elapsed_secs": outer_elapsed,
+        "setup_overhead_fraction": setup_overhead,
+        "counters_window_aligned": aligned,
         "accepted": accepted,
         "accepted_per_s": accepted / window if window else None,
         "accepted_over_offered": agg["achieved_over_offered"],
@@ -541,6 +749,10 @@ def run_cell(rig: dict, duration: int, offers: list, audit_on: bool) -> dict:
             after["audit_send_errors"] - before["audit_send_errors"]
         ),
         "generator_headroom": headroom,
+        "attempted_over_offered": (
+            agg["attempted"] / (agg["offered_per_s"] * duration)
+            if agg["offered_per_s"] else None
+        ),
         "load_per_cpu_before": load_before,
         "load_per_cpu_after": load_per_cpu(),
         "service_ms": agg["service_ms"],
@@ -565,6 +777,14 @@ def run_cell(rig: dict, duration: int, offers: list, audit_on: bool) -> dict:
         cell["audit_service_mean_ms"] = None
         cell["audit_busy_fraction"] = None
         cell["outstanding_delta"] = None
+        # Recorded rather than assumed: the rig JSON saying audit is off is a
+        # claim about how the relay was started, and with --skip-relay nobody
+        # verified it. A moving audit series here means the control arm was
+        # auditing after all, which would make the whole comparison meaningless.
+        cell["audit_activity_in_control_arm"] = int(
+            (after["audit_count"] - before["audit_count"])
+            + (after["audit_log_errors"] - before["audit_log_errors"])
+        )
         cell["audit_note"] = "audit disabled: no worker, so no completion series"
     return cell
 
@@ -620,6 +840,13 @@ def experiment_identity(rig: dict, args: argparse.Namespace) -> dict:
         "messages_per_min_limit": rig["messages_per_min_limit"],
         "generator": rig["generator"],
         "source_revision": rig.get("source_revision"),
+        # Two dirty trees at the same commit are two different builds.
+        "source_diff_digest": rig.get("source_diff_digest"),
+        # A fixed audit-on-then-audit-off order against a database that grew in
+        # between confounds arm with time, cache and index size. Restoring the
+        # same snapshot at both arm boundaries makes the arms comparable; the
+        # identity records it so a pair where only one arm was reset is rejected.
+        "database_reset": rig.get("database_reset"),
     }
 
 
@@ -683,6 +910,38 @@ def combine(first: dict, second: dict) -> dict:
             + ", ".join(mismatched)
         )
 
+    for report, arm in ((on_report, True), (off_report, False)):
+        identity = report["identity"]
+        expected = sorted(float(r) for r in identity["rates"])
+        seen: dict = {}
+        for cell in report["cells"]:
+            if cell["audit_enabled"] != arm:
+                raise ValueError(
+                    "a cell labelled audit_enabled={} appears in the audit_enabled={} "
+                    "report".format(cell["audit_enabled"], arm)
+                )
+            if cell.get("duration_secs") not in (None, identity["duration_secs"]):
+                raise ValueError(
+                    "a {:g}/s cell ran for {}s but the identity declares {}s".format(
+                        cell["offered_per_s"],
+                        cell["duration_secs"],
+                        identity["duration_secs"],
+                    )
+                )
+            seen[cell["offered_per_s"]] = seen.get(cell["offered_per_s"], 0) + 1
+        if sorted(seen) != expected:
+            raise ValueError(
+                "the cells do not cover the declared rate grid: declared {}, "
+                "present {}".format(expected, sorted(seen))
+            )
+        wrong = {r: n for r, n in seen.items() if n != identity["repeats"]}
+        if wrong:
+            raise ValueError(
+                "the declared {} repeats are not present at every rate: {}".format(
+                    identity["repeats"], wrong
+                )
+            )
+
     threshold = 0.99
     return {
         "mode": "combine",
@@ -705,7 +964,10 @@ def combine(first: dict, second: dict) -> dict:
     }
 
 
-def model() -> dict:
+def model(
+    ceiling_per_s: float = MEASURED_DRAIN_BAND_PER_S,
+    rates: list[float] | None = None,
+) -> dict:
     """Deterministic queueing arithmetic, no services.
 
     Documents the contract's shape, and deliberately reproduces the physics the
@@ -716,14 +978,20 @@ def model() -> dict:
     ceiling — which made the green path a test of steady cells rather than of the
     behaviour the harness meets in the field.
 
+    The default ceiling is the drain rate measured on this rig, *not* a round
+    number below the grid. An earlier version fixed it at 333/s while the grid
+    topped out at 400/s, so the model ran at 120% utilization and separated
+    cleanly while the rig would have sat at 81-102% and separated by coin flip.
+    A fixture that cannot produce the failing input turns green into a statement
+    about the fixture. `ceiling_per_s` is a parameter so a test can push it above
+    the top grid rate and exercise the no-separation path.
+
     For review and for the unit tests, never as evidence.
     """
-    ceiling = 1000.0 / 3.0
+    ceiling = ceiling_per_s
     duration = 20.0
     repeats = 5
-    # 350/s sits just above the ceiling, so it fills the channel over several
-    # repeats; 400/s overshoots far enough to bank the whole depth at once.
-    rates = [20.0, 50.0, 100.0, 200.0, 350.0, 400.0]
+    rates = list(DEFAULT_RATES if rates is None else rates)
 
     def jitter(repeat: int) -> float:
         return (repeat - (repeats - 1) / 2.0) * 0.002

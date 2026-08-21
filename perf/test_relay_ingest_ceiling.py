@@ -262,7 +262,36 @@ class VerdictTests(unittest.TestCase):
         off = arm([1.0, 1.0], audit=False)
         result = harness.verdict(on, off, control_ran=True)
         self.assertFalse(result["ok"])
-        self.assertTrue(any("cannot be compared" in f for f in result["failures"]))
+        self.assertTrue(any("never compared" in f for f in result["failures"]))
+
+    def test_lost_evidence_reports_inconclusive_not_negative(self) -> None:
+        # Two rates: one comparable and unseparated, one that lost its evidence.
+        # Reporting "not shown to limit ingest" here would state a result about
+        # the relay when the truth is that the informative cells were dropped.
+        on = arm([0.60, 0.62, 0.61], rate=100.0) + arm([0.60, 0.62], rate=800.0)
+        on[-1]["outstanding_delta"] = 1000
+        off = arm([0.61, 0.60, 0.62], audit=False, rate=100.0) + arm(
+            [1.0, 1.0], audit=False, rate=800.0
+        )
+        result = harness.verdict(on, off, control_ran=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("inconclusive rather than negative" in f for f in result["failures"]),
+            result["failures"],
+        )
+
+    def test_a_fatal_problem_is_not_also_listed_as_an_exclusion(self) -> None:
+        on = arm([0.60, 0.62, 0.58, 0.61])
+        on[0]["audit_send_errors_delta"] = 1
+        result = harness.verdict(on, arm([1.0, 1.0, 0.999, 1.0], audit=False), True)
+        self.assertTrue(any("worker is gone" in f for f in result["failures"]))
+        self.assertFalse(
+            any(
+                "worker is gone" in r
+                for c in result["excluded_cells"]
+                for r in c["reasons"]
+            )
+        )
 
     def test_no_separation_fails_the_run(self) -> None:
         result = harness.verdict(
@@ -298,6 +327,126 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("structurally blind", self.passing()["lock_ceiling"])
 
 
+class CausalValidityTests(unittest.TestCase):
+    """The gates that stop a precise answer to the wrong experiment."""
+
+    def test_both_arms_collapsing_is_not_a_positive_control(self) -> None:
+        # MUTANT, and the shipped bug: audit-on ~0.40 against audit-off ~0.50
+        # separates cleanly and means nothing. Removing the audit path has to
+        # restore the offer, not merely do better than keeping it.
+        on = arm([0.40, 0.41, 0.39, 0.40])
+        off = arm([0.50, 0.51, 0.49, 0.50], audit=False)
+        result = harness.verdict(on, off, control_ran=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("did not hold its offer" in f for f in result["failures"]),
+            result["failures"],
+        )
+
+    def test_a_control_that_holds_its_offer_passes(self) -> None:
+        result = harness.verdict(
+            arm([0.60, 0.62, 0.58, 0.61]),
+            arm([1.0, 0.999, 1.0, 0.998], audit=False),
+            control_ran=True,
+        )
+        self.assertTrue(result["ok"], result["failures"])
+        self.assertTrue(
+            result["arm_separation"]["primary_control_holds_offer"]
+        )
+
+    def test_only_secondary_rates_separating_does_not_pass(self) -> None:
+        # MUTANT for the familywise hole: passing on any-of-N rates gives a ~10%
+        # false-pass rate at five rates, measured on this module. One predeclared
+        # primary contrast is the fix, so a separation at a lower rate while the
+        # primary does not separate must fail.
+        on = arm([0.60, 0.62, 0.58, 0.61], rate=800.0) + arm(
+            [1.0, 0.999, 1.0, 0.998], rate=1600.0
+        )
+        off = arm([1.0, 0.999, 1.0, 0.998], audit=False, rate=800.0) + arm(
+            [1.0, 0.999, 1.0, 0.998], audit=False, rate=1600.0
+        )
+        result = harness.verdict(on, off, control_ran=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("only secondary rates separated" in f for f in result["failures"]),
+            result["failures"],
+        )
+
+    def test_a_reverse_separation_contradicts_rather_than_fails_to_support(self) -> None:
+        on = arm([1.0, 0.999, 1.0, 0.998], rate=800.0)
+        off = arm([0.60, 0.62, 0.58, 0.61], audit=False, rate=800.0)
+        result = harness.verdict(on, off, control_ran=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("contradicts the hypothesis" in f for f in result["failures"]),
+            result["failures"],
+        )
+
+    def test_an_auditing_control_arm_is_not_a_control(self) -> None:
+        # MUTANT: the rig JSON claiming audit is off is a claim about how the
+        # relay was started, and under --skip-relay nobody verified it.
+        off = arm([1.0, 0.999, 1.0, 0.998], audit=False)
+        off[0]["audit_activity_in_control_arm"] = 4105
+        result = harness.verdict(arm([0.60, 0.62, 0.58, 0.61]), off, True)
+        self.assertTrue(
+            any(
+                "still auditing" in r
+                for c in result["excluded_cells"]
+                for r in c["reasons"]
+            ),
+            result["excluded_cells"],
+        )
+
+    def test_unaligned_counter_windows_disqualify_a_cell(self) -> None:
+        # MUTANT: counters bracketing the whole subprocess while rates divide by
+        # the post-connect window can hide banking and push busy above 1.0.
+        problems = harness.cell_problems(cell(counters_window_aligned=False))
+        self.assertTrue(any("timed window" in p for p in problems))
+
+    def test_aligned_counter_windows_pass(self) -> None:
+        self.assertEqual(harness.cell_problems(cell(counters_window_aligned=True)), [])
+
+    def test_heavy_setup_overhead_disqualifies_a_cell(self) -> None:
+        problems = harness.cell_problems(cell(setup_overhead_fraction=0.20))
+        self.assertTrue(any("setup and teardown" in p for p in problems))
+
+    def test_a_generator_that_missed_its_slots_disqualifies_a_cell(self) -> None:
+        # Signing and scheduler delay are outside service_ms by design, so the
+        # on-wire headroom gate can pass while the generator never sent the offer.
+        problems = harness.cell_problems(cell(attempted_over_offered=0.80))
+        self.assertTrue(any("scheduled slots" in p for p in problems))
+
+
+class WorkerRateRegimeTests(unittest.TestCase):
+    def test_estimates_are_reported_per_rate_not_pooled(self) -> None:
+        # Different offered rates are different load and database regimes, not
+        # repeats of one estimand.
+        cells = [
+            cell(offered_per_s=800.0, audit_completed_per_s=450.0),
+            cell(offered_per_s=800.0, audit_completed_per_s=460.0),
+            cell(offered_per_s=1600.0, audit_completed_per_s=400.0),
+            cell(offered_per_s=1600.0, audit_completed_per_s=410.0),
+        ]
+        per_rate = harness.worker_rate(cells)["per_rate"]
+        self.assertEqual([r["offered_per_s"] for r in per_rate], [800.0, 1600.0])
+        self.assertAlmostEqual(per_rate[0]["completed_per_s"]["mean"], 455.0)
+        self.assertAlmostEqual(per_rate[1]["completed_per_s"]["mean"], 405.0)
+
+
+class TTableTests(unittest.TestCase):
+    def test_rounding_errs_wide_not_narrow(self) -> None:
+        # The sparse table must never return a smaller critical value than the
+        # true one: df 11 is 2.201 and df 13 is 2.160, and picking the next higher
+        # stored df would under-cover at exactly the n>=16 cells the plan specs.
+        self.assertGreaterEqual(harness.t95(11), 2.201)
+        self.assertGreaterEqual(harness.t95(13), 2.160)
+        self.assertGreaterEqual(harness.t95(14), 2.145)
+
+    def test_exact_entries_are_returned_unchanged(self) -> None:
+        self.assertEqual(harness.t95(4), 2.776)
+        self.assertEqual(harness.t95(10), 2.228)
+
+
 class CombineTests(unittest.TestCase):
     def half(self, audit: bool, **identity) -> dict:
         base = {
@@ -309,14 +458,16 @@ class CombineTests(unittest.TestCase):
             "messages_per_min_limit": 6000000,
             "generator": "./target/ci/ingest_load",
             "source_revision": "deadbeef",
+            "source_diff_digest": "clean",
+            "database_reset": True,
         }
         base.update(identity)
-        fractions = [0.60, 0.62, 0.58, 0.61] if audit else [1.0, 1.0, 0.999, 1.0]
-        return {
-            "audit_enabled": audit,
-            "identity": base,
-            "cells": arm(fractions, audit=audit),
-        }
+        fractions = [0.60, 0.62, 0.58, 0.61] if audit else [1.0, 0.999, 1.0, 0.998]
+        cells = []
+        for rate in base["rates"]:
+            for f in fractions[: base["repeats"]]:
+                cells.extend(arm([f], audit=audit, rate=rate))
+        return {"audit_enabled": audit, "identity": base, "cells": cells}
 
     def test_matched_halves_combine_and_pass(self) -> None:
         report = harness.combine(self.half(True), self.half(False))
@@ -350,6 +501,45 @@ class CombineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 harness.combine(self.half(True), self.half(False, **{field: value}))
 
+    def test_cells_must_cover_the_declared_rate_grid(self) -> None:
+        # MUTANT, probe-confirmed by the reviewers: an identity declaring
+        # [800, 1600] with only 800-cells supplied used to return ok.
+        broken = self.half(True, rates=[800.0, 1600.0])
+        broken["cells"] = [c for c in broken["cells"] if c["offered_per_s"] == 800.0]
+        with self.assertRaises(ValueError) as ctx:
+            harness.combine(broken, self.half(False, rates=[800.0, 1600.0]))
+        self.assertIn("rate grid", str(ctx.exception))
+
+    def test_cells_must_carry_the_declared_repeat_count(self) -> None:
+        broken = self.half(True)
+        broken["cells"] = broken["cells"][:-1]
+        with self.assertRaises(ValueError) as ctx:
+            harness.combine(broken, self.half(False))
+        self.assertIn("repeats", str(ctx.exception))
+
+    def test_a_cell_labelled_for_the_other_arm_is_rejected(self) -> None:
+        # MUTANT: audit-off-labelled cells inside the audit-on report used to pass.
+        broken = self.half(True)
+        broken["cells"] = arm([0.6, 0.62, 0.58, 0.61], audit=False)
+        with self.assertRaises(ValueError) as ctx:
+            harness.combine(broken, self.half(False))
+        self.assertIn("audit_enabled", str(ctx.exception))
+
+    def test_a_dirty_tree_digest_mismatch_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            harness.combine(
+                self.half(True), self.half(False, source_diff_digest="beef")
+            )
+
+    def test_arms_reset_differently_are_rejected(self) -> None:
+        # A fixed arm order against a database that grew in between confounds arm
+        # with time and index size; restoring the same snapshot at both boundaries
+        # is what makes them comparable, so a pair where only one arm was reset
+        # is not one experiment.
+        with self.assertRaises(ValueError) as ctx:
+            harness.combine(self.half(True), self.half(False, database_reset=False))
+        self.assertIn("database_reset", str(ctx.exception))
+
     def test_combine_signals_misuse_the_way_its_neighbours_do(self) -> None:
         # ValueError, not SystemExit: the guard on the path that produced the
         # shipped verdict has to be assertable from a test.
@@ -368,7 +558,49 @@ class ModelTests(unittest.TestCase):
             for r in harness.model()["verdict"]["arm_separation"]["by_rate"]
             if r.get("separated_here")
         ]
-        self.assertEqual(rates, [350.0, 400.0])
+        self.assertEqual(rates, [800.0, 1600.0])
+
+    def test_the_default_grid_straddles_the_measured_drain_band(self) -> None:
+        # The regression guard for a grid that cannot fire the contract. A top
+        # rate at the drain rate makes the only informative cell a coin flip, and
+        # the run then reports "not shown to limit ingest" — a false negative
+        # phrased as a conclusion.
+        band = harness.MEASURED_DRAIN_BAND_PER_S
+        self.assertLess(min(harness.DEFAULT_RATES), band)
+        self.assertGreaterEqual(max(harness.DEFAULT_RATES), 2.0 * band)
+
+    def test_the_model_ceiling_is_not_below_its_own_grid_by_construction(self) -> None:
+        # The earlier model fixed its ceiling at 333/s under a 400/s top rate, so
+        # it separated at 120% utilization while the rig sat at 81-102%. Green
+        # then described the fixture rather than the contract.
+        self.assertGreater(
+            harness.MEASURED_DRAIN_BAND_PER_S, max(harness.DEFAULT_RATES) / 8.0
+        )
+        self.assertLess(harness.MEASURED_DRAIN_BAND_PER_S, max(harness.DEFAULT_RATES))
+
+    def test_a_ceiling_above_the_grid_reports_a_negative_not_a_pass(self) -> None:
+        # MUTANT: nothing saturates, so there is nothing to separate. The run must
+        # fail, and must say it compared every rate and found nothing rather than
+        # implying the evidence was missing.
+        verdict = harness.model(ceiling_per_s=2.0 * max(harness.DEFAULT_RATES))["verdict"]
+        self.assertFalse(verdict["ok"])
+        # And the diagnosis is the saturation one, not the exoneration one: a
+        # ceiling above the grid means the grid never reached the audit path, so
+        # "none separated" would be the wrong thing for a reader to act on.
+        self.assertTrue(
+            any("never saturated" in f for f in verdict["failures"]), verdict["failures"]
+        )
+        self.assertFalse(verdict["saturation"]["any_rate_saturated"])
+
+    def test_a_transition_rate_fills_the_channel_over_several_repeats(self) -> None:
+        # Partial banking, as distinct from the deep +1000-from-empty shape: an
+        # offer just above the drain rate accumulates across repeats until the
+        # channel caps.
+        verdict = harness.model(ceiling_per_s=450.0, rates=[100.0, 470.0])["verdict"]
+        deltas = [c["offered_per_s"] for c in verdict["excluded_cells"]]
+        self.assertTrue(deltas)
+        self.assertTrue(all(r == 470.0 for r in deltas))
+        self.assertGreater(len(deltas), 1)
 
     def test_the_model_reproduces_sequential_channel_fill(self) -> None:
         # The green path has to be tested against the physics, not against a
@@ -387,11 +619,14 @@ class ModelTests(unittest.TestCase):
 
     def test_the_model_keeps_every_rate_comparable(self) -> None:
         separation = harness.model()["verdict"]["arm_separation"]
-        self.assertEqual(separation["comparable_rates"], 6)
+        self.assertEqual(separation["comparable_rates"], len(harness.DEFAULT_RATES))
 
     def test_the_model_reports_the_serialized_worker_rate(self) -> None:
+        # The worker rate the model recovers is the ceiling it was given, which is
+        # now the drain rate measured on this rig rather than a round number
+        # chosen to sit below the grid.
         estimate = harness.model()["verdict"]["worker_rate"]["estimate"]
-        self.assertAlmostEqual(estimate["mean"], 1000.0 / 3.0, 6)
+        self.assertAlmostEqual(estimate["mean"], harness.MEASURED_DRAIN_BAND_PER_S, 6)
 
 
 class KneeReportingTests(unittest.TestCase):
