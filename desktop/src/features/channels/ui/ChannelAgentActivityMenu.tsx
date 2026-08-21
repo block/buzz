@@ -1,0 +1,86 @@
+import { Activity, Bot, Loader2 } from "lucide-react";
+
+import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
+import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
+
+type ChannelAgentActivityMenuProps = {
+  agents: readonly ChannelAgentSessionAgent[];
+  channelId: string;
+  compact: boolean;
+  onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
+  openAgentSessionPubkey: string | null;
+};
+
+export function ChannelAgentActivityMenu({
+  agents,
+  channelId,
+  compact,
+  onOpenAgentSession,
+  openAgentSessionPubkey,
+}: ChannelAgentActivityMenuProps) {
+  const workingPubkeys = useChannelWorkingAgentPubkeys(channelId);
+  const workingSet = new Set(workingPubkeys.map(normalizePubkey));
+  const selectedPubkey = openAgentSessionPubkey
+    ? normalizePubkey(openAgentSessionPubkey)
+    : null;
+
+  if (agents.length === 0) {
+    return null;
+  }
+
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          aria-label="Open agent activity"
+          data-testid="channel-agent-activity-menu-trigger"
+          size={compact ? "icon" : "sm"}
+          title="Agent activity"
+          type="button"
+          variant={selectedPubkey ? "secondary" : "outline"}
+        >
+          <Activity />
+          {compact ? null : <span>Activity</span>}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-64">
+        <DropdownMenuLabel>Agent activity</DropdownMenuLabel>
+        {agents.map((agent) => {
+          const pubkey = normalizePubkey(agent.pubkey);
+          const isWorking = workingSet.has(pubkey);
+          const isSelected = selectedPubkey === pubkey;
+          return (
+            <DropdownMenuItem
+              className="gap-2"
+              data-testid={`channel-agent-activity-item-${agent.pubkey}`}
+              key={agent.pubkey}
+              onSelect={() => onOpenAgentSession(agent.pubkey, channelId)}
+            >
+              <Bot className="text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+              {isWorking ? (
+                <span className="flex shrink-0 items-center gap-1.5 text-xs text-primary">
+                  <Loader2 className="animate-spin" />
+                  Working
+                </span>
+              ) : isSelected ? (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  Open
+                </span>
+              ) : null}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}

@@ -734,6 +734,7 @@ export function ChannelScreen({
         activeChannel={activeChannel}
         activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
         activeChannelTitle={activeChannelTitle}
+        activityAgents={channelAgentSessionAgents}
         actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
         activeDmAvatarUrl={activeDmAvatarUrl}
         activeDmHeaderParticipants={activeDmHeaderParticipants}
@@ -745,7 +746,9 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
+        onOpenAgentSession={handleOpenAgentSession}
         onToggleMembers={handleToggleMembers}
+        openAgentSessionPubkey={openAgentSessionPubkey}
         showHeaderContent={!isSinglePanelView && !isHuddleTranscript}
         transparentChrome={activeChannel?.channelType !== "forum"}
       />
@@ -754,6 +757,7 @@ export function ChannelScreen({
       activeChannel,
       activeChannelEphemeralDisplay,
       activeChannelTitle,
+      channelAgentSessionAgents,
       shouldCompactHeaderActions,
       activeDmAvatarUrl,
       activeDmHeaderParticipants,
@@ -764,9 +768,11 @@ export function ChannelScreen({
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
+      handleOpenAgentSession,
       handleToggleMembers,
       isSinglePanelView,
       isHuddleTranscript,
+      openAgentSessionPubkey,
     ],
   );
   return (

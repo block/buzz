@@ -7,7 +7,9 @@ import type { ActiveDmHeaderParticipant } from "@/features/channels/useActiveCha
 import { getChannelDescription } from "@/features/channels/lib/channelDescription";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
+import { ChannelAgentActivityMenu } from "@/features/channels/ui/ChannelAgentActivityMenu";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -38,6 +40,8 @@ type ChannelScreenHeaderProps = {
   activeDmPresenceStatus: PresenceStatus | null;
   chromeWrapperRef?: React.Ref<HTMLDivElement>;
   currentPubkey?: string;
+  activityAgents?: readonly ChannelAgentSessionAgent[];
+  openAgentSessionPubkey?: string | null;
   isAddBotOpen?: boolean;
   isJoining?: boolean;
   showHeaderContent?: boolean;
@@ -45,6 +49,7 @@ type ChannelScreenHeaderProps = {
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
+  onOpenAgentSession?: (pubkey: string, channelId?: string | null) => void;
   onToggleMembers: () => void;
 };
 
@@ -58,6 +63,8 @@ export function ChannelScreenHeader({
   activeDmPresenceStatus,
   chromeWrapperRef,
   currentPubkey,
+  activityAgents = [],
+  openAgentSessionPubkey = null,
   isAddBotOpen,
   isJoining = false,
   onAddBotOpenChange,
@@ -65,6 +72,7 @@ export function ChannelScreenHeader({
   transparentChrome = false,
   onJoinChannel,
   onManageChannel,
+  onOpenAgentSession,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
@@ -119,6 +127,15 @@ export function ChannelScreenHeader({
   const actions = activeChannel ? (
     <div className="flex items-center gap-1">
       {terminalButton}
+      {onOpenAgentSession ? (
+        <ChannelAgentActivityMenu
+          agents={activityAgents}
+          channelId={activeChannel.id}
+          compact={actionsVariant === "compact"}
+          onOpenAgentSession={onOpenAgentSession}
+          openAgentSessionPubkey={openAgentSessionPubkey}
+        />
+      ) : null}
       {channelActions}
     </div>
   ) : null;
