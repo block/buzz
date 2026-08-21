@@ -48,7 +48,16 @@ fn write_activity_snapshot(
                         { "id": "event-b", "detail": "failed activity" }
                     ]
                 }
-            ]
+            ],
+            "snapshotProjection": {
+                "bounded": false,
+                "maxBytes": 6291456,
+                "originalJournals": 2,
+                "includedJournals": 2,
+                "omittedJournals": 0,
+                "omittedEvents": 0,
+                "textFieldsTruncated": 0
+            }
         },
         "rawEvents": []
     });
@@ -169,6 +178,29 @@ fn activity_ledger_today_includes_events_when_requested() {
     assert_eq!(result["journals"][0]["events"][0]["id"], "event-b");
     assert_eq!(result["counts"]["failed"], 1);
     assert_eq!(result["counts"]["claimedWithoutEvidence"], 1);
+}
+
+#[test]
+fn activity_ledger_today_limit_keeps_newest_matching_journals() {
+    let tmp = TempDir::new().unwrap();
+    let capability = ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE;
+    let path = write_activity_snapshot(&tmp, capability, 100, 160);
+
+    let output = read_activity_ledger_today(
+        path.to_str().unwrap(),
+        capability,
+        &expected_owner_pubkey(),
+        &json!({"limit": 1}),
+        120,
+    )
+    .unwrap();
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["counts"]["matchingJournals"], 2);
+    assert_eq!(result["counts"]["returnedJournals"], 1);
+    assert_eq!(result["journals"][0]["id"], "journal-b");
+    assert_eq!(result["channels"][0]["channelId"], "chan-b");
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["sourceProjection"]["bounded"], false);
 }
 
 #[test]

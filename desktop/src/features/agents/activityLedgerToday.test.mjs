@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   activityLedgerDayRange,
   applyAuthorityToTodayActivity,
+  buildBoundedTodayActivitySurface,
   buildTodayActivityFromArchivedEvents,
 } from "./activityLedgerToday.ts";
 
@@ -195,4 +196,128 @@ test("Today authority overlay recomputes evidence-gap counts", async () => {
   assert.equal(updated.journals[0].proofState, "VERIFIED");
   assert.equal(updated.counts.claimedWithoutEvidence, 0);
   assert.equal(updated.channels[0].lastActivityAt, "2026-08-21T14:00:01.000Z");
+});
+
+function snapshotJournal(id, minute, detail = null) {
+  const timestamp = `2026-08-21T14:${String(minute).padStart(2, "0")}:00.000Z`;
+  const event = {
+    id: `event-${id}`,
+    journalKey: id,
+    correlationId: `message-${id}`,
+    category: "tool",
+    title: "write_file",
+    detail,
+    status: "completed",
+    proofState: "RECEIPTED",
+    timestamp,
+    channelId: "channel-1",
+    sessionId: "session-1",
+    turnId: id,
+    toolCallId: `tool-${id}`,
+    messageId: null,
+    provenance: {
+      sourceEventId: `source-${id}`,
+      sourcePubkey: "agent-a",
+      sourceKind: 24200,
+      sourceCreatedAt: Math.floor(Date.parse(timestamp) / 1_000),
+      sourceSignature: "a".repeat(128),
+      origin: "historical_backfill",
+      observerKind: "acp_read",
+      method: "session/update",
+      sessionUpdate: "tool_call_update",
+      seq: minute,
+      timestamp,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: id,
+      toolCallId: `tool-${id}`,
+      messageId: null,
+      triggeringEventIds: [`message-${id}`],
+    },
+    tags: ["tool", "tool:write_file"],
+  };
+  return {
+    id,
+    journalKey: id,
+    correlationId: `message-${id}`,
+    channelId: "channel-1",
+    sessionId: "session-1",
+    turnId: id,
+    startedAt: timestamp,
+    endedAt: timestamp,
+    status: "completed",
+    proofState: "RECEIPTED",
+    summary: `Completed ${id}`,
+    summarySource: "auto",
+    ownerModifiedAt: null,
+    ownerModifiedBy: null,
+    claimedCompletionWithoutEvidence: false,
+    eventCount: 1,
+    events: [event],
+    agentPubkey: "agent-a",
+    agentName: "Honey",
+  };
+}
+
+test("Today snapshot projection bounds oversized tool output", () => {
+  const journal = snapshotJournal(
+    "turn-large",
+    1,
+    "x".repeat(10 * 1024 * 1024),
+  );
+  const surface = {
+    day: "2026-08-21",
+    journals: [journal],
+    channels: [],
+    counts: {
+      journals: 1,
+      failed: 0,
+      inProgress: 0,
+      claimedWithoutEvidence: 0,
+    },
+  };
+  const maxBytes = 32 * 1024;
+  const bounded = buildBoundedTodayActivitySurface(surface, maxBytes);
+
+  assert.ok(
+    new TextEncoder().encode(JSON.stringify(bounded)).byteLength <= maxBytes,
+  );
+  assert.equal(bounded.journals.length, 1);
+  assert.equal(bounded.snapshotProjection.bounded, true);
+  assert.equal(bounded.snapshotProjection.textFieldsTruncated, 1);
+  assert.ok(bounded.journals[0].events[0].detail.length < 10 * 1024 * 1024);
+});
+
+test("Today snapshot projection drops oldest journals only as a final fallback", () => {
+  const journals = Array.from({ length: 10 }, (_, index) =>
+    snapshotJournal(`turn-${index}`, index),
+  );
+  const surface = {
+    day: "2026-08-21",
+    journals,
+    channels: [],
+    counts: {
+      journals: journals.length,
+      failed: 0,
+      inProgress: 0,
+      claimedWithoutEvidence: 0,
+    },
+  };
+  const maxBytes = 2_500;
+  const bounded = buildBoundedTodayActivitySurface(surface, maxBytes);
+
+  assert.ok(
+    new TextEncoder().encode(JSON.stringify(bounded)).byteLength <= maxBytes,
+  );
+  assert.ok(bounded.journals.length > 0);
+  assert.ok(bounded.journals.length < journals.length);
+  assert.equal(bounded.journals.at(-1).id, "turn-9");
+  assert.deepEqual(
+    bounded.journals.map((journal) => journal.id),
+    journals.slice(-bounded.journals.length).map((journal) => journal.id),
+  );
+  assert.equal(
+    bounded.snapshotProjection.omittedJournals,
+    journals.length - bounded.journals.length,
+  );
 });

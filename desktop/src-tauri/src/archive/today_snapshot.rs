@@ -291,26 +291,6 @@ fn parse_and_validate_signed_snapshot(
 }
 
 #[cfg(unix)]
-fn secure_open(path: &Path) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| format!("create Today snapshot temp file: {error}"))
-}
-
-#[cfg(not(unix))]
-fn secure_open(path: &Path) -> Result<std::fs::File, String> {
-    std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| format!("create Today snapshot temp file: {error}"))
-}
-
-#[cfg(unix)]
 fn enforce_private_permissions(path: &Path, directory: bool) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if directory { 0o700 } else { 0o600 };
@@ -320,48 +300,6 @@ fn enforce_private_permissions(path: &Path, directory: bool) -> Result<(), Strin
 
 #[cfg(not(unix))]
 fn enforce_private_permissions(_path: &Path, _directory: bool) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn atomic_publish(temp_path: &Path, destination: &Path) -> Result<(), String> {
-    std::fs::rename(temp_path, destination)
-        .map_err(|error| format!("atomically publish Today snapshot: {error}"))
-}
-
-#[cfg(windows)]
-fn atomic_publish(temp_path: &Path, destination: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let temp_wide = temp_path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination_wide = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths for the
-    // duration of the call. MOVEFILE_REPLACE_EXISTING preserves atomic
-    // replace semantics when a prior Today snapshot already exists.
-    let moved = unsafe {
-        MoveFileExW(
-            temp_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        return Err(format!(
-            "atomically publish Today snapshot: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
     Ok(())
 }
 
@@ -382,27 +320,30 @@ pub fn write_owner_today_snapshot(
     enforce_private_permissions(&archive_dir, true)?;
 
     let destination = snapshot_path(nest_dir, expected_owner_pubkey);
-    let temp_path = archive_dir.join(format!(
-        ".activity-ledger-today-{}.{}.tmp",
-        expected_owner_pubkey,
-        uuid::Uuid::new_v4()
-    ));
-    let write_result = (|| -> Result<(), String> {
-        let mut file = secure_open(&temp_path)?;
-        file.write_all(canonical_json.as_bytes())
-            .map_err(|error| format!("write Today snapshot: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("sync Today snapshot: {error}"))?;
-        drop(file);
-        enforce_private_permissions(&temp_path, false)?;
-        atomic_publish(&temp_path, &destination)?;
-        enforce_private_permissions(&destination, false)?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    write_result?;
+    // Keep the temporary file in the destination directory. Besides making
+    // replacement atomic, this rules out Windows' cross-volume copy/delete
+    // path; file contents are synced below before the safe replace-existing
+    // persist call publishes the new name.
+    let mut temp_file = tempfile::Builder::new()
+        .prefix(".activity-ledger-today-")
+        .tempfile_in(&archive_dir)
+        .map_err(|error| format!("create Today snapshot temp file: {error}"))?;
+    enforce_private_permissions(temp_file.path(), false)?;
+    temp_file
+        .write_all(canonical_json.as_bytes())
+        .map_err(|error| format!("write Today snapshot: {error}"))?;
+    temp_file
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("sync Today snapshot: {error}"))?;
+    temp_file
+        .persist(&destination)
+        .map_err(|error| format!("atomically publish Today snapshot: {}", error.error))?;
+    enforce_private_permissions(&destination, false)?;
+    #[cfg(unix)]
+    std::fs::File::open(&archive_dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync Today snapshot directory: {error}"))?;
 
     let sha256 = hex::encode(Sha256::digest(canonical_json.as_bytes()));
     Ok(TodaySnapshotReceipt {

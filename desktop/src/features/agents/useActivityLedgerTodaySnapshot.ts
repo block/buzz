@@ -14,6 +14,7 @@ import {
 import {
   activityLedgerDayRange,
   applyAuthorityToTodayActivity,
+  buildBoundedTodayActivitySurface,
   buildTodayActivityFromArchivedEvents,
 } from "./activityLedgerToday";
 
@@ -90,9 +91,8 @@ export function useActivityLedgerTodaySnapshot(): void {
           ...range,
           journalIds: observedSurface.journals.map((journal) => journal.id),
         });
-        const surface = applyAuthorityToTodayActivity(
-          observedSurface,
-          authority,
+        const surface = buildBoundedTodayActivitySurface(
+          applyAuthorityToTodayActivity(observedSurface, authority),
         );
         const generatedAt = Math.floor(now.getTime() / 1_000);
         await writeOwnerTodaySnapshot({

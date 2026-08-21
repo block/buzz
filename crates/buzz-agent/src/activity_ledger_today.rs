@@ -389,6 +389,10 @@ fn filter_activity_ledger_snapshot(
         .ok_or_else(|| {
             format!("{ACTIVITY_LEDGER_TODAY_TOOL}: surface.journals must be an array")
         })?;
+    let source_projection = surface
+        .get("snapshotProjection")
+        .cloned()
+        .unwrap_or(Value::Null);
 
     let mut filtered = Vec::new();
     for journal in journals {
@@ -399,7 +403,8 @@ fn filter_activity_ledger_snapshot(
     let matching_journals = filtered.len();
     let truncated = matching_journals > query.limit;
     if truncated {
-        filtered.truncate(query.limit);
+        let oldest_to_drop = filtered.len() - query.limit;
+        filtered.drain(..oldest_to_drop);
     }
 
     let channels = rebuild_filtered_channels(&filtered);
@@ -424,6 +429,7 @@ fn filter_activity_ledger_snapshot(
         "generatedAt": generated_at,
         "expiresAt": expires_at,
         "capability": capability,
+        "sourceProjection": source_projection,
         "filters": {
             "channelId": query.channel_id,
             "agentPubkey": query.agent_pubkey,
@@ -484,16 +490,16 @@ fn strip_events_from_journal(journal: &Value, include_events: bool) -> Result<Va
     Ok(Value::Object(object))
 }
 
+type FilteredChannelSummary = (
+    Vec<String>,
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+    String,
+);
+
 fn rebuild_filtered_channels(journals: &[Value]) -> Vec<Value> {
-    let mut channels: std::collections::BTreeMap<
-        String,
-        (
-            Vec<String>,
-            std::collections::BTreeSet<String>,
-            std::collections::BTreeSet<String>,
-            String,
-        ),
-    > = std::collections::BTreeMap::new();
+    let mut channels: std::collections::BTreeMap<String, FilteredChannelSummary> =
+        std::collections::BTreeMap::new();
 
     for journal in journals {
         let Some(channel_id) = string_field(journal, "channelId").map(str::to_owned) else {
