@@ -1022,7 +1022,7 @@ async fn create_session_and_apply_model(
         with_huddle_instructions(
             with_core(
                 with_team(
-                    framed_system_prompt(ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
                     ctx.team_instructions.as_deref(),
                 ),
                 agent_core,
@@ -1608,24 +1608,36 @@ pub(crate) fn prepend_standing_for_legacy(
 }
 
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
-/// header, keeping the base/persona boundary recoverable downstream.
+/// header, keeping the base/workspace/persona boundaries recoverable downstream.
 ///
-/// The header framing matches the legacy per-turn path (`queue::base_section`
-/// for `[Base]`, `[Agent Instructions]\n{...}` for the persona) so the desktop observer can
-/// split the combined value into labeled sub-sections. Each prompt is wrapped
-/// only when present, so a persona-only agent yields
-/// `[Agent Instructions]\n{persona}`
-/// rather than an unlabeled blob that would be mislabeled as `[Base]`.
-fn framed_system_prompt(base_prompt: Option<&str>, system_prompt: Option<&str>) -> Option<String> {
+/// The static base remains first for prompt-prefix caching. When a base is
+/// present, the dynamic workspace anchor follows it and precedes the user-owned
+/// agent instructions. A persona-only agent still yields
+/// `[Agent Instructions]\n{persona}` rather than an unlabeled blob that would
+/// be mislabeled as `[Base]`.
+fn framed_system_prompt(
+    cwd: &str,
+    base_prompt: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Option<String> {
     match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
-            "{}\n\n[Agent Instructions]\n{sp}",
-            crate::queue::base_section(bp)
+            "{}\n\n{}\n\n[Agent Instructions]\n{sp}",
+            crate::queue::base_section(bp),
+            workspace_section(cwd)
         )),
-        (Some(bp), None) => Some(crate::queue::base_section(bp)),
+        (Some(bp), None) => Some(format!(
+            "{}\n\n{}",
+            crate::queue::base_section(bp),
+            workspace_section(cwd)
+        )),
         (None, Some(sp)) => Some(format!("[Agent Instructions]\n{sp}")),
         (None, None) => None,
     }
+}
+
+fn workspace_section(cwd: &str) -> String {
+    format!("[Workspace]\nCurrent working directory: {cwd}")
 }
 
 /// Append the team-owned instruction section after `[Agent Instructions]` and before core memory.
@@ -4920,31 +4932,44 @@ mod tests {
         // Also the regression guard against #2372: the session title travels
         // out of band in `_meta.sessionTitle`, so this exact-bytes assertion is
         // what pins the framing against a `[Session]` section reappearing here.
-        let framed = framed_system_prompt(Some("base text"), Some("persona text"))
+        let framed = framed_system_prompt("/workspace", Some("base text"), Some("persona text"))
             .expect("both present yields Some");
         assert_eq!(
             framed,
-            "[Base]\nbase text\n\n[Agent Instructions]\npersona text"
+            "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: /workspace\n\n[Agent Instructions]\npersona text"
         );
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
-        let framed = framed_system_prompt(Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        let framed =
+            framed_system_prompt("/workspace", Some("base text"), None).expect("base yields Some");
+        assert_eq!(
+            framed,
+            "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: /workspace"
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_persona_only_labels_agent_instructions() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
         // its own [Agent Instructions] header even when no base prompt exists.
-        let framed = framed_system_prompt(None, Some("persona text")).expect("persona yields Some");
+        let framed = framed_system_prompt("/workspace", None, Some("persona text"))
+            .expect("persona yields Some");
         assert_eq!(framed, "[Agent Instructions]\npersona text");
     }
 
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt(None, None).is_none());
+        assert!(framed_system_prompt("/workspace", None, None).is_none());
+    }
+
+    #[test]
+    fn test_workspace_section_preserves_windows_cwd() {
+        assert_eq!(
+            workspace_section(r"C:\Users\me\buzz"),
+            "[Workspace]\nCurrent working directory: C:\\Users\\me\\buzz"
+        );
     }
 
     #[test]

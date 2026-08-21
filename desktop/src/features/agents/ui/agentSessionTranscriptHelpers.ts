@@ -158,7 +158,7 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 4. Parse Base/Agent Instructions from the remaining prefix ────────────
+  // ── 4. Parse Base/Workspace/Agent Instructions from the remaining prefix ─
   // The canonical team-instructions delimiter produced by compose_prompt() in
   // buzz-persona/src/resolve.rs:
   //   format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
@@ -185,6 +185,50 @@ export function parseSystemPromptSections(
     { header: "[Agent Instructions]", title: "Agent Instructions" },
     { header: "[System]", title: "System" },
   ] as const;
+
+  function appendBaseAndWorkspace(raw: string): void {
+    const BASE_HEADER = "[Base]";
+    const WORKSPACE_HEADER = "[Workspace]";
+    const workspaceMarker = `\n\n${WORKSPACE_HEADER}\n`;
+    const baseMarker = `\n\n${BASE_HEADER}\n`;
+
+    // Current framing keeps the static base first, followed by the dynamic cwd.
+    if (raw.startsWith(`${BASE_HEADER}\n`)) {
+      const workspaceAt = raw.lastIndexOf(workspaceMarker);
+      if (workspaceAt !== -1) {
+        const baseBody = raw
+          .slice(`${BASE_HEADER}\n`.length, workspaceAt)
+          .trim();
+        const workspaceBody = raw
+          .slice(workspaceAt + workspaceMarker.length)
+          .trim();
+        if (baseBody) sections.push({ title: "Base", body: baseBody });
+        if (workspaceBody)
+          sections.push({ title: "Workspace", body: workspaceBody });
+        return;
+      }
+    }
+
+    // Preserve readable transcripts for sessions captured with the former
+    // Workspace-before-Base framing.
+    if (raw.startsWith(`${WORKSPACE_HEADER}\n`)) {
+      const baseAt = raw.lastIndexOf(baseMarker);
+      if (baseAt !== -1) {
+        const workspaceBody = raw
+          .slice(`${WORKSPACE_HEADER}\n`.length, baseAt)
+          .trim();
+        const baseBody = raw.slice(baseAt + baseMarker.length).trim();
+        if (workspaceBody)
+          sections.push({ title: "Workspace", body: workspaceBody });
+        if (baseBody) sections.push({ title: "Base", body: baseBody });
+        return;
+      }
+    }
+
+    const baseBody = raw.replace(/^\[Base]\n/, "").trim();
+    if (baseBody) sections.push({ title: "Base", body: baseBody });
+  }
+
   const baseAndInstructions = remainder;
   if (baseAndInstructions) {
     const leadingFrame = instructionFrames.find(({ header }) =>
@@ -209,8 +253,7 @@ export function parseSystemPromptSections(
       const head = boundary
         ? baseAndInstructions.slice(0, boundary.at)
         : baseAndInstructions;
-      const baseBody = head.replace(/^\[Base]\n/, "").trim();
-      if (baseBody) sections.push({ title: "Base", body: baseBody });
+      appendBaseAndWorkspace(head);
 
       if (boundary) {
         const raw = baseAndInstructions.slice(

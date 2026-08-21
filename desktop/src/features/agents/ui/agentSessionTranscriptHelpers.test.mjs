@@ -202,11 +202,41 @@ test("parseSystemPromptSections splits both prompts into Base and System", () =>
 });
 
 test("parseSystemPromptSections splits current Base and Agent Instructions framing", () => {
-  const framed = "[Base]\nbase text\n\n[Agent Instructions]\npersona text";
+  const framed =
+    "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: /workspace\n\n[Agent Instructions]\npersona text";
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
     { title: "Base", body: "base text" },
+    { title: "Workspace", body: "Current working directory: /workspace" },
     { title: "Agent Instructions", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections preserves a Windows workspace path", () => {
+  const framed =
+    "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: C:\\Users\\me\\buzz\n\n[Agent Instructions]\npersona text";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    {
+      title: "Workspace",
+      body: "Current working directory: C:\\Users\\me\\buzz",
+    },
+    { title: "Agent Instructions", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections preserves the former Workspace-before-Base framing", () => {
+  const framed =
+    "[Workspace]\nYour absolute working directory is `/workspace`.\n\n[Base]\nbase text\n\n[System]\npersona text";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "Workspace",
+      body: "Your absolute working directory is `/workspace`.",
+    },
+    { title: "Base", body: "base text" },
+    { title: "System", body: "persona text" },
   ]);
 });
 
@@ -341,10 +371,13 @@ test("parseSystemPromptSections keeps exact core header literal when only a sing
   ]);
 });
 
-test("parseSystemPromptSections pins the current Base+Agent Instructions+Core harness shape", () => {
+test("parseSystemPromptSections pins the current Base+Workspace+Agent Instructions+Core harness shape", () => {
   const framed = [
     "[Base]",
     "You are an assistant.",
+    "",
+    "[Workspace]",
+    "Current working directory: /workspace",
     "",
     "[Agent Instructions]",
     "Custom persona instructions.",
@@ -357,6 +390,7 @@ test("parseSystemPromptSections pins the current Base+Agent Instructions+Core ha
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
     { title: "Base", body: "You are an assistant." },
+    { title: "Workspace", body: "Current working directory: /workspace" },
     { title: "Agent Instructions", body: "Custom persona instructions." },
     {
       title: "Core Memory",
