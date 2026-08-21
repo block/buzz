@@ -56,7 +56,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _initInFlight = false;
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
-      return AsyncData(_lastKnownMessages ?? const []);
+      if (_lastKnownMessages case final cached?) {
+        return AsyncData(cached);
+      }
+      return const AsyncLoading();
     }
 
     _reachedOldest = false;
