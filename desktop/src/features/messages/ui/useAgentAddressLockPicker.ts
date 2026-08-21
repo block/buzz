@@ -72,6 +72,12 @@ export function useAgentAddressLockPicker({
     () => new Set(audience.pubkeys),
     [audience.pubkeys],
   );
+  const unpinnedAgentPubkeysRef = React.useRef(new Set<string>());
+  const unpinnedAudienceScopeRef = React.useRef(audienceScope);
+  if (unpinnedAudienceScopeRef.current !== audienceScope) {
+    unpinnedAudienceScopeRef.current = audienceScope;
+    unpinnedAgentPubkeysRef.current.clear();
+  }
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
   const [announcement, setAnnouncement] = React.useState("");
   const lockedAgents = React.useMemo<ComposerAddressAgent[]>(
@@ -133,15 +139,25 @@ export function useAgentAddressLockPicker({
       richText.getPlainTextAndCursor,
     ],
   );
+  const removeAddressedAgent = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      if (!audienceScope || !normalized) return;
+      unpinnedAgentPubkeysRef.current.add(normalized);
+      audience.removePubkey(normalized);
+    },
+    [audience.removePubkey, audienceScope],
+  );
   const toggleAlwaysAddressAgent = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (!audienceScope || !pubkey || !suggestion.isAgent) return;
 
       if (lockedAgentPubkeys.has(pubkey)) {
-        audience.removePubkey(pubkey);
+        removeAddressedAgent(pubkey);
         setAnnouncement(`Stopped always addressing ${suggestion.displayName}`);
       } else {
+        unpinnedAgentPubkeysRef.current.delete(pubkey);
         audience.addPubkey(pubkey);
         onPulseAddressLock(pubkey);
         setAnnouncement(`Always addressing ${suggestion.displayName}`);
@@ -170,13 +186,13 @@ export function useAgentAddressLockPicker({
     [
       applyAutocompleteEdit,
       audience.addPubkey,
-      audience.removePubkey,
       audienceScope,
       lockedAgentPubkeys,
       mentions.isMentionOpen,
       mentions.mentionStartIndex,
       mentions.openMentionPicker,
       onPulseAddressLock,
+      removeAddressedAgent,
       richText.getPlainTextAndCursor,
     ],
   );
@@ -186,7 +202,10 @@ export function useAgentAddressLockPicker({
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (suggestion.isAgent && pubkey && audienceScope) {
         const { cursor } = richText.getPlainTextAndCursor();
-        if (mentions.isInlineMentionSelection()) {
+        const wasUnpinned =
+          !lockedAgentPubkeys.has(pubkey) &&
+          unpinnedAgentPubkeysRef.current.has(pubkey);
+        if (mentions.isInlineMentionSelection() || wasUnpinned) {
           applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
           return;
         }
@@ -220,6 +239,7 @@ export function useAgentAddressLockPicker({
     announcement,
     lockedAgents,
     lockedAgentPubkeys,
+    removeAddressedAgent,
     selectMentionSuggestion,
     toggleAlwaysAddressAgent,
   };

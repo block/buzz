@@ -302,6 +302,69 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
   assert.equal(result.current.announcement, "Always addressing Agent Ada");
 });
 
+test("selecting an explicitly unpinned agent inserts a mention until send", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const appliedEdits = [];
+  const addedPubkeys = [];
+  const removedPubkeys = [];
+  const pulsedPubkeys = [];
+  const mentions = {
+    cancelMentionAutocomplete: () => {},
+    getDraftMentionRefs: () => [],
+    getMentionDisplayName: () => "Agent Ada",
+    isInlineMentionSelection: () => false,
+    insertMention: () => ({
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@Agent Ada ",
+    }),
+    mentionStartIndex: 0,
+  };
+  const richText = {
+    getPlainTextAndCursor: () => ({ text: "", cursor: 0 }),
+  };
+  const { result, rerender } = renderHook(
+    ({ pubkeys }) =>
+      useAgentAddressLockPicker({
+        applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+        audience: {
+          pubkeys,
+          addPubkey: (pubkey) => addedPubkeys.push(pubkey),
+          removePubkey: (pubkey) => removedPubkeys.push(pubkey),
+        },
+        audienceScope: "channel-scope",
+        mentions,
+        onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
+        richText,
+      }),
+    { initialProps: { pubkeys: ["agent-pubkey"] } },
+  );
+
+  act(() => result.current.removeAddressedAgent("AGENT-PUBKEY"));
+  rerender({ pubkeys: [] });
+  act(() => {
+    result.current.selectMentionSuggestion({
+      pubkey: "agent-pubkey",
+      displayName: "Agent Ada",
+      isAgent: true,
+    });
+  });
+
+  assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@Agent Ada ",
+    },
+  ]);
+  assert.deepEqual(addedPubkeys, []);
+  assert.deepEqual(pulsedPubkeys, []);
+});
+
 test("an addressed agent keeps its resolved name while mention state clears during send", async () => {
   const { renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(

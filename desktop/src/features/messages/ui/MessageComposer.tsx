@@ -1,5 +1,6 @@
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
+import { toast } from "sonner";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
@@ -25,6 +26,7 @@ import {
 } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
+  getPersistentAgentAudienceSnapshot,
   getPersistentAgentAudienceScope,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
@@ -48,6 +50,7 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -300,15 +303,41 @@ function MessageComposerImpl({
   const addInlineAgentMentionsToAudience = React.useCallback(
     (pubkeys: readonly string[]) => {
       if (!audienceScope || !keepMentionedAgentsPinned) return;
+      const pinnedPubkeys = new Set(
+        getPersistentAgentAudienceSnapshot().audiences[audienceScope] ?? [],
+      );
+      const newlyPinnedPubkeys: string[] = [];
       for (const pubkey of pubkeys) {
-        persistentAudience.addPubkey(pubkey);
-        addressPulse.pulseOne(pubkey);
+        const normalizedPubkey = normalizePubkey(pubkey);
+        if (!pinnedPubkeys.has(normalizedPubkey)) {
+          pinnedPubkeys.add(normalizedPubkey);
+          newlyPinnedPubkeys.push(normalizedPubkey);
+        }
+        persistentAudience.addPubkey(normalizedPubkey);
+        addressPulse.pulseOne(normalizedPubkey);
       }
+      if (newlyPinnedPubkeys.length === 0) return;
+
+      if (newlyPinnedPubkeys.length === 1) {
+        const displayName = mentions
+          .getMentionDisplayName(newlyPinnedPubkeys[0])
+          ?.trim();
+        toast.success(
+          displayName ? `${displayName} is now pinned` : "Agent is now pinned",
+          { description: "Future messages will include this agent." },
+        );
+        return;
+      }
+
+      toast.success(`${newlyPinnedPubkeys.length} agents are now pinned`, {
+        description: "Future messages will include these agents.",
+      });
     },
     [
       addressPulse.pulseOne,
       audienceScope,
       keepMentionedAgentsPinned,
+      mentions.getMentionDisplayName,
       persistentAudience.addPubkey,
     ],
   );
@@ -419,6 +448,7 @@ function MessageComposerImpl({
     announcement: addressLockAnnouncement,
     lockedAgents,
     lockedAgentPubkeys,
+    removeAddressedAgent,
     selectMentionSuggestion,
     toggleAlwaysAddressAgent,
   } = useAgentAddressLockPicker({
@@ -1006,7 +1036,7 @@ function MessageComposerImpl({
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionSettings}
               onPaperclip={handlePaperclipClick}
-              onRemoveAddressedAgent={persistentAudience.removePubkey}
+              onRemoveAddressedAgent={removeAddressedAgent}
               pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
               sendDisabled={sendDisabled}
               shakeVersionByPubkey={addressPulse.shakeVersionByPubkey}

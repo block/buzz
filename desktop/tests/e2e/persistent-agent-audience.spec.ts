@@ -301,6 +301,7 @@ test("the mention button opens settings and can undo an address", async ({
   ).toHaveCount(0);
   await ingress.click();
   await expect(menu).toHaveCount(0);
+  await input.fill("");
   await ingress.click();
   await expect(menu).toBeVisible();
   await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
@@ -324,7 +325,7 @@ test("the mention button opens settings and can undo an address", async ({
     .toEqual([AGENT_A]);
 
   await menu.getByRole("button", { name: "Always address Morgarita" }).click();
-  await expect(input).toHaveText("draft text");
+  await expect(input).toHaveText("");
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
@@ -344,8 +345,7 @@ test("the mention button opens settings and can undo an address", async ({
     )
     .toEqual([]);
 
-  await input.fill("@Mor");
-  await input.press("Tab");
+  await menu.getByRole("button", { name: "Mention Morgarita" }).click();
   await expect(input).toHaveText("@Morgarita ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
@@ -516,6 +516,12 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible({ timeout: 2_500 });
+  const autoPinToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Morgarita is now pinned" });
+  await expect(autoPinToast).toContainText(
+    "Future messages will include this agent.",
+  );
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita hello"))
     .toContain(AGENT_A);
