@@ -13,7 +13,6 @@ from harbor_buzz_orchestra.container_runtime import (
     REMOTE_BIN,
     REMOTE_EVIDENCE,
     REMOTE_LOGS,
-    SCRIPTED_TURN_SETTLE_POLLS,
     THINKING_EFFORT,
     BuzzContainerRuntime,
     EndpointLaunchConfig,
@@ -503,6 +502,25 @@ async def test_sends_task_declared_actor_messages_and_records_event_ids(
     assert all(call[3]["reply_to"] == "task-root" for call in calls)
 
 
+async def test_scripted_message_requires_an_event_id(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("solo-1", "orchestrator", "orch-model")
+    trial = replace(
+        trial_handle((orch,)),
+        task_name="cross-thread-requests",
+    )
+
+    async def send(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(rt, "_send", send)
+
+    with pytest.raises(RuntimeLaunchError, match="did not return an event ID"):
+        await rt._send_scripted_messages(
+            trial=trial, orchestrator=orch, task_event_id="task-root"
+        )
+
+
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):
     rt = runtime(tmp_path, poll_seconds=0)
     orch = credential("orch-1", "orchestrator", "orch-model")
@@ -550,7 +568,7 @@ async def test_solo_turn_end_completes_without_done_message(tmp_path, monkeypatc
     assert await rt._wait_for_done(environment, orch, trial, [], solo=solo) is None
 
 
-async def test_scripted_events_wait_for_delayed_follow_up_turn(tmp_path, monkeypatch):
+async def test_scripted_events_wait_for_delivery_receipt(tmp_path, monkeypatch):
     from harbor_buzz_orchestra.container_runtime import _Agent
 
     rt = runtime(tmp_path, poll_seconds=0)
@@ -559,14 +577,10 @@ async def test_scripted_events_wait_for_delayed_follow_up_turn(tmp_path, monkeyp
     solo = _Agent(orch, 7, "stdout.log", "stderr.log")
     alpha = {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}
     beta = {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "BETA"}
-    message_rounds = iter(
-        [[alpha]] * SCRIPTED_TURN_SETTLE_POLLS
-        + [[alpha, beta]] * SCRIPTED_TURN_SETTLE_POLLS
-    )
+    scripted_event_id = "b" * 64
+    message_rounds = iter([[alpha]] * 8 + [[alpha, beta]] * 2)
     turn_rounds = iter(
-        [(1, 1)] * (SCRIPTED_TURN_SETTLE_POLLS - 1)
-        + [(2, 1)]
-        + [(2, 2)] * SCRIPTED_TURN_SETTLE_POLLS
+        [(1, 1, set())] * 8 + [(2, 1, set()), (2, 2, {scripted_event_id})]
     )
     polls = 0
 
@@ -575,11 +589,11 @@ async def test_scripted_events_wait_for_delayed_follow_up_turn(tmp_path, monkeyp
         polls += 1
         return next(message_rounds)
 
-    async def turn_counts(*args, **kwargs):
+    async def turn_status(*args, **kwargs):
         return next(turn_rounds)
 
     monkeypatch.setattr(rt, "_buzz_json", buzz_json)
-    monkeypatch.setattr(rt, "_turn_counts", turn_counts)
+    monkeypatch.setattr(rt, "_turn_status", turn_status)
 
     result = await rt._wait_for_done(
         Environment(),
@@ -587,11 +601,11 @@ async def test_scripted_events_wait_for_delayed_follow_up_turn(tmp_path, monkeyp
         trial,
         [],
         solo=solo,
-        wait_for_scripted_turns=True,
+        scripted_event_ids={scripted_event_id},
     )
 
     assert result["id"] == "beta"
-    assert polls == SCRIPTED_TURN_SETTLE_POLLS * 2
+    assert polls == 10
 
 
 async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch):
@@ -605,7 +619,8 @@ async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch)
         {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"},
         {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "DONE: BETA"},
     ]
-    turn_rounds = iter([(2, 1)] + [(2, 2)] * SCRIPTED_TURN_SETTLE_POLLS)
+    scripted_event_id = "b" * 64
+    turn_rounds = iter([(2, 1, {scripted_event_id}), (2, 2, {scripted_event_id})])
     polls = 0
 
     async def buzz_json(*args, **kwargs):
@@ -613,11 +628,11 @@ async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch)
         polls += 1
         return messages
 
-    async def turn_counts(*args, **kwargs):
+    async def turn_status(*args, **kwargs):
         return next(turn_rounds)
 
     monkeypatch.setattr(rt, "_buzz_json", buzz_json)
-    monkeypatch.setattr(rt, "_turn_counts", turn_counts)
+    monkeypatch.setattr(rt, "_turn_status", turn_status)
 
     result = await rt._wait_for_done(
         Environment(),
@@ -625,11 +640,38 @@ async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch)
         trial,
         [],
         solo=solo,
-        wait_for_scripted_turns=True,
+        scripted_event_ids={scripted_event_id},
     )
 
     assert result["id"] == "beta"
-    assert polls == SCRIPTED_TURN_SETTLE_POLLS + 1
+    assert polls == 2
+
+
+def test_turn_status_parses_completed_batch_and_successful_steer_receipts():
+    batch_event_id = "a" * 64
+    steer_event_id = "b" * 64
+    rejected_event_id = "c" * 64
+    output = "\n".join(
+        [
+            "turn starting for channel test",
+            f"turn delivered Buzz events for channel test: {batch_event_id}",
+            "turn complete for channel test: end_turn",
+            (
+                "non-cancelling steer ack received "
+                f"event_id={steer_event_id} ack=Ok(Success {{ session_id: session }})"
+            ),
+            (
+                "non-cancelling steer ack received "
+                f"event_id={rejected_event_id} ack=Ok(Err(OutcomeRejected))"
+            ),
+        ]
+    )
+
+    assert BuzzContainerRuntime._parse_turn_status(output) == (
+        1,
+        1,
+        {batch_event_id, steer_event_id},
+    )
 
 
 async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch):
