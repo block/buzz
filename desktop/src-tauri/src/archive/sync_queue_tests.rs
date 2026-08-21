@@ -218,14 +218,14 @@ fn queue_bound_rejects_new_event_without_mutating_pending_head() {
     assert_eq!(queue.len(), MAX_DURABLE_QUEUE_ENTRIES);
 }
 
-#[test]
-fn byte_capacity_returns_the_candidate_for_retry_after_head_drain() {
+#[tokio::test]
+async fn byte_capacity_inbox_survives_failed_teardown_and_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pending.json");
     let filler = signed_candidate(&"f".repeat(512 * 1024));
     let incoming = signed_candidate(&"i".repeat(512 * 1024));
     let incoming_id = incoming.event_id.clone();
-    let mut queue = DurableQueue::open(path).unwrap();
+    let mut queue = DurableQueue::open(path.clone()).unwrap();
     queue.fill_until_candidate_exceeds_byte_capacity_for_test(filler, &incoming);
 
     assert!(queue.len() < MAX_DURABLE_QUEUE_ENTRIES);
@@ -234,9 +234,45 @@ fn byte_capacity_returns_the_candidate_for_retry_after_head_drain() {
         other => panic!("expected byte-capacity backpressure, got {other}"),
     };
     assert_eq!(retained.event_id, incoming_id);
+    assert_eq!(
+        queue.stash_inbox(retained).unwrap(),
+        EnqueueResult::Accepted
+    );
+    drop(queue);
 
-    queue.acknowledge_head(queue.head_len()).unwrap();
-    assert_eq!(queue.enqueue(retained).unwrap(), EnqueueResult::Accepted);
+    let queue = DurableQueue::open(path.clone()).unwrap();
+    assert!(queue.has_inbox());
+    let failing_io = Arc::new(QueueIo::new(usize::MAX));
+    let (_tx, rx) = mpsc::channel(1);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    run_sync(
+        failing_io.as_ref(),
+        Arc::new(Notify::new()),
+        rx,
+        cancel,
+        queue,
+    )
+    .await
+    .unwrap();
+    assert_eq!(failing_io.attempt_count(), ARCHIVE_RETRY_ATTEMPTS);
+    assert!(DurableQueue::open(path.clone()).unwrap().has_inbox());
+
+    let recovered_io = Arc::new(QueueIo::new(0));
+    run_restored_queue(Arc::clone(&recovered_io), &path)
+        .await
+        .unwrap();
+    assert!(
+        recovered_io
+            .delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|id| id == &incoming_id),
+        "durable byte-cap inbox was not replayed after restart"
+    );
+    assert!(DurableQueue::open(path).unwrap().is_empty());
 }
 
 #[tokio::test]

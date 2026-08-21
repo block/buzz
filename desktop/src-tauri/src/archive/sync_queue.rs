@@ -19,8 +19,10 @@ use crate::archive::{ArchiveCandidate, MatchedScope, ScopeType};
 /// this file cannot grow safely; silently dropping the tail is never allowed.
 pub(super) const MAX_DURABLE_QUEUE_ENTRIES: usize = 2_048;
 const MAX_DURABLE_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DURABLE_INBOX_BYTES: usize = 1024 * 1024;
 const MAX_ACKED_DEDUPE_KEYS: usize = 2_048;
 const DURABLE_QUEUE_VERSION: u8 = 1;
+const DURABLE_INBOX_VERSION: u8 = 1;
 
 pub(super) const ARCHIVE_RETRY_ATTEMPTS: usize = 4;
 #[cfg(not(test))]
@@ -103,10 +105,22 @@ pub(super) struct DurableQueueFile {
     acked_keys: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DurableInboxFile {
+    version: u8,
+    candidate: DurableCandidate,
+}
+
 #[derive(Debug)]
 pub(super) struct DurableQueue {
     path: PathBuf,
+    inbox_path: PathBuf,
     entries: Vec<DurableCandidate>,
+    /// One event may cross the serialized queue-byte boundary after socket
+    /// receive. It is durably parked here before any older queue head drains,
+    /// so cancellation or restart cannot lose the already-consumed frame.
+    inbox: Option<DurableCandidate>,
     /// A bounded durable tombstone window suppresses relay duplicates after an
     /// acknowledged item has left the pending queue. A crash after archive
     /// acknowledgment but before this tombstone commits can still replay once;
@@ -164,20 +178,29 @@ impl DurableQueue {
             .ok_or_else(|| "archive sync queue path has no parent".to_string())?;
         ensure_owner_only_dir(parent)?;
 
-        let blocked_path = blocked_diagnostic_path(&path);
-        if blocked_path.exists() {
-            let diagnostic = fs::read_to_string(&blocked_path)
-                .unwrap_or_else(|_| "archive sync queue is blocked".to_string());
-            return Err(format!(
-                "archive sync durable queue is fail-closed: {}",
-                diagnostic.trim()
-            ));
+        let inbox_path = durable_inbox_path(&path);
+        for blocked_path in [
+            blocked_diagnostic_path(&path),
+            blocked_diagnostic_path(&inbox_path),
+        ] {
+            if blocked_path.exists() {
+                let diagnostic = fs::read_to_string(&blocked_path)
+                    .unwrap_or_else(|_| "archive sync queue is blocked".to_string());
+                return Err(format!(
+                    "archive sync durable queue is fail-closed: {}",
+                    diagnostic.trim()
+                ));
+            }
         }
+
+        let inbox = load_durable_inbox(&inbox_path)?;
 
         if !path.exists() {
             return Ok(Self {
                 path,
+                inbox_path,
                 entries: Vec::new(),
+                inbox,
                 acked_keys: Vec::new(),
             });
         }
@@ -249,10 +272,20 @@ impl DurableQueue {
             }
             entries.push(entry);
         }
+        let mut inbox = inbox;
+        if let Some(candidate) = &inbox {
+            let key = candidate.dedupe_key();
+            if acked.contains(&key) || pending_seen.contains(&key) {
+                remove_durable_inbox(&inbox_path)?;
+                inbox = None;
+            }
+        }
 
         let queue = Self {
             path,
+            inbox_path,
             entries,
+            inbox,
             acked_keys,
         };
         if changed {
@@ -266,7 +299,15 @@ impl DurableQueue {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.inbox.is_none()
+    }
+
+    pub(super) fn has_work(&self) -> bool {
+        !self.is_empty()
+    }
+
+    pub(super) fn has_inbox(&self) -> bool {
+        self.inbox.is_some()
     }
 
     pub(super) fn has_entry_capacity(&self) -> bool {
@@ -296,12 +337,9 @@ impl DurableQueue {
             });
         }
 
-        self.entries.push(candidate);
+        self.entries.push(candidate.clone());
         if let Err(error) = self.persist() {
-            let candidate = self
-                .entries
-                .pop()
-                .expect("enqueue candidate must remain at the queue tail");
+            self.entries.pop();
             let message =
                 format!("archive sync durable queue write failed; event was not accepted: {error}");
             return Err(match error {
@@ -312,7 +350,51 @@ impl DurableQueue {
         Ok(EnqueueResult::Accepted)
     }
 
+    pub(super) fn stash_inbox(
+        &mut self,
+        candidate: DurableCandidate,
+    ) -> Result<EnqueueResult, EnqueueError> {
+        candidate.validate().map_err(EnqueueError::Rejected)?;
+        if let Some(existing) = &self.inbox {
+            if existing.dedupe_key() == candidate.dedupe_key() {
+                return Ok(EnqueueResult::Duplicate);
+            }
+            return Err(EnqueueError::Capacity {
+                candidate,
+                message: "archive sync durable inbox already contains an event".into(),
+            });
+        }
+        if self
+            .acked_keys
+            .iter()
+            .any(|key| key == &candidate.dedupe_key())
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry.dedupe_key() == candidate.dedupe_key())
+        {
+            return Ok(EnqueueResult::Duplicate);
+        }
+        if let Err(error) = persist_inbox_file(&self.inbox_path, &candidate) {
+            let message =
+                format!("archive sync durable inbox write failed; event was not accepted: {error}");
+            return Err(match error {
+                QueuePersistError::Capacity(_) => EnqueueError::Capacity { candidate, message },
+                QueuePersistError::Storage(_) => EnqueueError::Storage { candidate, message },
+            });
+        }
+        self.inbox = Some(candidate);
+        Ok(EnqueueResult::Accepted)
+    }
+
     pub(super) fn head(&self) -> Vec<ArchiveCandidate> {
+        if self.entries.is_empty() {
+            return self
+                .inbox
+                .iter()
+                .map(DurableCandidate::archive_candidate)
+                .collect();
+        }
         self.entries
             .iter()
             .take(FLUSH_BATCH_SIZE)
@@ -321,13 +403,38 @@ impl DurableQueue {
     }
 
     pub(super) fn head_len(&self) -> usize {
-        self.entries.len().min(FLUSH_BATCH_SIZE)
+        if self.entries.is_empty() && self.inbox.is_some() {
+            1
+        } else {
+            self.entries.len().min(FLUSH_BATCH_SIZE)
+        }
     }
 
     /// Atomically records both removal and the recent-ack tombstones. Memory is
     /// changed only after the replacement file commits, so a failed write
     /// leaves the durable head intact for another attempt or restart.
     pub(super) fn acknowledge_head(&mut self, count: usize) -> Result<(), String> {
+        if self.entries.is_empty() {
+            let Some(inbox) = &self.inbox else {
+                return Err("invalid durable archive acknowledgment count".into());
+            };
+            if count != 1 {
+                return Err("invalid durable archive inbox acknowledgment count".into());
+            }
+            let mut next_acked = self.acked_keys.clone();
+            next_acked.push(inbox.dedupe_key());
+            if next_acked.len() > MAX_ACKED_DEDUPE_KEYS {
+                next_acked.drain(..next_acked.len() - MAX_ACKED_DEDUPE_KEYS);
+            }
+            // Commit the tombstone before removing the separately durable
+            // inbox. A crash between these writes leaves a duplicate that open
+            // removes without redelivery, never an untracked accepted event.
+            persist_queue_file(&self.path, &[], &next_acked).map_err(|error| error.to_string())?;
+            remove_durable_inbox(&self.inbox_path)?;
+            self.inbox = None;
+            self.acked_keys = next_acked;
+            return Ok(());
+        }
         if count == 0 || count > self.entries.len() {
             return Err("invalid durable archive acknowledgment count".into());
         }
@@ -380,6 +487,72 @@ impl DurableQueue {
             assert!(self.entries.len() < MAX_DURABLE_QUEUE_ENTRIES);
         }
         self.persist().unwrap();
+    }
+}
+
+fn durable_inbox_path(queue_path: &Path) -> PathBuf {
+    queue_path.with_extension("inbox.json")
+}
+
+fn load_durable_inbox(path: &Path) -> Result<Option<DurableCandidate>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| format!("read durable archive inbox {}: {error}", path.display()))?;
+    if bytes.len() > MAX_DURABLE_INBOX_BYTES {
+        return Err(quarantine_corrupt_queue(
+            path,
+            format!(
+                "inbox file is {} bytes; maximum is {MAX_DURABLE_INBOX_BYTES}",
+                bytes.len()
+            ),
+        ));
+    }
+    let persisted: DurableInboxFile = serde_json::from_slice(&bytes)
+        .map_err(|error| quarantine_corrupt_queue(path, format!("invalid inbox JSON: {error}")))?;
+    if persisted.version != DURABLE_INBOX_VERSION {
+        return Err(quarantine_corrupt_queue(
+            path,
+            format!(
+                "unsupported inbox version {}; expected {DURABLE_INBOX_VERSION}",
+                persisted.version
+            ),
+        ));
+    }
+    persisted
+        .candidate
+        .validate()
+        .map_err(|error| quarantine_corrupt_queue(path, error))?;
+    Ok(Some(persisted.candidate))
+}
+
+fn persist_inbox_file(path: &Path, candidate: &DurableCandidate) -> Result<(), QueuePersistError> {
+    let payload = serde_json::to_vec(&DurableInboxFile {
+        version: DURABLE_INBOX_VERSION,
+        candidate: candidate.clone(),
+    })
+    .map_err(|error| {
+        QueuePersistError::Storage(format!("serialize durable archive inbox: {error}"))
+    })?;
+    if payload.len() > MAX_DURABLE_INBOX_BYTES {
+        return Err(QueuePersistError::Capacity(format!(
+            "durable archive inbox would be {} bytes; maximum is {MAX_DURABLE_INBOX_BYTES}",
+            payload.len()
+        )));
+    }
+    crate::managed_agents::storage::atomic_write_json_restricted(path, &payload)
+        .map_err(QueuePersistError::Storage)
+}
+
+fn remove_durable_inbox(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "remove promoted durable archive inbox {}: {error}",
+            path.display()
+        )),
     }
 }
 
