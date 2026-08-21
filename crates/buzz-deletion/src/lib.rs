@@ -564,6 +564,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
             .unwrap_or_else(|_| "path".to_string())
             .parse()
             .map_err(anyhow::Error::msg)?,
+        migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
         max_image_bytes: 1,
         max_gif_bytes: 1,
         max_video_bytes: 1,
@@ -733,7 +734,7 @@ async fn enumerate_tenant_prefixes(
             }
             let page = services
                 .media
-                .list_prefix_page(&prefix, continuation.take(), LIST_PAGE_SIZE)
+                .list_prefix_page(&prefix, continuation.take(), None, LIST_PAGE_SIZE)
                 .await?;
             for (key, size) in page.objects {
                 if !is_tenant_owned_key(community, &key) {
@@ -1277,7 +1278,10 @@ fn token_with_current_fence(token: &LeaseToken, request: &DeletionRequest) -> Le
 /// empty — O(1) requests per prefix, independent of fleet size.
 async fn verify_storage_absence(services: &Services, request: &DeletionRequest) -> Result<()> {
     for prefix in tenant_prefixes(*request.community_id.as_uuid()) {
-        let page = services.media.list_prefix_page(&prefix, None, 1).await?;
+        let page = services
+            .media
+            .list_prefix_page(&prefix, None, None, 1)
+            .await?;
         if let Some((key, _)) = page.objects.first() {
             return Err(transient(format!(
                 "logical verification found a live target object binding: {key}"
@@ -1543,6 +1547,7 @@ mod tests {
                     s3_bucket: "unused".to_string(),
                     s3_region: "us-east-1".to_string(),
                     s3_addressing_style: buzz_media::S3AddressingStyle::Path,
+                    migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
                     max_image_bytes: 1,
                     max_gif_bytes: 1,
                     max_video_bytes: 1,
@@ -1646,6 +1651,7 @@ mod tests {
                     .or_else(|_| std::env::var("BUZZ_S3_REGION"))
                     .unwrap_or_else(|_| "us-east-1".to_string()),
                 s3_addressing_style: buzz_media::S3AddressingStyle::Path,
+                migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
                 max_image_bytes: 1,
                 max_gif_bytes: 1,
                 max_video_bytes: 1,

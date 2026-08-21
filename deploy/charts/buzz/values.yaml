@@ -117,6 +117,10 @@ relay:
   drainJitterMs: 0
   requireAuthToken: true
   requireRelayMembership: true
+  # Behavior-preserving upgrade default: legacy-only reads and writes. Existing deployments use
+  # legacy-only -> dual-read-and-write -> backfill -> sharded-only. New deployments should override this to
+  # sharded-only before accepting their first upload so they never need a backfill.
+  mediaMigrationPhase: legacy-only
   allowNipOaAuth: true
   pubkeyAllowlist: false
   corsOrigins: []

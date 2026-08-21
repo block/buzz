@@ -6,6 +6,8 @@ pub mod auth;
 pub mod bucket_index;
 pub mod config;
 pub mod error;
+pub mod keys;
+pub mod migration;
 pub mod storage;
 pub mod thumbnail;
 pub mod types;
@@ -18,9 +20,16 @@ pub use bucket_index::{
     BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass, Page, SweepError,
     TaxonomySweepOutcome,
 };
-pub use config::{MediaConfig, S3AddressingStyle};
+pub use config::{MediaConfig, MediaMigrationPhase, S3AddressingStyle};
 pub use error::MediaError;
-pub use storage::{BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage};
+pub use keys::{
+    legacy_blob_key, legacy_thumb_key, read_candidates, sharded_blob_key, sharded_thumb_key,
+    MediaKeyError, MediaReadCandidates,
+};
+pub use storage::{
+    BlobHeadMeta, BlobMeta, BlobStream, BulkDeleteOutcome, ByteStream, MediaStorage,
+    PayloadByteRange, PayloadRangeRead,
+};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
 pub use upload_record::{

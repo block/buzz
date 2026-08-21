@@ -19,7 +19,10 @@ use axum::{
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
+use buzz_media::{
+    BlobDescriptor, MediaError, PayloadByteRange, PayloadRangeRead, UploadAttribution,
+    UploadNetworkInfo,
+};
 
 use crate::state::AppState;
 
@@ -694,7 +697,7 @@ pub(crate) async fn serve_blob_for_tenant(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
+    let payload_name = resolve_payload_name(&state.media_storage, tenant, sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -709,71 +712,71 @@ pub(crate) async fn serve_blob_for_tenant(
     match single_range {
         None => {
             // Full response — 200 OK. Stream from S3 — never loads full blob into RAM.
-            let total = state
+            let blob = state
                 .media_storage
-                .head_with_metadata(&key)
-                .await?
-                .ok_or(MediaError::NotFound)?
-                .size;
-            let stream = state.media_storage.get_stream(&key).await?;
+                .get_payload_stream(tenant, &payload_name)
+                .await?;
             let resp = axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, &content_type)
-                .header(header::CONTENT_LENGTH, total.to_string())
+                .header(header::CONTENT_LENGTH, blob.size.to_string())
                 .header(header::CONTENT_DISPOSITION, disposition)
                 .header(header::CACHE_CONTROL, cache_control)
                 .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
                 .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                 .header(header::ACCEPT_RANGES, "bytes")
-                .body(axum::body::Body::from_stream(stream))
+                .body(axum::body::Body::from_stream(blob.stream))
                 .map_err(|_| MediaError::Internal)?;
             Ok(resp)
         }
         Some(range_str) => {
             // S3-native single-range response, capped to bound request memory.
-            let total = state
+            let Some(requested_range) = parse_byte_range(&range_str) else {
+                let total = state
+                    .media_storage
+                    .head_payload(tenant, &payload_name)
+                    .await?
+                    .size;
+                return axum::response::Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                    .body(axum::body::Body::empty())
+                    .map_err(|_| MediaError::Internal);
+            };
+
+            match state
                 .media_storage
-                .head_with_metadata(&key)
+                .get_payload_range(tenant, &payload_name, requested_range, MAX_RANGE_CHUNK)
                 .await?
-                .ok_or(MediaError::NotFound)?
-                .size;
-
-            let parsed = parse_byte_range(&range_str, total);
-            match parsed {
-                Some((start, end)) => {
-                    if start >= total {
-                        return axum::response::Response::builder()
-                            .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                            .header(header::CONTENT_RANGE, format!("bytes */{total}"))
-                            .body(axum::body::Body::empty())
-                            .map_err(|_| MediaError::Internal);
-                    }
-
-                    let end = end.min(total.saturating_sub(1));
-                    let end = end
-                        .min(start.saturating_add(MAX_RANGE_CHUNK - 1))
-                        .min(total.saturating_sub(1));
-                    let chunk = state.media_storage.get_range(&key, start, end).await?;
+            {
+                PayloadRangeRead::Satisfiable {
+                    total,
+                    start,
+                    end,
+                    bytes,
+                } => {
                     let content_range = format!("bytes {start}-{end}/{total}");
 
                     Ok(axum::response::Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)
                         .header(header::CONTENT_TYPE, &content_type)
                         .header(header::CONTENT_RANGE, content_range)
-                        .header(header::CONTENT_LENGTH, chunk.len().to_string())
+                        .header(header::CONTENT_LENGTH, bytes.len().to_string())
                         .header(header::CONTENT_DISPOSITION, disposition)
                         .header(header::ACCEPT_RANGES, "bytes")
                         .header(header::CACHE_CONTROL, cache_control)
                         .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
                         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-                        .body(axum::body::Body::from(chunk))
+                        .body(axum::body::Body::from(bytes))
                         .map_err(|_| MediaError::Internal)?)
                 }
-                None => Ok(axum::response::Response::builder()
-                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .header(header::CONTENT_RANGE, format!("bytes */{total}"))
-                    .body(axum::body::Body::empty())
-                    .map_err(|_| MediaError::Internal)?),
+                PayloadRangeRead::Unsatisfiable { total } => {
+                    Ok(axum::response::Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                        .body(axum::body::Body::empty())
+                        .map_err(|_| MediaError::Internal)?)
+                }
             }
         }
     }
@@ -781,41 +784,44 @@ pub(crate) async fn serve_blob_for_tenant(
 
 /// Parse a `Range: bytes=START-END` header value.
 ///
-/// Returns `Some((start, end))` for a valid absolute or suffix range.
+/// Returns a syntactically valid single range. Object-size dependent validation
+/// is deferred to the storage read so fallback candidates resolve against the
+/// same object that is actually read.
 /// Supported forms:
 ///   - `bytes=START-END` → absolute range
 ///   - `bytes=START-`    → from START to end of file
 ///   - `bytes=-N`        → last N bytes (suffix range, per RFC 9110 §14.1.2)
 ///
 /// Returns `None` for malformed values or non-bytes units — callers respond with 416.
-fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
+fn parse_byte_range(range: &str) -> Option<PayloadByteRange> {
     let range = range.strip_prefix("bytes=")?;
 
     // Suffix range: "bytes=-N" → last N bytes of the file.
     if let Some(suffix) = range.strip_prefix('-') {
         let n: u64 = suffix.parse().ok()?;
-        if n == 0 || total == 0 {
+        if n == 0 {
             return None;
         }
-        let start = total.saturating_sub(n);
-        return Some((start, total - 1));
+        return Some(PayloadByteRange::Suffix(n));
     }
 
     let (start_str, end_str) = range.split_once('-')?;
     let start: u64 = start_str.parse().ok()?;
 
     // Open-ended range: "bytes=START-" → from start to end of file.
-    let end: u64 = if end_str.is_empty() {
-        u64::MAX
+    let end = if end_str.is_empty() {
+        None
     } else {
-        end_str.parse().ok()?
+        Some(end_str.parse().ok()?)
     };
 
-    if start > end {
-        return None;
+    if let Some(end) = end {
+        if start > end {
+            return None;
+        }
     }
 
-    Some((start, end))
+    Some(PayloadByteRange::Absolute { start, end })
 }
 
 /// HEAD /media/{sha256_ext} — Blossom BUD-01 existence check.
@@ -862,9 +868,13 @@ pub async fn head_blob(
         sidecar_mime
     };
 
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
-    match state.media_storage.head_with_metadata(&key).await? {
-        Some(meta) => {
+    let payload_name = resolve_payload_name(&state.media_storage, &tenant, &sha256_ext).await?;
+    match state
+        .media_storage
+        .head_payload(&tenant, &payload_name)
+        .await
+    {
+        Ok(meta) => {
             let size_str = meta.size.to_string();
             Ok((
                 StatusCode::OK,
@@ -877,7 +887,8 @@ pub async fn head_blob(
             )
                 .into_response())
         }
-        None => Ok(StatusCode::NOT_FOUND.into_response()),
+        Err(MediaError::NotFound) => Ok(StatusCode::NOT_FOUND.into_response()),
+        Err(error) => Err(error),
     }
 }
 
@@ -888,7 +899,7 @@ pub async fn head_blob(
 ///
 /// Sidecar-derived extensions are validated as safe tokens to prevent
 /// object-key confusion if sidecar data is ever tampered with.
-async fn resolve_s3_key(
+async fn resolve_payload_name(
     storage: &buzz_media::MediaStorage,
     tenant: &TenantContext,
     sha256_ext: &str,
@@ -1338,60 +1349,93 @@ mod tests {
 
     #[test]
     fn test_parse_byte_range_basic() {
-        assert_eq!(parse_byte_range("bytes=0-499", 1000), Some((0, 499)));
-        assert_eq!(parse_byte_range("bytes=500-999", 1000), Some((500, 999)));
+        assert_eq!(
+            parse_byte_range("bytes=0-499"),
+            Some(PayloadByteRange::Absolute {
+                start: 0,
+                end: Some(499)
+            })
+        );
+        assert_eq!(
+            parse_byte_range("bytes=500-999"),
+            Some(PayloadByteRange::Absolute {
+                start: 500,
+                end: Some(999)
+            })
+        );
     }
 
     #[test]
     fn test_parse_byte_range_open_ended() {
         // "bytes=500-" means from 500 to end of file
-        assert_eq!(parse_byte_range("bytes=500-", 1000), Some((500, u64::MAX)));
+        assert_eq!(
+            parse_byte_range("bytes=500-"),
+            Some(PayloadByteRange::Absolute {
+                start: 500,
+                end: None
+            })
+        );
     }
 
     #[test]
     fn test_parse_byte_range_suffix() {
         // "bytes=-500" on a 1000-byte file → last 500 bytes
-        assert_eq!(parse_byte_range("bytes=-500", 1000), Some((500, 999)));
+        assert_eq!(
+            parse_byte_range("bytes=-500"),
+            Some(PayloadByteRange::Suffix(500))
+        );
     }
 
     #[test]
     fn test_parse_byte_range_suffix_larger_than_file() {
         // Suffix larger than file → clamp to start of file
-        assert_eq!(parse_byte_range("bytes=-5000", 1000), Some((0, 999)));
+        assert_eq!(
+            parse_byte_range("bytes=-5000"),
+            Some(PayloadByteRange::Suffix(5000))
+        );
     }
 
     #[test]
     fn test_parse_byte_range_suffix_zero() {
         // "bytes=-0" is nonsensical → None
-        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
+        assert_eq!(parse_byte_range("bytes=-0"), None);
     }
 
     #[test]
-    fn test_parse_byte_range_suffix_empty_file() {
-        // Suffix on empty file → None
-        assert_eq!(parse_byte_range("bytes=-500", 0), None);
+    fn test_parse_byte_range_suffix_defers_empty_file_handling() {
+        // Empty-file handling needs object size, so storage resolves it after selecting a candidate.
+        assert_eq!(
+            parse_byte_range("bytes=-500"),
+            Some(PayloadByteRange::Suffix(500))
+        );
     }
 
     #[test]
     fn test_parse_byte_range_rejects_inverted() {
         // start > end is invalid
-        assert_eq!(parse_byte_range("bytes=999-0", 1000), None);
+        assert_eq!(parse_byte_range("bytes=999-0"), None);
     }
 
     #[test]
     fn test_parse_byte_range_rejects_non_bytes_unit() {
-        assert_eq!(parse_byte_range("items=0-10", 1000), None);
+        assert_eq!(parse_byte_range("items=0-10"), None);
     }
 
     #[test]
     fn test_parse_byte_range_rejects_malformed() {
-        assert_eq!(parse_byte_range("bytes=abc-def", 1000), None);
-        assert_eq!(parse_byte_range("garbage", 1000), None);
-        assert_eq!(parse_byte_range("bytes=", 1000), None);
+        assert_eq!(parse_byte_range("bytes=abc-def"), None);
+        assert_eq!(parse_byte_range("garbage"), None);
+        assert_eq!(parse_byte_range("bytes="), None);
     }
 
     #[test]
     fn test_parse_byte_range_zero_start() {
-        assert_eq!(parse_byte_range("bytes=0-0", 1000), Some((0, 0)));
+        assert_eq!(
+            parse_byte_range("bytes=0-0"),
+            Some(PayloadByteRange::Absolute {
+                start: 0,
+                end: Some(0)
+            })
+        );
     }
 }

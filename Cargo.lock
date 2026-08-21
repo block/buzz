@@ -1123,17 +1123,20 @@ dependencies = [
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "blurhash",
  "buzz-core",
  "bytes",
  "chrono",
+ "clap",
  "futures-core",
  "futures-util",
  "hex",
  "image",
  "imagesize",
  "infer",
+ "metrics",
  "mp4",
  "nostr 0.44.7",
  "rust-s3",
@@ -1145,6 +1148,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "uuid",
 ]

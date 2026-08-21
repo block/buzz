@@ -100,6 +100,35 @@ disables that probe through `relay.extraEnv`, `/_readiness` does not test object
 storage; configuration is still parsed strictly, but reachability and addressing
 errors surface on the first storage operation.
 
+## Media object-key migration
+
+`BUZZ_MEDIA_MIGRATION_PHASE` (or Helm `relay.mediaMigrationPhase`) controls
+which S3 media payload layouts the relay reads and writes. The default is
+`legacy-only`, which preserves the exact flat-key behavior of older Buzz
+versions: upgrading an existing deployment does not probe sharded keys,
+double-write objects, or otherwise change media storage behavior.
+
+The supported modes are:
+
+| Mode | Reads | Writes | Use |
+|---|---|---|---|
+| `legacy-only` (default) | Legacy only | Legacy only | Behavior-preserving upgrades and deployments that are not migrating yet |
+| `dual-read-and-write` | Sharded first, legacy fallback | Sharded and legacy | Migration, backfill, and rollback window |
+| `sharded-only` | Sharded only | Sharded only | New deployments and completed migrations |
+
+**New deployments should start with `sharded-only` before accepting the first
+upload.** Starting on the sharded layout avoids creating legacy objects and
+eliminates the later backfill and cleanup migration.
+
+Existing deployments should keep the `legacy-only` default until an operator
+intentionally starts the staged migration. Do not roll `sharded-only` writers
+back to a Buzz version that predates sharded reads. Returning from
+`sharded-only` to `dual-read-and-write` does not retroactively recreate legacy
+copies; run and verify the backfill before relying on old-version rollback.
+Never set the phase back to `legacy-only` after any upload has been accepted
+in `sharded-only`: `legacy-only` reads only flat keys, so objects that exist
+only in the sharded layout return 404 until the phase is raised again.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay
@@ -267,3 +296,49 @@ helm unittest .
 helm dependency build .
 ct lint --config ../../../ct.yaml --charts .
 ```
+
+### Backfill and legacy cleanup Jobs
+
+The relay image includes `/usr/local/bin/buzz-media-layout-backfill` and
+`/usr/local/bin/buzz-media-layout-delete-legacy`; both use the relay's
+`BUZZ_S3_*` settings or IRSA credential chain. Runnable Kubernetes Job examples
+are in [`deploy/kubernetes/examples/`](../../kubernetes/examples/). The tools:
+
+- list canonical `_meta/<community>/<sha>.json` sidecars in bounded pages;
+- default to 25 total S3 requests/second, configurable with
+  `BUZZ_MEDIA_MIGRATION_REQUESTS_PER_SECOND`;
+- print the last completed sidecar as `checkpoint`; the backfill job can be
+  restarted with `BUZZ_MEDIA_MIGRATION_START_AFTER=<checkpoint>` if it fails;
+  the destructive cleanup job always scans from the beginning so shared legacy
+  keys are verified for every community before deletion;
+- are idempotent: backfill skips an existing destination, and deletion skips an
+  absent legacy source;
+- fail closed on malformed metadata or a missing source/destination.
+
+For an **existing deployment**:
+
+1. Upgrade with the default `legacy-only`. This is behavior-preserving: the
+   relay continues reading and writing only flat legacy keys.
+2. Select `dual-read-and-write`; confirm every relay can read both layouts, and
+   observe successful dual writes and storage telemetry through a rollback
+   window.
+3. Run the backfill Job. Re-run from any logged checkpoint as needed, then run
+   it again to a clean `copied=0` result. Reconcile storage sweep unknown keys,
+   duplicate gauges, migration failures, and legacy fallback traffic.
+4. Select `sharded-only` only after every supported rollback version and
+   external consumer understands sharded keys, and reconciliation finds no
+   missing sharded destination. In particular, buzz-moderation must prefer the
+   upload-record `blob_key` field (falling back to flat `{sha}.{ext}` for old
+   records) before `sharded-only` or legacy cleanup; otherwise new scans and
+   pending report/evidence workflows can continue to look for flat objects.
+5. Run the deletion Job with its default `dry-run=true`, review the output, and
+   retain a recovery window/S3 versions. Only then set `dry-run=false` and
+   `BUZZ_MEDIA_DELETE_CONFIRM=delete-verified-legacy-media`. The tool checks the
+   corresponding sharded object immediately before every deletion.
+
+For a **new empty deployment**, set `BUZZ_MEDIA_MIGRATION_PHASE=sharded-only`
+(or Helm `relay.mediaMigrationPhase: sharded-only`) before accepting the first
+upload. This is the recommended starting mode: no legacy objects are created,
+so no backfill or deletion Job is ever needed. The Compose example environment
+ships `sharded-only` for this reason; the chart default remains `legacy-only`
+solely to keep `helm upgrade` behavior-preserving for existing deployments.
