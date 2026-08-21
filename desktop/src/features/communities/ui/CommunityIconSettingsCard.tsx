@@ -3,7 +3,6 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { AgentCreationPreview } from "@/features/agents/ui/AgentCreationPreview";
-import { downscaleIconToDataUrl } from "@/features/communities/lib/downscaleIcon";
 import {
   communityIconQueryKey,
   useActiveCommunityIcon,
@@ -111,7 +110,6 @@ export function CommunityIconSettingsCard({
         onClearAvatar={clearIconPreview}
         onCommitAvatar={persistIcon}
         onSelectAvatar={previewIcon}
-        processImage={downscaleIconToDataUrl}
         shape="rounded-square"
         testIdPrefix="community-icon"
         variant={compact ? "compact" : "default"}
