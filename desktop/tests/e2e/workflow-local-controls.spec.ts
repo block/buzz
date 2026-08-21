@@ -211,6 +211,20 @@ test("round-trips and reopens structured message-text conditions", async ({
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
   const matchControls = dialog.getByRole("group", { name: "Match" });
+  const operatorButtons = matchControls.getByRole("button");
+  const firstOperatorBox = await operatorButtons.nth(0).boundingBox();
+  const secondOperatorBox = await operatorButtons.nth(1).boundingBox();
+  const thirdOperatorBox = await operatorButtons.nth(2).boundingBox();
+  expect(firstOperatorBox).not.toBeNull();
+  expect(secondOperatorBox).not.toBeNull();
+  expect(thirdOperatorBox).not.toBeNull();
+  expect(secondOperatorBox?.x).toBeGreaterThan(firstOperatorBox?.x ?? 0);
+  expect(thirdOperatorBox?.x).toBe(firstOperatorBox?.x);
+  expect(thirdOperatorBox?.y).toBeGreaterThan(firstOperatorBox?.y ?? 0);
+  await waitForAnimations(page);
+  await matchControls.screenshot({
+    path: "test-results/workflow-message-condition-operators.png",
+  });
   await expect(
     matchControls.getByRole("button", { name: "ends with" }),
   ).toHaveAttribute("aria-pressed", "true");

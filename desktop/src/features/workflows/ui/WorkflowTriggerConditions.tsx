@@ -207,14 +207,7 @@ export function WorkflowTriggerConditions({
                   <div className="animate-in space-y-3 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
                     <fieldset>
                       <legend className="sr-only">Match</legend>
-                      <div
-                        className={cn(
-                          "grid gap-2.5",
-                          conditionOperatorsForField(field.value).length === 2
-                            ? "grid-cols-2"
-                            : "grid-cols-2 sm:grid-cols-3",
-                        )}
-                      >
+                      <div className="grid grid-cols-2 gap-2.5">
                         {conditionOperatorsForField(field.value).map(
                           (operator) => {
                             const selected = condition.operator === operator;
