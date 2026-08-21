@@ -162,7 +162,7 @@ export function ComposerMentionButton({
             className={cn(
               "flex h-8 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
               hasAgents
-                ? "w-4"
+                ? "-ml-2 w-6 rounded-l-lg rounded-r-sm pl-2"
                 : "w-8 hover:bg-accent hover:text-accent-foreground",
             )}
             data-mention-picker-trigger=""

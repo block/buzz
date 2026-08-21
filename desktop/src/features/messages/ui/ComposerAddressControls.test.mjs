@@ -71,11 +71,12 @@ test("mention-button prototype expands the mention control with addressed agents
   assert.ok(view.getByTestId("composer-address-locks"));
   const avatar = view.getByTestId("composer-address-lock-agent-pubkey");
   assert.ok(avatar);
-  assert.match(
-    view.getByRole("button", { name: "Manage automatic agent mentions" })
-      .parentElement?.className ?? "",
-    /(?:^|\s)pl-2(?:\s|$)/,
-  );
+  const manage = view.getByRole("button", {
+    name: "Manage automatic agent mentions",
+  });
+  assert.match(manage.className, /(?:^|\s)-ml-2(?:\s|$)/);
+  assert.match(manage.className, /(?:^|\s)pl-2(?:\s|$)/);
+  assert.match(manage.parentElement?.className ?? "", /(?:^|\s)pl-2(?:\s|$)/);
   assert.match(
     view.getByRole("button", { name: "Manage automatic agent mentions" })
       .parentElement?.className ?? "",
