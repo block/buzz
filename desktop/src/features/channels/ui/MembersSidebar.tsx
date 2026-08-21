@@ -141,9 +141,6 @@ export function MembersSidebar({
   relayUrl,
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
-  const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
-    enabled: open,
-  });
   const queryClient = useQueryClient();
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -470,6 +467,18 @@ export function MembersSidebar({
       ),
     [managedAgentsQuery.data],
   );
+  const hasLocalManagedMember = React.useMemo(
+    () =>
+      [...bots, ...archived].some(
+        (member) =>
+          managedAgentByPubkey.get(normalizePubkey(member.pubkey))?.backend
+            .type === "local",
+      ),
+    [archived, bots, managedAgentByPubkey],
+  );
+  const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
+    enabled: open && Boolean(relayUrl) && hasLocalManagedMember,
+  });
   const controllableManagedBots = React.useMemo(
     () =>
       bots.flatMap((member) => {
