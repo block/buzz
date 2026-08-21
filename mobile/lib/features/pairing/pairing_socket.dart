@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../../shared/relay/event_signing.dart';
 import '../../shared/relay/nostr_models.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
@@ -197,6 +198,7 @@ class PairingSocket {
         content: '',
         tags: tags,
         secretKey: _ephemeralPrivkey,
+        pubkey: pubkeyForPrivkey(_ephemeralPrivkey),
         createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       );
 

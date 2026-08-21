@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import 'event_signing.dart';
 import '../auth/auth.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
@@ -973,6 +974,7 @@ String buildNip98AuthHeader({
       ['nonce', const Uuid().v4()],
     ],
     secretKey: privkeyHex,
+    pubkey: pubkeyForPrivkey(privkeyHex),
     verify: false,
   );
   return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
