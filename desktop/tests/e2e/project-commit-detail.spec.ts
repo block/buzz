@@ -585,6 +585,50 @@ test("multi-repository projects switch the active repository", async ({
     .toBe(true);
 });
 
+test("latest files commit opens its detail without a divider", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  const projectEntry = page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first();
+  await expect(projectEntry).toBeVisible({ timeout: 10_000 });
+  await projectEntry.click();
+  await page.getByRole("tab", { name: "Files" }).click();
+
+  const latestCommit = page.getByTestId("project-repository-latest-commit");
+  await expect(latestCommit).toBeVisible();
+  await expect(latestCommit).toHaveCSS("border-bottom-width", "0px");
+  await expect(
+    page.getByTestId("project-repository-latest-commit-summary"),
+  ).toHaveCSS("font-size", "12px");
+  await expect(
+    page.getByTestId("project-repository-entry-row").first(),
+  ).toHaveCSS("font-size", "12px");
+  const repositoryEntryRow = page
+    .getByTestId("project-repository-entry-row")
+    .first();
+  const repositoryEntryCells = repositoryEntryRow.locator("td");
+  await expect(repositoryEntryCells.first()).toHaveCSS("border-radius", "0px");
+  await repositoryEntryRow.hover();
+  await expect(repositoryEntryCells.first()).toHaveCSS(
+    "border-top-left-radius",
+    "8px",
+  );
+  await expect(repositoryEntryCells.last()).toHaveCSS(
+    "border-top-right-radius",
+    "8px",
+  );
+  await latestCommit.click();
+  await expect(page.getByTestId("project-commit-detail")).toBeVisible();
+});
+
 test("commit detail opens from the commits feed with a diff", async ({
   page,
 }) => {
@@ -649,7 +693,10 @@ test("commit detail opens from the commits feed with a diff", async ({
   await expect(commitHeader).toContainText("Committed");
   await expect(commitHeader).not.toContainText("Brain");
   await expect(commitHeader.locator("img")).toHaveCount(0);
-  await expect(commitDetail).toHaveCSS("max-width", "768px");
+  await expect(commitDetail.locator(":scope > div").first()).toHaveCSS(
+    "max-width",
+    "768px",
+  );
   await expect(
     commitDetail.getByRole("heading", {
       name: "Add Trello board workflow details",
@@ -823,7 +870,7 @@ test("pull request and issue feeds use compact work item rows", async ({
     page.getByTestId("project-work-item-group-header").first(),
   ).toBeVisible();
   await expect(
-    prRows.first().locator("button").filter({ hasText: /.+/ }).nth(1),
+    prRows.first().locator("[data-projects-text-priority='primary']"),
   ).toHaveCSS("font-weight", "400");
   await waitForAnimations(page);
   await page.screenshot({ fullPage: false, path: `${SHOTS}/03-prs-feed.png` });
