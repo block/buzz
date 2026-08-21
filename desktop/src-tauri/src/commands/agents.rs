@@ -908,6 +908,16 @@ pub async fn create_managed_agent(
             // pre-fix shape, and once the instance-gate dialog (#4270) can
             // pin a fresh instance to owner-only, the next persona edit
             // silently un-pinned it (review on #4270).
+            //
+            // INVARIANT for anyone adding another way to link a record to a
+            // persona: stamp these three fields there too. The heal is safe
+            // only while no path links a record to a definition carrying an
+            // explicit non-default respond_to WITHOUT stamping the mirrors.
+            // Today the only other linker is migration/backfill.rs, which
+            // manufactures the definition from the record's own config, so
+            // the definition's mode always equals the instance's gate and the
+            // dangerous shape cannot arise. A future linker that skips the
+            // stamp reopens the un-pinning bug silently (@georgerous, #4270).
             definition_respond_to: linked_persona
                 .as_ref()
                 .and_then(|persona| persona.respond_to.clone()),
