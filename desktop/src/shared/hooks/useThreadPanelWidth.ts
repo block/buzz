@@ -74,6 +74,7 @@ export function useThreadPanelWidth(
   const [widthPx, setWidthPx] = React.useState<number>(() =>
     getInitialThreadPanelWidth({ defaultWidthPx, minWidthPx, sessionKey }),
   );
+  const [isResizing, setIsResizing] = React.useState(false);
 
   React.useEffect(() => {
     if (typeof window === "undefined") {
@@ -98,6 +99,7 @@ export function useThreadPanelWidth(
 
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
+      setIsResizing(true);
 
       const handlePointerMove = (moveEvent: PointerEvent) => {
         const deltaX = startX - moveEvent.clientX;
@@ -111,14 +113,18 @@ export function useThreadPanelWidth(
         setWidthPx(nextWidth);
       };
 
-      const handlePointerUp = () => {
+      const handlePointerEnd = () => {
         document.body.style.cursor = previousCursor;
         document.body.style.userSelect = previousUserSelect;
+        setIsResizing(false);
         window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerEnd);
+        window.removeEventListener("pointercancel", handlePointerEnd);
       };
 
       window.addEventListener("pointermove", handlePointerMove);
-      window.addEventListener("pointerup", handlePointerUp, { once: true });
+      window.addEventListener("pointerup", handlePointerEnd);
+      window.addEventListener("pointercancel", handlePointerEnd);
     },
     [getAvailableWidth, minWidthPx, widthPx],
   );
@@ -129,6 +135,7 @@ export function useThreadPanelWidth(
 
   return {
     canReset: widthPx !== defaultWidthPx,
+    isResizing,
     onResetWidth,
     onResizeStart,
     widthPx,

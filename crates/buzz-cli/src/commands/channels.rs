@@ -161,6 +161,7 @@ struct ChannelSummary {
     about: Option<String>,
     topic: Option<String>,
     purpose: Option<String>,
+    ttl_seconds: Option<i64>,
 }
 
 impl ChannelSummary {
@@ -176,6 +177,7 @@ impl ChannelSummary {
         let mut about: Option<String> = None;
         let mut topic: Option<String> = None;
         let mut purpose: Option<String> = None;
+        let mut ttl_seconds: Option<i64> = None;
 
         for tag in tags {
             let Some(tag_arr) = tag.as_array() else {
@@ -194,6 +196,7 @@ impl ChannelSummary {
                 "about" => about = val.map(str::to_string),
                 "topic" => topic = val.map(str::to_string),
                 "purpose" => purpose = val.map(str::to_string),
+                "ttl" => ttl_seconds = val.and_then(|value| value.parse().ok()),
                 "archived" => archived = val == Some("true"),
                 _ => {}
             }
@@ -208,6 +211,7 @@ impl ChannelSummary {
             about,
             topic,
             purpose,
+            ttl_seconds,
         })
     }
 }
@@ -1215,6 +1219,7 @@ mod tests {
             ["about", "About text"],
             ["topic", "Composer work"],
             ["purpose", "Track UI for the composer"],
+            ["ttl", "3600"],
         ]));
         let s = ChannelSummary::from_event(&ev).expect("parse");
         assert_eq!(s.channel_id, "11111111-1111-1111-1111-111111111111");
@@ -1225,6 +1230,7 @@ mod tests {
         assert_eq!(s.about.as_deref(), Some("About text"));
         assert_eq!(s.topic.as_deref(), Some("Composer work"));
         assert_eq!(s.purpose.as_deref(), Some("Track UI for the composer"));
+        assert_eq!(s.ttl_seconds, Some(3600));
     }
 
     #[test]

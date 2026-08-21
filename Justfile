@@ -335,7 +335,7 @@ test-unit:
         # buzz-agent model-capabilities corpus: the Rust half of the
         # cross-language drift guard. `model_capabilities.rs` embeds
         # scripts/model-capabilities.json + scripts/normative-corpus.json via
-        # include_str! and replays all 103 vectors as pure in-process tests (no
+        # include_str! and replays the full locked corpus as pure in-process tests (no
         # infra). Enumerated explicitly because nothing in CI runs
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
@@ -995,6 +995,31 @@ benchmark *ARGS:
     export PATH="{{justfile_directory()}}/bin:$PATH"
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Run the benchmark adapter + testbed gate exactly as CI does (pytest + ruff, pinned ruff from pyproject)
+benchmark-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
+    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
+    # which ruff lints. Read the pin from there so this recipe cannot drift
+    # from the workflow (a floating specifier once meant CI failed on RUF100
+    # while the locked local ruff passed).
+    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
+    for project in . testbed; do
+        (
+            cd "$project"
+            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
+            uv run --frozen pytest -q
+            uvx "ruff@$ruff_pin" check .
+            uvx "ruff@$ruff_pin" format --check .
+        )
+    done
+    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
+    # need the harness config passed explicitly to stay linted.
+    echo "── buzz-dataset (ruff $ruff_pin)"
+    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
+    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:

@@ -6,7 +6,6 @@ import {
   reconcileObserverArchive,
   startReconciliation,
 } from "./useObserverArchiveSeed.ts";
-import { ArchiveSyncManager } from "./archiveSyncManager.ts";
 
 // ── Fake deps factory ────────────────────────────────────────────────────────
 
@@ -140,117 +139,12 @@ test("test_reconcile_toggle_off_then_restart_does_not_remerge", async () => {
   );
 });
 
-// ── Startup ordering (real ArchiveSyncManager + real reconciler) ─────────────
-
-test("test_archive_sync_blocked_until_reconciliation", async () => {
-  let resolveMerge;
-  const mergePromise = new Promise((resolve) => {
-    resolveMerge = resolve;
-  });
-
-  const subscribeCalls = [];
-  const fakeRelay = {
-    subscribeLive(filter, _callback) {
-      subscribeCalls.push(filter);
-      return Promise.resolve(async () => {});
-    },
-  };
-
-  const reconcilerDeps = {
-    mergeSaveSubscriptionKinds: () => mergePromise,
-    readExplicitChoice: () => "unset",
-    setExplicitChoice: () => {},
-  };
-
-  const manager = new ArchiveSyncManager({
-    relayClient: fakeRelay,
-    listSaveSubscriptions: async () => [
-      {
-        scopeType: "owner_p",
-        scopeValue: "pk1",
-        kinds: [24200],
-        identityPubkey: "pk1",
-        relayUrl: "wss://r",
-        createdAt: 0,
-      },
-    ],
-    archiveEvents: async () => ({ persisted: 0, dropped: 0 }),
-    onSubscriptionChange: () => () => {},
-  });
-
-  // Start reconciliation (pending — merge not yet resolved).
-  const reconciling = reconcileObserverArchive("pk1", reconcilerDeps);
-
-  // Before reconciliation resolves, manager must not have been started.
-  await tick();
-  assert.equal(
-    subscribeCalls.length,
-    0,
-    "subscribeLive must not run before reconciliation",
-  );
-
-  // Resolve reconciliation — now start the manager (simulating the gate).
-  resolveMerge();
-  await reconciling;
-  await manager.start();
-
-  assert.ok(
-    subscribeCalls.length > 0,
-    "subscribeLive must run after gate opens",
-  );
-  const hasOwnerP = subscribeCalls.some((f) => f["#p"]?.length > 0);
-  assert.ok(hasOwnerP, "subscription must use owner_p (#p) filter");
-  const hasKind24200 = subscribeCalls.some((f) => f.kinds?.includes(24200));
-  assert.ok(hasKind24200, "subscription filter must include kind 24200");
-
-  manager.destroy();
-});
-
-test("test_archive_sync_blocked_on_reconciliation_rejection", async () => {
-  const reconcilerDeps = makeDeps({ mergeShouldFail: true });
-
-  const subscribeCalls = [];
-  const fakeRelay = {
-    subscribeLive(filter) {
-      subscribeCalls.push(filter);
-      return Promise.resolve(async () => {});
-    },
-  };
-
-  const manager = new ArchiveSyncManager({
-    relayClient: fakeRelay,
-    listSaveSubscriptions: async () => [
-      {
-        scopeType: "owner_p",
-        scopeValue: "pk1",
-        kinds: [24200],
-        identityPubkey: "pk1",
-        relayUrl: "wss://r",
-        createdAt: 0,
-      },
-    ],
-    archiveEvents: async () => ({ persisted: 0, dropped: 0 }),
-    onSubscriptionChange: () => () => {},
-  });
-
-  // Reconciliation rejects — gate must remain closed.
-  let rejected = false;
-  try {
-    await reconcileObserverArchive("pk1", reconcilerDeps);
-  } catch {
-    rejected = true;
-  }
-  assert.ok(rejected, "reconciliation must reject on merge failure");
-
-  // Manager must NOT start after failed reconciliation.
-  assert.equal(
-    subscribeCalls.length,
-    0,
-    "subscribeLive must not run after failed reconciliation",
-  );
-
-  manager.destroy();
-});
+// ── Startup ordering ─────────────────────────────────────────────────────────
+//
+// The two ordering tests that lived here drove `ArchiveSyncManager` directly.
+// That manager is gone: archive sync runs in Rust and the renderer keeps only
+// the start gate. The same invariant — no listener opens before kind 24200 is
+// seeded — is now asserted against the real gate in useArchiveSync.test.mjs.
 
 // ── Identity-scoped readiness (exercises exported isReconciledFor) ──────────
 

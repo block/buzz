@@ -10,7 +10,7 @@ struct NativeEmojiPickerView: View {
   let onClose: () -> Void
 
   @State private var query = ""
-  @State private var selectedSectionID: String?
+  @State private var categorySelection: NativeEmojiCategorySelection
   @State private var selectedSkinTone: Int
 
   private let columns = Array(
@@ -33,6 +33,11 @@ struct NativeEmojiPickerView: View {
     self.onSelect = onSelect
     self.onSkinToneChanged = onSkinToneChanged
     self.onClose = onClose
+    _categorySelection = State(
+      initialValue: NativeEmojiCategorySelection(
+        initialSectionID: data.sections.first?.id
+      )
+    )
     _selectedSkinTone = State(
       initialValue: validNativeEmojiSkinTone(initialSkinTone)
     )
@@ -49,9 +54,6 @@ struct NativeEmojiPickerView: View {
         pickerContent
       }
       .background(Color(uiColor: appearance.surface))
-      .onAppear {
-        selectedSectionID = data.sections.first?.id
-      }
     }
   }
 
@@ -103,34 +105,17 @@ struct NativeEmojiPickerView: View {
   private func categoryRail(_ proxy: ScrollViewProxy) -> some View {
     HStack(spacing: 0) {
       ForEach(data.sections) { section in
-        Button {
-          selectedSectionID = section.id
-          withAnimation(.easeOut(duration: 0.24)) {
-            proxy.scrollTo("section-\(section.id)", anchor: .top)
-          }
-        } label: {
-          Image(systemName: section.systemImage)
-            .font(.system(size: 18, weight: .medium))
-            .foregroundStyle(
-              Color(
-                uiColor: selectedSectionID == section.id
-                  ? appearance.accent : appearance.secondaryText
-              )
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: 36)
-            .background(
-              selectedSectionID == section.id
-                ? Color(uiColor: appearance.control) : Color.clear,
-              in: Circle()
-            )
+        NativeEmojiCategoryButton(
+          section: section,
+          appearance: appearance,
+          selection: categorySelection
+        ) {
+          categorySelection.select(section.id)
+          // Category navigation is a frequent shortcut. Keeping it immediate
+          // means an in-progress proxy animation can never fight a finger drag.
+          proxy.scrollTo("section-\(section.id)", anchor: .top)
         }
         .frame(maxWidth: .infinity)
-        .buttonStyle(.plain)
-        .accessibilityLabel(section.title)
-        .accessibilityAddTraits(
-          selectedSectionID == section.id ? .isSelected : []
-        )
       }
       Divider()
         .frame(height: 24)
@@ -302,12 +287,15 @@ struct NativeEmojiPickerView: View {
     .scrollDismissesKeyboard(.interactively)
     .onPreferenceChange(NativeEmojiSectionOffsetsKey.self) { offsets in
       guard tracksSelection else { return }
-      selectedSectionID = NativeEmojiCategoryTracker.selectedSectionID(
-        order: data.sections.map(\.id),
-        offsets: offsets,
-        viewportTop: 0,
-        viewportBottom: offsets[nativeEmojiViewportBottomKey],
-        contentBottom: offsets[nativeEmojiContentBottomKey]
+      categorySelection.select(
+        NativeEmojiCategoryTracker.selectedSectionID(
+          order: data.sections.map(\.id),
+          offsets: offsets,
+          viewportTop: 0,
+          viewportBottom: offsets[nativeEmojiViewportBottomKey],
+          contentBottom: offsets[nativeEmojiContentBottomKey],
+          currentSelection: categorySelection.selectedSectionID
+        )
       )
     }
   }
@@ -378,6 +366,38 @@ struct NativeEmojiPickerView: View {
       return item.skinVariants.first ?? item.value
     }
     return item.skinVariants[selectedSkinTone]
+  }
+}
+
+/// Observes only the rail selection. Keeping this in a leaf view prevents a
+/// scroll-frame highlight update from rebuilding the picker grid itself.
+private struct NativeEmojiCategoryButton: View {
+  let section: NativeEmojiSection
+  let appearance: NativeEmojiPickerAppearance
+  @ObservedObject var selection: NativeEmojiCategorySelection
+  let onSelect: () -> Void
+
+  var body: some View {
+    let isSelected = selection.selectedSectionID == section.id
+    Button(action: onSelect) {
+      Image(systemName: section.systemImage)
+        .font(.system(size: 18, weight: .medium))
+        .foregroundStyle(
+          Color(
+            uiColor: isSelected
+              ? appearance.accent : appearance.secondaryText
+          )
+        )
+        .frame(maxWidth: .infinity)
+        .frame(height: 36)
+        .background(
+          isSelected ? Color(uiColor: appearance.control) : Color.clear,
+          in: Circle()
+        )
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(section.title)
+    .accessibilityAddTraits(isSelected ? .isSelected : [])
   }
 }
 
