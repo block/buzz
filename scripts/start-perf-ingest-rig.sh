@@ -23,8 +23,10 @@
 #   ./scripts/start-perf-ingest-rig.sh --reset            # first run
 #   ./scripts/start-perf-ingest-rig.sh --audit off        # attribution control
 #
-# Teardown:
-#   kill "$(cat /tmp/buzz-perf-ingest-rig.pid)"
+# Teardown (the script verifies the pid is still this relay before signalling it;
+# do the same by hand, since pids are recycled):
+#   pid=$(cat /tmp/buzz-perf-ingest-rig.pid)
+#   ps -p "$pid" -o command= | grep -q buzz-relay && kill "$pid"
 #   docker compose -p buzz-harness -f docker-compose.harness.yml down -v
 # =============================================================================
 set -euo pipefail

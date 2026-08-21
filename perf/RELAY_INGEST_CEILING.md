@@ -95,6 +95,11 @@ interval of the *difference*.
 
 Non-zero exit on any of these, with every failure reported rather than the first:
 
+Cells that cannot be evidence are **excluded and reported**, not treated as run
+failures — see the next section for why that distinction is load-bearing. Only
+three things fail a run: a dead audit worker, a missing control, and too little
+surviving evidence to compare the arms.
+
 1. **A cell was contaminated by admission control.** Either `reason="quota"` or
    `reason="unavailable"` moved. The second matters as much as the first: a
    rejected event takes the same NOTICE-without-OK path either way, and admission
@@ -105,16 +110,9 @@ Non-zero exit on any of these, with every failure reported rather than the first
    audit-enqueue failures.** An enqueue failure specifically means the worker is
    gone: a bounded `mpsc::Sender::send` awaits when full and errors only when the
    receiver is dropped.
-3. **A cell was not in steady state** — `outstanding_delta` moved more than a small
-   fraction of the audit channel's depth. The criterion is stability, *not*
-   emptiness: a saturating cell settles with the channel full and backpressure
-   engaged, an unsaturated one settles near zero, and both are legitimate. A gate
-   written as "assert the queue is empty before the window" would make every
-   saturated cell — every cell that matters for a ceiling — unmeasurable while
-   looking like a working precondition.
-4. **The generator had less than 1.5x headroom over the offered rate**, so the cell
+3. **The generator had less than 1.5x headroom over the offered rate**, so the cell
    was partly measuring the generator rather than the relay.
-5. **The audit-off control did not run.** A single-arm dataset is a partial
+4. **The audit-off control did not run.** A single-arm dataset is a partial
    experiment and reports `control.ran: false`; `--combine` judges the pair. The
    verdict carries an explicit ran/skipped marker, because "no knee on the
    audit-off arm" otherwise reads identically for "the control ran and the knee
@@ -122,7 +120,38 @@ Non-zero exit on any of these, with every failure reported rather than the first
 6. **The two halves handed to `--combine` are not the same experiment.** Rates,
    duration, repeats, community hosts, both limiter settings, the generator path,
    and the source revision must all match.
-7. **No rate separated the arms**, so the audit path is not shown to limit ingest.
+7. **No rate kept two evidence cells in both arms**, so the arms cannot be
+   compared at all and too much of the dataset was excluded — or, when they can be
+   compared, **no rate separated them**, so the audit path is not shown to limit
+   ingest.
+
+Of those, items 1 and 2 exclude the offending cell; an audit *enqueue* failure is
+the exception and fails the run outright, because a bounded `mpsc::Sender::send`
+errors only when the receiver is dropped, so it means the worker is gone and every
+later cell is suspect.
+
+### Why a non-steady cell is excluded rather than fatal
+
+The audit channel starts empty, so **the first repeat of the first saturating rate
+banks acceptance credit by construction** — the preceding unsaturated rates never
+filled it. A rate just above the drain rate accumulates over several repeats until
+the channel caps, and that is the transition region where the bracket is decided.
+A contract that failed the run on any non-steady cell would therefore fail exactly
+the datasets this harness exists to judge.
+
+So a non-steady cell is dropped from the arm intervals and from the worker-rate
+estimate and listed in `excluded_cells` with its reason. Dropping it also removes
+the bias: the banked credit lands in `accepted`, inflating that cell's
+accepted/offered, so it does not belong in the interval either way. A rate needs at
+least two surviving repeats per arm to produce a difference interval, and the run
+fails if no rate clears that — exclusion must not become a way to pass by
+discarding almost everything.
+
+`model()` reproduces this fill sequence rather than setting every cell steady, so
+the green path is tested against the physics. The two-community cells are
+report-only by scope but carry `problems` and `steady` annotations, because an
+unannotated contaminated cell in a table nobody judges is how a bad number gets
+quoted later.
 
 `perf/test_relay_ingest_ceiling.py` pairs every passing case with a mutant that
 must fail — a lone dip that must not count as a knee, a control that did not run,

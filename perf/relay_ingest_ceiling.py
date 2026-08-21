@@ -229,6 +229,61 @@ def cell_problems(cell: dict) -> list[str]:
     return problems
 
 
+# A dead audit worker invalidates every cell after it, not just its own, so this
+# one problem fails the run instead of dropping a cell.
+FATAL_PROBLEM_KEYS = ("audit_send_errors_delta",)
+
+
+def fatal_problems(cells: list[dict]) -> list[str]:
+    out = []
+    for cell in cells:
+        for key in FATAL_PROBLEM_KEYS:
+            if cell.get(key):
+                out.append(
+                    "{:g}/s: audit enqueue failed, which means the worker is gone "
+                    "and every later cell is suspect ({}={})".format(
+                        cell["offered_per_s"], key, cell[key]
+                    )
+                )
+    return out
+
+
+def cell_exclusions(cells: list[dict]) -> list[dict]:
+    """Cells that cannot be evidence, with why.
+
+    Excluded rather than run-fatal. A saturating cell that starts with the audit
+    channel empty banks its whole depth in accepted events — measured as exactly
+    +1000 — so the *first* repeat of the first saturating rate in any sweep is
+    non-steady by construction, and a transition rate accumulates over several
+    repeats. Failing the run on that would fail precisely the datasets this
+    harness exists to judge; the bias also means the cell does not belong in the
+    interval, since the credit inflates accepted/offered.
+    """
+    excluded = []
+    for cell in cells:
+        reasons = cell_problems(cell)
+        if steady_state(cell) is False:
+            reasons.append(
+                "{:g}/s: outstanding audit work moved by {}, so the cell carries "
+                "acceptance credit rather than a steady rate".format(
+                    cell["offered_per_s"], cell["outstanding_delta"]
+                )
+            )
+        if reasons:
+            excluded.append(
+                {
+                    "offered_per_s": cell["offered_per_s"],
+                    "audit_enabled": cell["audit_enabled"],
+                    "reasons": reasons,
+                }
+            )
+    return excluded
+
+
+def cell_is_evidence(cell: dict) -> bool:
+    return not cell_problems(cell) and steady_state(cell) is not False
+
+
 def steady_state(cell: dict) -> bool | None:
     """Whether outstanding audit work held level across the window.
 
@@ -252,26 +307,38 @@ def arm_separation(on_cells: list[dict], off_cells: list[dict]) -> dict:
     by_rate: dict = {}
     for cells, arm in ((on_cells, "on"), (off_cells, "off")):
         for cell in cells:
-            entry = by_rate.setdefault(cell["offered_per_s"], {"on": [], "off": []})
-            entry[arm].append(cell["accepted_over_offered"])
+            entry = by_rate.setdefault(
+                cell["offered_per_s"], {"on": [], "off": [], "dropped": 0}
+            )
+            if cell_is_evidence(cell):
+                entry[arm].append(cell["accepted_over_offered"])
+            else:
+                entry["dropped"] += 1
 
     rates = []
     separated = False
+    comparable = 0
     for rate in sorted(by_rate):
         on_vals, off_vals = by_rate[rate]["on"], by_rate[rate]["off"]
         entry = {
             "offered_per_s": rate,
+            "evidence_cells": {"audit_on": len(on_vals), "audit_off": len(off_vals)},
+            "dropped_cells": by_rate[rate]["dropped"],
             "audit_on": confidence_interval(on_vals) if on_vals else None,
             "audit_off": confidence_interval(off_vals) if off_vals else None,
         }
         if len(on_vals) >= 2 and len(off_vals) >= 2:
+            comparable += 1
             diff = difference_interval(off_vals, on_vals)
             entry["off_minus_on"] = diff
             if diff["excludes_zero"] and diff["diff"] > 0.0:
                 separated = True
                 entry["separated_here"] = True
+        else:
+            entry["off_minus_on"] = None
+            entry["note"] = "fewer than two evidence cells in one arm"
         rates.append(entry)
-    return {"separated": separated, "by_rate": rates}
+    return {"separated": separated, "comparable_rates": comparable, "by_rate": rates}
 
 
 def worker_rate(on_cells: list[dict]) -> dict:
@@ -282,7 +349,7 @@ def worker_rate(on_cells: list[dict]) -> dict:
     """
     usable = [
         c for c in on_cells
-        if not cell_problems(c)
+        if cell_is_evidence(c)
         and steady_state(c)
         and (c.get("audit_busy_fraction") or 0.0) >= BUSY_FRACTION_FOR_CAPACITY
     ]
@@ -308,15 +375,15 @@ def worker_rate(on_cells: list[dict]) -> dict:
 def verdict(
     on_cells: list[dict], off_cells: list[dict] | None, control_ran: bool
 ) -> dict:
-    """Whether the dataset supports the audit-attribution claim."""
-    failures = [p for c in on_cells for p in cell_problems(c)]
-    failures += [p for c in (off_cells or []) for p in cell_problems(c)]
-    failures += [
-        "{:g}/s: outstanding audit work moved by {}, so the cell was not in "
-        "steady state".format(c["offered_per_s"], c["outstanding_delta"])
-        for c in on_cells
-        if steady_state(c) is False
-    ]
+    """Whether the dataset supports the audit-attribution claim.
+
+    Cells that cannot be evidence are excluded and reported, not treated as run
+    failures. Only three things fail a run: a dead audit worker, a missing
+    control, and too little surviving evidence to compare the arms.
+    """
+    all_cells = list(on_cells) + list(off_cells or [])
+    failures = fatal_problems(all_cells)
+    excluded = cell_exclusions(all_cells)
 
     if not control_ran:
         failures.append(
@@ -327,9 +394,14 @@ def verdict(
     separation = (
         arm_separation(on_cells, off_cells)
         if control_ran and off_cells
-        else {"separated": False, "by_rate": []}
+        else {"separated": False, "comparable_rates": 0, "by_rate": []}
     )
-    if control_ran and not separation["separated"]:
+    if control_ran and not separation["comparable_rates"]:
+        failures.append(
+            "no rate kept two evidence cells in both arms, so the arms cannot be "
+            "compared at all: too much of this dataset was excluded"
+        )
+    elif control_ran and not separation["separated"]:
         failures.append(
             "no rate where audit-off exceeded audit-on with the difference "
             "interval excluding zero: the audit path is not shown to limit ingest"
@@ -339,6 +411,7 @@ def verdict(
         "ok": not failures,
         "control": {"ran": control_ran, "arm": "audit_off"},
         "failures": failures,
+        "excluded_cells": excluded,
         "arm_separation": separation,
         "worker_rate": worker_rate(on_cells),
         "lock_ceiling": (
@@ -562,6 +635,11 @@ def measure(args: argparse.Namespace, log: Callable[[str], None]) -> dict:
     if audit_on and not args.skip_two_community:
         log("Sweep, audit enabled, two communities at half rate each")
         two_cells = sweep(rig, args.rates, args.duration, args.repeats, True, True, log)
+        # Report-only by agreed scope, but annotated: an unannotated contaminated
+        # cell in a table nobody judges is how a bad number gets quoted later.
+        for cell in two_cells:
+            cell["problems"] = cell_problems(cell)
+            cell["steady"] = steady_state(cell)
 
     # A single-arm dataset is never a verdict; --combine judges the pair.
     if audit_on:
@@ -628,48 +706,90 @@ def combine(first: dict, second: dict) -> dict:
 
 
 def model() -> dict:
-    """Deterministic arithmetic, no services - documents the contract's shape.
+    """Deterministic queueing arithmetic, no services.
 
-    A serialized ~3ms audit write caps completions near 333/s; with audit off the
-    same offers are met. For review and for the unit tests, never as evidence.
+    Documents the contract's shape, and deliberately reproduces the physics the
+    exclusion rule exists for: the audit channel starts empty, so a saturating
+    rate banks acceptance credit on its first repeats and only reaches steady
+    state once the channel is full. An earlier version of this model set
+    `outstanding_delta` to zero at every rate, including one above its own
+    ceiling — which made the green path a test of steady cells rather than of the
+    behaviour the harness meets in the field.
+
+    For review and for the unit tests, never as evidence.
     """
     ceiling = 1000.0 / 3.0
+    duration = 20.0
+    repeats = 5
+    # 350/s sits just above the ceiling, so it fills the channel over several
+    # repeats; 400/s overshoots far enough to bank the whole depth at once.
+    rates = [20.0, 50.0, 100.0, 200.0, 350.0, 400.0]
 
-    def cell(rate: float, audit: bool, jitter: float) -> dict:
-        fraction = min(1.0, ceiling / rate) if audit else 1.0
-        base = {
-            "offered_per_s": rate,
-            "audit_enabled": audit,
-            "accepted_over_offered": min(1.0, fraction * (1.0 + jitter)),
-            "accepted_per_s": rate * fraction,
-            "rejected": 0,
-            "transport_errors": 0,
-            "quota_rejections_delta": 0,
-            "unavailable_rejections_delta": 0,
-            "audit_log_errors_delta": 0,
-            "audit_send_errors_delta": 0,
-            "generator_headroom": 4.0,
-        }
-        if audit:
-            base.update(
-                audit_completed_per_s=min(rate, ceiling),
-                audit_service_mean_ms=3.0,
-                audit_busy_fraction=1.0 if rate >= ceiling else rate / ceiling,
-                outstanding_delta=0,
-            )
-        else:
-            base.update(
-                audit_completed_per_s=None,
-                audit_service_mean_ms=None,
-                audit_busy_fraction=None,
-                outstanding_delta=None,
-            )
-        return base
+    def jitter(repeat: int) -> float:
+        return (repeat - (repeats - 1) / 2.0) * 0.002
 
-    jitters = [-0.004, -0.002, 0.0, 0.002, 0.004]
-    on = [cell(r, True, j) for r in DEFAULT_RATES for j in jitters]
-    off = [cell(r, False, j) for r in DEFAULT_RATES for j in jitters]
-    return {"mode": "model", "verdict": verdict(on, off, control_ran=True)}
+    def audit_on_cells() -> list:
+        cells = []
+        fill = 0.0
+        for rate in rates:
+            offered = rate * duration
+            drain_capacity = ceiling * duration
+            for repeat in range(repeats):
+                headroom = AUDIT_CHANNEL_DEPTH - fill
+                accepted = min(offered, drain_capacity + headroom)
+                drained = min(drain_capacity, fill + accepted)
+                delta = accepted - drained
+                fill += delta
+                cells.append(
+                    {
+                        "offered_per_s": rate,
+                        "audit_enabled": True,
+                        "accepted_over_offered": min(
+                            1.0, accepted / offered * (1.0 + jitter(repeat))
+                        ),
+                        "accepted_per_s": accepted / duration,
+                        "rejected": 0,
+                        "transport_errors": 0,
+                        "quota_rejections_delta": 0,
+                        "unavailable_rejections_delta": 0,
+                        "audit_log_errors_delta": 0,
+                        "audit_send_errors_delta": 0,
+                        "generator_headroom": 4.0,
+                        "audit_completed_per_s": drained / duration,
+                        "audit_service_mean_ms": 1000.0 / ceiling,
+                        "audit_busy_fraction": min(1.0, drained / drain_capacity),
+                        "outstanding_delta": int(round(delta)),
+                    }
+                )
+        return cells
+
+    def audit_off_cells() -> list:
+        return [
+            {
+                "offered_per_s": rate,
+                "audit_enabled": False,
+                "accepted_over_offered": min(1.0, 1.0 * (1.0 + jitter(repeat))),
+                "accepted_per_s": rate,
+                "rejected": 0,
+                "transport_errors": 0,
+                "quota_rejections_delta": 0,
+                "unavailable_rejections_delta": 0,
+                "audit_log_errors_delta": 0,
+                "audit_send_errors_delta": 0,
+                "generator_headroom": 4.0,
+                "audit_completed_per_s": None,
+                "audit_service_mean_ms": None,
+                "audit_busy_fraction": None,
+                "outstanding_delta": None,
+            }
+            for rate in rates
+            for repeat in range(repeats)
+        ]
+
+    return {
+        "mode": "model",
+        "verdict": verdict(audit_on_cells(), audit_off_cells(), control_ran=True),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

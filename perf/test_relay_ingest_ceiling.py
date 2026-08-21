@@ -134,6 +134,14 @@ class SteadyStateTests(unittest.TestCase):
     def test_audit_off_cells_have_no_steady_state_reading(self) -> None:
         self.assertIsNone(harness.steady_state(cell(outstanding_delta=None)))
 
+    def test_an_audit_off_cell_is_still_evidence(self) -> None:
+        # No queue means no steady-state reading, which must not be mistaken for
+        # failing the check - otherwise the whole control arm drops out.
+        self.assertTrue(harness.cell_is_evidence(cell(outstanding_delta=None)))
+
+    def test_a_banking_cell_is_not_evidence(self) -> None:
+        self.assertFalse(harness.cell_is_evidence(cell(outstanding_delta=1000)))
+
 
 class ArmSeparationTests(unittest.TestCase):
     def test_separation_is_found_where_the_arms_diverge(self) -> None:
@@ -210,12 +218,51 @@ class VerdictTests(unittest.TestCase):
             harness.verdict(arm([0.6, 0.61]), None, control_ran=False)["control"]["ran"]
         )
 
-    def test_an_unsteady_cell_fails_the_run(self) -> None:
+    def test_an_unsteady_cell_is_excluded_not_fatal(self) -> None:
+        # The first repeat of the first saturating rate starts with the audit
+        # channel empty and banks its whole depth, so failing the run on a
+        # non-steady cell would fail every genuine saturating dataset. It is
+        # dropped from the evidence and reported instead.
         on = arm([0.60, 0.62, 0.58, 0.61])
         on[0]["outstanding_delta"] = 1000
+        on[0]["accepted_over_offered"] = 0.73  # the credit inflates this
+        result = harness.verdict(on, arm([1.0, 1.0, 0.999, 1.0], audit=False), True)
+        self.assertTrue(result["ok"], result["failures"])
+        self.assertEqual(len(result["excluded_cells"]), 1)
+        self.assertTrue(
+            any("acceptance credit" in r for r in result["excluded_cells"][0]["reasons"])
+        )
+
+    def test_an_excluded_cell_is_kept_out_of_the_interval(self) -> None:
+        # Not only must it not fail the run, its inflated accepted/offered must
+        # not widen or shift the arm's interval.
+        on = arm([0.60, 0.62, 0.58, 0.61])
+        on[0]["outstanding_delta"] = 1000
+        on[0]["accepted_over_offered"] = 0.73
+        result = harness.verdict(on, arm([1.0, 1.0, 0.999, 1.0], audit=False), True)
+        rate = result["arm_separation"]["by_rate"][0]
+        self.assertEqual(rate["evidence_cells"]["audit_on"], 3)
+        self.assertEqual(rate["dropped_cells"], 1)
+        self.assertLess(rate["audit_on"]["mean"], 0.63)
+
+    def test_a_dead_audit_worker_is_fatal_not_merely_excluded(self) -> None:
+        # An enqueue failure means the receiver is gone, so every later cell is
+        # suspect - not just the one that noticed.
+        on = arm([0.60, 0.62, 0.58, 0.61])
+        on[1]["audit_send_errors_delta"] = 1
         result = harness.verdict(on, arm([1.0, 1.0, 0.999, 1.0], audit=False), True)
         self.assertFalse(result["ok"])
-        self.assertTrue(any("steady state" in f for f in result["failures"]))
+        self.assertTrue(any("worker is gone" in f for f in result["failures"]))
+
+    def test_too_few_surviving_cells_fails_the_run(self) -> None:
+        # MUTANT: exclusion must not become a way to pass by discarding almost
+        # everything. One evidence cell per arm cannot support an interval.
+        on = arm([0.60, 0.62])
+        on[0]["outstanding_delta"] = 1000
+        off = arm([1.0, 1.0], audit=False)
+        result = harness.verdict(on, off, control_ran=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("cannot be compared" in f for f in result["failures"]))
 
     def test_no_separation_fails_the_run(self) -> None:
         result = harness.verdict(
@@ -228,10 +275,21 @@ class VerdictTests(unittest.TestCase):
 
     def test_every_failure_is_reported_not_just_the_first(self) -> None:
         on = arm([0.60, 0.62, 0.58, 0.61])
+        on[0]["audit_send_errors_delta"] = 1
+        result = harness.verdict(on, None, control_ran=False)
+        self.assertGreaterEqual(len(result["failures"]), 2)
+        self.assertTrue(any("worker is gone" in f for f in result["failures"]))
+        self.assertTrue(any("partial experiment" in f for f in result["failures"]))
+
+    def test_exclusions_and_failures_are_reported_separately(self) -> None:
+        # A contaminated cell and a banking cell are both excluded with reasons;
+        # neither is silently dropped, and neither is confused with a failure.
+        on = arm([0.60, 0.62, 0.58, 0.61])
         on[0]["quota_rejections_delta"] = 1
         on[1]["outstanding_delta"] = 1000
-        result = harness.verdict(on, arm([0.6, 0.61, 0.59, 0.6], audit=False), True)
-        self.assertGreaterEqual(len(result["failures"]), 3)
+        result = harness.verdict(on, arm([1.0, 1.0, 0.999, 1.0], audit=False), True)
+        self.assertEqual(len(result["excluded_cells"]), 2)
+        self.assertEqual(result["arm_separation"]["by_rate"][0]["dropped_cells"], 2)
 
     def test_the_lock_ceiling_is_never_reported_as_absent(self) -> None:
         # The worker ceiling is lower and masks the lock, so a passing run says
@@ -310,7 +368,26 @@ class ModelTests(unittest.TestCase):
             for r in harness.model()["verdict"]["arm_separation"]["by_rate"]
             if r.get("separated_here")
         ]
-        self.assertEqual(rates, [400.0])
+        self.assertEqual(rates, [350.0, 400.0])
+
+    def test_the_model_reproduces_sequential_channel_fill(self) -> None:
+        # The green path has to be tested against the physics, not against a
+        # dataset where every cell is conveniently steady. The first saturating
+        # rate banks acceptance credit until the channel is full, so the model
+        # must produce excluded cells and still pass.
+        verdict = harness.model()["verdict"]
+        self.assertTrue(verdict["ok"], verdict["failures"])
+        self.assertGreater(len(verdict["excluded_cells"]), 0)
+        self.assertTrue(
+            all(
+                any("acceptance credit" in r for r in c["reasons"])
+                for c in verdict["excluded_cells"]
+            )
+        )
+
+    def test_the_model_keeps_every_rate_comparable(self) -> None:
+        separation = harness.model()["verdict"]["arm_separation"]
+        self.assertEqual(separation["comparable_rates"], 6)
 
     def test_the_model_reports_the_serialized_worker_rate(self) -> None:
         estimate = harness.model()["verdict"]["worker_rate"]["estimate"]
