@@ -12,11 +12,44 @@ import {
   channelScopedBotTypingPubkeyKey,
   mergeMemberAgentFlagsIntoProfiles,
 } from "./useChannelActivityTyping.ts";
+import {
+  buildChannelAgentSessionCandidates,
+  getChannelAgentSessionAgents,
+} from "./useChannelAgentSessions.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
 const AGENT_2 =
   "dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321";
+
+it("keeps a directory-known Hermes agent in DM activity when it is a member", () => {
+  const channelMembers = [{ pubkey: AGENT, role: "bot" }];
+  const candidates = buildChannelAgentSessionCandidates({
+    channelMembers,
+    managedAgents: [],
+    relayAgents: [
+      {
+        pubkey: AGENT,
+        name: "Hermes",
+        status: "online",
+        channelIds: ["ordinary-channel"],
+        channels: ["Ordinary channel"],
+      },
+    ],
+  });
+
+  const agents = getChannelAgentSessionAgents({
+    activeChannel: { channelType: "dm", name: "Hermes DM" },
+    activeChannelId: "dm-channel",
+    agents: candidates,
+    channelMembers,
+  });
+
+  assert.deepEqual(
+    agents.map((agent) => agent.pubkey),
+    [AGENT],
+  );
+});
 
 describe("channelScopedBotTypingPubkeyKey", () => {
   it("excludes thread-scoped typing entries", () => {

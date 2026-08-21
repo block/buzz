@@ -142,6 +142,10 @@ export function getChannelAgentSessionAgents({
       channelIds.includes(activeChannelId) ||
       channels.includes(activeChannel.name);
 
+    if (activeChannel.channelType === "dm") {
+      return memberPubkeys?.has(normalizedPubkey) ?? matchesDeclaredChannel;
+    }
+
     if (agent.agentSource === "member-bot") {
       return botMemberPubkeys?.has(normalizedPubkey) ?? matchesDeclaredChannel;
     }
