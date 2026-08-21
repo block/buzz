@@ -38,16 +38,40 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::{net::TcpListener, sync::oneshot};
 use url::Url;
 
+/// Drive uploads, which reuse this module's account connection and token
+/// refresh rather than owning a second OAuth client of their own.
+pub(crate) mod drive;
+
 use crate::app_state::keyring_service;
 use crate::secret_store::SecretStore;
 
 const GOOGLE_OAUTH_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_MEET_API_BASE: &str = "https://meet.googleapis.com/v2";
-// Principal-scoped: a token with this scope can only see/manage spaces it
-// itself created — exactly matching "each user connects their own account,"
-// not a shared org-wide meeting inbox.
-const GOOGLE_MEET_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
+// Two scopes on one connection, both deliberately narrow:
+//
+// `meetings.space.created` is principal-scoped — a token carrying it can only
+// see or manage spaces it itself created, matching "each user connects their
+// own account" rather than a shared org-wide meeting inbox.
+//
+// `drive.file` is the per-file Drive scope: the app can create files and manage
+// only the files it created, and can see nothing else in the user's Drive. It
+// is **not** a restricted scope, so it needs no Google security assessment and
+// the consent screen carries no scary warning. `drive.readonly`/`drive` — which
+// browsing an existing folder would require — are both restricted, which is why
+// folder browsing is not a feature. See `docs/google-drive-integration-spec.md`.
+const GOOGLE_SCOPES: &str = concat!(
+    "https://www.googleapis.com/auth/meetings.space.created",
+    " ",
+    "https://www.googleapis.com/auth/drive.file",
+);
+/// The Drive half of {@link GOOGLE_SCOPES}, matched against a refreshed token's
+/// granted scope. Accounts connected before Drive shipped hold a token without
+/// it; their refresh still succeeds, so without this check the first Drive
+/// upload would fail with a raw 403 instead of "reconnect your account".
+pub(crate) const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
+// Named for Meet because that is what first stored it, and renaming the key
+// would silently disconnect every account already connected.
 const GOOGLE_MEET_REFRESH_TOKEN_KEY: &str = "google_meet_refresh_token";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
@@ -84,6 +108,28 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
+    /// Space-separated list of what Google actually granted, which is not
+    /// necessarily what was asked for — a token minted before Drive shipped
+    /// keeps its original, narrower scope across every refresh.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// A freshly refreshed access token plus what it is allowed to do.
+pub(crate) struct GoogleAccessToken {
+    pub access_token: String,
+    granted_scope: String,
+}
+
+impl GoogleAccessToken {
+    /// True if Google granted `scope` on this token. Compared over
+    /// whitespace-separated entries rather than by substring, so one scope
+    /// cannot be mistaken for another that merely contains it.
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.granted_scope
+            .split_whitespace()
+            .any(|granted| granted == scope)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,7 +270,7 @@ pub(crate) async fn start_google_meet_connect(
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", GOOGLE_MEET_SCOPE)
+        .append_pair("scope", GOOGLE_SCOPES)
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent")
         .append_pair("code_challenge", &challenge)
@@ -329,14 +375,16 @@ pub(crate) fn disconnect_google_meet_account() -> Result<(), String> {
         .map_err(|error| format!("could not disconnect Google account: {error}"))
 }
 
-/// Refreshes the stored token and creates a new, empty Google Meet space —
-/// the "instant meeting" flow (no calendar event, no scheduled time).
-#[tauri::command]
-pub(crate) async fn create_instant_google_meet(
-    app_state: tauri::State<'_, crate::app_state::AppState>,
-) -> Result<GoogleMeetInfo, String> {
-    let client_id = google_client_id()
-        .ok_or_else(|| "Google Meet is not configured for this build".to_owned())?;
+/// Exchange the stored refresh token for a usable access token.
+///
+/// Shared by every Google-backed feature (Meet spaces, Drive uploads) so there
+/// is one place that knows how the connection is stored and one definition of
+/// what "your connection expired" means.
+pub(crate) async fn google_access_token(
+    app_state: &crate::app_state::AppState,
+) -> Result<GoogleAccessToken, String> {
+    let client_id =
+        google_client_id().ok_or_else(|| "Google is not configured for this build".to_owned())?;
     let store = SecretStore::shared(keyring_service());
     let refresh_token = store
         .load(GOOGLE_MEET_REFRESH_TOKEN_KEY)
@@ -364,6 +412,20 @@ pub(crate) async fn create_instant_google_meet(
             ));
         }
     };
+
+    Ok(GoogleAccessToken {
+        access_token: token.access_token,
+        granted_scope: token.scope.unwrap_or_default(),
+    })
+}
+
+/// Refreshes the stored token and creates a new, empty Google Meet space —
+/// the "instant meeting" flow (no calendar event, no scheduled time).
+#[tauri::command]
+pub(crate) async fn create_instant_google_meet(
+    app_state: tauri::State<'_, crate::app_state::AppState>,
+) -> Result<GoogleMeetInfo, String> {
+    let token = google_access_token(&app_state).await?;
 
     let response = app_state
         .http_client

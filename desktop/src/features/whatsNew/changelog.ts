@@ -156,6 +156,16 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Online/away status is more reliable, which also makes @here more accurate",
     ],
   },
+  {
+    version: "0.5.17-1",
+    date: "2026-08-21",
+    bullets: [
+      "Video, audio and files over 5 MB now go to your own Google Drive and are shared as a link — no more ffmpeg, no more upload failures on large files",
+      "Connect your Google account under Settings → Voice to use this. If you connected it before today, disconnect and reconnect once",
+      "Links shared in a channel now appear in its Files tab, alongside uploaded files",
+      "A link can be marked as a new version of a file, and a file as a new version of a link",
+    ],
+  },
 ];
 
 /**

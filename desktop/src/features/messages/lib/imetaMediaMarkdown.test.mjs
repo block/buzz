@@ -746,3 +746,84 @@ test("splitOutgoingTags is the inverse of mergeOutgoingTags", () => {
   assert.deepEqual(mentionTags, []);
   assert.deepEqual(linkPreviewTags, []);
 });
+
+// --- external attachments (Drive uploads) -----------------------------------
+//
+// A Drive upload travels through the composer's attachment state like any
+// other file, but its bytes live outside the relay. Two consequences, both
+// tested here because getting either wrong ships a broken message: it must
+// emit no imeta tag, and it must never render as inline media.
+
+const DRIVE_VIDEO = {
+  external: true,
+  filename: "quarterly review.mp4",
+  sha256: "",
+  size: 210_000_000,
+  type: "application/octet-stream",
+  uploaded: 0,
+  url: "https://drive.google.com/file/d/1a2B3c/view",
+};
+
+test("an external attachment emits no imeta tag", () => {
+  assert.deepEqual(buildImetaTags([DRIVE_VIDEO]), []);
+});
+
+test("external attachments are dropped without disturbing the others", () => {
+  const relayFile = {
+    filename: "notes.pdf",
+    sha256: "abc",
+    size: 1024,
+    type: "application/pdf",
+    uploaded: 0,
+    url: "https://relay.example/media/notes.pdf",
+  };
+  const tags = buildImetaTags([DRIVE_VIDEO, relayFile]);
+  assert.equal(tags.length, 1);
+  assert.ok(tags[0].includes("url https://relay.example/media/notes.pdf"));
+});
+
+test("an external attachment renders as a link, never an inline player", () => {
+  const line = formatImetaMediaLine(DRIVE_VIDEO);
+  assert.equal(
+    line,
+    "\n[quarterly review.mp4](https://drive.google.com/file/d/1a2B3c/view)",
+  );
+  assert.ok(!line.includes("!["));
+});
+
+test("a video MIME type on an external attachment is still not inlined", () => {
+  // Belt and braces: the router sets application/octet-stream, but the guard
+  // must hold if that ever changes, or Drive links become broken <video> tags.
+  const line = formatImetaMediaLine({ ...DRIVE_VIDEO, type: "video/mp4" });
+  assert.ok(line.startsWith("\n[quarterly review.mp4]("));
+});
+
+test("an image MIME type on an external attachment is still not inlined", () => {
+  const line = formatImetaMediaLine({
+    ...DRIVE_VIDEO,
+    filename: "poster.png",
+    type: "image/png",
+  });
+  assert.ok(line.startsWith("\n[poster.png]("));
+});
+
+test("a relay video is unaffected and still renders inline", () => {
+  const line = formatImetaMediaLine({
+    filename: "clip.mp4",
+    sha256: "abc",
+    size: 1024,
+    type: "video/mp4",
+    uploaded: 0,
+    url: "https://relay.example/media/clip.mp4",
+  });
+  assert.equal(line, "\n![video](https://relay.example/media/clip.mp4)");
+});
+
+test("the Drive link label carries the filename the Files tab will read", () => {
+  // `channelLinkEntries.mjs` reads this markdown label as the entry's name, so
+  // this line is the whole reason a Drive row says "quarterly review.mp4"
+  // rather than "Google Drive file".
+  assert.ok(
+    formatImetaMediaLine(DRIVE_VIDEO).includes("[quarterly review.mp4]"),
+  );
+});

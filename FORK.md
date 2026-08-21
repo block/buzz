@@ -7,7 +7,7 @@ Everything upstream does, this does. This document covers only what is
 **different**, so you can decide whether to run this build, take a patch from
 it, or contribute.
 
-Current release: **`0.5.17-0`**, based on upstream `desktop-v0.5.17`.
+Current release: **`0.5.17-1`**, based on upstream `desktop-v0.5.17`.
 Windows installers are published under
 [Releases](https://github.com/ranjank2alpha/buzz/releases).
 
@@ -46,6 +46,61 @@ one, and every surface then tells you which is current.
   and missing parents.
 
 Pure logic with tests: `fileVersionChains.mjs`, `supersedesRanking.mjs`.
+
+### Links in the Files tab
+
+Any web link pasted into a channel becomes an entry in that channel's Files
+tab, alongside uploaded files — one row per URL, dated at its first appearance,
+removed when its message is deleted.
+
+This falls out of the versioning design rather than being bolted onto it. The
+version tag references an *event*, not a file, so a link entry gets version
+chains, deletion handling and the composer's supersedes picker for free: a
+Google Doc can supersede an uploaded PDF, and vice versa, with no new tag and
+no relay change.
+
+Naming a link is the hard part, since the document's title is not in the event.
+Google's document surfaces are labelled by kind (`Google Doc`, `Google Drive
+file`), everything else falls back to the last readable path segment, and
+opaque ids are skipped rather than displayed — a Drive id in a file list is
+worse than nothing.
+
+Pure logic with tests: `channelLinkEntries.mjs`.
+
+### Large files, video and audio go to Google Drive
+
+Any file over 5 MB, and all video and audio regardless of size, uploads to a
+"Buzz uploads" folder in the sender's own Google Drive and is posted as a link.
+It reuses the Google account already connected for Meet, on the narrow
+`drive.file` scope — the app can manage only the files it created and can see
+nothing else in the user's Drive.
+
+The reason is not storage policy. The relay path transcodes video locally
+through ffmpeg, which is not preinstalled on macOS, then lands on a **hosted**
+relay whose caps and version this fork does not control. That path failed
+often enough to be worth routing around rather than repairing.
+
+Two design notes worth having:
+
+- **It is one seam, not a parallel pipeline.** `routedMediaUpload.ts` is
+  signature-compatible with the existing upload function, so the composer and
+  the deferred-upload queue each swap a single import and keep cancellation,
+  byte progress and slot ordering unchanged.
+- **A Drive upload posts no `imeta` tag.** There is no relay blob behind it and
+  no sha256 to assert, so it travels as an ordinary `[filename](url)` markdown
+  link — which is also what makes it appear in the Files tab under its real
+  name, since link entries take their name from that label. No Drive API call
+  is needed to name a file Buzz itself uploaded.
+
+There is deliberately **no "upload to Drive?" prompt**: direct sharing of these
+files is not permitted, so the only alternative to Drive is not sending the
+file, and a dialog with one real outcome is not a choice.
+
+Sharing is handled by the Workspace default rather than a per-file API call.
+Folder browsing is not offered, because listing an existing Drive folder needs
+a restricted scope and a Google security assessment.
+
+Full reasoning: [`docs/google-drive-integration-spec.md`](docs/google-drive-integration-spec.md).
 
 ### Inbox as three lanes
 

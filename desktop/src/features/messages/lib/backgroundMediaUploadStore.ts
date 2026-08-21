@@ -1,11 +1,10 @@
 import * as React from "react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
-import {
-  cancelMediaUpload,
-  releaseMediaUpload,
-  uploadMediaFile,
-} from "@/shared/api/tauriMedia";
+import { cancelMediaUpload, releaseMediaUpload } from "@/shared/api/tauriMedia";
+// Routed, not the raw relay upload: the deferred queue carries videos, and
+// every video now goes to the sender's Drive. See `routedMediaUpload.ts`.
+import { uploadMediaFile } from "./routedMediaUpload";
 import {
   type BackgroundMediaUploadPhase,
   isNativeMediaUploadPhase,

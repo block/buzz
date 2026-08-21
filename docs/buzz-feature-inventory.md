@@ -5,7 +5,7 @@ A complete map of what this product does today, for competitive gap analysis.
 **What this is.** Buzz is a desktop team-chat application (Tauri 2 + React,
 Windows/macOS/Linux) built on the Nostr protocol. Messages are signed events on
 a relay rather than rows in a vendor database. This repository is `k2alpha`, a
-fork of the open-source `block/buzz` project, currently at version `0.5.17-0`
+fork of the open-source `block/buzz` project, currently at version `0.5.17-1`
 (based on upstream `desktop-v0.5.17`, plus fork-specific work).
 
 **Who uses it.** A team of ~40 senior professionals, predominantly on Windows,
@@ -69,6 +69,13 @@ explicitly marked otherwise.
   Markdown and plain-text/code. PowerPoint fidelity improves when LibreOffice is
   installed.
 - **Files tab** per channel — every file shared, with uploader, date, time, size.
+- **Links as file entries** — any web link pasted into a channel message becomes
+  a row in the Files tab, deduplicated to one entry per URL and dated at its
+  first appearance. Named by Google surface (`Google Doc`, `Google Drive file`)
+  or the last readable path segment; never a bare opaque id. A sender-supplied
+  markdown label outranks all of it, which is how Drive uploads appear under
+  their real filename. Opens in the browser. A link and a file can supersede
+  each other, because the version tag references an event rather than a file.
 - **File versioning** — at upload time, Buzz asks whether the file is a new
   version of an existing one, with fuzzy filename suggestions (recognises
   `report-v2.pdf`, `report (1).pdf`, `deck FINAL.pptx`, `budget_2026_rev2.xlsx`)
@@ -76,6 +83,12 @@ explicitly marked otherwise.
   "supersedes N earlier versions"; older ones show "Outdated — view latest" and
   jump straight to the newest. Version sets collapse into one row in the Files
   tab. Correcting a mistake means deleting the message that carries the link.
+- **Google Drive routing** — files over 5 MB, and all video and audio, upload to
+  a "Buzz uploads" folder in the sender's own Drive (`drive.file` scope, reusing
+  the Meet OAuth connection) and post as a labelled link rather than a relay
+  attachment. Resumable chunked upload with byte progress. Blocked with an
+  explanation when Drive is not connected — no relay fallback. No per-file
+  sharing call; the Workspace domain default covers it.
 - **Diff viewer** for code/text changes.
 - Known limitation: the Files tab lists top-level channel messages only; a file
   attached solely inside a thread reply does not appear there.

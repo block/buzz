@@ -1,10 +1,13 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AlertCircle,
   ChevronRight,
   Download,
+  ExternalLink,
   File as FileIcon,
+  Link2,
 } from "lucide-react";
 
 import {
@@ -17,6 +20,7 @@ import { buildFileVersionChains } from "@/features/messages/lib/fileVersionChain
 import { FileVersionBadge } from "@/shared/ui/FileVersionBadge";
 import { classifyFilePreviewKind } from "@/shared/ui/markdownFileCard";
 import { FilePreviewModal } from "@/shared/ui/filePreview/FilePreviewModal";
+import { linkHost } from "@/shared/lib/channelLinkEntries.mjs";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -61,7 +65,15 @@ function FileRow({
   versionLabel?: string;
 }) {
   const outdated = isOutdatedFile(file);
-  const filename = file.filename ?? "Untitled file";
+  const isLink = file.kind === "link";
+  const filename =
+    file.filename ?? (isLink ? "Untitled link" : "Untitled file");
+  // The host is the one piece of context a link name loses. "Google Doc" says
+  // what it is; "docs.google.com" is redundant, but "q3.pdf" on an unfamiliar
+  // domain is exactly what people want to see before clicking.
+  const host = isLink && file.url ? linkHost(file.url) : null;
+  const RowIcon = isLink ? Link2 : FileIcon;
+  const ActionIcon = isLink ? ExternalLink : Download;
 
   return (
     <div
@@ -76,7 +88,7 @@ function FileRow({
         onClick={() => onOpen(file)}
         type="button"
       >
-        <FileIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <RowIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-foreground">
@@ -104,10 +116,16 @@ function FileRow({
                 <span>{formatFileSize(file.size)}</span>
               </>
             ) : null}
+            {host ? (
+              <>
+                <span>&middot;</span>
+                <span className="truncate">{host}</span>
+              </>
+            ) : null}
           </div>
         </div>
       </button>
-      <Download className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/60" />
+      <ActionIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/60" />
     </div>
   );
 }
@@ -218,6 +236,15 @@ export function FilesPanel({
 
   const handleOpenFile = React.useCallback((file: ChannelFileEntry) => {
     if (!file.url) return; // no `url` imeta field — nothing to preview/download
+    // A link goes to the browser. Rendering someone else's page inside the
+    // preview modal would be both wrong and a way to load arbitrary remote
+    // content into the app.
+    if (file.kind === "link") {
+      void openUrl(file.url).catch(() => {
+        /* the OS refused to open it; nothing useful to say in the list */
+      });
+      return;
+    }
     setPreviewFile(file);
   }, []);
 
@@ -235,8 +262,8 @@ export function FilesPanel({
           <DialogHeader className="border-b border-border/70 px-4 py-3">
             <DialogTitle className="text-sm font-medium">Files</DialogTitle>
             <DialogDescription className="sr-only">
-              Every file shared in this channel. Files superseded by a newer
-              upload are marked outdated.
+              Every file and link shared in this channel. Anything superseded by
+              a newer version is marked outdated.
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -267,7 +294,7 @@ export function FilesPanel({
               </div>
             ) : (
               <div className="flex justify-center py-8 text-sm text-muted-foreground">
-                No files have been shared in this channel yet.
+                No files or links have been shared in this channel yet.
               </div>
             )}
           </div>

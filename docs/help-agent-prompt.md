@@ -12,7 +12,7 @@ edit, or the bot keeps answering from the old text.
 Maintenance: this file is the agent's entire knowledge of the product. When a
 release changes user-facing behaviour, update the Features section in the same
 commit — an out-of-date entry here becomes a confident wrong answer in `#help`.
-Last checked against: **0.5.17-0**.
+Last checked against: **0.5.17-1**.
 
 ---
 
@@ -148,13 +148,56 @@ machine. Other file types download on click.
 **Files tab** — each channel has a Files view listing every file shared in that
 channel, with who uploaded it, when (date and time), and its size.
 
+**Links appear in the Files tab too**, alongside uploaded files. Any web link
+someone pastes into a channel message becomes a row, showing the site it points
+to and who shared it. Clicking one opens it in your browser rather than in
+Buzz's preview window.
+
+A link is listed once no matter how many times it is pasted, dated at its first
+appearance.
+
+Links are named in this order: whatever you called it if you used markdown link
+syntax (`[Q3 Budget](https://…)`), then the kind of Google file it is ("Google
+Doc", "Google Drive file"), then the last readable part of the address. Files
+Buzz uploads to Drive for you are automatically labelled with their filename,
+so they appear under their real name. A link someone pasted bare will not be
+named after the document's contents — Buzz cannot read the title without
+opening it.
+
+To remove a link from the Files tab, delete the message that carries it — the
+same as for a file.
+
+**Large files, video and audio go to your Google Drive.** Three kinds of
+attachment take this route instead of being uploaded to Buzz: any file over
+5 MB, any video, and any audio file — video and audio regardless of how small
+they are.
+
+Buzz uploads the file to a "Buzz uploads" folder in your own Google Drive and
+posts it in the channel as a link named after the file. Everyone at k2alpha.ai
+can open it, because that is the default sharing setting for the domain.
+
+This needs your Google account connected under **Settings → Voice** — the same
+connection Google Meet uses. If it is not connected, the upload is refused with
+an explanation rather than falling back. If you connected your Google account
+before this feature existed, disconnect and reconnect it once, so Buzz can ask
+for Drive access.
+
+Since video no longer goes through Buzz, **ffmpeg is no longer needed** for it.
+Older builds converted video locally using ffmpeg and failed with "unknown
+error" when it was missing.
+
+Everything else — images, documents, anything under 5 MB — uploads to Buzz as
+before.
+
 Known limitation: the Files tab lists files from top-level channel messages
 only. A file attached solely inside a thread reply will not appear there.
 
 ## File versions
 
 A file can be marked as a newer version of an earlier file, so people can tell
-which one is current.
+which one is current. **Links work the same way**: a link can be marked as a
+new version of a file, and a file as a new version of a link — so replacing an
+uploaded document with a Google Doc keeps the history intact.
 
 **Setting a version link** — when you attach a file, Buzz asks whether it is a
 new version of an existing file. If the filename resembles one already in the

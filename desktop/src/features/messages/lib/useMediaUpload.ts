@@ -5,7 +5,7 @@ import {
   pickAndUploadMedia,
   uploadMediaBytes,
 } from "@/shared/api/tauri";
-import { uploadMediaFile } from "@/shared/api/tauriMedia";
+import { uploadMediaFile } from "./routedMediaUpload";
 import type { ImetaMedia } from "./imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";

@@ -30,6 +30,33 @@ was not used on this path.
 *Risk:* low. Regression test included — a case where only the thread marker
 moved, which returned `null` before the fix.
 
+### Tauri error messages are discarded, so failures read as "unknown error"
+
+`getErrorMessage` (`useMentionSendFlow.helpers.ts:85`) only keeps a message when
+the value is an `Error` instance:
+
+```ts
+return error instanceof Error && error.message ? error.message : fallback;
+```
+
+Tauri's `invoke` rejects with a **plain string**, not an `Error`. So every
+error raised from Rust fails the `instanceof` check and is replaced by the
+caller's fallback — usually `"unknown error"`.
+
+The user-visible cost is concrete. `find_ffmpeg` in `commands/media_transcode.rs`
+raises a genuinely helpful message when video upload can't find ffmpeg —
+including `brew install ffmpeg` — and none of it reaches the user. On macOS,
+where ffmpeg is not preinstalled, the first person to share a video gets
+`Upload failed: unknown error` and no path forward. It took reading the Rust
+source to work out what was wrong.
+
+The fix is to fall back to the string form before the literal, which
+`useMediaUpload.ts:630` already does correctly with `String(err)` — so the
+codebase contains both the right and the wrong handling of the same thing.
+
+*Files:* `features/messages/ui/useMentionSendFlow.helpers.ts`.
+*Risk:* very low. Strictly widens what is reported; no path loses information.
+
 ### Unread dot invisible on the active channel row
 
 The row-level unread dot painted `bg-primary` unconditionally. The active row

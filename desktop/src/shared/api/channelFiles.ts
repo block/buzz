@@ -1,4 +1,5 @@
 import { getChannelMessagesBefore } from "./tauriChannels";
+import { collectChannelLinkEntries } from "@/shared/lib/channelLinkEntries.mjs";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { SUPERSEDES_MARKER, SUPERSEDES_SUBJECT_MARKER } from "./supersedesTags";
 import type { ChannelPageCursor, RelayEvent } from "./types";
@@ -59,6 +60,14 @@ const MAX_PAGES = 200;
  * struct. Keep all three in sync if this shape changes.
  */
 export type ChannelFileEntry = {
+  /**
+   * `"link"` for a URL shared in a message body rather than an uploaded file.
+   * Link entries sit in the same list — and the same version chains — because
+   * the supersedes tag points at an *event*, not at a file, so a Drive link can
+   * supersede an uploaded PDF with no new tag and no relay change. See
+   * `shared/lib/channelLinkEntries.mjs`.
+   */
+  kind: "file" | "link";
   eventId: string;
   uploadedBy: string;
   /** Unix seconds. */
@@ -181,6 +190,17 @@ export async function listChannelFiles(
   // `subject` event id -> `target` (superseded) event id. Merged into the
   // same map as own-message `supersedes` tags below.
   const linkDeclarations: { subject: string; target: string }[] = [];
+  // Every surviving content event, for the link sweep below. Collected in the
+  // same pass rather than a second walk over `events`, since the deletion and
+  // kind filtering are identical.
+  const linkSources: {
+    eventId: string;
+    pubkey: string;
+    createdAt: number;
+    content: string;
+    hasAttachment: boolean;
+    supersedes: string | null;
+  }[] = [];
   for (const event of events) {
     if (
       event.kind !== KIND_STREAM_MESSAGE &&
@@ -190,17 +210,27 @@ export async function listChannelFiles(
     }
     // A deleted message contributes neither its file nor any version link it
     // asserted — deleting is the only way to undo a link, so it has to undo
-    // the link too, not just hide the row.
+    // the link too, not just hide the row. The same applies to a link it
+    // carried: deleting the message is how you take a link back.
     if (deleted.has(event.id)) continue;
     const imetaEntries = parseImetaTags(event.tags);
+    const supersedes = supersedesTarget(event.tags);
+    linkSources.push({
+      eventId: event.id,
+      pubkey: event.pubkey,
+      createdAt: event.created_at,
+      content: event.content,
+      hasAttachment: imetaEntries.size > 0,
+      supersedes,
+    });
     if (imetaEntries.size === 0) {
       const declaration = supersedesLinkDeclaration(event.tags);
       if (declaration) linkDeclarations.push(declaration);
       continue; // not a file-bearing message
     }
-    const supersedes = supersedesTarget(event.tags);
     for (const entry of imetaEntries.values()) {
       files.push({
+        kind: "file",
         eventId: event.id,
         uploadedBy: event.pubkey,
         uploadedAt: event.created_at,
@@ -214,6 +244,18 @@ export async function listChannelFiles(
       });
     }
   }
+
+  // Links shared in message bodies join the same list, so they get version
+  // chains, deletion handling and Files-tab rendering for free. A URL that is
+  // already an uploaded file's own URL is excluded: the markdown renderer
+  // embeds an attachment's URL in the message body, so without this every
+  // upload would also produce a duplicate link row beside itself.
+  files.push(
+    ...collectChannelLinkEntries({
+      messages: linkSources,
+      excludedUrls: files.map((file) => file.url),
+    }),
+  );
 
   // Build the newer-eventId -> older-eventId map from both sources: a file's
   // own `supersedes` tag (live-composer case) takes priority; a retroactive
@@ -233,6 +275,12 @@ export async function listChannelFiles(
   // (covers the retroactive case, whose own tag didn't carry one) and
   // back-fill `supersededBy` now that the full set is known.
   for (const file of files) {
+    // Files only. A message carrying both an attachment and a link shares one
+    // event id between two entries, and the supersedes tag on it belongs to
+    // the file — applying it here as well would give the link a "New version"
+    // badge for a predecessor it never claimed. `collectChannelLinkEntries`
+    // makes the same call at the other end.
+    if (file.kind !== "file") continue;
     const merged = supersedesByEventId.get(file.eventId);
     if (merged) file.supersedes = merged;
   }

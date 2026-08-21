@@ -38,6 +38,19 @@ export type ImetaMedia = BlobDescriptor & {
    * shape `channelFiles.ts`'s `supersedesTarget` reads back on the read side.
    */
   supersedesEventId?: string;
+  /**
+   * The bytes live outside the relay — today, in the sender's Google Drive.
+   *
+   * Such an attachment carries no `imeta` tag (there is no relay blob and no
+   * sha256 to assert) and always renders as a plain `[filename](url)` link
+   * rather than inline media. Both rules are enforced below. See
+   * `routedMediaUpload.ts`.
+   *
+   * Lives here rather than on `BlobDescriptor` because it is a fact about how
+   * the composer should *present* an attachment, which is this module's
+   * subject — `BlobDescriptor` describes a blob the relay returned.
+   */
+  external?: boolean;
 };
 
 /**
@@ -96,19 +109,27 @@ export function imetaMediaFromTags(
 export function buildImetaTags(
   imetaMedia: ReadonlyArray<ImetaMedia>,
 ): string[][] {
-  return imetaMedia.map((d) => [
-    "imeta",
-    `url ${d.url}`,
-    `m ${d.type}`,
-    ...(d.sha256 ? [`x ${d.sha256}`] : []),
-    ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
-    ...(d.dim ? [`dim ${d.dim}`] : []),
-    ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
-    ...(d.thumb ? [`thumb ${d.thumb}`] : []),
-    ...(d.duration != null ? [`duration ${d.duration}`] : []),
-    ...(d.image ? [`image ${d.image}`] : []),
-    ...(d.filename ? [`filename ${d.filename}`] : []),
-  ]);
+  return (
+    imetaMedia
+      // An external attachment (a Drive upload) has no relay blob behind it, so
+      // there is nothing honest to put in an imeta tag — no sha256, no
+      // relay-served url. It travels as the markdown link in the body instead,
+      // which is also what makes the Files tab list it with its real filename.
+      .filter((d) => !d.external)
+      .map((d) => [
+        "imeta",
+        `url ${d.url}`,
+        `m ${d.type}`,
+        ...(d.sha256 ? [`x ${d.sha256}`] : []),
+        ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
+        ...(d.dim ? [`dim ${d.dim}`] : []),
+        ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
+        ...(d.thumb ? [`thumb ${d.thumb}`] : []),
+        ...(d.duration != null ? [`duration ${d.duration}`] : []),
+        ...(d.image ? [`image ${d.image}`] : []),
+        ...(d.filename ? [`filename ${d.filename}`] : []),
+      ])
+  );
 }
 
 const MEDIA_LINE_RE =
@@ -285,7 +306,7 @@ export function findSpoileredImetaMediaUrls(
  * image MIME so the renderer can upgrade them to the import/download card.
  */
 export function formatImetaMediaLine(
-  { url, type, filename }: ImetaMedia,
+  { external, url, type, filename }: ImetaMedia,
   options: { label?: string; spoiler?: boolean } = {},
 ): string {
   // A PNG snapshot is image/png on the wire, but it is an importable file, not
@@ -293,11 +314,15 @@ export function formatImetaMediaLine(
   const lower = filename?.toLowerCase();
   const isSnapshotPng =
     lower?.endsWith(".agent.png") || lower?.endsWith(".team.png");
-  if (type.startsWith("video/")) {
+  // An external attachment is a link to someone else's viewer page, never a
+  // byte stream. `<video src="https://drive.google.com/file/d/…/view">` would
+  // render as a permanently broken player, so it always takes the link branch
+  // below regardless of what the file actually is.
+  if (!external && type.startsWith("video/")) {
     const line = `![video](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  if (type.startsWith("image/") && !isSnapshotPng) {
+  if (!external && type.startsWith("image/") && !isSnapshotPng) {
     const line = `![image](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
