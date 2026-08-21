@@ -59,6 +59,19 @@ const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
 const _landingHighlightOpacity = 0.12;
 const _threadTailScrollTolerance = 0.5;
 
+/// Returns whether a bounded tail correction reached the effective end.
+///
+/// Item positions can lag the active scroll position by a frame, so an exact
+/// end-of-scroll measurement is sufficient even while the tail item still
+/// reports outside the visible boundary.
+@visibleForTesting
+bool threadTailCorrectionReachedEnd({
+  required bool tailIsVisible,
+  required double? extentAfter,
+}) =>
+    tailIsVisible ||
+    (extentAfter != null && extentAfter <= _threadTailScrollTolerance);
+
 // Keep the direct-position correction finite in case the viewport cannot
 // expose its tail (for example, continuously changing media dimensions).
 const _latestTailCorrectionLimit = 8;
@@ -402,11 +415,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       // trust an exact end-of-scroll position too: there is nowhere further
       // for Latest to navigate, so leaving the control visible is misleading.
       final position = activeThreadScrollPosition.value;
-      final reachedScrollExtent =
-          position != null &&
-          position.hasContentDimensions &&
-          position.extentAfter <= _threadTailScrollTolerance;
-      isAtThreadTail.value = reachedTail || reachedScrollExtent;
+      isAtThreadTail.value = threadTailCorrectionReachedEnd(
+        tailIsVisible: reachedTail,
+        extentAfter: position != null && position.hasContentDimensions
+            ? position.extentAfter
+            : null,
+      );
     }
 
     void correctThreadTailInstantly() {

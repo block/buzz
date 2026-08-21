@@ -255,17 +255,44 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView
   }
 
-  /// Whether the pre-iOS-26 fallback should use a dark surface so a light
-  /// foreground remains visible over media.
+  /// Whether the pre-iOS-26 fallback should use a dark surface so the
+  /// foreground maintains non-text UI contrast in light appearance.
   static func usesDarkFallbackSurface(
     foregroundColor: UIColor?,
     interfaceStyle: UIUserInterfaceStyle
   ) -> Bool {
     guard interfaceStyle != .dark, let foregroundColor else { return false }
-    var white: CGFloat = 0
+    let traits = UITraitCollection(userInterfaceStyle: interfaceStyle)
+    let backgroundColor = UIColor.secondarySystemBackground.resolvedColor(with: traits)
+    guard
+      let foregroundLuminance = relativeLuminance(
+        of: foregroundColor.resolvedColor(with: traits)
+      ),
+      let backgroundLuminance = relativeLuminance(of: backgroundColor)
+    else { return false }
+    let lighter = max(foregroundLuminance, backgroundLuminance)
+    let darker = min(foregroundLuminance, backgroundLuminance)
+    return (lighter + 0.05) / (darker + 0.05) < 3
+  }
+
+  private static func relativeLuminance(of color: UIColor) -> CGFloat? {
+    var red: CGFloat = 0
+    var green: CGFloat = 0
+    var blue: CGFloat = 0
     var alpha: CGFloat = 0
-    guard foregroundColor.getWhite(&white, alpha: &alpha) else { return false }
-    return alpha > 0.5 && white >= 0.9
+    guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+      return nil
+    }
+
+    func linearize(_ component: CGFloat) -> CGFloat {
+      component <= 0.04045
+        ? component / 12.92
+        : pow((component + 0.055) / 1.055, 2.4)
+    }
+
+    return 0.2126 * linearize(red) +
+      0.7152 * linearize(green) +
+      0.0722 * linearize(blue)
   }
 
   private func applyAppearance(from value: Any?) {

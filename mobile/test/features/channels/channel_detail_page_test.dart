@@ -3,7 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollDirection, SemanticsAction;
+import 'package:flutter/rendering.dart'
+    show RenderParagraph, ScrollDirection, SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -5368,6 +5369,74 @@ void main() {
       },
     );
 
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets(
+        'keeps a narrow long channel title aligned on ${platform.name}',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = platform;
+          addTearDown(
+            () => debugDefaultTargetPlatformOverride = previousPlatform,
+          );
+          tester.view.physicalSize = const Size(320, 700);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          final channel = _testChannel.copyWith(
+            name: 'a-very-long-channel-name-that-must-truncate',
+          );
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: const [],
+              channel: channel,
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ChannelDetailPage(channel: channel),
+                      ),
+                    ),
+                    child: const Text('Open channel'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.text('Open channel'));
+          await tester.pumpAndSettle();
+
+          final backRect = platform == TargetPlatform.iOS
+              ? tester.getRect(
+                  find.byKey(const ValueKey('channel-ios-glass-back')),
+                )
+              : tester.getRect(find.byTooltip('Back'));
+          final avatarRect = tester.getRect(
+            find.byKey(const ValueKey('channel-header-avatar')),
+          );
+          final titleSpacing = avatarRect.left - backRect.right;
+          final title = tester.renderObject<RenderParagraph>(
+            find.byKey(const ValueKey('channel-header-name')),
+          );
+          final titleDidExceedMaxLines = title.didExceedMaxLines;
+          debugDefaultTargetPlatformOverride = previousPlatform;
+
+          expect(
+            titleSpacing,
+            moreOrLessEquals(
+              platform == TargetPlatform.iOS
+                  ? iosGlassChannelHeaderTitleSpacing
+                  : 0,
+            ),
+          );
+          expect(titleDidExceedMaxLines, isTrue);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
     testWidgets('shows a tappable channel name and collective member count', (
       tester,
     ) async {
@@ -8925,6 +8994,20 @@ void main() {
       );
       expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
     });
+
+    test(
+      'thread tail accepts exact scroll extent while item positions lag',
+      () {
+        expect(
+          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 0),
+          isTrue,
+        );
+        expect(
+          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 1),
+          isFalse,
+        );
+      },
+    );
 
     testWidgets('thread Latest settles across expanding lazy scroll extents', (
       tester,
