@@ -345,7 +345,12 @@ async fn flush_head_with_retries<I: ArchiveSyncIo + ?Sized>(
     // Archive acknowledgment already happened. Retry only the atomic durable
     // removal; do not call archive again while this process remembers the ack.
     for attempt in 0..ARCHIVE_RETRY_ATTEMPTS {
-        let acknowledged = acknowledged_head.expect("acknowledged head is set");
+        let Some(acknowledged) = *acknowledged_head else {
+            eprintln!(
+                "buzz-desktop: archive sync: archive acknowledgment state missing; retaining durable head"
+            );
+            return FlushOutcome::Retained;
+        };
         match queue.acknowledge_head(acknowledged.count) {
             Ok(()) => {
                 if acknowledged.persisted_agent_metrics > 0 {

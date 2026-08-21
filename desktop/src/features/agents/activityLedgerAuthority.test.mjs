@@ -5,7 +5,10 @@ import {
   buildMissionJournal,
   normalizeActivityEvents,
 } from "./activityLedger.ts";
-import { applyValidatedJournalAuthority } from "./activityLedgerAuthority.ts";
+import {
+  applyValidatedJournalAuthority,
+  journalAuthorityCorrelationId,
+} from "./activityLedgerAuthority.ts";
 
 const sourceId = "a".repeat(64);
 
@@ -87,6 +90,26 @@ test("owner-signed verification only promotes evidence bound to the journal", ()
     artifact({ sourceEventIds: ["f".repeat(64)] }),
   ]);
   assert.notEqual(crossJournal.proofState, "VERIFIED");
+});
+
+test("verification writes use the journal correlation, not a tool-call correlation", () => {
+  const journal = observedJournal();
+  const toolEvidence = {
+    ...journal.events[0],
+    correlationId: "tool-call-1",
+    proofState: "RECEIPTED",
+    category: "tool",
+  };
+  const journalWithTool = {
+    ...journal,
+    events: [...journal.events, toolEvidence],
+  };
+
+  assert.equal(journalAuthorityCorrelationId(journalWithTool), "message-1");
+  assert.notEqual(
+    journalAuthorityCorrelationId(journalWithTool),
+    toolEvidence.correlationId,
+  );
 });
 
 test("latest owner override changes summary without changing proof", () => {

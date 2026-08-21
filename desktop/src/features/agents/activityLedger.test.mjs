@@ -548,3 +548,23 @@ test("buildTodayActivitySurface filters out work from other local days", () => {
   assert.equal(feed.journals.length, 1);
   assert.equal(feed.journals[0].channelId, CHANNEL_A);
 });
+
+test("buildTodayActivitySurface marks abandoned turns incomplete", () => {
+  const feed = buildTodayActivitySurface(
+    [
+      {
+        agentPubkey: AGENT_A,
+        agentName: "Fizz",
+        events: normalizeActivityEvents([observerEvent()]),
+      },
+    ],
+    {
+      day: "2026-08-21",
+      asOf: "2026-08-21T14:10:00.000Z",
+      incompleteAfterMs: 60_000,
+    },
+  );
+
+  assert.equal(feed.journals[0].status, "incomplete");
+  assert.equal(feed.journals[0].proofState, "UNKNOWN");
+});

@@ -898,7 +898,11 @@ export function applyOwnerJournalOverride(
 
 export function buildTodayActivitySurface(
   feeds: readonly TodayActivityFeedInput[],
-  options: { day: string },
+  options: {
+    day: string;
+    asOf?: string | Date;
+    incompleteAfterMs?: number;
+  },
 ): TodayActivitySurface {
   const journals: TodayActivityJournal[] = [];
   const channels = new Map<
@@ -914,6 +918,10 @@ export function buildTodayActivitySurface(
   for (const feed of feeds) {
     for (const journal of groupMissionJournals(
       feed.events.filter((event) => localDay(event.timestamp) === options.day),
+      {
+        asOf: options.asOf ?? new Date(),
+        incompleteAfterMs: options.incompleteAfterMs,
+      },
     )) {
       journals.push({
         ...journal,

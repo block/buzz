@@ -21,6 +21,16 @@ export type ValidatedJournalAuthorityArtifact = {
 };
 
 /**
+ * Authority artifacts are journal-scoped, even when their supporting evidence
+ * is a tool event with its own tool-call correlation.
+ */
+export function journalAuthorityCorrelationId(
+  journal: Pick<MissionJournal, "correlationId">,
+): string {
+  return journal.correlationId;
+}
+
+/**
  * Overlay owner authority without rewriting the observed source journal.
  *
  * The backend verifies artifact ids, signatures, signer identity, tags, and

@@ -15,7 +15,10 @@ import {
   normalizeActivityEvents,
   type MissionJournal,
 } from "@/features/agents/activityLedger";
-import { applyValidatedJournalAuthority } from "@/features/agents/activityLedgerAuthority";
+import {
+  applyValidatedJournalAuthority,
+  journalAuthorityCorrelationId,
+} from "@/features/agents/activityLedgerAuthority";
 import {
   getJournalAuthorityArtifacts,
   upsertJournalVerification,
@@ -275,16 +278,6 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     ],
     [journal.events],
   );
-  const receiptedCorrelationId = React.useMemo(
-    () =>
-      journal.events.find(
-        (event) =>
-          event.proofState === "RECEIPTED" &&
-          typeof event.provenance.sourceEventId === "string",
-      )?.correlationId ?? journal.correlationId,
-    [journal.correlationId, journal.events],
-  );
-
   const saveSummary = async () => {
     if (!summary.trim() || saving) return;
     setSaving(true);
@@ -315,7 +308,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     try {
       await upsertJournalVerification({
         journalId: journal.id,
-        correlationId: receiptedCorrelationId,
+        correlationId: journalAuthorityCorrelationId(journal),
         receiptRef: receiptRef.trim(),
         sourceEventIds: receiptedSourceIds,
       });

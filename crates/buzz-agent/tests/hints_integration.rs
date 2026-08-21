@@ -7,7 +7,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::Digest;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -582,28 +585,70 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let owner_keys =
+        Keys::parse("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let surface = json!({
+        "day": "2026-08-21",
+        "journals": [
+            {
+                "id": "journal-a",
+                "channelId": "chan-a",
+                "agentPubkey": "agent-a",
+                "agentName": "Honey",
+                "status": "completed",
+                "proofState": "RECEIPTED",
+                "endedAt": "2026-08-21T14:00:00.000Z",
+                "claimedCompletionWithoutEvidence": false,
+                "events": [{ "id": "event-a", "detail": "receipted activity" }]
+            }
+        ]
+    });
+    let raw_events: Vec<Value> = Vec::new();
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CanonicalPayload<'a> {
+        schema: &'static str,
+        owner_pubkey: &'a str,
+        generated_at: u64,
+        expires_at: u64,
+        capability: &'static str,
+        surface: &'a Value,
+        raw_events: &'a [Value],
+    }
+    let canonical_payload = serde_json::to_string(&CanonicalPayload {
+        schema: "buzz.activity-ledger.today/v1",
+        owner_pubkey: &owner_pubkey,
+        generated_at: now_secs.saturating_sub(60),
+        expires_at: now_secs + 300,
+        capability: "buzz.activity-ledger.today.read/v1",
+        surface: &surface,
+        raw_events: &raw_events,
+    })
+    .unwrap();
+    let snapshot_sha256 = hex::encode(sha2::Sha256::digest(canonical_payload.as_bytes()));
+    let signed_event = EventBuilder::new(Kind::Custom(24202), canonical_payload)
+        .tags([
+            Tag::parse(["t", "buzz-activity-ledger-today"]).unwrap(),
+            Tag::parse(["schema", "buzz.activity-ledger.today/v1"]).unwrap(),
+            Tag::parse(["capability", "buzz.activity-ledger.today.read/v1"]).unwrap(),
+            Tag::parse(["snapshot_sha256", &snapshot_sha256]).unwrap(),
+            Tag::parse(["expires_at", &(now_secs + 300).to_string()]).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(now_secs.saturating_sub(60)))
+        .sign_with_keys(&owner_keys)
+        .unwrap();
     let snapshot = json!({
         "schema": "buzz.activity-ledger.today/v1",
-        "ownerPubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "ownerPubkey": owner_pubkey,
         "generatedAt": now_secs.saturating_sub(60),
         "expiresAt": now_secs + 300,
         "capability": "buzz.activity-ledger.today.read/v1",
-        "surface": {
-            "day": "2026-08-21",
-            "journals": [
-                {
-                    "id": "journal-a",
-                    "channelId": "chan-a",
-                    "agentPubkey": "agent-a",
-                    "agentName": "Honey",
-                    "status": "completed",
-                    "proofState": "RECEIPTED",
-                    "endedAt": "2026-08-21T14:00:00.000Z",
-                    "claimedCompletionWithoutEvidence": false,
-                    "events": [{ "id": "event-a", "detail": "receipted activity" }]
-                }
-            ]
-        }
+        "surface": surface,
+        "rawEvents": raw_events,
+        "snapshotSha256": snapshot_sha256,
+        "eventId": signed_event.id.to_hex(),
+        "signature": signed_event.sig.to_string(),
     });
     std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
     #[cfg(unix)]
@@ -642,6 +687,10 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
             (
                 "BUZZ_ACTIVITY_LEDGER_TODAY_CAPABILITY",
                 "buzz.activity-ledger.today.read/v1",
+            ),
+            (
+                "BUZZ_ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY",
+                owner_pubkey.as_str(),
             ),
         ],
     )
