@@ -3103,6 +3103,19 @@ async fn ingest_event_inner(
         });
     }
 
+    // This runs after duplicate detection so each newly persisted kind:9
+    // message contributes at most one usage event. Enqueueing is best-effort
+    // and never changes message acceptance.
+    if let Some(sender) = state.usage_analytics.as_ref() {
+        if let Some(usage_event) = crate::usage_analytics::message_sent(
+            &stored_event.event,
+            &tenant.community().as_uuid().to_string(),
+            stored_event.received_at.timestamp_millis(),
+        ) {
+            let _ = sender.try_send(usage_event);
+        }
+    }
+
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)

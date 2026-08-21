@@ -767,6 +767,9 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+
+    /// Best-effort usage-event sender, absent when the webhook is disabled.
+    pub(crate) usage_analytics: Option<crate::usage_analytics::UsageAnalyticsSender>,
 }
 
 impl AppState {
@@ -830,6 +833,25 @@ impl AppState {
             }
             tracing::warn!("audit log worker exited (expected on shutdown)");
         });
+
+        let usage_analytics = config
+            .usage_analytics_endpoint
+            .clone()
+            .and_then(|endpoint| {
+                match crate::usage_analytics::UsageAnalyticsSender::spawn(
+                    endpoint,
+                    crate::usage_analytics::QUEUE_CAPACITY,
+                ) {
+                    Ok(sender) => Some(sender),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error.without_url(),
+                            "usage analytics disabled: HTTP client initialization failed"
+                        );
+                        None
+                    }
+                }
+            });
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
@@ -940,6 +962,7 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            usage_analytics,
         };
         (
             state,
