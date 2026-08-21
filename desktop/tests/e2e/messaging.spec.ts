@@ -1879,6 +1879,155 @@ test("emoji picker inserts emoji into the draft and keeps focus in the composer"
   await expect(input).toHaveText("Ship🚀 now");
 });
 
+test("relay GIF capability gates the composer picker", async ({ page }) => {
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({ supported_extensions: [] }),
+      contentType: "application/nostr+json",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const pickerButton = page.getByTestId("composer-emoji-button");
+  await expect(pickerButton).toHaveAccessibleName("Insert emoji");
+  await pickerButton.click();
+  await expect(page.getByRole("tab", { name: "GIFs" })).toHaveCount(0);
+});
+
+test("relay GIF search selects content-only media and reports the share", async ({
+  page,
+}) => {
+  const searchBodies: Array<{
+    customer_id: string;
+    locale: string;
+    query: string;
+  }> = [];
+  const shareBodies: Array<{ customer_id: string; slug: string }> = [];
+  const gifUrl = "https://static.klipy.com/e2e-ship-it.gif";
+  const previewUrl = "https://static.klipy.com/e2e-ship-it.webp";
+
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/search", async (route) => {
+    searchBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: [
+            {
+              id: null,
+              file: {
+                md: {
+                  gif: { height: 180, size: 42, url: gifUrl, width: 320 },
+                },
+                sm: {
+                  webp: {
+                    height: 90,
+                    size: 12,
+                    url: previewUrl,
+                    width: 160,
+                  },
+                },
+              },
+              slug: "e2e-ship-it",
+              title: "Ship it",
+              type: "gif",
+            },
+          ],
+        },
+      }),
+      contentType: "application/json",
+    });
+  });
+  await page.route("http://localhost:3000/gifs/share", async (route) => {
+    shareBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("https://static.klipy.com/e2e-ship-it.*", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const pickerButton = page.getByTestId("composer-emoji-button");
+  await expect(pickerButton).toHaveAccessibleName("Insert emoji or GIF");
+  await pickerButton.click();
+  await page.getByRole("tab", { name: "GIFs" }).click();
+
+  await expect.poll(() => searchBodies.map(({ query }) => query)).toContain("");
+  await expect(
+    page.getByRole("button", { name: "Choose Ship it" }),
+  ).toBeVisible();
+
+  await page.getByRole("searchbox", { name: "Search KLIPY" }).fill("celebrate");
+  await expect
+    .poll(() => searchBodies.map(({ query }) => query))
+    .toContain("celebrate");
+  await page.getByRole("button", { name: "Choose Ship it" }).click();
+
+  await expect(page.getByTestId("composer-media-attachment")).toBeVisible();
+  await expect
+    .poll(() => shareBodies)
+    .toEqual([
+      {
+        customer_id: searchBodies.at(-1)?.customer_id,
+        slug: "e2e-ship-it",
+      },
+    ]);
+
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("composer-media-attachment")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate((expectedUrl) => {
+        return Boolean(
+          (
+            window as Window & {
+              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+                content?: string;
+                kind?: number;
+              }>;
+            }
+          ).__BUZZ_E2E_SIGNED_EVENTS__?.some(
+            (event) => event.kind === 9 && event.content?.includes(expectedUrl),
+          ),
+        );
+      }, gifUrl),
+    )
+    .toBe(true);
+  const matchingEvent = await page.evaluate((expectedUrl) => {
+    return (
+      window as Window & {
+        __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+          content?: string;
+          kind?: number;
+          tags?: string[][];
+        }>;
+      }
+    ).__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.kind === 9 && event.content?.includes(expectedUrl),
+    );
+  }, gifUrl);
+  expect(matchingEvent?.content).toBe(`![image](${gifUrl})`);
+  expect(matchingEvent?.tags?.some((tag) => tag[0] === "imeta")).toBe(false);
+});
+
 test("empty message cannot be sent", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();

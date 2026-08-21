@@ -609,6 +609,7 @@ export function ForumComposer({
                 ) : undefined
               }
               formattingDisabled={Boolean(disabled || isSubmissionPending)}
+              gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={Boolean(isSending || isSubmissionPending)}

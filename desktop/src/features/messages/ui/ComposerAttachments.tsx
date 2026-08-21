@@ -275,7 +275,11 @@ const MediaAttachmentItem = React.forwardRef<
       ? rewriteRelayUrl(attachment.thumb)
       : undefined;
 
-  const canEdit = !isVideo && onEditSave !== undefined;
+  // Only Buzz-hosted uploads have a content hash. URL-only provider media
+  // must remain externally hosted instead of being copied into storage by the
+  // image editor's save path.
+  const canEdit =
+    !isVideo && onEditSave !== undefined && attachment.sha256.length === 64;
   const canRevert =
     !isVideo && onRevert !== undefined && originalUrl !== undefined;
 

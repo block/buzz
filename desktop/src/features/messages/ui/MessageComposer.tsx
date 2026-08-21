@@ -971,13 +971,13 @@ function MessageComposerImpl({
             >
               <EditorContent editor={richText.editor} />
             </div>
-
             <ComposerDockToolbar
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={composerDisabled}
+              gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending}
