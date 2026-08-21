@@ -1,4 +1,4 @@
-import { FolderGit2, GitBranch, Globe, SquareTerminal } from "lucide-react";
+import { FolderGit2, Globe, SquareTerminal } from "lucide-react";
 
 import type {
   Project,
@@ -15,9 +15,9 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { repositoryShareLink } from "@/features/projects/lib/projectShareLinks";
 import {
-  formatExactTimestamp,
-  relativeTime,
-} from "@/features/projects/lib/projectsViewHelpers";
+  selectionItemFromRepository,
+  type ProjectSelectionItem,
+} from "@/features/projects/lib/projectSelection";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
@@ -26,12 +26,10 @@ import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
-  PROJECT_LIST_ROW_CLASS,
-  PROJECT_LIST_ROW_DATE_CLASS,
   PROJECT_LIST_ROW_PREVIEW_CLASS,
   PROJECT_LIST_ROW_TITLE_CLASS,
-  PROJECT_LIST_ROW_TRAILING_CLASS,
 } from "./projectListRowStyles";
+import { ProjectEntityListRow } from "./ProjectEntityListRow";
 import {
   ProjectActivityBar,
   ProjectPeopleStack,
@@ -40,6 +38,7 @@ import {
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { GitHubMark } from "./GitHubMark";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
+import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { projectTerminalLabel } from "./useOpenProjectTerminal";
 
 export type RepositoryListItem = {
@@ -52,10 +51,17 @@ type RepositoryItemProps = RepositoryListItem & {
   onOpen: (project: Project, repository: Repository) => void;
   onOpenTerminal: (repository: Repository) => void;
   profiles?: UserProfileLookup;
+  selectionRangeItems?: ProjectSelectionItem[];
   summary?: ProjectActivitySummary;
 };
 
-function RepositoryHostIcon({ repository }: { repository: Repository }) {
+function RepositoryHostIcon({
+  compact = false,
+  repository,
+}: {
+  compact?: boolean;
+  repository: Repository;
+}) {
   const host = projectRepoHostForRepository(repository, useRelayOrigin());
   const label =
     host.kind === "buzz"
@@ -63,25 +69,31 @@ function RepositoryHostIcon({ repository }: { repository: Repository }) {
       : host.kind === "external"
         ? `Git data hosted on ${host.host}`
         : "Repository host";
+  const mark =
+    host.kind === "buzz" ? (
+      <BuzzMark className={compact ? "h-3.5 w-4" : "h-4.5 w-5"} />
+    ) : host.kind === "external" && host.host === "github.com" ? (
+      <GitHubMark className={compact ? "h-3.5 w-3.5" : "h-4.5 w-4.5"} />
+    ) : host.kind === "external" ? (
+      <Globe className={compact ? "h-3.5 w-3.5" : "h-4.5 w-4.5"} />
+    ) : (
+      <FolderGit2 className={compact ? "h-3.5 w-3.5" : "h-4.5 w-4.5"} />
+    );
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span
           aria-label={label}
-          className="pointer-events-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-muted-foreground"
+          className={
+            compact
+              ? "pointer-events-auto flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/70"
+              : "pointer-events-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-muted-foreground"
+          }
           data-testid="repository-host-icon"
           role="img"
         >
-          {host.kind === "buzz" ? (
-            <BuzzMark className="h-4.5 w-5" />
-          ) : host.kind === "external" && host.host === "github.com" ? (
-            <GitHubMark className="h-4.5 w-4.5" />
-          ) : host.kind === "external" ? (
-            <Globe className="h-4.5 w-4.5" />
-          ) : (
-            <FolderGit2 className="h-4.5 w-4.5" />
-          )}
+          {mark}
         </span>
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
@@ -136,27 +148,6 @@ function RepositoryIdentity({
         </p>
       </div>
     </>
-  );
-}
-
-function RepositoryUpdatedLabel({
-  repository,
-  summary,
-}: Pick<RepositoryItemProps, "repository" | "summary">) {
-  const updatedAt = summary?.updatedAt || repository.createdAt;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
-          {relativeTime(updatedAt)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {summary?.latestCommit
-          ? `${summary.latestCommit.title || summary.latestCommit.commit.slice(0, 7)} · ${formatExactTimestamp(summary.latestCommit.createdAt)}`
-          : `Created ${formatExactTimestamp(repository.createdAt)}`}
-      </TooltipContent>
-    </Tooltip>
   );
 }
 
@@ -236,16 +227,21 @@ export function RepositoryGridCard(props: RepositoryItemProps) {
             />
           </div>
         </div>
-        <p className="line-clamp-2 min-h-10 py-3 text-sm text-muted-foreground">
+        <p
+          className={cn(
+            PROJECT_GRID_CARD_BODY_CLASS,
+            "my-2 text-muted-foreground",
+          )}
+          data-testid="projects-grid-card-body"
+        >
           {repository.description || "A repository in this project."}
         </p>
-        <div className="pointer-events-auto mt-auto flex items-center justify-between gap-3">
+        <div className="pointer-events-auto mt-auto">
           <ProjectPeopleStack
             profiles={profiles}
             pubkeys={repositoryPeople(repository, summary)}
             workOwnerPubkey={repository.owner}
           />
-          <RepositoryUpdatedLabel repository={repository} summary={summary} />
         </div>
         <div className="mt-2">
           <ProjectStatsRow summary={summary} />
@@ -266,68 +262,48 @@ export function RepositoryListRow(props: RepositoryItemProps) {
     profiles,
     project,
     repository,
+    selectionRangeItems,
     summary,
   } = props;
+  const updatedAt = summary?.updatedAt || repository.createdAt;
+  const selectionItem = selectionItemFromRepository({
+    channelId: repository.channelId ?? project.projectChannelId,
+    id: repository.id,
+    owner: repository.owner,
+    shareLink: repositoryShareLink(repository),
+    title: repository.name,
+  });
   return (
-    <div
-      className={cn(PROJECT_LIST_ROW_CLASS, "py-3")}
-      data-testid={`repository-row-${repository.dtag}`}
-    >
-      <RepositoryOpenButton
-        onOpen={onOpen}
-        project={project}
-        repository={repository}
-      />
-      <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-2.5">
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
-          <RepositoryIdentity
-            profiles={profiles}
-            project={project}
-            repository={repository}
-          />
+    <ProjectEntityListRow
+      beforeDate={
+        <div className="w-44" data-testid="repositories-row-activity-bar">
+          <ProjectActivityBar summary={summary} />
         </div>
-        <div
-          className={cn(PROJECT_LIST_ROW_TRAILING_CLASS, "pointer-events-auto")}
-        >
-          <div
-            className="hidden w-24 shrink-0 items-center gap-1.5 text-xs text-muted-foreground md:flex"
-            data-testid="repositories-row-branch"
-          >
-            <GitBranch className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{repository.defaultBranch}</span>
-          </div>
-          <div
-            className="hidden items-center gap-3 xl:flex"
-            data-testid="repositories-row-summary"
-          >
-            <ProjectStatsRow fixedColumns summary={summary} />
-            <div className="w-20 shrink-0">
-              <ProjectActivityBar summary={summary} />
-            </div>
-          </div>
-          <div
-            className="hidden w-24 shrink-0 justify-end lg:flex"
-            data-testid="repositories-row-people"
-          >
-            <ProjectPeopleStack
-              profiles={profiles}
-              pubkeys={repositoryPeople(repository, summary)}
-              workOwnerPubkey={repository.owner}
-            />
-          </div>
-          <div
-            className={PROJECT_LIST_ROW_DATE_CLASS}
-            data-testid="repositories-row-date"
-          >
-            <RepositoryUpdatedLabel repository={repository} summary={summary} />
-          </div>
-          <RepositoryActionsMenu
-            hasLocal={hasLocal}
-            onOpenTerminal={onOpenTerminal}
-            repository={repository}
-          />
-        </div>
-      </div>
-    </div>
+      }
+      dateSeconds={updatedAt}
+      dateTestId="repositories-row-date"
+      icon={<RepositoryHostIcon compact repository={repository} />}
+      onClick={() => onOpen(project, repository)}
+      people={repositoryPeople(repository, summary)}
+      peopleTestId="repositories-row-people"
+      profiles={profiles}
+      selection={
+        selectionRangeItems
+          ? { item: selectionItem, rangeItems: selectionRangeItems }
+          : undefined
+      }
+      testId={`repository-row-${repository.dtag}`}
+      title={repository.name}
+      titleAttr={repository.name}
+      titleSecondary={repository.description || undefined}
+      titleSecondaryTestId="repositories-row-description"
+      trailing={
+        <RepositoryActionsMenu
+          hasLocal={hasLocal}
+          onOpenTerminal={onOpenTerminal}
+          repository={repository}
+        />
+      }
+    />
   );
 }

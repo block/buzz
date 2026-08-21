@@ -38,16 +38,9 @@
   }
 
   .buzz-huddle-tooltip {
-    --primary: var(
-      --huddle-tooltip-surface,
-      var(--huddle-control-surface, 0 0% 20%)
+    background: hsl(
+      var(--huddle-tooltip-surface, var(--huddle-control-surface, 0 0% 20%))
     );
-    --primary-foreground: var(
-      --huddle-tooltip-foreground,
-      var(--huddle-control-foreground, 0 0% 98%)
-    );
-
-    background: hsl(var(--primary));
     border: 1px solid
       hsl(
         var(
@@ -57,7 +50,12 @@
         0.72
       );
     box-shadow: 0 10px 22px rgb(0 0 0 / 35%);
-    color: hsl(var(--primary-foreground));
+    color: hsl(
+      var(
+        --huddle-tooltip-foreground,
+        var(--huddle-control-foreground, 0 0% 98%)
+      )
+    );
   }
 
   .buzz-huddle-drawer .buzz-huddle-control-button,

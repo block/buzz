@@ -232,7 +232,9 @@ function composerLinkPresentation(
         "data-message-link": "",
       },
       icon: "message",
-      label: `${resolvedChannelName} · ${message.value.messageId.slice(0, 8)}`,
+      // Matches the rendered inline message chip, which never shows the event
+      // hash — the label must not change when the draft is sent.
+      label: resolvedChannelName,
     };
   }
 
@@ -276,10 +278,10 @@ function composerLinkPresentation(
     channelName: "",
     dataAttributes: { "data-buzz-link-kind": entity.value.type },
     icon: entity.value.type,
-    label:
-      entity.value.type === "repo" || entity.value.type === "project"
-        ? entity.value.dtag
-        : `${entity.value.dtag} · ${shortId}`,
+    // Entity chips use only stable link-derived identity. Fetched metadata is
+    // reserved for sent-message tooltips/cards, so every composer chip keeps the
+    // same label after send and throughout metadata resolution.
+    label: entity.value.dtag,
   };
 }
 

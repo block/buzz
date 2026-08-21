@@ -11,7 +11,12 @@ from dataclasses import dataclass
 
 import psycopg
 from harbor_buzz_orchestra.manifest import ExperimentManifest
-from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
+from harbor_buzz_orchestra.provisioning import (
+    AgentCredential,
+    DirectoryIdentity,
+    TrialHandle,
+)
+from harbor_buzz_orchestra.task_fixtures import fixture_for
 
 from .buzz_cli import BuzzCli
 from .keys import compute_auth_tag, generate_keypair, keypair_from_secret
@@ -73,6 +78,7 @@ class BuzzTrialProvisioner:
         trial_id: str,
         manifest: ExperimentManifest,
         channel_label: str | None = None,
+        task_name: str | None = None,
     ) -> TrialHandle:
         manifest_hash = manifest.sha256
         with psycopg.connect(self._config.postgres_dsn) as conn:
@@ -87,7 +93,12 @@ class BuzzTrialProvisioner:
                 return existing
 
             handle = self._provision(
-                run_id, trial_id, manifest, manifest_hash, channel_label
+                run_id,
+                trial_id,
+                manifest,
+                manifest_hash,
+                channel_label,
+                task_name,
             )
             self._store_trial(conn, handle)
             conn.commit()
@@ -139,9 +150,10 @@ class BuzzTrialProvisioner:
         manifest: ExperimentManifest,
         manifest_hash: str,
         channel_label: str | None,
+        task_name: str | None,
     ) -> TrialHandle:
         credentials = self._mint_credentials(manifest)
-        user = self._mint_user()
+        user = self._mint_user(task_name)
         # The user identity creates the channel and invites the agents —
         # mirroring production Buzz, where a human owns the channel their
         # agents work in.
@@ -157,6 +169,7 @@ class BuzzTrialProvisioner:
         )
         for credential in credentials:
             cli.add_member(channel_id, credential.nostr_pubkey)
+        directory = self._seed_directory(task_name, cli)
         return TrialHandle(
             run_id=run_id,
             trial_id=trial_id,
@@ -166,6 +179,66 @@ class BuzzTrialProvisioner:
             credentials=credentials,
             user=user,
             user_relay_url=self._config.relay_http_url,
+            task_name=task_name or "",
+            directory=directory,
+        )
+
+    def _seed_directory(
+        self, task_name: str | None, observer: BuzzCli
+    ) -> tuple[DirectoryIdentity, ...]:
+        """Publish stable task-directory profiles, skipping those already seeded."""
+        entries = fixture_for(task_name).directory
+        credentials = [
+            self._directory_credential(entry.name, entry.role) for entry in entries
+        ]
+        if not credentials:
+            return ()
+        existing = {
+            profile.get("pubkey")
+            for profile in observer.profiles(
+                [credential.nostr_pubkey for credential in credentials]
+            )
+            if isinstance(profile, dict)
+        }
+        for credential in credentials:
+            if credential.nostr_pubkey not in existing:
+                self._cli_for(credential).set_profile(credential.agent_id)
+        return tuple(
+            DirectoryIdentity(
+                name=credential.agent_id,
+                role=credential.role,
+                pubkey=credential.nostr_pubkey,
+            )
+            for credential in credentials
+        )
+
+    def _directory_credential(self, name: str, role: str) -> AgentCredential:
+        """Derive one community-stable benchmark identity without storing its key."""
+        return self._stable_credential(name, name, role)
+
+    def _stable_credential(
+        self, identity_id: str, display_name: str, role: str
+    ) -> AgentCredential:
+        """Derive an owner-scoped stable identity for reusable task fixtures."""
+        order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        digest = hashlib.sha256(
+            b"buzz-benchmark-directory-v1\0"
+            + bytes.fromhex(self._config.owner_secret_key)
+            + b"\0"
+            + identity_id.encode()
+        ).digest()
+        secret = ((int.from_bytes(digest, "big") % (order - 1)) + 1).to_bytes(32, "big")
+        keypair = keypair_from_secret(secret.hex())
+        return AgentCredential(
+            agent_id=display_name,
+            role=role,
+            nostr_secret_key=keypair.secret_key,
+            nostr_pubkey=keypair.pubkey,
+            nostr_auth_tag=compute_auth_tag(
+                self._config.owner_secret_key, keypair.pubkey
+            ),
+            llm_endpoint="",
+            llm_api_key="",
         )
 
     def _mint_credentials(
@@ -196,13 +269,21 @@ class BuzzTrialProvisioner:
                 )
         return tuple(credentials)
 
-    def _mint_user(self) -> AgentCredential:
+    def _mint_user(self, task_name: str | None = None) -> AgentCredential:
         """Mint the trial's user identity — the human analogue, not an agent.
 
+        A task may declare a dedicated stable identity when its user-facing
+        profile is part of what the benchmark measures. This avoids profile
+        races with the pinned GUI user when different tasks run concurrently.
         With a pinned ``user_secret_key`` the same identity fronts every
         trial, like one human running many teams; otherwise each trial gets
         a fresh user key.
         """
+        display_name = fixture_for(task_name).user_display_name
+        if display_name is not None:
+            return self._stable_credential(
+                f"task-user:{task_name}", display_name, "user"
+            )
         keypair = (
             keypair_from_secret(self._config.user_secret_key)
             if self._config.user_secret_key
@@ -256,6 +337,11 @@ class BuzzTrialProvisioner:
             ),
             user=AgentCredential(**stored["user"]),
             user_relay_url=stored.get("user_relay_url", ""),
+            task_name=stored.get("task_name", ""),
+            directory=tuple(
+                DirectoryIdentity(**identity)
+                for identity in stored.get("directory", [])
+            ),
         )
 
     @staticmethod

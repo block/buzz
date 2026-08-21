@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
 import 'directional_transition_scope.dart';
+import 'ios_glass_navigation_button.dart';
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
@@ -174,16 +175,23 @@ class FrostedAppBar extends StatelessWidget {
     final effectiveLeading =
         leading ??
         (automaticallyImplyLeading && canPop
-            ? SizedBox(
-                width: 48,
-                height: 48,
-                child: IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  color: iconColor,
-                  icon: const Icon(LucideIcons.chevronLeft),
-                  tooltip: 'Back',
-                ),
-              )
+            ? Theme.of(context).platform == TargetPlatform.iOS
+                  ? IosGlassNavigationButton(
+                      icon: IosGlassNavigationIcon.back,
+                      semanticLabel: 'Back',
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      foregroundColor: iconColor,
+                    )
+                  : SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        color: iconColor,
+                        icon: const Icon(LucideIcons.chevronLeft),
+                        tooltip: 'Back',
+                      ),
+                    )
             : null);
 
     final titleRow = SizedBox(

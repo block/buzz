@@ -564,11 +564,14 @@ pub fn run() {
             get_user_notes,
             get_git_identity,
             get_project_repo_snapshot,
+            get_project_repo_file_content,
             get_project_repo_diff,
             get_project_local_repo_diff,
             get_project_local_repo_snapshot,
+            get_project_local_repo_file_content,
             get_project_repo_sync_status,
             list_project_local_repositories,
+            open_project_repository_folder,
             clone_project_repository,
             create_project_remote_branch,
             delete_project_remote_branch,
@@ -611,6 +614,7 @@ pub fn run() {
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
             get_channels,
+            get_open_channel_directory,
             create_channel,
             ensure_starter_channels,
             open_dm,
@@ -638,6 +642,7 @@ pub fn run() {
             get_forum_posts,
             get_forum_thread,
             get_thread_replies,
+            get_channel_reconnect_repair,
             get_channel_window,
             get_channel_messages_before,
             edit_message,
@@ -908,7 +913,6 @@ pub fn run() {
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);
