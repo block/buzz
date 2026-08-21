@@ -20,6 +20,9 @@ services:
       BUZZ_GIT_REPO_PATH: /data/git
       BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-false}
       BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
+      # Advertise the pairing sidecar in NIP-11 so clients don't fall back to a
+      # non-existent legacy /pair path on the main relay (see #3842).
+      BUZZ_PAIRING_RELAY_URL: ${BUZZ_PAIRING_RELAY_URL:?set BUZZ_PAIRING_RELAY_URL}
     ports:
       - "${BUZZ_HTTP_PORT:-3000}:3000"
     volumes:
@@ -118,6 +121,33 @@ services:
         mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
       '
     restart: "no"
+    networks:
+      - buzz-net
+
+  # Stateless NIP-AB pairing sidecar. Desktop/mobile QR pairing needs this when
+  # the main relay enforces membership (NIP-43) — without it, clients fall back
+  # to a legacy /pair path on the relay and get 404 (#3842).
+  # Use entrypoint (not command): the image ENTRYPOINT is buzz-relay, and
+  # Compose `command:` only appends args.
+  pairing-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      # Exposed for non-Caddy installs; TLS setups reach it via Caddy /pair*.
+      - "${BUZZ_PAIR_RELAY_PORT:-5000}:5000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1:5000'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
     networks:
       - buzz-net
 
