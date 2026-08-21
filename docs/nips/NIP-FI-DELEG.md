@@ -56,8 +56,9 @@ The evidence authenticates every field, has one unambiguous owner and delegate,
 matches the server-owned domain and exact request or target, and has a finite
 expiry satisfying `now < mandatory_expiry`; equality at an expiry is expired.
 Optional `not_before` satisfies `not_before <= now + skew`, using the
-configured delegated `skew`; arithmetic is overflow-safe. A missing value
-denies. The proven actor equals `delegate_key`. [FI-DELEG-EVIDENCE-CLOSED]
+configured delegated `skew`; arithmetic is overflow-safe. A missing
+configured `skew` denies. The proven actor equals `delegate_key`.
+[FI-DELEG-EVIDENCE-CLOSED]
 
 A delegated request carries fresh request-appropriate Nostr proof and no
 `Nostr-Federated-Identity` or profile provenance field. Mixed direct and
