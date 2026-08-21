@@ -17,7 +17,11 @@ and RFC 8174) when, and only when, they appear in all capitals.
 This profile authorizes a delegate key from separately validated delegation
 evidence rooted in a currently eligible NIP-FI owner binding. The delegate
 proves its own key. It does not present a federated assertion and never receives
-or inherits the owner's binding.
+or inherits the owner's binding. Because a trusted edge inserts assertion and
+provenance fields on every request it forwards, and `FI-DELEG-PATH-SEPARATION`
+denies any such field on a delegated request, delegated requests cannot traverse
+a route that requires edge provenance; they use ingress on which NIP-FI-EDGE is
+not required.
 
 This profile defines the normalized delegation result and its additional
 preparation, final-admission, and lease witnesses. It does not define a wire
@@ -51,8 +55,9 @@ when their concrete encoding belongs to the supplying delegation protocol.
 The evidence authenticates every field, has one unambiguous owner and delegate,
 matches the server-owned domain and exact request or target, and has a finite
 expiry satisfying `now < mandatory_expiry`; equality at an expiry is expired.
-Optional `not_before` satisfies `not_before <= now + skew`, as core defines for
-`nbf`. The proven actor equals `delegate_key`. [FI-DELEG-EVIDENCE-CLOSED]
+Optional `not_before` satisfies `not_before <= now + skew`, using the
+configured delegated `skew`; arithmetic is overflow-safe. A missing value
+denies. The proven actor equals `delegate_key`. [FI-DELEG-EVIDENCE-CLOSED]
 
 A delegated request carries fresh request-appropriate Nostr proof and no
 `Nostr-Federated-Identity` or profile provenance field. Mixed direct and
@@ -120,8 +125,8 @@ material. [FI-DELEG-NO-BINDING]
 
 ## Delegated leases
 
-A deployment configures a positive finite delegated maximum. The lease deadline
-is no later than the minimum of:
+A deployment configures a positive finite delegated maximum and a non-negative
+finite delegated `skew`. The lease deadline is no later than the minimum of:
 
 - delegation expiry;
 - delegate proof or connection bound;
@@ -149,11 +154,11 @@ or owner key on the same connection. [FI-DELEG-OWNER-CURRENT]
 
 ## Discovery
 
-A relay claiming this profile MAY add `"delegation": true` to the NIP-FI
-object in NIP-11 only when owner-current resolution, the positive finite
-maximum, uniform final admission, and all profile oracles are active. It does
-not advertise relationship IDs, owner keys, private delegation protocol names,
-or policy detail. [FI-DELEG-DISCOVERY]
+A relay claiming this profile MAY add `"delegation": true` to the NIP-11
+`federated_identity` object only when owner-current resolution, the positive
+finite maximum, uniform final admission, and all profile oracles are active. It
+does not advertise relationship IDs, owner keys, private delegation protocol
+names, or policy detail. [FI-DELEG-DISCOVERY]
 
 ## Behavioral oracles
 

@@ -193,7 +193,9 @@ For each listed oracle the suite MUST retain at least one **mutant**: an
 implementation variant that violates a requirement that oracle governs,
 together with that oracle's failing output (`FI-CONF-MUTATION`). Evidence is
 the exact patch identity, the oracle identifier, and the retained failure
-output at the claimed head.
+output at the claimed head. For this document's own oracles the implementation
+under test includes the conformance suite and its report; a mutant is a single
+variant of the suite or report that the entry's own oracle rejects.
 
 While `FI-CONF-INTEROP-EXIT` is validly deferred it remains in claim
 completeness but is excluded from this section's mutation and global-control

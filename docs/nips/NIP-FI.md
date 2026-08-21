@@ -44,8 +44,7 @@ public identity projection, application membership policy, or user interface.
 - **actor** (`k`): the 32-byte public key returned by Nostr-proof validation.
 - **request context** (`R`): `R_t` sealed with `k`.
 - **binding**: a durable, versioned association `(D, i, k)` with immutable
-  provenance `attested-key`, `tofu`, or a companion-profile value such as
-  `provisioned`.
+  provenance `attested-key`, `tofu`, or `provisioned`.
 - **retired pair**: a durable denial fact for an exact `(D, i, k)`.
 - **revoked key**: a durable denial fact for `(D, k)`.
 - **prepared authorization**: immutable, read-only evidence and witnesses for a
@@ -185,7 +184,7 @@ The Nostr-key claim is named `nostr_pubkey`. When present it MUST be a
 lowercase hexadecimal encoding of exactly one 32-byte Nostr public key; other
 encodings and aliases deny. In `attested-key` enrollment policy and wherever
 current matching issuer attestation is required, this exact claim MUST be
-present and equal the proven actor. Authorization claims or capabilities use a
+present and equal the proven actor; authorization claims or capabilities use a
 closed bounded input set and deterministic canonical encoding. Unchecked claims
 never enter the result. [FI-TRACE-VERIFIER-PARITY]
 
@@ -314,7 +313,7 @@ to lowercase hexadecimal SHA-256 of the **body bytes**: the complete content
 after transfer decoding and before any content decoding. Absence, duplication,
 mismatch, validation of only a prefix, or substitution of the body bytes after
 validation denies. For an irrelevant body, no
-Authorization decision, target, capability, or effect selector derives from a
+authorization decision, target, capability, or effect selector derives from a
 body field not bound by NIP-98. A `payload` tag present on an operation whose
 body is declared authorization-irrelevant is validated identically against the
 body bytes; duplication or mismatch denies. [FI-TRACE-BODY-BINDING]
