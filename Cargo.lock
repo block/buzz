@@ -1368,6 +1368,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-supervisor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-cli",
+ "buzz-core",
+ "buzz-sdk",
+ "clap",
+ "nix 0.31.3",
+ "nostr",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-test-client"
 version = "0.1.0"
 dependencies = [

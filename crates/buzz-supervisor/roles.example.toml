@@ -1,0 +1,37 @@
+# Example team roster for buzz-supervisor.
+#
+# Every provisioned channel gets one fresh keypair + one spawned `buzz-acp`
+# process per [[roles]] entry below, all rooted at that channel's `workdir`.
+#
+# NOTE: top-level keys (shared_members, extra_allowlist) must come BEFORE
+# any [[roles]] block — TOML attaches trailing top-level keys to the last
+# array-of-tables entry, not the document root. (RoleConfig rejects unknown
+# fields specifically so getting this backwards is a loud parse error
+# instead of the keys silently vanishing.)
+
+# Added as a plain channel member (no process spawned) to every provisioned
+# channel — e.g. an externally-bridged Reviewer identity.
+shared_members = ["ce2fe47f9df685d5070407ab64e903b0fe76123b42b37b4cadee2552b5cb2b02"]
+
+# Always included in every role's respond_to_allowlist, in addition to the
+# team's own generated pubkeys — typically the human owner(s).
+extra_allowlist = ["c19fc270d15c6bb3e6ca7910dd7c9e7aa760019fe1e729196450a173f157f227"]
+
+[[roles]]
+name = "load-balancer"
+display_name = "Load Balancer"
+agent_command = "claude-agent-acp"
+system_prompt_file = "/home/alice/.buzz_agents/load-balancer-prompt.txt"
+# At most one role per team should set this — see relay.md's "one listener
+# per channel" note. The rest default to `false` (mentions-only).
+subscribe_all = true
+
+[[roles]]
+name = "coder"
+display_name = "Coder"
+agent_command = "claude-agent-acp"
+
+[[roles]]
+name = "writer"
+display_name = "Writer"
+agent_command = "claude-agent-acp"
