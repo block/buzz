@@ -2,6 +2,7 @@ import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
+import { ProviderUsageExperimentSettings } from "@/features/provider-usage/ui/ProviderUsageExperimentSettings";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
@@ -10,31 +11,36 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
   const switchId = `feature-toggle-${feature.id}`;
 
   return (
-    <SettingsOptionRow>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium" id={`${switchId}-label`}>
-          {feature.name}
-        </p>
-        <p className="text-xs text-muted-foreground/70" data-settings-subcopy>
-          {feature.description}
-        </p>
+    <SettingsOptionRow className="flex-col items-stretch gap-0">
+      <div className="flex w-full items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium" id={`${switchId}-label`}>
+            {feature.name}
+          </p>
+          <p className="text-xs text-muted-foreground/70" data-settings-subcopy>
+            {feature.description}
+          </p>
+        </div>
+        <Switch
+          aria-labelledby={`${switchId}-label`}
+          checked={enabled}
+          data-testid={switchId}
+          onCheckedChange={(value) => {
+            toggle(value);
+            if (feature.id === "agentManagedProfiles") {
+              void setAgentManagedProfiles(value).catch((error) => {
+                console.error(
+                  "Failed to apply agent-managed profiles setting:",
+                  error,
+                );
+              });
+            }
+          }}
+        />
       </div>
-      <Switch
-        aria-labelledby={`${switchId}-label`}
-        checked={enabled}
-        data-testid={switchId}
-        onCheckedChange={(value) => {
-          toggle(value);
-          if (feature.id === "agentManagedProfiles") {
-            void setAgentManagedProfiles(value).catch((error) => {
-              console.error(
-                "Failed to apply agent-managed profiles setting:",
-                error,
-              );
-            });
-          }
-        }}
-      />
+      {feature.id === "providerUsage" ? (
+        <ProviderUsageExperimentSettings enabled={enabled} />
+      ) : null}
     </SettingsOptionRow>
   );
 }

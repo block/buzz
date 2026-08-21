@@ -108,6 +108,9 @@ export type MockManagedAgentSeed = {
   respondToAllowlist?: string[];
   /** Per-agent env vars seeded into the mock store. */
   envVars?: Record<string, string>;
+  /** Resolved provider/model values shown on owner-only agent surfaces. */
+  provider?: string | null;
+  model?: string | null;
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -164,6 +167,81 @@ type MockSearchProfileSeed = {
   isAgent?: boolean;
 };
 
+// ── Agent usage (NIP-AM) mock wire shapes ────────────────────────────────────
+// Mirrors `desktop/src/shared/api/tauriArchive.ts`'s camelCase types
+// field-for-field, kept independent of that module so the bridge has no
+// runtime dependency on the feature slice it's mocking for.
+
+type RawUsageField = { value: string | null; incomplete: boolean };
+type RawCostField = { value: number | null; incomplete: boolean };
+
+type RawReportedUsage = {
+  inputTokens: RawUsageField;
+  outputTokens: RawUsageField;
+  totalTokens: RawUsageField;
+  estimatedCostUsd: RawCostField;
+  cacheReadTokens: RawUsageField;
+  cacheWriteTokens: RawUsageField;
+  freshInputTokens: RawUsageField;
+};
+
+type RawAgentUsageSeriesBucket = {
+  start: number;
+  end: number;
+  usage: RawReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+type RawAgentUsageModel = {
+  harness: string | null;
+  model: string | null;
+  usage: RawReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+type RawAgentUsage = {
+  agentPubkey: string;
+  usage: RawReportedUsage;
+  buckets: RawAgentUsageSeriesBucket[];
+  models: RawAgentUsageModel[];
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+type RawAgentUsageSeries = {
+  collectionEnabled: boolean;
+  buckets: RawAgentUsageSeriesBucket[];
+  agents: RawAgentUsage[];
+  coverage: {
+    firstArchivedAt: number | null;
+    lastArchivedAt: number | null;
+    firstReportedAt: number | null;
+    lastReportedAt: number | null;
+    reportCount: number;
+    invalidReportCount: number;
+    hasUnknownUsage: boolean;
+  };
+  hasArchivedEvidence: boolean | null;
+};
+
+const DEFAULT_MOCK_AGENT_USAGE_SERIES: RawAgentUsageSeries = {
+  collectionEnabled: true,
+  buckets: [],
+  agents: [],
+  coverage: {
+    firstArchivedAt: null,
+    lastArchivedAt: null,
+    firstReportedAt: null,
+    lastReportedAt: null,
+    reportCount: 0,
+    invalidReportCount: 0,
+    hasUnknownUsage: false,
+  },
+  hasArchivedEvidence: null,
+};
+
 type MockHuddleMemberSeed = {
   pubkey: string;
   role: "owner" | "admin" | "member" | "guest" | "bot";
@@ -179,7 +257,6 @@ type MockHuddleSeed = {
   ttsEnabled?: boolean;
   isCreator?: boolean;
 };
-
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
@@ -489,6 +566,23 @@ type E2eConfig = {
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
     agentMetricArchiveDefaultEnabled?: boolean;
+    /**
+     * Response for `get_agent_usage_series` (NIP-AM local agent usage,
+     * `desktop/src/features/agent-usage`). Mirrors
+     * `desktop/src/shared/api/tauriArchive.ts`'s `AgentUsageSeries` wire
+     * shape field-for-field so specs can seed exact fixtures without a real
+     * SQLite archive. Omitted → an empty, collection-enabled series (no
+     * agents, no coverage, `hasArchivedEvidence: null`), which renders the
+     * "no locally archived usage" empty state.
+     */
+    agentUsageSeries?: RawAgentUsageSeries;
+    /** Sequenced `get_agent_usage_series` failures, call-count indexed
+     *  (mirrors `addChannelMembersErrors`): a string rejects that call;
+     *  `null` succeeds. When exhausted, the last entry repeats. Drives the
+     *  retry error state without deleting mock config mid-test. */
+    agentUsageErrors?: (string | null)[];
+    /** Delay (ms) before `get_agent_usage_series` resolves; drives the loading-skeleton state. */
+    agentUsageDelayMs?: number;
     saveSubscriptions?: Array<{
       scope_type: string;
       scope_value: string;
@@ -2314,7 +2408,8 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     parallelism: 1,
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
-    model: null,
+    model: seed.model ?? null,
+    provider: seed.provider ?? null,
     env_vars: { ...(seed.envVars ?? {}) },
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
@@ -7973,6 +8068,12 @@ function withMockRuntimeConfigMetadata(
 ): RawAcpRuntimeCatalogEntry {
   return {
     ...runtime,
+    provider_usage_id:
+      "provider_usage_id" in runtime
+        ? runtime.provider_usage_id
+        : runtime.id === "codex"
+          ? "codex"
+          : null,
     node_required: runtime.node_required ?? false,
     auth_status: runtime.auth_status ?? { status: "unknown" },
     model_env_var:
@@ -8200,6 +8301,7 @@ let installCallCount = 0;
 const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
 let setGlobalAgentConfigCallCount = 0;
+let agentUsageSeriesCallCount = 0;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
   provider: string | null;
@@ -11732,6 +11834,61 @@ export function maybeInstallE2eTauriMocks() {
 
         return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
       }
+      case "list_provider_usage_capabilities":
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            availability: "available",
+            detail: "Uses your existing local Codex sign-in",
+          },
+          {
+            id: "claude",
+            name: "Claude",
+            availability: "unsupported",
+            detail: "No supported standalone personal allowance reader yet",
+          },
+          {
+            id: "grok",
+            name: "Grok",
+            availability: "unsupported",
+            detail: "Consumer allowance is available in Grok Settings",
+          },
+        ];
+      case "get_provider_usage":
+        return {
+          provider: "codex",
+          vendor: "openai",
+          product: "codex",
+          source: "personalAllowance",
+          planType: "pro",
+          windows: [
+            {
+              id: "codex:primary",
+              label: "5-hour",
+              usedPercent: 38,
+              remainingPercent: 62,
+              resetsAt: 1_785_258_777,
+              durationMinutes: 300,
+            },
+            {
+              id: "codex:secondary",
+              label: "Weekly",
+              usedPercent: 52,
+              remainingPercent: 48,
+              resetsAt: 1_785_658_777,
+              durationMinutes: 10_080,
+            },
+          ],
+          totals: {
+            creditBalance: "0",
+            resetCreditsAvailable: 3,
+            lifetimeTokens: 13_597_623_776,
+            latestDailyTokens: 61_038_450,
+            latestDailyDate: "2026-07-24",
+          },
+          fetchedAt: 1_753_390_800,
+        };
       case "sign_nostr_identity_binding": {
         const request = payload as {
           challengeId: string;
@@ -13869,6 +14026,35 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
+      case "get_agent_usage_series": {
+        // `AgentUsageSeriesRequest` is validated Rust-side; the mock trusts
+        // the seeded fixture as-is and ignores `bucketBoundaries`/`agentPubkey`
+        // filtering — specs seed the exact series they want per window/agent.
+        const configuredErrors = activeConfig?.mock?.agentUsageErrors;
+        if (configuredErrors && configuredErrors.length > 0) {
+          const index = Math.min(
+            agentUsageSeriesCallCount,
+            configuredErrors.length - 1,
+          );
+          agentUsageSeriesCallCount += 1;
+          const error = configuredErrors[index];
+          if (error) {
+            throw new Error(error);
+          }
+        } else {
+          agentUsageSeriesCallCount += 1;
+        }
+        const usageDelayMs = activeConfig?.mock?.agentUsageDelayMs ?? 0;
+        if (usageDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, usageDelayMs),
+          );
+        }
+        return (
+          activeConfig?.mock?.agentUsageSeries ??
+          DEFAULT_MOCK_AGENT_USAGE_SERIES
+        );
+      }
       // Archive sync runs natively; the bridge has no relay-backed backend to
       // drive, so these are accepted no-ops. Without them every AppShell mount
       // logs an unknown-command warning once the gate opens.

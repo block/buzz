@@ -72,9 +72,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
                         .join("bin"),
                 );
             }
-            // Goose's legacy Windows installer (superseded by #2680) unpacked
-            // to %USERPROFILE%\goose\goose.exe, which is on no standard PATH —
-            // without this probe those installs stay permanently undiscovered.
+            // Probe Goose's legacy off-PATH %USERPROFILE%\goose install.
             if let Some(profile) = std::env::var_os("USERPROFILE") {
                 paths.push(PathBuf::from(profile).join("goose"));
             }
@@ -90,6 +88,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["goose"],
         aliases: &[],
         avatar_url: GOOSE_AVATAR_URL,
+        provider_usage_id: None,
         mcp_command: None,
         mcp_hooks: false,
         underlying_cli: Some("goose"),
@@ -125,6 +124,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["claude-agent-acp", "claude-code-acp"],
         aliases: &["claude-code", "claudecode"],
         avatar_url: CLAUDE_CODE_AVATAR_URL,
+        provider_usage_id: None,
         mcp_command: None,
         mcp_hooks: false,
         underlying_cli: Some("claude"),
@@ -158,6 +158,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["codex-acp"],
         aliases: &[],
         avatar_url: CODEX_AVATAR_URL,
+        provider_usage_id: Some("codex"),
         mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: false,
         underlying_cli: Some("codex"),
@@ -183,7 +184,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run `codex login` to authenticate."),
-        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
     KnownAcpRuntime {
@@ -192,6 +192,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["buzz-agent"],
         aliases: &[],
         avatar_url: BUZZ_AGENT_AVATAR_URL,
+        provider_usage_id: None,
         mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: true,
         underlying_cli: None,
@@ -1198,9 +1199,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
         | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
     };
 
-    // node_required now means Buzz cannot provide npm for this platform.
-    // On supported desktop platforms, Buzz downloads a private Node/npm
-    // runtime into app data before running npm-backed adapter installs.
+    // True only when Buzz cannot provide npm for this platform.
     let node_required = matches!(
         availability,
         AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
@@ -1215,6 +1214,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             id: runtime.id.to_string(),
             label: runtime.label.to_string(),
             avatar_url: runtime.avatar_url.to_string(),
+            provider_usage_id: runtime.provider_usage_id.map(str::to_string),
             availability,
             command,
             binary_path,
@@ -1350,9 +1350,9 @@ pub fn discover_acp_runtimes_from(
             entries.push(AcpRuntimeCatalogEntry {
                 id: def.id.clone(),
                 label: def.label.clone(),
-                // F1 security fix: never copy user-supplied avatar URL into the catalog.
-                // All icons are bundled assets; customs fall back to TerminalSquare in the UI.
+                // Never copy user-supplied avatar URLs into the catalog.
                 avatar_url: String::new(),
+                provider_usage_id: None,
                 availability,
                 command,
                 binary_path,

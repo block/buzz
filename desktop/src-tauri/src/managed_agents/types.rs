@@ -619,6 +619,9 @@ pub struct AcpRuntimeCatalogEntry {
     pub id: String,
     pub label: String,
     pub avatar_url: String,
+    /// Provider-neutral personal-allowance adapter associated with this
+    /// runtime. Absent when no safe reader exists.
+    pub provider_usage_id: Option<String>,
     pub availability: AcpAvailabilityStatus,
     pub command: Option<String>,
     pub binary_path: Option<String>,

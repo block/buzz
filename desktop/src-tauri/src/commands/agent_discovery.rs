@@ -137,11 +137,11 @@ pub async fn save_custom_harness(
 
     let default_args =
         crate::managed_agents::normalize_agent_args(&definition.command, definition.args.clone());
-
     Ok(AcpRuntimeCatalogEntry {
         id: definition.id,
         label: definition.label,
         avatar_url: String::new(),
+        provider_usage_id: None,
         availability,
         command: command_opt,
         binary_path,

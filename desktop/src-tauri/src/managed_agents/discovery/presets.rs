@@ -56,6 +56,7 @@ pub(super) fn preset_catalog_entry(
         label: def.label.to_string(),
         // No remote URL — all preset icons are bundled assets.
         avatar_url: String::new(),
+        provider_usage_id: None,
         availability,
         command,
         binary_path,

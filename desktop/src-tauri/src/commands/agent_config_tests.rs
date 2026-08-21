@@ -35,6 +35,7 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
         commands: &["goose"],
         aliases: &[],
         avatar_url: "",
+        provider_usage_id: None,
         mcp_command: None,
         mcp_hooks: false,
         underlying_cli: None,

@@ -1017,8 +1017,7 @@ mod tests {
 
     // ── cli_login_requirements: resolve_command integration ─────────────
 
-    /// Construct a minimal `KnownAcpRuntime` stub for testing cli_login_requirements.
-    /// `commands` are the adapter binaries; `underlying_cli` is the CLI name.
+    /// Minimal runtime stub for cli-login requirement tests.
     fn make_cli_runtime(
         commands: &'static [&'static str],
         underlying_cli: Option<&'static str>,
@@ -1029,6 +1028,7 @@ mod tests {
             commands,
             aliases: &[],
             avatar_url: "",
+            provider_usage_id: None,
             mcp_command: None,
             mcp_hooks: false,
             underlying_cli,
@@ -1206,8 +1206,7 @@ mod tests {
 
     // ── codex readiness version gate ───────────────────────────────────────
 
-    /// Build a minimal `KnownAcpRuntime` for testing the codex version gate.
-    /// `adapter_commands` are the exact strings passed to `find_command` — use
+    /// `adapter_commands` are the exact strings passed to `find_command`: use
     /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
     /// when resolving via absolute path.  `underlying_cli` is a portable
     /// stand-in so the adapter is not misclassified as `CliMissing`.
@@ -1221,6 +1220,7 @@ mod tests {
             commands: adapter_commands,
             aliases: &[],
             avatar_url: "",
+            provider_usage_id: None,
             mcp_command: None,
             mcp_hooks: false,
             underlying_cli,

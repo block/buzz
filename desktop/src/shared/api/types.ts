@@ -488,11 +488,11 @@ export type AuthStatus =
   | { status: "config_invalid"; diagnostic: string }
   | { status: "not_applicable" }
   | { status: "unknown" };
-
 export type AcpRuntimeCatalogEntry = {
   id: string;
   label: string;
   avatarUrl: string;
+  providerUsageId: "codex" | "claude" | "grok" | null;
   availability: AcpAvailabilityStatus;
   command: string | null;
   binaryPath: string | null;

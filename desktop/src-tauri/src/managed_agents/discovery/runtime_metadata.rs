@@ -5,6 +5,9 @@ pub(crate) struct KnownAcpRuntime {
     pub commands: &'static [&'static str],
     pub aliases: &'static [&'static str],
     pub avatar_url: &'static str,
+    /// Personal-allowance adapter exposed by this runtime, when Buzz has a
+    /// safe standalone reader for the underlying account.
+    pub provider_usage_id: Option<&'static str>,
     /// Legacy MCP server binary field. Vestigial — all agents now use the bundled CLI
     /// directly. Will be removed when runtime discovery is simplified.
     pub mcp_command: Option<&'static str>,

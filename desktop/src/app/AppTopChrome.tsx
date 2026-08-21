@@ -8,6 +8,8 @@ import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 import { cn } from "@/shared/lib/cn";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
+import { FeatureGate } from "@/shared/features";
+import { SidebarProviderUsageIndicator } from "@/features/provider-usage/ui/SidebarProviderUsageIndicator";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
@@ -160,6 +162,9 @@ export function AppTopChrome({
         data-tauri-drag-region
         id="app-top-chrome-content"
       />
+      <FeatureGate feature="providerUsage">
+        <SidebarProviderUsageIndicator placement="chrome" />
+      </FeatureGate>
     </div>
   );
 }

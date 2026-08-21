@@ -151,7 +151,6 @@ export type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
-  // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
@@ -172,6 +171,7 @@ export type RawAcpRuntimeCatalogEntry = {
   id: string;
   label: string;
   avatar_url: string;
+  provider_usage_id?: AcpRuntimeCatalogEntry["providerUsageId"];
   availability: AcpAvailabilityStatus;
   command: string | null;
   binary_path: string | null;
@@ -186,7 +186,6 @@ export type RawAcpRuntimeCatalogEntry = {
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
-  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
   requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
@@ -683,6 +682,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     id: entry.id,
     label: entry.label,
     avatarUrl: entry.avatar_url,
+    providerUsageId: entry.provider_usage_id ?? null,
     availability: entry.availability,
     command: entry.command,
     binaryPath: entry.binary_path,
