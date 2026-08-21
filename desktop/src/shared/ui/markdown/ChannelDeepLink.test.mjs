@@ -32,3 +32,14 @@ test("channelTooltipFooter adds archived status without changing existing metada
     "Private channel · Forum",
   );
 });
+
+test("channelTooltipFooter uses just now for activity within a minute", () => {
+  assert.equal(
+    channelTooltipFooter({
+      ...channel,
+      archivedAt: null,
+      lastMessageAt: new Date().toISOString(),
+    }),
+    "Private channel · Forum · Active just now",
+  );
+});
