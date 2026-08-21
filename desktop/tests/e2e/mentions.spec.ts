@@ -738,8 +738,9 @@ test("selecting a person mention inserts @Name into input", async ({
 
   const dropdown = autocomplete(page);
   await dropdown.getByText("bob").click();
+  await page.keyboard.type("hello");
 
-  await expect(input).toHaveText("Hey @bob ");
+  await expect(input).toHaveText("Hey @bob hello");
   const mentionChip = input.locator(".human-mention-highlight", {
     hasText: "bob",
   });
@@ -813,8 +814,9 @@ test("selecting a managed agent mention inserts @Name into input", async ({
 
   const dropdown = autocomplete(page);
   await dropdown.getByText("alice").click();
+  await page.keyboard.type("hello");
 
-  await expect(input).toHaveText("Hey @alice ");
+  await expect(input).toHaveText("Hey @alice hello");
   const agentMentionChip = input.locator(".agent-mention-highlight", {
     hasText: "alice",
   });

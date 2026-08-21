@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { getSchema } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
+
 import {
   buildHighlightPatterns,
   findHighlightMatches,
+  selectionAfterMentionTrailingSpace,
 } from "./mentionHighlightExtension.ts";
 
 // ── buildHighlightPatterns ────────────────────────────────────────────
@@ -163,4 +167,36 @@ test("#general should NOT match inside #generally (trailing word boundary)", () 
   const patterns = buildHighlightPatterns([], ["general"]);
   const matches = findHighlightMatches("#generally", patterns);
   assert.equal(matches.length, 0);
+});
+
+const schema = getSchema([
+  StarterKit.configure({
+    heading: false,
+    trailingNode: false,
+    link: false,
+  }),
+]);
+const paragraph = (...content) => schema.nodes.paragraph.create(null, content);
+const text = (value) => schema.text(value);
+const document = (...content) => schema.nodes.doc.create(null, content);
+
+test("selectionAfterMentionTrailingSpace steps past the space after @Name", () => {
+  const doc = document(paragraph(text("@quinn ")));
+  const spacePos = 1 + "@quinn".length;
+  assert.equal(selectionAfterMentionTrailingSpace(doc, spacePos), spacePos + 1);
+  assert.equal(
+    selectionAfterMentionTrailingSpace(doc, spacePos + 1),
+    spacePos + 1,
+  );
+});
+
+test("selectionAfterMentionTrailingSpace leaves a caret inside the mention name", () => {
+  const doc = document(paragraph(text("@quinn ")));
+  assert.equal(selectionAfterMentionTrailingSpace(doc, 4), 4);
+});
+
+test("selectionAfterMentionTrailingSpace does not move without a trailing space", () => {
+  const doc = document(paragraph(text("@quinn")));
+  const end = 1 + "@quinn".length;
+  assert.equal(selectionAfterMentionTrailingSpace(doc, end), end);
 });

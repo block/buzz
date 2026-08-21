@@ -1,5 +1,11 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 import {
@@ -85,9 +91,39 @@ export const MentionHighlightExtension = Extension.create({
             return oldDecorations.map(tr.mapping, tr.doc);
           },
         },
+        appendTransaction(transactions, _oldState, newState) {
+          if (!newState.selection.empty) return null;
+          if (
+            !transactions.some(
+              (tr) => tr.docChanged || tr.getMeta(mentionHighlightKey),
+            )
+          ) {
+            return null;
+          }
+          const from = newState.selection.from;
+          const next = selectionAfterMentionTrailingSpace(newState.doc, from);
+          if (next === from) return null;
+          return newState.tr.setSelection(
+            TextSelection.create(newState.doc, next),
+          );
+        },
         props: {
           decorations(state) {
             return this.getState(state) ?? DecorationSet.empty;
+          },
+          handleTextInput(view, from, to, text) {
+            if (from !== to) return false;
+            const next = selectionAfterMentionTrailingSpace(
+              view.state.doc,
+              from,
+            );
+            if (next === from) return false;
+            const tr = view.state.tr.insertText(text, next);
+            tr.setSelection(
+              TextSelection.create(tr.doc, tr.mapping.map(next, 1)),
+            );
+            view.dispatch(tr);
+            return true;
           },
         },
       }),
@@ -134,6 +170,28 @@ export function buildHighlightPatterns(
   }
 
   return patterns;
+}
+
+/**
+ * If `pos` sits at the end of an `@name` / `#channel` token and the next
+ * character is a space, return the position after that space.
+ *
+ * Autocomplete inserts `@Name ` then chip decorations wrap the token. The
+ * browser can map the caret back to the chip edge, so the next keystroke
+ * lands before the space (`@quinnhello`). Callers use this to keep typing
+ * after the token.
+ */
+export function selectionAfterMentionTrailingSpace(
+  doc: ProseMirrorNode,
+  pos: number,
+): number {
+  if (pos < 0 || pos >= doc.content.size) return pos;
+  const nextChar = doc.textBetween(pos, pos + 1, "\n", "\0");
+  if (nextChar !== " ") return pos;
+  const lookbehind = Math.min(pos, 80);
+  const before = doc.textBetween(pos - lookbehind, pos, "\n", "\0");
+  if (!/(?:^|[\s(])[@#][^\s]+$/.test(before)) return pos;
+  return pos + 1;
 }
 
 /**
@@ -310,25 +368,41 @@ function addMatchesForPatterns(
     while (match !== null) {
       const from = position + match.index;
       const to = from + match[0].length;
+      const outsideEnd = { inclusiveEnd: false };
       if (options?.hidePrefix && /^[@#]/.test(match[0])) {
         decorations.push(
-          Decoration.inline(from, from + 1, {
-            class: "mention-prefix-hidden",
-            spellcheck: "false",
-          }),
+          Decoration.inline(
+            from,
+            from + 1,
+            {
+              class: "mention-prefix-hidden",
+              spellcheck: "false",
+            },
+            outsideEnd,
+          ),
         );
         decorations.push(
-          Decoration.inline(from + 1, to, {
-            class: className,
-            spellcheck: "false",
-          }),
+          Decoration.inline(
+            from + 1,
+            to,
+            {
+              class: className,
+              spellcheck: "false",
+            },
+            outsideEnd,
+          ),
         );
       } else {
         decorations.push(
-          Decoration.inline(from, to, {
-            class: className,
-            spellcheck: "false",
-          }),
+          Decoration.inline(
+            from,
+            to,
+            {
+              class: className,
+              spellcheck: "false",
+            },
+            outsideEnd,
+          ),
         );
       }
       match = pattern.exec(text);
