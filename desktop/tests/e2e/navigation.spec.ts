@@ -62,6 +62,18 @@ async function createWorkflow(
   await page.getByRole("menuitem", { name: "Send Message" }).click();
   await dialog.getByLabel("Message text").fill("Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await Promise.race([
+    activationConfirmation.waitFor({ state: "visible" }),
+    dialog.waitFor({ state: "hidden" }),
+  ]);
+  if (await activationConfirmation.isVisible()) {
+    await activationConfirmation
+      .getByRole("button", { name: "Turn on" })
+      .click();
+  }
   await expect(dialog).not.toBeVisible();
 }
 

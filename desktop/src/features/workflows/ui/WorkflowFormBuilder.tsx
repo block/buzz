@@ -1,11 +1,15 @@
 import {
   ArrowDown,
+  CalendarClock,
   Check,
   ChevronDown,
+  GitPullRequest,
+  MessageSquare,
   Plus,
+  SmilePlus,
   Trash2,
+  Webhook,
   X,
-  Zap,
 } from "lucide-react";
 import { FocusScope } from "@radix-ui/react-focus-scope";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -13,6 +17,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 
 import type { Channel } from "@/shared/api/types";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -21,15 +26,20 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
-import { WorkflowEmojiField } from "./WorkflowEmojiField";
-import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
+import { reactionConditionValue } from "./workflowReactionCondition";
+import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
+import { workflowStepDescription } from "./workflowStepDescription";
+import { workflowTriggerDescription } from "./workflowTriggerDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
+import {
+  parseConditionExpressions,
+  conditionValueError,
+  type ParsedConditionExpression,
+} from "./workflowConditionExpression";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
-import { FieldLabel } from "./workflowFormPrimitives";
 import {
   DEFAULT_FORM_STATE,
   ACTION_LABELS,
@@ -52,62 +62,39 @@ import type {
 } from "./workflowFormTypes";
 
 function TriggerConfigFields({
+  conditionDrafts,
   disabled,
   trigger,
+  onConditionDraftsChange,
   onUpdate,
 }: {
+  conditionDrafts: ParsedConditionExpression[] | null;
   disabled?: boolean;
   trigger: TriggerConfig;
+  onConditionDraftsChange: (drafts: ParsedConditionExpression[] | null) => void;
   onUpdate: (trigger: TriggerConfig) => void;
 }) {
   switch (trigger.on) {
     case "message_posted":
-      return (
-        <WorkflowMessageTextCondition
-          disabled={disabled}
-          onChange={(filter) => onUpdate({ ...trigger, filter })}
-          value={trigger.filter ?? ""}
-        />
-      );
     case "diff_posted":
-      return (
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-filter">
-            Condition (optional)
-          </FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id="wf-trigger-filter"
-            onChange={(event) =>
-              onUpdate({ ...trigger, filter: event.target.value })
-            }
-            placeholder='e.g. str_contains(trigger_text, "deploy")'
-            value={trigger.filter ?? ""}
-          />
-          <p className="text-xs text-muted-foreground">
-            Evalexpr. Empty matches all events.
-          </p>
-        </div>
-      );
     case "reaction_added":
       return (
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-emoji">
-            Emoji filter (optional)
-          </FieldLabel>
-          <WorkflowEmojiField
-            ariaLabel="Choose trigger emoji"
-            clearAriaLabel="Clear trigger emoji"
-            disabled={disabled}
-            id="wf-trigger-emoji"
-            onChange={(emoji) => onUpdate({ ...trigger, emoji })}
-            value={trigger.emoji ?? ""}
-          />
-          <p className="text-xs text-muted-foreground">
-            Empty matches any reaction.
-          </p>
-        </div>
+        <WorkflowTriggerConditions
+          key={trigger.on}
+          conditionDrafts={conditionDrafts}
+          disabled={disabled}
+          onConditionDraftsChange={onConditionDraftsChange}
+          onChange={(filter) =>
+            onUpdate({
+              ...trigger,
+              emoji:
+                trigger.on === "reaction_added" ? undefined : trigger.emoji,
+              filter,
+            })
+          }
+          triggerType={trigger.on}
+          value={reactionConditionValue(trigger)}
+        />
       );
     case "webhook":
       return (
@@ -135,6 +122,7 @@ type WorkflowFormBuilderProps = {
   mode: WorkflowEditorMode;
   onChange: (yaml: string) => void;
   onSelectedNodeChange: (pane: WorkflowEditorPane) => void;
+  onValidityChange?: (valid: boolean) => void;
   parseError: string | null;
   scopeField?: React.ReactNode;
   selectedNode: WorkflowEditorPane;
@@ -275,6 +263,7 @@ function WorkflowNode({
               isNumbered && "text-sm font-semibold",
             )}
             data-selected={selected}
+            data-testid="workflow-node-icon"
           >
             {isNumbered ? number : icon}
           </span>
@@ -362,12 +351,13 @@ export const WorkflowFormBuilder = React.forwardRef<
   WorkflowFormBuilderProps
 >(function WorkflowFormBuilder(
   {
-    channels: _channels,
+    channels,
     disabled,
     nameLeadingContainer,
     mode,
     onChange,
     onSelectedNodeChange,
+    onValidityChange,
     parseError,
     scopeField,
     selectedNode: selectedRouteNode,
@@ -383,6 +373,18 @@ export const WorkflowFormBuilder = React.forwardRef<
       ? initialParseRef.current.state
       : DEFAULT_FORM_STATE,
   );
+  const [triggerConditionDrafts, setTriggerConditionDrafts] = React.useState<
+    ParsedConditionExpression[] | null
+  >(null);
+  const conditionDraftsValid =
+    triggerConditionDrafts === null ||
+    triggerConditionDrafts.every(
+      (condition) => !conditionValueError(condition.field, condition.value),
+    );
+
+  React.useEffect(() => {
+    onValidityChange?.(mode !== "form" || conditionDraftsValid);
+  }, [conditionDraftsValid, mode, onValidityChange]);
   const selectedNode =
     selectedRouteNode?.type === "trigger" ||
     (selectedRouteNode?.type === "step" &&
@@ -424,6 +426,7 @@ export const WorkflowFormBuilder = React.forwardRef<
     previousModeRef.current = mode;
 
     if (mode === "yaml") {
+      setTriggerConditionDrafts(null);
       onSelectedNodeChange(null);
       return;
     }
@@ -595,6 +598,33 @@ export const WorkflowFormBuilder = React.forwardRef<
   const selectedStepIndex = selectedStep
     ? formState.steps.findIndex((step) => step.id === selectedStep.id)
     : -1;
+  const triggerEmoji = React.useMemo(() => {
+    if (formState.trigger.on !== "reaction_added") return undefined;
+    const legacyEmoji = formState.trigger.emoji?.trim();
+    if (legacyEmoji) return legacyEmoji;
+    if (!formState.trigger.filter) return undefined;
+    const conditions = parseConditionExpressions(
+      formState.trigger.filter,
+      "reaction_added",
+    );
+    return conditions
+      ?.find(
+        ({ field, operator }) =>
+          field === "trigger_emoji" && operator === "equals",
+      )
+      ?.value.trim();
+  }, [formState.trigger]);
+  const triggerDescription = workflowTriggerDescription(formState.trigger);
+  const visibleTriggerDescription = triggerEmoji
+    ? "Reaction added"
+    : triggerDescription;
+  const TriggerIcon = {
+    diff_posted: GitPullRequest,
+    message_posted: MessageSquare,
+    reaction_added: SmilePlus,
+    schedule: CalendarClock,
+    webhook: Webhook,
+  }[formState.trigger.on];
 
   return (
     <>
@@ -637,10 +667,19 @@ export const WorkflowFormBuilder = React.forwardRef<
                   {scopeField ? <div className="mb-3">{scopeField}</div> : null}
                   <ol aria-label="Workflow sequence">
                     <WorkflowNode
-                      description={TRIGGER_LABELS[formState.trigger.on]}
+                      description={visibleTriggerDescription}
                       disabled={disabled}
-                      icon={<Zap className="h-4 w-4" />}
-                      label={`Trigger: ${TRIGGER_LABELS[formState.trigger.on]}`}
+                      icon={
+                        triggerEmoji ? (
+                          <StatusEmoji
+                            className="h-6 w-6 text-xl"
+                            value={triggerEmoji}
+                          />
+                        ) : (
+                          <TriggerIcon className="h-4 w-4" />
+                        )
+                      }
+                      label={`Trigger: ${triggerDescription}`}
                       onAddAfter={(action) => insertStep(0, action)}
                       onClick={() => selectNode({ type: "trigger" })}
                       selected={selectedNode?.type === "trigger"}
@@ -649,16 +688,39 @@ export const WorkflowFormBuilder = React.forwardRef<
                     />
 
                     {formState.steps.map((step, index) => {
-                      const stepName = step.name?.trim();
                       const actionLabel = ACTION_LABELS[step.action];
-                      const nodeTitle = stepName || actionLabel;
+                      const channelLabel = step.channel
+                        ? channels.find(
+                            (channel) => channel.id === step.channel,
+                          )?.name
+                        : undefined;
+                      const nodeDescription = workflowStepDescription(step, {
+                        channelLabel,
+                      });
+                      const stepEmoji =
+                        step.action === "add_reaction"
+                          ? step.emoji?.trim()
+                          : undefined;
+                      const visibleNodeDescription = stepEmoji
+                        ? actionLabel
+                        : nodeDescription;
+                      const showActionSubtitle =
+                        !stepEmoji && nodeDescription !== actionLabel;
                       return (
                         <WorkflowNode
-                          description={nodeTitle}
+                          description={visibleNodeDescription}
                           disabled={disabled}
+                          icon={
+                            stepEmoji ? (
+                              <StatusEmoji
+                                className="h-6 w-6 text-xl"
+                                value={stepEmoji}
+                              />
+                            ) : undefined
+                          }
                           key={step.id}
-                          label={`Step ${index + 1}: ${nodeTitle}`}
-                          number={index + 1}
+                          label={`Step ${index + 1}: ${nodeDescription}`}
+                          number={stepEmoji ? undefined : index + 1}
                           onAddAfter={(action) => insertStep(index + 1, action)}
                           onClick={() =>
                             selectNode({ type: "step", stepId: step.id })
@@ -669,7 +731,9 @@ export const WorkflowFormBuilder = React.forwardRef<
                             selectedNode.stepId === step.id
                           }
                           showTitle={false}
-                          subtitle={stepName ? actionLabel : undefined}
+                          subtitle={
+                            showActionSubtitle ? actionLabel : undefined
+                          }
                           terminal={index === formState.steps.length - 1}
                           title={`Step ${index + 1}`}
                         />
@@ -746,6 +810,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                                 disabled={disabled}
                                 labels={TRIGGER_LABELS}
                                 onChange={(triggerType) => {
+                                  setTriggerConditionDrafts(null);
                                   const next = withTriggerType(
                                     formState,
                                     triggerType,
@@ -842,7 +907,11 @@ export const WorkflowFormBuilder = React.forwardRef<
                               {selectedNode.type === "trigger" ? (
                                 <div>
                                   <TriggerConfigFields
+                                    conditionDrafts={triggerConditionDrafts}
                                     disabled={disabled}
+                                    onConditionDraftsChange={
+                                      setTriggerConditionDrafts
+                                    }
                                     onUpdate={(trigger) =>
                                       updateFormState({ ...formState, trigger })
                                     }
@@ -858,6 +927,10 @@ export const WorkflowFormBuilder = React.forwardRef<
                                   onUpdate={(updated) =>
                                     updateStep(selectedStepIndex, updated)
                                   }
+                                  previousSteps={formState.steps.slice(
+                                    0,
+                                    selectedStepIndex,
+                                  )}
                                   showHeader={false}
                                   step={selectedStep}
                                   triggerType={formState.trigger.on}
