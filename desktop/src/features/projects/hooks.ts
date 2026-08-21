@@ -637,11 +637,32 @@ async function deleteProject(project: Project): Promise<void> {
 
 export const projectsQueryKey = ["projects"] as const;
 
+/**
+ * Freshness windows for the Projects surface. Every local write path
+ * invalidates its keys explicitly (issue/PR mutations, project creation,
+ * repo sync), so short windows bought nothing for own-actions and charged a
+ * full relay fan-out — project enumeration is an exhaustive paginated scan,
+ * work items are five 2,000-event queries — on nearly every Projects
+ * re-entry. Remote actors' changes surface within the window. gcTime keeps
+ * the enumeration cached across visits so re-entering Projects paints from
+ * cache instead of blocking on the scan.
+ */
+export const PROJECTS_STALE_TIME_MS = 5 * 60_000;
+// Window-guarded like react-query's own server default (Infinity): an
+// explicit finite gcTime schedules a real, non-unref'd timeout per cache
+// entry, which keeps node test processes alive for the full 30 minutes.
+export const PROJECTS_GC_TIME_MS =
+  typeof window === "undefined" ? Number.POSITIVE_INFINITY : 30 * 60_000;
+export const PROJECT_WORK_ITEMS_STALE_TIME_MS = 2 * 60_000;
+export const PROJECT_ACTIVITY_STALE_TIME_MS = 2 * 60_000;
+export const PROJECT_LOCAL_REPOS_STALE_TIME_MS = 2 * 60_000;
+
 export function useProjectsQuery() {
   return useQuery({
     queryKey: projectsQueryKey,
     queryFn: () => fetchProjects(),
-    staleTime: 60_000,
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
   });
 }
 
@@ -652,7 +673,8 @@ export function useProjectQuery(projectId: string) {
     select: (projects) =>
       projects.find((project) => projectMatchesRouteId(project, projectId)) ??
       null,
-    staleTime: 60_000,
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
   });
 }
 
@@ -793,7 +815,8 @@ export function useProjectLocalRepositoriesQuery(reposDir?: string | null) {
   return useQuery({
     queryKey: ["projects", "local-repositories", reposDir ?? "default"],
     queryFn: () => listProjectLocalRepositories({ reposDir }),
-    staleTime: 10_000,
+    // Filesystem scan; repo sync/clone flows invalidate this key on change.
+    staleTime: PROJECT_LOCAL_REPOS_STALE_TIME_MS,
     retry: 1,
   });
 }
@@ -830,7 +853,7 @@ export function useProjectsWorkItemsQuery(projects: Project[]) {
     enabled: projects.length > 0,
     queryKey: ["projects", "work-items", projects.map((project) => project.id)],
     queryFn: () => fetchProjectsWorkItems(projects),
-    staleTime: 30_000,
+    staleTime: PROJECT_WORK_ITEMS_STALE_TIME_MS,
   });
 }
 
@@ -935,7 +958,7 @@ export function useProjectActivitySummariesQuery(projects: Project[]) {
     enabled: repoAddresses.length > 0,
     queryKey: ["projects", "activity-summaries", repoAddresses],
     queryFn: () => fetchProjectActivitySummaries(projects),
-    staleTime: 30_000,
+    staleTime: PROJECT_ACTIVITY_STALE_TIME_MS,
   });
 }
 
