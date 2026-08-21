@@ -24,13 +24,114 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
-/// Deny-by-default read-only deployment-admin configuration.
+/// Authentication mode for the deployment-admin API.
+///
+/// Configured by `BUZZ_ADMIN_AUTH`. Exactly one variant is active; invalid
+/// combinations (e.g. `BUZZ_ADMIN_TOKEN` set in `Nip98` mode) are startup
+/// errors — they are not representable.
+///
+/// # Role resolution (nip98 mode only)
+///
+/// In `nip98` mode the authenticated pubkey is resolved to an
+/// `AdminPrincipal` at request time via [`crate::api::admin::auth::resolve_admin_principal`]:
+/// - `Operator/Config` if pubkey ∈ `RELAY_OPERATOR_PUBKEYS`
+/// - `Operator/OwnerFallback` if pubkey == `RELAY_OWNER_PUBKEY` **and**
+///   `RELAY_OPERATOR_PUBKEYS` is empty (evaluated from config, never runtime rows)
+/// - `Moderator/Db` from the `relay_operators` table otherwise
+/// - `None` → 403 (no fall-through role, ever)
+///
+/// Token mode is read-write when the relay has a stable identity
+/// (`BUZZ_RELAY_PRIVATE_KEY` configured, or dev mode); mutations are attributed
+/// to the relay's own pubkey, and it is read-only otherwise. Disabled mode is
+/// always read-only. NIP-98 mode is read-write per resolved principal.
+#[derive(Debug, Clone)]
+pub enum AdminAuth {
+    /// Operator bearer credential required on every request.
+    /// Selected by `BUZZ_ADMIN_AUTH=token` (or leaving `BUZZ_ADMIN_AUTH` unset).
+    /// Read-write when the relay has a stable identity (`BUZZ_RELAY_PRIVATE_KEY`
+    /// configured, or dev mode with `BUZZ_REQUIRE_AUTH_TOKEN=false`); mutations
+    /// are attributed to the relay's own pubkey. Read-only otherwise.
+    Token(AdminToken),
+    /// Bearer authentication disabled. The operator has explicitly asserted
+    /// that the admin API is protected at the network layer (reverse proxy,
+    /// VPN, firewall). `Host`/`Origin` checks remain active as defense-in-depth.
+    /// Selected by `BUZZ_ADMIN_AUTH=disabled`.
+    /// Always read-only: `authorize()` resolves no principal for this mode, so
+    /// mutation and staffing routes always 403.
+    Disabled,
+    /// NIP-98 HTTP Auth. Every request must carry an `Authorization: Nostr`
+    /// header containing a signed kind-27235 event. The authenticated pubkey
+    /// is resolved to an [`crate::api::admin::auth::AdminPrincipal`] at request
+    /// time from config + DB. Selected by `BUZZ_ADMIN_AUTH=nip98`.
+    /// Read-write per resolved principal; the only mode that attributes
+    /// mutations to a distinct human operator rather than the relay itself.
+    Nip98,
+}
+
+/// Deny-by-default deployment-admin configuration. Mutation and staffing routes
+/// require a resolved principal (NIP-98, or token mode with a stable relay
+/// identity); disabled mode is always read-only.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
     /// Exact admin HTTP authority.
     pub host: String,
+    /// Authentication mode selected at startup.
+    pub auth: AdminAuth,
     /// Optional admin SPA bundle directory.
     pub web_dir: Option<std::path::PathBuf>,
+}
+
+/// Operator bearer credential for the deployment-admin API, held decoded.
+///
+/// `Debug` is redacted by hand so the secret cannot escape through a derived
+/// `Debug` on [`AdminConfig`] or [`Config`].
+#[derive(Clone)]
+pub struct AdminToken([u8; 32]);
+
+impl AdminToken {
+    /// Constant-time comparison against a presented credential.
+    pub fn matches(&self, presented: &[u8; 32]) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(presented).into()
+    }
+
+    /// Build a token from raw bytes. Test-only: production tokens come from
+    /// [`parse_admin_token`] so the operator-facing validation is never bypassed.
+    #[cfg(test)]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for AdminToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdminToken(redacted)")
+    }
+}
+
+/// Guidance repeated in every `BUZZ_ADMIN_TOKEN` rejection.
+const ADMIN_TOKEN_GUIDANCE: &str = "BUZZ_ADMIN_TOKEN must be 64 hexadecimal characters \
+     (surrounding whitespace is trimmed); generate one with `openssl rand -hex 32`";
+
+/// Read and validate the admin bearer credential. Fail-closed: the admin API is
+/// only ever mounted alongside a token that passed this check.
+fn parse_admin_token() -> Result<AdminToken, ConfigError> {
+    let raw = match std::env::var("BUZZ_ADMIN_TOKEN") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_ADMIN_TOKEN is required whenever BUZZ_ADMIN_HOST is set — \
+                 {ADMIN_TOKEN_GUIDANCE}"
+            )))
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(ConfigError::InvalidValue(ADMIN_TOKEN_GUIDANCE.to_string()))
+        }
+    };
+    let mut token = [0u8; 32];
+    hex::decode_to_slice(raw.trim(), &mut token)
+        .map_err(|_| ConfigError::InvalidValue(ADMIN_TOKEN_GUIDANCE.to_string()))?;
+    Ok(AdminToken(token))
 }
 
 /// Relay-hosted policy content presented on join surfaces.
@@ -186,9 +287,14 @@ pub struct Config {
     /// Canonical HTTP origin of the deployment-global operator API.
     ///
     /// Every operator NIP-98 `u` tag is verified against this origin, independent
-    /// of the inbound HTTP `Host` header and tenant registry. Required when
-    /// `RELAY_OPERATOR_PUBKEYS` is non-empty. Set via `RELAY_OPERATOR_API_ORIGIN`
-    /// as an `http://` or `https://` origin with no path, query, or fragment.
+    /// of the inbound HTTP `Host` header and tenant registry. Required only to
+    /// *use* the community-provisioning endpoints: when it is unset, those
+    /// endpoints fail closed at request time (see
+    /// `api::operator::authorize_operator_request`). It is NOT required at boot
+    /// even when `RELAY_OPERATOR_PUBKEYS` is set, because that allowlist is
+    /// shared with the NIP-98 admin console, which needs no origin. Set via
+    /// `RELAY_OPERATOR_API_ORIGIN` as an `http://` or `https://` origin with no
+    /// path, query, or fragment.
     pub relay_operator_api_origin: Option<String>,
 
     /// Deployment-level relay operator pubkeys allowed to use the
@@ -634,19 +740,24 @@ impl Config {
             .ok()
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
-            .and_then(|s| {
+            .map(|s| {
                 // Must be exactly 64 lowercase hex characters (32-byte pubkey).
+                // Fail closed — once RELAY_OWNER_PUBKEY can be the break-glass
+                // operator root (owner-fallback B), silently discarding a malformed
+                // value would be a lockout, not a graceful degradation.
                 let valid = s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
                 if valid {
-                    Some(s)
+                    Ok(s)
                 } else {
-                    warn!(
-                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — ignoring. \
-                         Got: {s:?}"
-                    );
-                    None
+                    Err(ConfigError::InvalidValue(format!(
+                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — \
+                         got: {s:?}. Fix or unset it; a malformed value is a startup error \
+                         because this key can serve as the break-glass operator root when \
+                         RELAY_OPERATOR_PUBKEYS is empty."
+                    )))
                 }
-            });
+            })
+            .transpose()?;
 
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
         // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
@@ -682,10 +793,21 @@ impl Config {
             Err(_) => Vec::new(),
         };
         if !relay_operator_pubkeys.is_empty() && relay_operator_api_origin.is_none() {
-            return Err(ConfigError::InvalidValue(
-                "RELAY_OPERATOR_API_ORIGIN is required when RELAY_OPERATOR_PUBKEYS is configured"
-                    .to_string(),
-            ));
+            // Do NOT fail closed at boot: RELAY_OPERATOR_PUBKEYS is the shared
+            // allowlist for BOTH the community-provisioning endpoints and the
+            // NIP-98 admin console. Only provisioning needs the canonical
+            // origin, so requiring it at boot would force admin-console
+            // operators to configure a provisioning surface they never use.
+            // The provisioning endpoints stay fail-closed at request time
+            // (see `api::operator::authorize_operator_request`, which rejects
+            // when the origin is unconfigured); this warning names that so an
+            // operator who *did* want provisioning knows why it 500s.
+            warn!(
+                "RELAY_OPERATOR_PUBKEYS is set but RELAY_OPERATOR_API_ORIGIN is not — \
+                 the community-provisioning endpoints (POST /operator/communities) will \
+                 reject every request until RELAY_OPERATOR_API_ORIGIN is set. The NIP-98 \
+                 admin console does not require it and is unaffected."
+            );
         }
 
         let auth = buzz_auth::AuthConfig {
@@ -933,13 +1055,117 @@ impl Config {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
         {
-            None => None,
+            None => {
+                if std::env::var_os("BUZZ_ADMIN_TOKEN").is_some() {
+                    tracing::warn!(
+                        "BUZZ_ADMIN_TOKEN is set without BUZZ_ADMIN_HOST — the admin \
+                         dashboard and API stay disabled and the token is ignored"
+                    );
+                }
+                if std::env::var_os("BUZZ_ADMIN_AUTH").is_some() {
+                    tracing::warn!(
+                        "BUZZ_ADMIN_AUTH is set without BUZZ_ADMIN_HOST — \
+                         the admin dashboard and API stay disabled and the value is ignored"
+                    );
+                }
+                None
+            }
             Some(host) => {
                 if host.contains(['/', '\\', '@']) {
                     return Err(ConfigError::InvalidValue(
                         "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
                     ));
                 }
+
+                // IPv6 authorities must be bracketed (RFC 3986). An unbracketed
+                // literal such as `::1` cannot form a valid URI authority — the
+                // advertised NIP-11 origin and the NIP-98 `u`-tag verifier would
+                // emit `http://::1`, which no URL parser accepts, and no real
+                // client sends an unbracketed IPv6 `Host` header. Reject it here
+                // so every accepted host yields usable discovery and signing URLs.
+                if !host.starts_with('[') && host.matches(':').count() > 1 {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_ADMIN_HOST={host} looks like a bare IPv6 literal; \
+                         wrap IPv6 addresses in brackets, e.g. [::1] or [::1]:3000"
+                    )));
+                }
+
+                // Catch-all authority gate: every accepted host is interpolated
+                // into the NIP-11 advertisement and NIP-98 `u`-tag URLs, so it
+                // must be exactly an authority — a host with an optional port and
+                // nothing else. Parsing `http://{host}` and requiring the sentinel
+                // to carry only a host rejects any shape that smuggles a path,
+                // query, fragment, or credentials into the value (the bracket guard
+                // above already names the honest bare-IPv6 shape).
+                // Structural check, not parse-only: `admin.example.com?x=1` parses
+                // as a valid URL but lands `?x=1` in the query, which would corrupt
+                // both the advertised origin and the canonical `u`-tag URL. Mirrors
+                // `parse_operator_api_origin`. After passing the gate the host is
+                // lowercased (hostnames are case-insensitive per RFC 4343) so a
+                // mixed-case BUZZ_ADMIN_HOST round-trips correctly through desktop
+                // URL parsing, which always lowercases hostnames (the `url` crate
+                // normalizes an empty path to `/`, so a bare authority satisfies
+                // `path == "/"`).
+                let is_bare_authority =
+                    url::Url::parse(&format!("http://{host}")).is_ok_and(|url| {
+                        url.host().is_some()
+                            && url.username().is_empty()
+                            && url.password().is_none()
+                            && url.path() == "/"
+                            && url.query().is_none()
+                            && url.fragment().is_none()
+                    });
+                if !is_bare_authority {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_ADMIN_HOST={host} is not a valid URL authority; \
+                         it must be a host with an optional port and nothing else \
+                         (no path, query, fragment, or credentials), e.g. \
+                         relay.example.com:8443 or [::1]:3000"
+                    )));
+                }
+                let host = host.to_lowercase();
+
+                // Parse BUZZ_ADMIN_AUTH. Accepted values: "token" (default when
+                // unset), "disabled", "nip98". Any other non-empty value is a
+                // startup error (typo-proofing).
+                let auth_mode = match std::env::var("BUZZ_ADMIN_AUTH")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                {
+                    None | Some("") | Some("token") => "token",
+                    Some("disabled") => "disabled",
+                    Some("nip98") => "nip98",
+                    Some(other) => {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_ADMIN_AUTH must be \"token\", \"disabled\", or \"nip98\"; \
+                             got \"{other}\""
+                        )))
+                    }
+                };
+
+                // BUZZ_ADMIN_TOKEN set in nip98 or disabled mode is ambiguous intent; fail
+                // closed.
+                if auth_mode != "token" && std::env::var_os("BUZZ_ADMIN_TOKEN").is_some() {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_ADMIN_TOKEN is set but BUZZ_ADMIN_AUTH is \"{auth_mode}\" — \
+                         BUZZ_ADMIN_TOKEN is only used in token mode; set one or the other"
+                    )));
+                }
+
+                let auth = match auth_mode {
+                    "disabled" => {
+                        tracing::warn!(
+                            "BUZZ_ADMIN_AUTH=disabled — the admin API is \
+                             unauthenticated; the operator has asserted that access is \
+                             controlled at the network layer (reverse proxy, VPN, firewall)"
+                        );
+                        AdminAuth::Disabled
+                    }
+                    "nip98" => AdminAuth::Nip98,
+                    _ => AdminAuth::Token(parse_admin_token()?),
+                };
+
                 let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
                     .ok()
                     .map(|value| std::path::PathBuf::from(value.trim()))
@@ -952,7 +1178,11 @@ impl Config {
                         )));
                     }
                 }
-                Some(AdminConfig { host, web_dir })
+                Some(AdminConfig {
+                    host,
+                    auth,
+                    web_dir,
+                })
             }
         };
 
@@ -1157,6 +1387,398 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    /// Run `Config::from_env()` with the admin variables forced to `values`,
+    /// restoring the ambient environment afterwards.
+    fn config_with_admin_env(values: &[(&str, Option<&str>)]) -> Result<Config, ConfigError> {
+        const KEYS: [&str; 3] = ["BUZZ_ADMIN_HOST", "BUZZ_ADMIN_TOKEN", "BUZZ_ADMIN_AUTH"];
+        let previous: Vec<_> = KEYS
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+        for (key, value) in values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let config = Config::from_env();
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        config
+    }
+
+    const VALID_ADMIN_TOKEN: &str =
+        "5f0e1d2c3b4a59687786958493a2b1c0decadebeefcafe0123456789abcdef01";
+
+    #[test]
+    fn admin_host_without_a_usable_token_fails_closed_at_startup() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for token in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hex1"),
+            Some(&VALID_ADMIN_TOKEN[..62]),
+            Some("5f0e1d2c3b4a59687786958493a2b1c0decadebeefcafe0123456789abcdef0100"),
+        ] {
+            let result = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some("admin.example")),
+                ("BUZZ_ADMIN_TOKEN", token),
+            ]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_TOKEN")
+                ),
+                "{token:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_surface_activates_with_a_valid_token_and_tolerates_surrounding_whitespace() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for token in [
+            VALID_ADMIN_TOKEN.to_string(),
+            format!("  {VALID_ADMIN_TOKEN}\n"),
+        ] {
+            let admin = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some("admin.example")),
+                ("BUZZ_ADMIN_TOKEN", Some(&token)),
+            ])
+            .expect("config with a valid admin token")
+            .admin
+            .expect("admin surface is configured");
+            assert_eq!(admin.host, "admin.example");
+            assert!(
+                matches!(admin.auth, crate::config::AdminAuth::Token(ref t) if {
+                    let mut expected = [0u8; 32];
+                    hex::decode_to_slice(VALID_ADMIN_TOKEN, &mut expected).expect("hex fixture");
+                    t.matches(&expected) && !t.matches(&[0u8; 32])
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn admin_host_bare_ipv6_literal_fails_closed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for host in ["::1", "::1:3000", "fe80::1", "2001:db8::1"] {
+            let result = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some(host)),
+                ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+            ]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_HOST") && message.contains("bracket")
+                ),
+                "bare IPv6 host {host:?} must be rejected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_host_malformed_authority_fails_closed() {
+        // Shapes that slip the earlier guards but are not a bare authority, so
+        // they would corrupt the NIP-11 advertisement and NIP-98 `u`-tag URL:
+        //   - unclosed-bracket typos start with `[` (pass the bracket guard)
+        //     but are not parseable authorities;
+        //   - query/fragment suffixes parse as a valid URL, but the `?x=1` /
+        //     `#frag` lands in the query/fragment rather than the host, so a
+        //     parse-only gate would miss them — the structural check catches them.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for host in [
+            "[::1",
+            "[::1:3000",
+            "[not-closed",
+            "admin.example.com?x=1",
+            "admin.example.com#frag",
+            "[::1]?x=1",
+            "[::1]#frag",
+        ] {
+            let result = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some(host)),
+                ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+            ]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_HOST") && message.contains("valid URL authority")
+                ),
+                "malformed authority {host:?} must be rejected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_host_bracketed_ipv6_literal_is_accepted() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for host in ["[::1]", "[::1]:3000", "[2001:db8::1]:8443"] {
+            let admin = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some(host)),
+                ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+            ])
+            .unwrap_or_else(|e| panic!("bracketed IPv6 host {host:?} must be accepted: {e:?}"))
+            .admin
+            .expect("admin surface is configured");
+            assert_eq!(admin.host, host);
+        }
+    }
+
+    #[test]
+    fn admin_host_mixed_case_is_normalized_to_lowercase() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // Hostnames are case-insensitive (RFC 4343). A mixed-case BUZZ_ADMIN_HOST
+        // must be stored lowercase so it round-trips through desktop URL parsing
+        // (url::Url always lowercases hostnames) without a mismatch.
+        for (input, expected) in [
+            ("Admin.Example.com", "admin.example.com"),
+            ("Admin.Example.com:8443", "admin.example.com:8443"),
+            ("LOCALHOST:3000", "localhost:3000"),
+        ] {
+            let admin = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some(input)),
+                ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+            ])
+            .unwrap_or_else(|e| panic!("mixed-case host {input:?} must be accepted: {e:?}"))
+            .admin
+            .expect("admin surface is configured");
+            assert_eq!(
+                admin.host, expected,
+                "host {input:?} must be stored as lowercase {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_token_without_a_host_leaves_the_surface_disabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let config = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", None),
+            ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+        ])
+        .expect("a token alone is not a startup error");
+        assert!(config.admin.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admin_token_rejects_non_unicode_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_host = std::env::var_os("BUZZ_ADMIN_HOST");
+        let previous_token = std::env::var_os("BUZZ_ADMIN_TOKEN");
+        std::env::set_var("BUZZ_ADMIN_HOST", "admin.example");
+        std::env::set_var("BUZZ_ADMIN_TOKEN", std::ffi::OsString::from_vec(vec![0xff]));
+
+        let invalid = Config::from_env();
+
+        for (key, value) in [
+            ("BUZZ_ADMIN_HOST", previous_host),
+            ("BUZZ_ADMIN_TOKEN", previous_token),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_ADMIN_TOKEN")
+        ));
+    }
+
+    #[test]
+    fn admin_token_debug_output_is_redacted() {
+        let token = AdminToken::from_bytes([7u8; 32]);
+        let rendered = format!("{token:?}");
+        assert_eq!(rendered, "AdminToken(redacted)");
+        assert!(!rendered.contains("07"));
+    }
+
+    #[test]
+    fn disabled_mode_activates_without_a_token() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let admin = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_TOKEN", None),
+            ("BUZZ_ADMIN_AUTH", Some("disabled")),
+        ])
+        .expect("disabled mode without a token is valid")
+        .admin
+        .expect("admin surface is configured");
+        assert_eq!(admin.host, "admin.example");
+        assert!(matches!(admin.auth, crate::config::AdminAuth::Disabled));
+    }
+
+    #[test]
+    fn disabled_mode_and_token_both_set_fails_closed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let result = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+            ("BUZZ_ADMIN_AUTH", Some("disabled")),
+        ]);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue(ref message))
+                    if message.contains("BUZZ_ADMIN_TOKEN")
+                       && message.contains("disabled")
+            ),
+            "both set must be a startup error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn admin_auth_junk_values_all_fail_closed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for junk in [
+            "1",
+            "yes",
+            "TRUE",
+            "True",
+            "false",
+            "0",
+            "on",
+            "insecure_no_auth",
+        ] {
+            let result = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some("admin.example")),
+                ("BUZZ_ADMIN_TOKEN", None),
+                ("BUZZ_ADMIN_AUTH", Some(junk)),
+            ]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_AUTH")
+                ),
+                "{junk:?} must be rejected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_auth_empty_string_is_treated_as_token_mode() {
+        // An empty value (e.g. `BUZZ_ADMIN_AUTH=`) is treated as unset → token mode.
+        // Token mode without a token fails closed with a BUZZ_ADMIN_TOKEN error.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let result = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_TOKEN", None),
+            ("BUZZ_ADMIN_AUTH", Some("")),
+        ]);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue(ref message))
+                    if message.contains("BUZZ_ADMIN_TOKEN")
+            ),
+            "empty BUZZ_ADMIN_AUTH should fall through to the token requirement"
+        );
+    }
+
+    #[test]
+    fn admin_auth_explicit_token_mode_behaves_identically_to_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let admin = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+            ("BUZZ_ADMIN_AUTH", Some("token")),
+        ])
+        .expect("explicit token mode with a valid token is valid")
+        .admin
+        .expect("admin surface is configured");
+        assert!(matches!(admin.auth, crate::config::AdminAuth::Token(_)));
+    }
+
+    #[test]
+    fn nip98_mode_parses_and_succeeds_without_pubkeys_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let admin = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_AUTH", Some("nip98")),
+        ])
+        .expect(
+            "nip98 mode succeeds without BUZZ_ADMIN_PUBKEYS (role resolution is at request time)",
+        )
+        .admin
+        .expect("admin surface is configured");
+        assert!(matches!(admin.auth, crate::config::AdminAuth::Nip98));
+    }
+
+    #[test]
+    fn nip98_mode_and_token_both_set_fails_closed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let result = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_AUTH", Some("nip98")),
+            ("BUZZ_ADMIN_TOKEN", Some(VALID_ADMIN_TOKEN)),
+        ]);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue(ref message))
+                    if message.contains("BUZZ_ADMIN_TOKEN")
+                       && message.contains("nip98")
+            ),
+            "nip98 + token must be a startup error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_relay_owner_pubkey_is_a_startup_error_not_warn_and_ignore() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("RELAY_OWNER_PUBKEY");
+        for bad in ["not-a-pubkey", &"a".repeat(63), &"z".repeat(64), "abcd"] {
+            std::env::set_var("RELAY_OWNER_PUBKEY", bad);
+            let result = Config::from_env();
+            std::env::remove_var("RELAY_OWNER_PUBKEY");
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("RELAY_OWNER_PUBKEY")
+                ),
+                "malformed RELAY_OWNER_PUBKEY {bad:?} must be a startup error, got: {result:?}"
+            );
+        }
+        // Restore.
+        match previous {
+            Some(v) => std::env::set_var("RELAY_OWNER_PUBKEY", v),
+            None => std::env::remove_var("RELAY_OWNER_PUBKEY"),
+        }
+    }
+
+    #[test]
+    fn valid_relay_owner_pubkey_parses_correctly() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("RELAY_OWNER_PUBKEY");
+        let valid = "a".repeat(64);
+        std::env::set_var("RELAY_OWNER_PUBKEY", &valid);
+        let config = Config::from_env().expect("valid RELAY_OWNER_PUBKEY parses");
+        std::env::remove_var("RELAY_OWNER_PUBKEY");
+        if let Some(v) = previous {
+            std::env::set_var("RELAY_OWNER_PUBKEY", v);
+        }
+        assert_eq!(config.relay_owner_pubkey, Some(valid));
     }
 
     #[test]
@@ -1547,7 +2169,11 @@ mod tests {
     }
 
     #[test]
-    fn relay_operator_pubkeys_require_api_origin() {
+    fn relay_operator_pubkeys_without_api_origin_boots_and_warns() {
+        // Regression: RELAY_OPERATOR_PUBKEYS is the shared allowlist for both
+        // community provisioning and the NIP-98 admin console. Configuring the
+        // admin console (pubkeys) must NOT force the provisioning origin — boot
+        // succeeds; provisioning stays fail-closed at request time.
         let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
@@ -1557,10 +2183,15 @@ mod tests {
         let result = Config::from_env();
         std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
 
-        assert!(matches!(
-            result,
-            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("RELAY_OPERATOR_API_ORIGIN is required")
-        ));
+        let config = result.expect("pubkeys-set/origin-unset must boot, not fail closed");
+        assert_eq!(
+            config.relay_operator_pubkeys,
+            vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+        );
+        assert!(
+            config.relay_operator_api_origin.is_none(),
+            "origin stays unset — only the provisioning path requires it, at request time"
+        );
     }
 
     #[test]

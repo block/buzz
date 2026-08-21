@@ -138,6 +138,9 @@ pub struct NewAction<'a> {
     pub private_reason: Option<&'a str>,
     /// NIP-OA matched principal (`self` | `owner`) for ban enforcement audit.
     pub matched_principal: Option<&'a str>,
+    /// Deployment authority type. `'community'` for community-moderation paths;
+    /// `'relay_operator'`/`'relay_moderator'` for HTTP admin paths.
+    pub actor_authority: Option<&'a str>,
 }
 
 /// An audit row as read back for `buzz moderation audit`.
@@ -163,12 +166,22 @@ pub struct ActionRecord {
     pub private_reason: Option<String>,
     /// NIP-OA principal matched by enforcement, when relevant.
     pub matched_principal: Option<String>,
+    /// Deployment authority type for HTTP-initiated actions.
+    pub actor_authority: String,
     /// Action time.
     pub created_at: DateTime<Utc>,
 }
 
 /// Insert a new report row. Idempotent on `(community, report_event_id)`:
 /// re-ingesting the same signed report is a no-op returning the existing id.
+///
+/// `illegal` reports auto-escalate: they land `status='escalated'` so the
+/// platform operator backstop sees them without waiting for a community admin
+/// to forward them (the severe class was never the community's to hold). Every
+/// other category lands `open` for community triage. Auto-escalation only sets
+/// the queue status; it emits no moderator decision, so an auto-escalated
+/// report is indistinguishable downstream from an admin-escalated one — reopen
+/// and listing key off `status`, never on how the report reached it.
 pub async fn insert_report(
     pool: &PgPool,
     community: CommunityId,
@@ -180,13 +193,19 @@ pub async fn insert_report(
         ReportTarget::Blob(sha256) => ("blob", None, None, Some(sha256.as_slice())),
     };
 
+    let initial_status = if report.report_type == "illegal" {
+        "escalated"
+    } else {
+        "open"
+    };
+
     let row = sqlx::query(
         r#"
         INSERT INTO moderation_reports (
             community_id, report_event_id, reporter_pubkey, target_kind,
             target_event_id, target_pubkey, target_blob_sha256, channel_id,
-            report_type, note
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            report_type, note, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (community_id, report_event_id) DO UPDATE SET
             report_event_id = EXCLUDED.report_event_id
         RETURNING id
@@ -202,6 +221,7 @@ pub async fn insert_report(
     .bind(report.channel_id)
     .bind(report.report_type)
     .bind(report.note)
+    .bind(initial_status)
     .fetch_one(pool)
     .await?;
 
@@ -524,8 +544,9 @@ pub async fn insert_action(
         r#"
         INSERT INTO moderation_actions (
             community_id, actor_pubkey, action, target_pubkey, target_event_id,
-            channel_id, reason_code, public_reason, private_reason, matched_principal
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            channel_id, reason_code, public_reason, private_reason, matched_principal,
+            actor_authority
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id
         "#,
     )
@@ -539,6 +560,7 @@ pub async fn insert_action(
     .bind(action.public_reason)
     .bind(action.private_reason)
     .bind(action.matched_principal)
+    .bind(action.actor_authority.unwrap_or("community"))
     .fetch_one(pool)
     .await?;
 
@@ -554,7 +576,8 @@ pub async fn list_actions(
     let rows = sqlx::query(
         r#"
         SELECT id, actor_pubkey, action, target_pubkey, target_event_id, channel_id,
-               reason_code, public_reason, private_reason, matched_principal, created_at
+               reason_code, public_reason, private_reason, matched_principal,
+               actor_authority, created_at
         FROM moderation_actions
         WHERE community_id = $1
         ORDER BY created_at DESC
@@ -623,6 +646,7 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<ActionRecord> {
         public_reason: row.try_get("public_reason")?,
         private_reason: row.try_get("private_reason")?,
         matched_principal: row.try_get("matched_principal")?,
+        actor_authority: row.try_get("actor_authority")?,
         created_at: row.try_get("created_at")?,
     })
 }
@@ -669,12 +693,28 @@ mod tests {
         target_event_id: &'a [u8],
         note: Option<&'a str>,
     ) -> NewReport<'a> {
+        new_report_typed(
+            report_event_id,
+            reporter_pubkey,
+            target_event_id,
+            "spam",
+            note,
+        )
+    }
+
+    fn new_report_typed<'a>(
+        report_event_id: &'a [u8],
+        reporter_pubkey: &'a [u8],
+        target_event_id: &'a [u8],
+        report_type: &'a str,
+        note: Option<&'a str>,
+    ) -> NewReport<'a> {
         NewReport {
             report_event_id,
             reporter_pubkey,
             target: ReportTarget::Event(target_event_id.to_vec()),
             channel_id: None,
-            report_type: "spam",
+            report_type,
             note,
         }
     }
@@ -890,5 +930,85 @@ mod tests {
                 .expect("second resolve"),
             "second resolve should return false once the report is closed"
         );
+    }
+
+    /// `illegal` reports are the severe class the vision doc says was never the
+    /// community's to hold: they auto-escalate to the platform backstop at
+    /// ingestion rather than waiting for a community admin to forward them.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn illegal_report_auto_escalates_at_ingest() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let report_event_id = random_32();
+        let reporter = random_32();
+        let target_event_id = random_32();
+
+        let report_id = insert_report(
+            &pool,
+            community,
+            new_report_typed(
+                &report_event_id,
+                &reporter,
+                &target_event_id,
+                "illegal",
+                Some("illegal content"),
+            ),
+        )
+        .await
+        .expect("insert illegal report");
+
+        let row = get_report(&pool, community, report_id)
+            .await
+            .expect("get report")
+            .expect("report exists");
+        assert_eq!(
+            row.status, "escalated",
+            "an illegal report must land escalated"
+        );
+        // Auto-escalation is a queue-status decision, not a moderator action: no
+        // resolver is stamped, so downstream reads cannot infer a human forwarded it.
+        assert!(
+            row.resolved_by.is_none() && row.resolved_at.is_none(),
+            "auto-escalation must not stamp a resolver"
+        );
+    }
+
+    /// Every non-`illegal` category still lands `open` for community triage; the
+    /// auto-escalation branch must not widen to the ordinary report flow.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn non_illegal_report_lands_open_at_ingest() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+
+        for report_type in ["spam", "nudity", "malware", "profanity", "other"] {
+            let report_event_id = random_32();
+            let reporter = random_32();
+            let target_event_id = random_32();
+
+            let report_id = insert_report(
+                &pool,
+                community,
+                new_report_typed(
+                    &report_event_id,
+                    &reporter,
+                    &target_event_id,
+                    report_type,
+                    None,
+                ),
+            )
+            .await
+            .expect("insert report");
+
+            let row = get_report(&pool, community, report_id)
+                .await
+                .expect("get report")
+                .expect("report exists");
+            assert_eq!(
+                row.status, "open",
+                "a {report_type} report must land open, not escalated"
+            );
+        }
     }
 }

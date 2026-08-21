@@ -41,10 +41,13 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+pub mod relay_admin_actions;
 /// Use-limited relay invite persistence (v2 opaque tokens).
 pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
+/// Deployment-global operator/moderator roster persistence.
+pub mod relay_operators;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
 /// Thread metadata persistence.
@@ -4511,6 +4514,415 @@ impl Db {
     #[datastore_span(name = "backfill_from_allowlist", system = "postgresql")]
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
+    }
+
+    // ── relay_operators (deployment-global principal roster) ──────────────────
+
+    /// Fetch one relay operator/moderator row by pubkey (32-byte binary).
+    pub async fn get_relay_operator(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<relay_operators::RelayOperatorRecord>> {
+        relay_operators::get(&self.pool, pubkey).await
+    }
+
+    /// List all relay operator/moderator rows ordered by creation time.
+    pub async fn list_relay_operators(&self) -> Result<Vec<relay_operators::RelayOperatorRecord>> {
+        relay_operators::list(&self.pool).await
+    }
+
+    /// Insert or update a relay operator/moderator row (upsert by pubkey).
+    pub async fn upsert_relay_operator(
+        &self,
+        pubkey: &[u8],
+        role: &str,
+        added_by: &[u8],
+    ) -> Result<()> {
+        relay_operators::upsert(&self.pool, pubkey, role, added_by).await
+    }
+
+    /// Remove a relay operator/moderator row. Returns `true` if deleted.
+    /// Records the revocation in the append-only audit trail; `actor` is the
+    /// authenticated operator performing the removal.
+    pub async fn remove_relay_operator(&self, pubkey: &[u8], actor: &[u8]) -> Result<bool> {
+        relay_operators::remove(&self.pool, pubkey, actor).await
+    }
+
+    // ── relay_admin_actions (HTTP enforcement state machine) ──────────────────
+
+    /// Atomic decision-only report closure: CAS open→terminal + audit row in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_report_decision_atomic(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        terminal_status: &str,
+        audit_action: &str,
+        actor_pubkey: &[u8],
+        actor_authority: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::resolve_report_decision_atomic(
+            &self.pool,
+            community_id,
+            report_id,
+            terminal_status,
+            audit_action,
+            actor_pubkey,
+            actor_authority,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+            reason,
+        )
+        .await
+    }
+
+    /// Attempt to claim a report for HTTP enforcement (CAS open → processing).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_report_for_enforcement(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        actor_pubkey: &[u8],
+        actor_role: &str,
+        action: &str,
+        reason: Option<&str>,
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
+        audit_action: &str,
+        actor_authority: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+    ) -> Result<relay_admin_actions::ClaimResult> {
+        relay_admin_actions::claim_report(
+            &self.pool,
+            community_id,
+            report_id,
+            request_id,
+            actor_pubkey,
+            actor_role,
+            action,
+            reason,
+            timeout_until,
+            audit_action,
+            actor_authority,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+        )
+        .await
+    }
+
+    /// Advance an action from 'pending' to 'enforcing'.
+    pub async fn begin_enforcing_action(&self, action_id: uuid::Uuid) -> Result<bool> {
+        relay_admin_actions::begin_enforcing(&self.pool, action_id).await
+    }
+
+    /// Commit the core mutation step (advance step_marker to 'mutation_committed').
+    pub async fn commit_action_mutation_step(&self, action_id: uuid::Uuid) -> Result<bool> {
+        relay_admin_actions::commit_mutation_step(&self.pool, action_id).await
+    }
+
+    /// Finalize enforcement: action → succeeded, report → terminal status,
+    /// and enqueue outbox delivery rows atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_action_success(
+        &self,
+        action_id: uuid::Uuid,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        terminal_status: &str,
+        actor_pubkey: &[u8],
+        action_name: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::finalize_success(
+            &self.pool,
+            action_id,
+            community_id,
+            report_id,
+            terminal_status,
+            actor_pubkey,
+            action_name,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a ban mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    pub async fn execute_ban_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::execute_ban_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a timeout mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_timeout_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+        until: chrono::DateTime<chrono::Utc>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::execute_timeout_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+            until,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a kick mutation and commit the step marker.
+    /// Returns `Removed` (member was present), `AlreadyGone` (absent before this action),
+    /// or `AlreadyMarked` (marker already committed by another driver or lease lost).
+    pub async fn execute_kick_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<relay_admin_actions::KickWithMarkerResult> {
+        relay_admin_actions::execute_kick_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
+    /// Atomically execute a soft-delete mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    pub async fn execute_delete_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_event_id: &[u8],
+        parent_event_id: Option<&[u8]>,
+        root_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        relay_admin_actions::execute_delete_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_event_id,
+            parent_event_id,
+            root_event_id,
+        )
+        .await
+    }
+
+    /// Acquire the action mutation lease (prevents concurrent double-mutation).
+    pub async fn acquire_admin_action_lease(
+        &self,
+        action_id: uuid::Uuid,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<relay_admin_actions::LeaseResult> {
+        relay_admin_actions::acquire_action_lease(&self.pool, action_id, lease_until).await
+    }
+
+    /// Release the action mutation lease. No-op if caller no longer holds the token.
+    pub async fn release_admin_action_lease(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+    ) -> Result<()> {
+        relay_admin_actions::release_action_lease(&self.pool, action_id, lease_token).await
+    }
+
+    /// Claim a batch of stranded `relay_admin_actions` for the action recovery worker.
+    pub async fn claim_stranded_admin_action_batch(
+        &self,
+        worker_id: &str,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<relay_admin_actions::StrandedActionClaim>> {
+        relay_admin_actions::claim_stranded_action_batch(
+            &self.pool,
+            worker_id,
+            lease_until,
+            batch_size,
+        )
+        .await
+    }
+
+    /// Record a pre-mutation enforcement failure (keeps report in 'processing').
+    pub async fn record_action_failure(&self, action_id: uuid::Uuid, error: &str) -> Result<()> {
+        relay_admin_actions::record_failure(&self.pool, action_id, error).await
+    }
+
+    /// Cancel a pre-mutation failed action (returns report to 'open'),
+    /// attributing the cancel to `cancelled_by`.
+    pub async fn cancel_admin_action(
+        &self,
+        action_id: uuid::Uuid,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        cancelled_by: &[u8],
+    ) -> Result<bool> {
+        relay_admin_actions::cancel_action(
+            &self.pool,
+            action_id,
+            community_id,
+            report_id,
+            cancelled_by,
+        )
+        .await
+    }
+
+    /// Reopen a terminal report (resolved|dismissed|escalated → open) with a
+    /// durable `reopen` audit row, keyed idempotent on `request_id`.
+    pub async fn reopen_report(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        actor_pubkey: &[u8],
+        actor_role: &str,
+        reason: Option<&str>,
+    ) -> Result<relay_admin_actions::ReopenResult> {
+        relay_admin_actions::reopen_report(
+            &self.pool,
+            community_id,
+            report_id,
+            request_id,
+            actor_pubkey,
+            actor_role,
+            reason,
+        )
+        .await
+    }
+
+    /// Fetch an action record by ID.
+    pub async fn get_admin_action(
+        &self,
+        action_id: uuid::Uuid,
+    ) -> Result<Option<relay_admin_actions::AdminActionRecord>> {
+        relay_admin_actions::get_action(&self.pool, action_id).await
+    }
+
+    /// Enqueue an outbox artifact/notice delivery command.
+    pub async fn enqueue_admin_outbox(
+        &self,
+        action_id: uuid::Uuid,
+        task_type: &str,
+        payload: serde_json::Value,
+        dedup_key: &str,
+    ) -> Result<()> {
+        relay_admin_actions::enqueue_outbox(&self.pool, action_id, task_type, payload, dedup_key)
+            .await
+    }
+
+    /// Mark an outbox record as delivered, fenced by the claim token.
+    /// Returns `true` if updated, `false` if ownership was already lost.
+    pub async fn mark_admin_outbox_delivered(
+        &self,
+        outbox_id: uuid::Uuid,
+        claim_token: uuid::Uuid,
+    ) -> Result<bool> {
+        relay_admin_actions::mark_outbox_delivered(&self.pool, outbox_id, claim_token).await
+    }
+
+    /// Mark an outbox record as failed, fenced by the claim token.
+    /// Returns `true` if updated, `false` if ownership was already lost.
+    pub async fn fail_admin_outbox_row(
+        &self,
+        outbox_id: uuid::Uuid,
+        claim_token: uuid::Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        relay_admin_actions::fail_outbox_row(&self.pool, outbox_id, claim_token, error).await
+    }
+
+    /// Claim a batch of pending outbox rows for the given worker pod.
+    pub async fn claim_pending_admin_outbox_batch(
+        &self,
+        worker_id: &str,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<relay_admin_actions::OutboxRecord>> {
+        relay_admin_actions::claim_pending_outbox_batch(
+            &self.pool,
+            worker_id,
+            lease_until,
+            batch_size,
+        )
+        .await
+    }
+
+    /// List pending outbox records for an action.
+    pub async fn list_pending_admin_outbox(
+        &self,
+        action_id: uuid::Uuid,
+    ) -> Result<Vec<relay_admin_actions::OutboxRecord>> {
+        relay_admin_actions::list_pending_outbox(&self.pool, action_id).await
+    }
+
+    /// Deployment-authority kick: remove a member without requiring tenant owner/admin actor.
+    pub async fn deploy_kick_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<relay_admin_actions::KickResult> {
+        relay_admin_actions::deploy_kick_member(
+            &self.pool,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
+    /// Update product_feedback status (operator-managed lifecycle).
+    pub async fn update_feedback_status(&self, id: uuid::Uuid, status: &str) -> Result<bool> {
+        relay_admin_actions::update_feedback_status(&self.pool, id, status).await
     }
 
     /// Mints a v2 use-limited relay invite. The plaintext code is returned

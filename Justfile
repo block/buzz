@@ -340,6 +340,31 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
+        # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
+        # the admin.localhost origin/advertisement/canonical-URL pins, and the
+        # host-oracle/credential-first checks. These are the regression guard for
+        # the /api/admin/v1 moderation auth surface. Enumerated explicitly because
+        # nothing in CI runs `cargo test --workspace`, `just test-unit` did not
+        # enumerate `buzz-relay --lib`, and Backend Integration selects only the
+        # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
+        # and a red one could ship green (exactly how a broken admin test slipped
+        # past every gate once). Scoped to api::admin, not the whole buzz-relay
+        # --lib, because api::media has non-ignored tests that require Postgres.
+        # Two api::admin tests are excluded: both exercise a read-route DB
+        # fallthrough and pass without a database only by waiting out the sqlx
+        # acquire timeout (~30s each), so they do not belong in the infra-free
+        # unit job. nip98_mode_unrostered_signer_does_not_consume_a_replay_slot
+        # asserts a unique replay-guard invariant, so it is wired into the
+        # Postgres-backed Backend Integration job (see ci.yml "Admin API
+        # unrostered-signer replay invariant"). disabled_mode_allows_
+        # unauthenticated_requests_on_the_admin_host has no unique invariant:
+        # disabled-mode unauthenticated success is covered by
+        # disabled_mode_regression_pin_unauthenticated_request_is_served on the
+        # DB-free /probe route, and its Host/Origin gating is covered here by
+        # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
+        cargo nextest run -p buzz-relay --lib \
+            -E 'test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)'
     else
         ./scripts/run-tests.sh unit
     fi
@@ -443,7 +468,11 @@ admin: bootstrap _ensure-migrations
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
     export BUZZ_ADMIN_WEB_DIR="${BUZZ_ADMIN_WEB_DIR:-{{justfile_directory()}}/admin-web/dist}"
+    # The relay refuses to start without a token, and never logs one. Mint a
+    # throwaway per run so no dev secret is ever committed or reused.
+    export BUZZ_ADMIN_TOKEN="${BUZZ_ADMIN_TOKEN:-$(openssl rand -hex 32)}"
     echo "Admin dashboard: http://${BUZZ_ADMIN_HOST}/reports"
+    echo "Admin token (paste into dashboard prompt): ${BUZZ_ADMIN_TOKEN}"
     cargo run -p buzz-relay
 
 # Seed deterministic reports and product feedback for local admin dashboard review
@@ -456,7 +485,7 @@ admin-check: fmt-check
     cargo test -p buzz-relay api::admin
     cargo test -p buzz-relay router::tests
     pnpm -C admin-web check
-    pnpm -C admin-web exec playwright test
+    pnpm -C admin-web test:e2e
 
 # Start the relay server in release mode
 relay-release: _ensure-migrations

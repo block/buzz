@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 
+const TOKEN =
+  "5f0e1d2c3b4a59687786958493a2b1c0decadebeefcafe0123456789abcdef01";
+
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript((token) => {
+    sessionStorage.setItem("buzz-admin-token", token);
+  }, TOKEN);
   await page.route("**/api/admin/v1/**", async (route) => {
     await route.fulfill({ contentType: "application/json", body: "[]" });
   });
@@ -301,16 +307,10 @@ test("feedback attachments render from imeta without raw markdown", async ({
   await expect(page.getByText("![image]", { exact: false })).toHaveCount(0);
   await expect(
     page.getByRole("img", { name: "screenshot.png" }),
-  ).toHaveAttribute(
-    "src",
-    `/api/admin/v1/feedback/${id}/attachments/${"a".repeat(64)}`,
-  );
+  ).toHaveAttribute("src", /^blob:/);
   await expect(
     page.getByRole("link", { name: /diagnostics.txt/ }),
-  ).toHaveAttribute(
-    "href",
-    `/api/admin/v1/feedback/${id}/attachments/${"b".repeat(64)}`,
-  );
+  ).toHaveAttribute("href", /^blob:/);
   const fileHeight = await page
     .locator(".file-attachment")
     .evaluate((element) => element.getBoundingClientRect().height);

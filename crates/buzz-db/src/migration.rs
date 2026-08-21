@@ -174,6 +174,42 @@ mod tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
+    /// Connection parameters parsed out of a `postgres://user:pass@host:port/db`
+    /// URL so the parity test can pass them to the `bin/pgschema` binary, which
+    /// takes discrete `--host/--port/--user/--password/--db` flags rather than a
+    /// URL. Only the shapes this test emits (`BUZZ_TEST_DATABASE_URL` /
+    /// `DATABASE_URL` / `TEST_DB_URL`) are supported.
+    struct PgConn {
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
+    }
+
+    fn parse_pg_url(url: &str) -> PgConn {
+        let opts: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("parse postgres connection url");
+        PgConn {
+            host: opts.get_host().to_owned(),
+            port: opts.get_port(),
+            user: opts.get_username().to_owned(),
+            password: parse_pg_password(url),
+        }
+    }
+
+    /// `PgConnectOptions` intentionally does not expose the password via a
+    /// getter, so read it straight out of the URL authority. Falls back to the
+    /// `PGPASSWORD` env var, then empty.
+    fn parse_pg_password(url: &str) -> String {
+        url.split_once("://")
+            .and_then(|(_, rest)| rest.split_once('@'))
+            .map(|(authority, _)| authority)
+            .and_then(|authority| authority.split_once(':'))
+            .map(|(_, pass)| pass.to_owned())
+            .or_else(|| std::env::var("PGPASSWORD").ok())
+            .unwrap_or_default()
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
         ForeignKey,
@@ -427,6 +463,10 @@ mod tests {
             "storage_taxonomy_sweeps",
             "community_serving_write_leases",
             "community_deletion_executor_heartbeats",
+            "relay_operators",
+            "relay_admin_actions",
+            "relay_admin_outbox",
+            "relay_operator_audit",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -640,7 +680,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 37);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1080,6 +1120,74 @@ mod tests {
         assert_eq!(
             extract_roster_fence(roster_fence),
             extract_roster_fence(desired_schema)
+        );
+
+        assert_eq!(migrations[32].version, 33);
+        let relay_operators = migrations[32].sql.as_str();
+        assert!(
+            relay_operators.contains("CREATE TABLE relay_operators"),
+            "migration 33 must create relay_operators"
+        );
+        assert!(
+            relay_operators.contains("_operator_global_tables"),
+            "migration 33 must register relay_operators in _operator_global_tables"
+        );
+        assert!(
+            relay_operators.contains("actor_authority"),
+            "migration 33 must add actor_authority to moderation_actions"
+        );
+        assert!(
+            relay_operators.contains("processing"),
+            "migration 33 must add processing status to moderation_reports"
+        );
+
+        assert_eq!(migrations[33].version, 34);
+        let relay_admin_actions = migrations[33].sql.as_str();
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_actions"),
+            "migration 34 must create relay_admin_actions"
+        );
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_outbox"),
+            "migration 34 must create relay_admin_outbox"
+        );
+        assert!(
+            relay_admin_actions.contains("request_id"),
+            "migration 34 relay_admin_actions must include request_id for idempotency"
+        );
+        assert!(
+            relay_admin_actions.contains("step_marker"),
+            "migration 34 relay_admin_actions must include step_marker for crash recovery"
+        );
+
+        assert_eq!(migrations[34].version, 35);
+        let action_lease = migrations[34].sql.as_str();
+        assert!(
+            action_lease.contains("action_lease_token"),
+            "migration 35 must add action_lease_token to relay_admin_actions"
+        );
+        assert!(
+            action_lease.contains("action_lease_expires_at"),
+            "migration 35 must add action_lease_expires_at to relay_admin_actions"
+        );
+        assert!(
+            action_lease.contains("attempt_count"),
+            "migration 35 must add attempt_count to relay_admin_outbox"
+        );
+        assert!(
+            action_lease.contains("retry_after"),
+            "migration 35 must add retry_after to relay_admin_outbox"
+        );
+
+        assert_eq!(migrations[36].version, 37);
+        let operator_audit = migrations[36].sql.as_str();
+        assert!(
+            operator_audit.contains("CREATE TABLE relay_operator_audit"),
+            "migration 37 must create relay_operator_audit"
+        );
+        assert!(
+            operator_audit.contains("_operator_global_tables"),
+            "migration 37 must register relay_operator_audit in _operator_global_tables"
         );
     }
 
@@ -1828,6 +1936,186 @@ mod tests {
         .fetch_all(pool)
         .await
         .expect("read applied migrations")
+    }
+
+    /// The desired-state file (`schema/schema.sql`) and the incremental
+    /// migrations are two independent sources of the same schema. When a
+    /// migration mutates the admin tables, `schema.sql` must be hand-updated to
+    /// match — nothing enforces that automatically, and the lease/claim-token
+    /// migrations (0034/0035) once drifted for exactly this reason.
+    ///
+    /// This bootstraps one probe database from `schema.sql` **through the real
+    /// `bin/pgschema apply` binary** — the exact path CI (`ci.yml`) and both
+    /// test-relay launchers take — and migrates another through 1–36, then
+    /// asserts the three admin tables have identical column definitions (name,
+    /// type, nullability, default) and identical index shapes, including each
+    /// key's catalog sort/null options (`pg_index.indoption`). Columns are keyed
+    /// by name, not ordinal, because migrations append via `ALTER TABLE` while
+    /// `schema.sql` declares them inline — positions legitimately differ, shapes
+    /// must not.
+    ///
+    /// Driving the real binary is load-bearing: `pgschema` 1.7.4 discards
+    /// per-key `NULLS FIRST`/`NULLS LAST` when it re-emits an index, so a naive
+    /// `sqlx::raw_sql(schema.sql)` bootstrap would preserve ordering the actual
+    /// deployment path silently drops — the same false-confidence class as the
+    /// drift this test guards against. `indoption` (not just `indexdef` text) is
+    /// asserted so a resurrected `NULLS FIRST` in a migration that `pgschema`
+    /// cannot represent is caught.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_schema_parity_between_desired_state_and_migrations() {
+        use sqlx::AssertSqlSafe;
+
+        async fn columns(
+            pool: &PgPool,
+            table: &str,
+        ) -> Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+        )> {
+            sqlx::query_as(
+                "SELECT column_name, data_type, is_nullable, column_default, \
+                 is_identity, identity_generation \
+                 FROM information_schema.columns \
+                 WHERE table_schema = 'public' AND table_name = $1 \
+                 ORDER BY column_name",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read column definitions")
+        }
+
+        // Index name + rendered definition + per-key sort/null options. indoption
+        // is a int2vector rendered as text (e.g. `{2,0}` = NULLS FIRST ASC on key
+        // 0, plain ASC on key 1) so ordering divergences that `indexdef` text may
+        // still show but `pgschema` cannot reproduce are compared structurally.
+        async fn index_shapes(pool: &PgPool, table: &str) -> Vec<(String, String, String)> {
+            sqlx::query_as(
+                "SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indoption::int2[]::text \
+                 FROM pg_class c \
+                 JOIN pg_index i ON i.indexrelid = c.oid \
+                 JOIN pg_class t ON t.oid = i.indrelid \
+                 JOIN pg_namespace n ON n.oid = t.relnamespace \
+                 WHERE n.nspname = 'public' AND t.relname = $1 \
+                 ORDER BY c.relname",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read index shapes")
+        }
+
+        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        let conn = parse_pg_url(&base_url);
+        let admin = PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+
+        let desired_db = format!("buzz_admin_desired_{}", uuid::Uuid::new_v4().simple());
+        let migrated_db = format!("buzz_admin_migrated_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {desired_db}")))
+            .execute(&admin)
+            .await
+            .expect("create desired-state probe database");
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {migrated_db}")))
+            .execute(&admin)
+            .await
+            .expect("create migrated probe database");
+
+        // Bootstrap the desired-state probe through the real pgschema binary, the
+        // same invocation the test-relay launchers use. The freshly-created probe
+        // db doubles as pgschema's plan database (--plan-*), which avoids the
+        // embedded-Postgres download and matches start-relay-for-tests.sh.
+        let pgschema = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
+        let schema_file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql");
+        let port = conn.port.to_string();
+        let apply = std::process::Command::new(&pgschema)
+            .args([
+                "apply",
+                "--auto-approve",
+                "--file",
+                schema_file.to_str().expect("schema path utf-8"),
+                "--host",
+                &conn.host,
+                "--port",
+                &port,
+                "--user",
+                &conn.user,
+                "--password",
+                &conn.password,
+                "--db",
+                &desired_db,
+                "--plan-host",
+                &conn.host,
+                "--plan-port",
+                &port,
+                "--plan-user",
+                &conn.user,
+                "--plan-password",
+                &conn.password,
+                "--plan-db",
+                &desired_db,
+            ])
+            .output()
+            .expect("run bin/pgschema apply (hermit env required)");
+        assert!(
+            apply.status.success(),
+            "pgschema apply failed: {}\n{}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr),
+        );
+
+        let desired = PgPool::connect(&format!("{base_prefix}/{desired_db}"))
+            .await
+            .expect("connect desired-state probe database");
+        let migrated = PgPool::connect(&format!("{base_prefix}/{migrated_db}"))
+            .await
+            .expect("connect migrated probe database");
+        MIGRATOR
+            .run_to(37, &migrated)
+            .await
+            .expect("apply migrations 1-37");
+
+        for table in [
+            "relay_admin_actions",
+            "relay_admin_outbox",
+            "relay_operator_audit",
+        ] {
+            assert_eq!(
+                columns(&desired, table).await,
+                columns(&migrated, table).await,
+                "column parity mismatch for {table}: schema.sql desired state has drifted \
+                 from the migrations; update schema/schema.sql to match"
+            );
+            assert_eq!(
+                index_shapes(&desired, table).await,
+                index_shapes(&migrated, table).await,
+                "index-shape parity mismatch for {table}: the pgschema-bootstrapped desired \
+                 state (including per-key indoption) has drifted from the migrations. If a \
+                 migration uses a construct pgschema cannot represent (e.g. NULLS FIRST), the \
+                 migration and schema.sql must both use a representable shape."
+            );
+        }
+
+        desired.close().await;
+        migrated.close().await;
+        for probe_db in [desired_db, migrated_db] {
+            sqlx::query(AssertSqlSafe(format!(
+                "DROP DATABASE {probe_db} WITH (FORCE)"
+            )))
+            .execute(&admin)
+            .await
+            .expect("drop probe database");
+        }
     }
 
     #[tokio::test]

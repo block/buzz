@@ -72,6 +72,7 @@ use crate::handlers::moderation_authz::{
     authorize_moderation_action, ModerationAction, ModerationTarget,
 };
 use crate::handlers::moderation_notices::{send_moderation_notice, ModerationNotice};
+use crate::handlers::report_resolution::{enforcement_audit_action, resolve_report_decision_only};
 use crate::state::AppState;
 use buzz_db::moderation::NewAction;
 
@@ -210,6 +211,7 @@ async fn handle_ban(
             kind: "ban".to_string(),
             public_reason,
         },
+        chrono::Utc::now(),
     )
     .await
     {
@@ -315,6 +317,7 @@ async fn handle_timeout(
             kind: "timeout".to_string(),
             public_reason,
         },
+        chrono::Utc::now(),
     )
     .await
     {
@@ -363,7 +366,11 @@ async fn handle_untimeout(
 
 // ── 9044: resolve report ─────────────────────────────────────────────────────
 
-async fn handle_resolve(
+/// Re-drive a 9044 resolve command through the atomic decision helper.
+/// Made `pub(crate)` for integration tests — allows tests to call through the
+/// real `handle_resolve → resolve_report_decision_only` path without all the
+/// NIP-42/freshness boilerplate that `handle_moderation_command` adds.
+pub(crate) async fn handle_resolve(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
@@ -416,19 +423,6 @@ async fn handle_resolve(
         .map_err(|e| error(format!("database error: {e}")))?
         .ok_or_else(|| invalid("report not found in this community"))?;
 
-    // Don't write an audit row for a report someone else already closed. The
-    // DB's `WHERE status='open'` on resolve_moderation_report below is the real
-    // guard; this early check keeps a lost-race resolve (two mods on the same
-    // report) from leaving an orphan audit row behind the failed resolve. A tiny
-    // residual race remains — the row can flip to closed between this read and
-    // the DB write — but that window yields only an audit row plus a failed
-    // resolve, which is tolerated.
-    if report.status != "open" {
-        return Err(invalid(
-            "report is not open (already resolved or dismissed)",
-        ));
-    }
-
     // Carry the report's own target into the audit row so `delete`/`kick`/`ban`
     // resolutions record what they acted on.
     let (target_pubkey, target_event_id) = match &report.target {
@@ -437,68 +431,46 @@ async fn handle_resolve(
         buzz_db::moderation::ReportTarget::Blob(_) => (None, None),
     };
 
-    // Distinguish a resolution *decision* from the actual *enforcement* row.
-    // A one-click resolve with action=ban records the moderator's decision; the
-    // client then composes the real 9040, which writes its own "ban" enforcement
-    // row. `resolve:*` decision rows are part of the moderation_actions DB
-    // vocabulary so audit consumers can tell the two apart and don't double-count.
-    // `dismiss_report` and `escalate` stay unprefixed — escalate especially must
-    // remain queryable for the platform-safety lane.
-    let audit_action = resolution_audit_action(&action);
-    let action_id = insert_audit(
+    // Route through the shared atomic orchestration:
+    // - CAS `open → terminal` AND decision audit row in ONE transaction.
+    // - No orphan audit row on concurrent close (transaction rolls back both).
+    // - Preserves the event's signed `status` field verbatim (resolved|dismissed).
+    // - `actor_authority = "community"` marks this as a 9044 community-path resolution.
+    let audit_action = enforcement_audit_action(&action);
+    let reporter_pubkey = report.reporter_pubkey.clone();
+    let report_id = report.id;
+    match resolve_report_decision_only(
         state,
         tenant,
-        actor,
+        report_id,
+        &status,
         audit_action,
+        actor,
+        "community",
         target_pubkey,
         target_event_id,
+        report.channel_id,
         reason.as_deref(),
-    )
-    .await?;
-
-    let resolved = state
-        .db
-        .resolve_moderation_report(
-            tenant.community(),
-            report.id,
-            &status,
-            actor,
-            Some(action_id),
-        )
-        .await
-        .map_err(|e| error(format!("database error: {e}")))?;
-    if !resolved {
-        return Err(invalid(
-            "report is not open (already resolved or dismissed)",
-        ));
-    }
-
-    // Close the loop: DM the reporter that their report was reviewed.
-    let summary = reason.clone().unwrap_or_else(|| match status.as_str() {
-        "dismissed" => "Your report was reviewed and dismissed.".to_string(),
-        _ => "Your report was reviewed and acted on.".to_string(),
-    });
-    if let Err(e) = send_moderation_notice(
-        tenant,
-        state,
-        &report.reporter_pubkey,
-        ModerationNotice::ReportResolved {
-            report_id: report.id,
-            status: status.clone(),
-            summary,
-        },
+        &reporter_pubkey,
     )
     .await
     {
-        info!(error = %e, "report-resolution notice DM delivery failed (report still resolved)");
+        Ok(_) => {
+            info!(report_id = %report_id, status = %status, action = %action, "report resolved via 9044");
+            Ok(())
+        }
+        Err(crate::handlers::report_resolution::ResolutionError::NotOpen(_)) => Err(invalid(
+            "report is not open (already resolved or dismissed)",
+        )),
+        Err(e) => Err(error(format!("resolution failed: {e:?}"))),
     }
-
-    info!(report_id = %report.id, status = %status, action = %action, "report resolved");
-    Ok(())
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
+/// Map a 9044 action to the audit-row action string (used in tests to verify
+/// DB vocabulary compliance).
+#[cfg_attr(not(test), allow(dead_code))]
 fn resolution_audit_action(action: &str) -> &'static str {
     match action {
         "dismiss" => "dismiss_report",
@@ -538,6 +510,7 @@ async fn insert_audit(
                 public_reason,
                 private_reason: None,
                 matched_principal: None,
+                actor_authority: None, // community path
             },
         )
         .await

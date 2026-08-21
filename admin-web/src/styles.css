@@ -667,6 +667,26 @@ dd {
   color: #9f2424;
 }
 
+.token-prompt input {
+  width: min(22rem, 70vw);
+  padding: 0.65rem 0.9rem;
+  border: 1px solid rgb(35 30 30 / 16%);
+  border-radius: 0.75rem;
+  font: inherit;
+}
+
+.token-prompt button {
+  margin-top: 1rem;
+}
+
+.attachment-placeholder {
+  min-height: 8rem;
+  display: grid;
+  place-content: center;
+  color: rgb(35 30 30 / 48%);
+  font-size: 0.8rem;
+}
+
 @media (max-width: 720px) {
   .app-header {
     width: min(100% - 2rem, 1120px);

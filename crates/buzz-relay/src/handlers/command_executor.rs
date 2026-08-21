@@ -454,6 +454,7 @@ async fn handle_dm_open(
                 "actor": self_hex,
                 "participants": participant_hexes,
             }),
+            chrono::Utc::now(),
         )
         .await
         {
