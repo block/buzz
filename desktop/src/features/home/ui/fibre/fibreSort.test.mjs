@@ -16,11 +16,17 @@ const newerLow = {
   artifacts: [{ createdAt: 200 }],
 };
 
-test("resolveFibreSort defaults Open to priority and Done to newest", () => {
-  assert.equal(resolveFibreSort("open", null), "priority");
+test("only Important is ranked by default; the rest lead with newest", () => {
+  assert.equal(resolveFibreSort("important", null), "priority");
+  assert.equal(resolveFibreSort("hot", null), "newest");
+  assert.equal(resolveFibreSort("other", null), "newest");
   assert.equal(resolveFibreSort("done", null), "newest");
+});
+
+test("an explicit preference wins on every tab", () => {
   assert.equal(resolveFibreSort("done", "priority"), "priority");
-  assert.equal(resolveFibreSort("open", "newest"), "newest");
+  assert.equal(resolveFibreSort("important", "newest"), "newest");
+  assert.equal(resolveFibreSort("hot", "priority"), "priority");
 });
 
 test("priority sort is score desc then updatedAt", () => {

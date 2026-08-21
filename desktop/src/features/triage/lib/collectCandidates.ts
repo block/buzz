@@ -89,7 +89,9 @@ export function candidateFromEvent(
     createdAt: event.created_at,
     content: event.content,
     threadRootId: reference.rootId,
-    isMention: hasMentionForEvent(event, normalizedSelf),
+    // Every message carries a `p` tag for its own author, so without the
+    // `isSelf` guard the viewer's own messages read as mentions of themselves.
+    isMention: !isSelf && hasMentionForEvent(event, normalizedSelf),
     isDm: channel?.channelType === "dm",
     isReply: reference.parentId !== null && !isBroadcastReply(event.tags),
     isSelf,
@@ -111,6 +113,9 @@ export function candidatesFromInboxItems(
     const mentionTagged = item.tags.some(
       (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === normalizedSelf,
     );
+    const isSelf = Boolean(
+      normalizedSelf && item.pubkey.toLowerCase() === normalizedSelf,
+    );
 
     return {
       eventId: item.id,
@@ -122,12 +127,11 @@ export function candidatesFromInboxItems(
       createdAt: item.createdAt,
       content: item.content,
       threadRootId: reference.rootId ?? entry.conversationId ?? null,
-      isMention: mentionTagged || entry.categories.includes("mention"),
+      isMention:
+        !isSelf && (mentionTagged || entry.categories.includes("mention")),
       isDm: item.channelType === "dm",
       isReply: reference.parentId !== null && !isBroadcastReply(item.tags),
-      isSelf: Boolean(
-        normalizedSelf && item.pubkey.toLowerCase() === normalizedSelf,
-      ),
+      isSelf,
       source: "inbox",
     };
   });

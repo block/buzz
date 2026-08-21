@@ -6,6 +6,6 @@
   "description": "External fibre engine for the Buzz Inbox. Classifies messages into fibres and learns from feedback.",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test apply.test.mjs classify.test.mjs store.test.mjs"
+    "test": "node --test \"*.test.mjs\""
   }
 }

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  annotateFeedback,
   emptyFibresResponse,
   fetchFibres,
   ingestMessages,
@@ -121,6 +122,14 @@ export function useRestoreFibresMutation(pubkey: string | undefined) {
 export function useFibreFeedbackMutation() {
   return useMutation({
     mutationFn: (input: FibreFeedback) => sendFeedback(input),
+  });
+}
+
+/** Attaches a written reason to feedback already recorded. */
+export function useAnnotateFeedbackMutation() {
+  return useMutation({
+    mutationFn: (input: { pubkey: string; feedbackId: string; note: string }) =>
+      annotateFeedback(input),
   });
 }
 

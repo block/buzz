@@ -4,7 +4,7 @@
  * origins, so no capability or config change is involved.
  */
 const BASE_URL = (
-  import.meta.env.VITE_TRIAGE_API_URL ?? "http://localhost:8787"
+  import.meta.env?.VITE_TRIAGE_API_URL ?? "http://localhost:8787"
 ).replace(/\/$/, "");
 
 export const FIBRE_KINDS = [
@@ -20,6 +20,19 @@ export const FIBRE_KINDS = [
 export type FibreKind = (typeof FIBRE_KINDS)[number];
 
 export type FibreStatus = "open" | "done" | "dismissed";
+
+/**
+ * Which column an open fibre lands in. Assigned by the engine in order:
+ * priority above the important threshold first, then engagement, then the
+ * rest. Every open fibre has exactly one.
+ */
+export const FIBRE_LANES = ["important", "hot", "other"] as const;
+
+export type FibreLane = (typeof FIBRE_LANES)[number];
+
+export function isFibreLane(value: unknown): value is FibreLane {
+  return FIBRE_LANES.includes(value as FibreLane);
+}
 
 export type FibreSignal = {
   weight: string;
@@ -48,6 +61,9 @@ export type Fibre = {
   kind: FibreKind;
   status: FibreStatus;
   score: number;
+  /** How busy the conversation is, independent of whether it needs you. */
+  engagement: number;
+  lane: FibreLane;
   title: string;
   summary: string;
   why: string;
@@ -79,15 +95,22 @@ export type FibreIngestMessage = {
   source?: "inbox" | "channel" | "live";
 };
 
+export type FibreLaneCounts = Record<FibreLane, number>;
+
 export type FibresResponse = {
   fibres: Fibre[];
   done: Fibre[];
   openCount: number;
   doneCount: number;
   clearedCount: number;
+  laneCounts: FibreLaneCounts;
   changes?: unknown[];
   ingested?: number;
 };
+
+export function emptyLaneCounts(): FibreLaneCounts {
+  return { important: 0, hot: 0, other: 0 };
+}
 
 export function emptyFibresResponse(
   extras?: Partial<FibresResponse>,
@@ -98,6 +121,7 @@ export function emptyFibresResponse(
     openCount: 0,
     doneCount: 0,
     clearedCount: 0,
+    laneCounts: emptyLaneCounts(),
     ingested: 0,
     ...extras,
   };
@@ -114,7 +138,11 @@ export type FibreFeedback = {
   threadRootId?: string | null;
   userAction: FibreFeedbackAction;
   preview?: string;
+  /** Free text from the user on why this was not worth their attention. */
+  note?: string;
 };
+
+export type FibreFeedbackReceipt = { id: string };
 
 export class TriageApiError extends Error {
   readonly status?: number;
@@ -194,9 +222,24 @@ export async function restoreFibres(
   });
 }
 
-export function sendFeedback(input: FibreFeedback): Promise<unknown> {
-  return request("/feedback", {
-    method: "POST",
-    body: JSON.stringify(input),
+export async function sendFeedback(
+  input: FibreFeedback,
+): Promise<FibreFeedbackReceipt> {
+  const { feedback } = await request<{ feedback: FibreFeedbackReceipt }>(
+    "/feedback",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return feedback;
+}
+
+/** Attaches a reason to feedback already recorded, so `x` stays instant. */
+export function annotateFeedback(input: {
+  pubkey: string;
+  feedbackId: string;
+  note: string;
+}): Promise<unknown> {
+  return request(`/feedback/${encodeURIComponent(input.feedbackId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ pubkey: input.pubkey, note: input.note }),
   });
 }

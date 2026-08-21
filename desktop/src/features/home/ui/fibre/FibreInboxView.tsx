@@ -3,12 +3,14 @@ import { toast } from "sonner";
 
 import { useCommunities } from "@/features/communities/useCommunities";
 import { FibreDetailPane } from "@/features/home/ui/fibre/FibreDetailPane";
+import { FibreDismissReasonDialog } from "@/features/home/ui/fibre/FibreDismissReasonDialog";
 import { FibreListPane } from "@/features/home/ui/fibre/FibreListPane";
 import {
   collectFibrePubkeys,
   primaryThreadTarget,
 } from "@/features/home/ui/fibre/fibreFormat";
 import {
+  FIBRE_LIST_TABS,
   sortFibres,
   type FibreListTab,
 } from "@/features/home/ui/fibre/fibreSort";
@@ -17,12 +19,16 @@ import { useFibreSort } from "@/features/home/ui/fibre/useFibreSort";
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Fibre } from "@/features/triage/api";
+import { fibresInLane } from "@/features/triage/fibreStatus";
 import {
+  useAnnotateFeedbackMutation,
   useFibreFeedbackMutation,
   useFibresQuery,
   usePatchFibreMutation,
 } from "@/features/triage/hooks";
 import { useNow } from "@/shared/lib/useNow";
+
+const DISMISS_TOAST = "Marked not a fibre — triage will weight this lower";
 
 type FibreInboxViewProps = {
   currentPubkey?: string;
@@ -53,13 +59,18 @@ export function FibreInboxView({
   const fibresQuery = useFibresQuery(currentPubkey);
   const patchMutation = usePatchFibreMutation(currentPubkey);
   const feedbackMutation = useFibreFeedbackMutation();
+  const annotateMutation = useAnnotateFeedbackMutation();
   const { markSeen, seenAtById } = useFibreSeenState(
     currentPubkey,
     activeCommunity?.relayUrl,
   );
-  const [listTab, setListTab] = React.useState<FibreListTab>("open");
+  const [listTab, setListTab] = React.useState<FibreListTab>("important");
   const { setSort, sort } = useFibreSort(listTab);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [reasonTarget, setReasonTarget] = React.useState<{
+    feedbackId: string;
+    title: string;
+  } | null>(null);
 
   const openFibres = React.useMemo(
     () => sortFibres(fibresQuery.data?.fibres ?? [], sort, "activity"),
@@ -69,9 +80,22 @@ export function FibreInboxView({
     () => sortFibres(fibresQuery.data?.done ?? [], sort, "updated"),
     [fibresQuery.data?.done, sort],
   );
-  const fibres = listTab === "done" ? doneFibres : openFibres;
+  const fibres = React.useMemo(
+    () => (listTab === "done" ? doneFibres : fibresInLane(openFibres, listTab)),
+    [doneFibres, listTab, openFibres],
+  );
   const openCount = fibresQuery.data?.openCount ?? openFibres.length;
   const doneCount = fibresQuery.data?.doneCount ?? doneFibres.length;
+  const tabCounts = React.useMemo(() => {
+    const counts = Object.fromEntries(
+      FIBRE_LIST_TABS.map((tab) => [tab, 0]),
+    ) as Record<FibreListTab, number>;
+    for (const fibre of openFibres) {
+      if (fibre.lane in counts) counts[fibre.lane] += 1;
+    }
+    counts.done = doneCount;
+    return counts;
+  }, [doneCount, openFibres]);
   const profilePubkeys = React.useMemo(() => {
     const pubkeys = collectFibrePubkeys([...openFibres, ...doneFibres]);
     if (currentPubkey) pubkeys.push(currentPubkey);
@@ -94,15 +118,16 @@ export function FibreInboxView({
   }, [selected, selectedId]);
 
   React.useEffect(() => {
-    if (listTab === "open" && selected) {
+    if (listTab !== "done" && selected) {
       markSeen(selected);
     }
   }, [listTab, markSeen, selected]);
 
   React.useEffect(() => {
     const root = document.documentElement;
+    // Inbox zero means every lane is clear, not just the one being viewed.
     const showWallpaper =
-      listTab === "open" && fibresQuery.isSuccess && openCount === 0;
+      listTab !== "done" && fibresQuery.isSuccess && openCount === 0;
     if (showWallpaper) {
       root.setAttribute("data-inbox-zero", "");
     } else {
@@ -123,10 +148,24 @@ export function FibreInboxView({
   );
 
   const mark = React.useCallback(
-    (fibre: Fibre, status: "done" | "dismissed", message: string) => {
+    (
+      fibre: Fibre,
+      status: "done" | "dismissed",
+      message: string,
+      askReason = false,
+    ) => {
       patchMutation.mutate({ id: fibre.id, status });
-      if (currentPubkey) {
-        feedbackMutation.mutate({
+      advanceAfter(fibre.id);
+
+      if (!currentPubkey) {
+        toast.success(message);
+        return;
+      }
+
+      // The toast waits on the receipt because "Add reason" needs the
+      // feedback id; the fibre itself has already moved, so nothing blocks.
+      feedbackMutation.mutate(
+        {
           pubkey: currentPubkey,
           fibreId: fibre.id,
           eventId: fibre.artifacts[0]?.eventId,
@@ -135,12 +174,45 @@ export function FibreInboxView({
           threadRootId: fibre.artifacts[0]?.threadRootId,
           userAction: status === "done" ? "done" : "dismissed",
           preview: fibre.title,
-        });
-      }
-      toast.success(message);
-      advanceAfter(fibre.id);
+        },
+        {
+          onSuccess: (receipt) => {
+            const target = { feedbackId: receipt.id, title: fibre.title };
+            if (status !== "dismissed" || !receipt.id) {
+              toast.success(message);
+              return;
+            }
+            if (askReason) {
+              setReasonTarget(target);
+              return;
+            }
+            toast.success(message, {
+              action: {
+                label: "Add reason",
+                onClick: () => setReasonTarget(target),
+              },
+            });
+          },
+          onError: () => toast.success(message),
+        },
+      );
     },
     [advanceAfter, currentPubkey, feedbackMutation, patchMutation],
+  );
+
+  const saveReason = React.useCallback(
+    (note: string) => {
+      if (!currentPubkey || !reasonTarget) return;
+      annotateMutation.mutate(
+        { pubkey: currentPubkey, feedbackId: reasonTarget.feedbackId, note },
+        {
+          onSuccess: () => toast.success("Thanks — triage will remember that"),
+          onError: () => toast.error("Could not save that reason"),
+        },
+      );
+      setReasonTarget(null);
+    },
+    [annotateMutation, currentPubkey, reasonTarget],
   );
 
   const reopen = React.useCallback(
@@ -188,11 +260,8 @@ export function FibreInboxView({
         mark(selected, "done", "Marked done");
       } else if (key === "x") {
         event.preventDefault();
-        mark(
-          selected,
-          "dismissed",
-          "Marked not a fibre — the model will weight this pattern lower",
-        );
+        // Shift jumps straight to the reason prompt instead of the toast.
+        mark(selected, "dismissed", DISMISS_TOAST, event.shiftKey);
       } else if (key === "h") {
         event.preventDefault();
         toast.message("Snooze isn't wired yet");
@@ -242,18 +311,18 @@ export function FibreInboxView({
     >
       <FibreListPane
         currentPubkey={currentPubkey}
-        doneCount={doneCount}
         fibres={fibres}
+        isInboxZero={openCount === 0}
         listTab={listTab}
         nowMs={nowMs}
         onListTabChange={setListTab}
         onSelect={setSelectedId}
         onSortChange={setSort}
-        openCount={openCount}
         profiles={profiles}
         seenAtById={seenAtById}
         selectedId={selected?.id ?? null}
         sort={sort}
+        tabCounts={tabCounts}
       />
       <FibreDetailPane
         currentPubkey={currentPubkey}
@@ -261,16 +330,15 @@ export function FibreInboxView({
         listTab={listTab}
         nowMs={nowMs}
         profiles={profiles}
-        onDismiss={(fibre) =>
-          mark(
-            fibre,
-            "dismissed",
-            "Marked not a fibre — the model will weight this pattern lower",
-          )
-        }
+        onDismiss={(fibre) => mark(fibre, "dismissed", DISMISS_TOAST)}
         onDone={(fibre) => mark(fibre, "done", "Marked done")}
         onOpenContext={onOpenContext}
         onReopen={reopen}
+      />
+      <FibreDismissReasonDialog
+        fibreTitle={reasonTarget?.title ?? null}
+        onCancel={() => setReasonTarget(null)}
+        onSubmit={saveReason}
       />
     </div>
   );

@@ -1,8 +1,23 @@
-import type { Fibre } from "@/features/triage/api";
+import { FIBRE_LANES, type Fibre, type FibreLane } from "@/features/triage/api";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 export type FibreSort = "priority" | "newest";
-export type FibreListTab = "open" | "done";
+export type FibreListTab = FibreLane | "done";
+
+export const FIBRE_LIST_TABS: FibreListTab[] = [...FIBRE_LANES, "done"];
+
+export const FIBRE_TAB_LABELS: Record<FibreListTab, string> = {
+  important: "Important",
+  hot: "Hot",
+  other: "Other",
+  done: "Done",
+};
+
+export function isFibreListTab(
+  value: string | null | undefined,
+): value is FibreListTab {
+  return FIBRE_LIST_TABS.includes(value as FibreListTab);
+}
 
 export const FIBRE_SORT_STORAGE_KEY = "buzz-fibre-sort.v1";
 
@@ -27,12 +42,16 @@ export function writeFibreSort(sort: FibreSort): void {
   setLocalStorageItemWithRecovery(FIBRE_SORT_STORAGE_KEY, sort);
 }
 
-/** Open defaults to priority; Done defaults to newest until the user picks. */
+/**
+ * Important is ranked, so priority reads best there. Hot, Other, and Done are
+ * about what is happening rather than what matters most, so they default to
+ * newest until the user picks.
+ */
 export function resolveFibreSort(
   tab: FibreListTab,
   preference: FibreSort | null,
 ): FibreSort {
-  return preference ?? (tab === "done" ? "newest" : "priority");
+  return preference ?? (tab === "important" ? "priority" : "newest");
 }
 
 export function fibreActivityAt(fibre: Fibre): number {

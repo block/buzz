@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyFibreActions, messageToArtifact } from "./apply.mjs";
+import {
+  applyFibreActions,
+  deriveLane,
+  messageToArtifact,
+} from "./apply.mjs";
 
 const MSG_A = {
   eventId: "a",
@@ -55,6 +59,56 @@ test("create adds a fibre from the referenced messages", () => {
     changes.map((change) => change.type),
     ["create"],
   );
+});
+
+test("lanes are tried in order: important, then hot, then other", () => {
+  assert.equal(deriveLane(90, 0), "important");
+  assert.equal(deriveLane(90, 95), "important");
+  assert.equal(deriveLane(71, 0), "important");
+  assert.equal(deriveLane(70, 0), "other");
+  assert.equal(deriveLane(70, 60), "hot");
+  assert.equal(deriveLane(10, 59), "other");
+});
+
+test("a created fibre carries an engagement and a lane", () => {
+  const { fibres } = applyFibreActions({
+    fibres: [],
+    messages: [MSG_A],
+    actions: [
+      { type: "create", kind: "ask", score: 84, engagement: 20, eventIds: ["a"] },
+    ],
+    now: 10,
+  });
+
+  assert.equal(fibres[0].engagement, 20);
+  assert.equal(fibres[0].lane, "important");
+});
+
+test("updating a fibre re-derives its lane from the new score", () => {
+  const created = applyFibreActions({
+    fibres: [],
+    messages: [MSG_A],
+    actions: [{ type: "create", kind: "ask", score: 40, eventIds: ["a"] }],
+    now: 10,
+  });
+  assert.equal(created.fibres[0].lane, "other");
+
+  const updated = applyFibreActions({
+    fibres: created.fibres,
+    messages: [MSG_B],
+    actions: [
+      {
+        type: "update",
+        fibreId: created.fibres[0].id,
+        score: 88,
+        eventIds: ["b"],
+      },
+    ],
+    now: 20,
+  });
+
+  assert.equal(updated.fibres[0].score, 88);
+  assert.equal(updated.fibres[0].lane, "important");
 });
 
 test("create with unknown event ids is ignored", () => {

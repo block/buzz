@@ -2,9 +2,11 @@ import { Ellipsis } from "lucide-react";
 
 import { FibreRow } from "@/features/home/ui/fibre/FibreRow";
 import { fibreDotState } from "@/features/home/ui/fibre/fibreSeen";
-import type {
-  FibreListTab,
-  FibreSort,
+import {
+  FIBRE_LIST_TABS,
+  FIBRE_TAB_LABELS,
+  type FibreListTab,
+  type FibreSort,
 } from "@/features/home/ui/fibre/fibreSort";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Fibre } from "@/features/triage/api";
@@ -24,8 +26,9 @@ type FibreListPaneProps = {
   fibres: readonly Fibre[];
   listTab: FibreListTab;
   nowMs: number;
-  openCount: number;
-  doneCount: number;
+  tabCounts: Record<FibreListTab, number>;
+  /** Every lane is empty, so the inbox-zero wallpaper owns the empty state. */
+  isInboxZero: boolean;
   profiles?: UserProfileLookup;
   seenAtById?: Record<string, number>;
   selectedId: string | null;
@@ -33,6 +36,25 @@ type FibreListPaneProps = {
   onListTabChange: (tab: FibreListTab) => void;
   onSelect: (id: string) => void;
   onSortChange: (sort: FibreSort) => void;
+};
+
+const EMPTY_COPY: Record<FibreListTab, { title: string; body: string }> = {
+  important: {
+    title: "Nothing needs you",
+    body: "Fibres blocking someone, or waiting on you, land here first.",
+  },
+  hot: {
+    title: "No live discussions",
+    body: "Busy threads show up here, even when nothing is asked of you.",
+  },
+  other: {
+    title: "Nothing else waiting",
+    body: "Fibres worth keeping but not urgent collect here.",
+  },
+  done: {
+    title: "Nothing completed yet",
+    body: "Mark a fibre done and it will land here.",
+  },
 };
 
 const TAB_TRIGGER_CLASS =
@@ -46,8 +68,8 @@ export function FibreListPane({
   fibres,
   listTab,
   nowMs,
-  openCount,
-  doneCount,
+  tabCounts,
+  isInboxZero,
   profiles,
   seenAtById,
   selectedId,
@@ -56,7 +78,8 @@ export function FibreListPane({
   onSelect,
   onSortChange,
 }: FibreListPaneProps) {
-  const showSeenDots = listTab === "open";
+  const showSeenDots = listTab !== "done";
+  const empty = EMPTY_COPY[listTab];
 
   return (
     <div
@@ -74,50 +97,34 @@ export function FibreListPane({
           className="flex items-center gap-3 text-muted-foreground"
           role="tablist"
         >
-          <button
-            aria-selected={listTab === "open"}
-            className={cn(
-              TAB_TRIGGER_CLASS,
-              listTab === "open" && "border-foreground text-foreground",
-            )}
-            data-testid="fibre-tab-open"
-            onClick={() => onListTabChange("open")}
-            role="tab"
-            type="button"
-          >
-            Open
-            <span
-              className={cn(
-                TAB_COUNT_CLASS,
-                listTab === "open" && "text-foreground/70",
-              )}
-              data-testid="fibre-tab-open-count"
-            >
-              {openCount}
-            </span>
-          </button>
-          <button
-            aria-selected={listTab === "done"}
-            className={cn(
-              TAB_TRIGGER_CLASS,
-              listTab === "done" && "border-foreground text-foreground",
-            )}
-            data-testid="fibre-tab-done"
-            onClick={() => onListTabChange("done")}
-            role="tab"
-            type="button"
-          >
-            Done
-            <span
-              className={cn(
-                TAB_COUNT_CLASS,
-                listTab === "done" && "text-foreground/70",
-              )}
-              data-testid="fibre-tab-done-count"
-            >
-              {doneCount}
-            </span>
-          </button>
+          {FIBRE_LIST_TABS.map((tab) => {
+            const active = listTab === tab;
+            return (
+              <button
+                aria-selected={active}
+                className={cn(
+                  TAB_TRIGGER_CLASS,
+                  active && "border-foreground text-foreground",
+                )}
+                data-testid={`fibre-tab-${tab}`}
+                key={tab}
+                onClick={() => onListTabChange(tab)}
+                role="tab"
+                type="button"
+              >
+                {FIBRE_TAB_LABELS[tab]}
+                <span
+                  className={cn(
+                    TAB_COUNT_CLASS,
+                    active && "text-foreground/70",
+                  )}
+                  data-testid={`fibre-tab-${tab}-count`}
+                >
+                  {tabCounts[tab]}
+                </span>
+              </button>
+            );
+          })}
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -153,16 +160,19 @@ export function FibreListPane({
       </TopChromeInsetHeader>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2.5">
         {fibres.length === 0 ? (
-          listTab === "done" ? (
-            <div className="inbox-zero-copy px-8 py-14 text-center">
+          isInboxZero && listTab !== "done" ? null : (
+            <div
+              className="inbox-zero-copy px-8 py-14 text-center"
+              data-testid="fibre-lane-empty"
+            >
               <div className="mb-1.5 text-sm text-foreground/80">
-                Nothing completed yet
+                {empty.title}
               </div>
               <div className="text-xs leading-relaxed text-muted-foreground">
-                Mark a fibre done and it will land here.
+                {empty.body}
               </div>
             </div>
-          ) : null
+          )
         ) : (
           fibres.map((fibre) => {
             const seen = showSeenDots

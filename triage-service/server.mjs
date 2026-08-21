@@ -1,17 +1,20 @@
 import { createServer } from "node:http";
 
-import { applyFibreActions } from "./apply.mjs";
-import { classifyMessages } from "./classify.mjs";
+import { buildLessons, triageBatch } from "./classify.mjs";
+import { describeMode } from "./llm.mjs";
 import {
   fibresPayload,
   ingestedIds,
   listFeedback,
   listFibres,
-  listOpenFibres,
+  listIgnored,
   markIngested,
+  patchFeedback,
   patchFibre,
   putFibres,
   recordFeedback,
+  recordIgnored,
+  recordTranscript,
   resetStore,
   restoreFibres,
 } from "./store.mjs";
@@ -58,18 +61,25 @@ async function ingestMessages(pubkey, incoming) {
     .filter((message) => (message.content ?? "").trim().length > 0)
     .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
+  // Context comes from the transcript, so it has to hold every message —
+  // including the ones triage goes on to ignore.
+  recordTranscript(pubkey, unseen);
+
   const allChanges = [];
+  let ignoredCount = 0;
+
   for (const batch of chunk(unseen, INGEST_BATCH)) {
-    const open = listOpenFibres(pubkey);
-    const actions = await classifyMessages(batch, open, listFeedback(pubkey));
-    const applied = applyFibreActions({
-      fibres: listFibres(pubkey),
+    const result = await triageBatch({
+      pubkey,
       messages: batch,
-      actions,
+      fibres: listFibres(pubkey),
+      lessons: buildLessons(listFeedback(pubkey)),
     });
-    putFibres(pubkey, applied.fibres);
-    markIngested(pubkey, applied.ingestedEventIds);
-    allChanges.push(...applied.changes);
+    putFibres(pubkey, result.fibres);
+    markIngested(pubkey, result.ingestedEventIds);
+    recordIgnored(pubkey, result.ignored);
+    allChanges.push(...result.changes);
+    ignoredCount += result.ignored.length;
   }
 
   if (unseen.length === 0 && incoming.length > 0) {
@@ -80,7 +90,12 @@ async function ingestMessages(pubkey, incoming) {
   }
 
   const payload = fibresPayload(pubkey);
-  return { ...payload, changes: allChanges, ingested: unseen.length };
+  return {
+    ...payload,
+    changes: allChanges,
+    ingested: unseen.length,
+    ignored: ignoredCount,
+  };
 }
 
 async function route(req, url) {
@@ -88,7 +103,7 @@ async function route(req, url) {
   const method = req.method ?? "GET";
 
   if (method === "GET" && pathname === "/health") {
-    return [200, { status: "ok" }];
+    return [200, { status: "ok", mode: describeMode() }];
   }
 
   if (method === "POST" && pathname === "/ingest") {
@@ -98,7 +113,7 @@ async function route(req, url) {
     if (!pubkey) return [400, { error: "pubkey is required" }];
     const result = await ingestMessages(pubkey, messages);
     console.log(
-      `[triage] ingested ${result.ingested} messages for ${pubkey.slice(0, 8)}: ${result.openCount} open fibres`,
+      `[triage] ${pubkey.slice(0, 8)}: ${result.ingested} messages in, ${result.ignored} ignored, ${result.openCount} open fibres (${result.laneCounts.important} important, ${result.laneCounts.hot} hot, ${result.laneCounts.other} other)`,
     );
     return [200, result];
   }
@@ -107,6 +122,20 @@ async function route(req, url) {
     const pubkey = searchParams.get("pubkey");
     if (!pubkey) return [400, { error: "pubkey is required" }];
     return [200, fibresPayload(pubkey)];
+  }
+
+  if (method === "GET" && pathname === "/ignored") {
+    const pubkey = searchParams.get("pubkey");
+    if (!pubkey) return [400, { error: "pubkey is required" }];
+    const ignored = listIgnored(pubkey);
+    return [
+      200,
+      {
+        ignored,
+        count: ignored.length,
+        addressedCount: ignored.filter((entry) => entry.wasAddressed).length,
+      },
+    ];
   }
 
   const fibreMatch = pathname.match(/^\/fibres\/([\w-]+)$/);
@@ -140,6 +169,18 @@ async function route(req, url) {
     return [201, { feedback }];
   }
 
+  const feedbackMatch = pathname.match(/^\/feedback\/([\w-]+)$/);
+  if (method === "PATCH" && feedbackMatch) {
+    const body = await readJson(req);
+    if (!body.pubkey) return [400, { error: "pubkey is required" }];
+    const note = typeof body.note === "string" ? body.note.trim() : "";
+    if (!note) return [400, { error: "note is required" }];
+    const feedback = patchFeedback(body.pubkey, feedbackMatch[1], { note });
+    return feedback
+      ? [200, { feedback }]
+      : [404, { error: "feedback not found" }];
+  }
+
   if (method === "POST" && pathname === "/reset") {
     resetStore();
     console.log("[triage] store purged");
@@ -166,6 +207,7 @@ createServer(async (req, res) => {
     send(res, 500, { error: error.message });
   }
 }).listen(PORT, () => {
-  const mode = process.env.TRIAGE_LLM === "1" ? "LLM" : "heuristic";
-  console.log(`[triage] listening on http://localhost:${PORT} (${mode} mode)`);
+  console.log(
+    `[triage] listening on http://localhost:${PORT} (${describeMode()} mode)`,
+  );
 });

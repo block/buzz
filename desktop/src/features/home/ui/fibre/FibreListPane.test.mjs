@@ -1,6 +1,6 @@
 /**
- * Fibre list rendering: kind labels, Open/Done tabs, seen dots, and empty
- * states. Mounts the shipping FibreListPane rather than reimplementing layout.
+ * Fibre list rendering: kind labels, lane tabs, seen dots, and empty states.
+ * Mounts the shipping FibreListPane rather than reimplementing layout.
  */
 
 import assert from "node:assert/strict";
@@ -27,6 +27,8 @@ function fibre(overrides = {}) {
     kind: "blocker",
     status: "open",
     score: 98,
+    engagement: 10,
+    lane: "important",
     title: "Incident root cause is identified",
     summary: "The agent traced the degradation.",
     why: "An agent @-mentioned you.",
@@ -55,22 +57,26 @@ function fibre(overrides = {}) {
   };
 }
 
+function counts(overrides = {}) {
+  return { important: 1, hot: 0, other: 0, done: 0, ...overrides };
+}
+
 function renderList(props = {}) {
   const tabs = [];
   const sorts = [];
   const selected = [];
   render(
     createElement(FibreListPane, {
-      doneCount: 0,
       fibres: [fibre()],
-      listTab: "open",
+      isInboxZero: false,
+      listTab: "important",
       nowMs: NOW,
       onListTabChange: (tab) => tabs.push(tab),
       onSelect: (id) => selected.push(id),
       onSortChange: (sort) => sorts.push(sort),
-      openCount: 1,
       selectedId: "f1",
       sort: "priority",
+      tabCounts: counts(),
       ...props,
     }),
   );
@@ -127,10 +133,13 @@ test("renders kind labels and titles without a score badge", () => {
         channelName: "hack-project-mesh",
       }),
     ],
-    openCount: 2,
+    tabCounts: counts({ important: 2 }),
   });
 
-  assert.equal(screen.getByTestId("fibre-tab-open-count").textContent, "2");
+  assert.equal(
+    screen.getByTestId("fibre-tab-important-count").textContent,
+    "2",
+  );
   assert.equal(screen.getByTestId("fibre-tab-done-count").textContent, "0");
   const rows = screen.getAllByTestId("fibre-row");
   assert.equal(rows.length, 2);
@@ -152,35 +161,62 @@ test("renders kind labels and titles without a score badge", () => {
   assert.deepEqual(selected, ["f2"]);
 });
 
-test("empty open list omits Inbox Zero copy and keeps the count on the tab", () => {
+test("all four lanes render with their counts", () => {
   renderList({
-    fibres: [],
-    openCount: 0,
-    selectedId: null,
+    tabCounts: counts({ important: 2, hot: 5, other: 9, done: 3 }),
   });
 
-  assert.equal(
-    screen.getByTestId("fibre-list").textContent.includes("Inbox Zero"),
-    false,
+  assert.deepEqual(
+    ["important", "hot", "other", "done"].map(
+      (tab) => screen.getByTestId(`fibre-tab-${tab}-count`).textContent,
+    ),
+    ["2", "5", "9", "3"],
   );
-  assert.equal(screen.getByTestId("fibre-tab-open-count").textContent, "0");
-  assert.equal(screen.queryAllByTestId("fibre-row").length, 0);
+  assert.equal(
+    screen.getByTestId("fibre-tab-important").getAttribute("aria-selected"),
+    "true",
+  );
 });
 
-test("empty done list shows completed copy", () => {
+test("an empty lane explains itself while other lanes still have fibres", () => {
   renderList({
-    doneCount: 0,
     fibres: [],
-    listTab: "done",
-    openCount: 0,
+    listTab: "hot",
     selectedId: null,
+    tabCounts: counts({ important: 4, hot: 0 }),
   });
 
   assert.match(
-    screen.getByTestId("fibre-list").textContent,
+    screen.getByTestId("fibre-lane-empty").textContent,
+    /No live discussions/,
+  );
+});
+
+test("at inbox zero the lane copy yields to the wallpaper", () => {
+  renderList({
+    fibres: [],
+    isInboxZero: true,
+    selectedId: null,
+    tabCounts: counts({ important: 0 }),
+  });
+
+  assert.equal(screen.queryByTestId("fibre-lane-empty"), null);
+  assert.equal(screen.queryAllByTestId("fibre-row").length, 0);
+});
+
+test("empty done list shows completed copy even at inbox zero", () => {
+  renderList({
+    fibres: [],
+    isInboxZero: true,
+    listTab: "done",
+    selectedId: null,
+    tabCounts: counts({ important: 0 }),
+  });
+
+  assert.match(
+    screen.getByTestId("fibre-lane-empty").textContent,
     /Nothing completed yet/,
   );
-  assert.equal(screen.getByTestId("fibre-tab-done-count").textContent, "0");
 });
 
 test("unseen fibres show a blue dot; updated fibres show purple", () => {
@@ -191,9 +227,9 @@ test("unseen fibres show a blue dot; updated fibres show purple", () => {
       fibre({ id: "f2", title: "Already opened", updatedAt: 50 }),
       fibre({ id: "f3", title: "Updated after open", updatedAt: 80 }),
     ],
-    openCount: 3,
     seenAtById: { f2: 50, f3: 50 },
     selectedId: "f1",
+    tabCounts: counts({ important: 3 }),
   });
 
   const rows = screen.getAllByTestId("fibre-row");
@@ -210,19 +246,20 @@ test("unseen fibres show a blue dot; updated fibres show purple", () => {
 
 test("done tab does not show seen dots", () => {
   renderList({
-    doneCount: 1,
     fibres: [fibre({ status: "done" })],
     listTab: "done",
-    openCount: 0,
+    tabCounts: counts({ important: 0, done: 1 }),
   });
 
   assert.equal(screen.queryByTestId("fibre-seen-dot"), null);
 });
 
-test("Open and Done tabs notify the parent", () => {
+test("every tab notifies the parent", () => {
   const { tabs } = renderList();
-  fireEvent.click(screen.getByTestId("fibre-tab-done"));
-  assert.deepEqual(tabs, ["done"]);
+  for (const tab of ["hot", "other", "done"]) {
+    fireEvent.click(screen.getByTestId(`fibre-tab-${tab}`));
+  }
+  assert.deepEqual(tabs, ["hot", "other", "done"]);
 });
 
 test("sort trigger is available in the list header", () => {

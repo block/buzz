@@ -25,6 +25,8 @@ const FIBRES = [
     kind: "blocker",
     status: "open",
     score: 98,
+    engagement: 20,
+    lane: "important",
     title:
       "Incident root cause is identified — the rollback call is waiting on you",
     summary: "The agent traced the degradation and posted findings.",
@@ -56,6 +58,8 @@ const FIBRES = [
     kind: "ask",
     status: "open",
     score: 84,
+    engagement: 10,
+    lane: "important",
     title: "Vlad needs you to run the triage scripts before the next build",
     summary: "Two scripts have to run in order.",
     why: "A direct @mention containing an executable instruction.",
@@ -83,6 +87,20 @@ const FIBRES = [
   },
 ];
 
+/** A live discussion nobody is asking the viewer about. */
+const HOT_FIBRE = {
+  ...FIBRES[1],
+  id: "f3",
+  kind: "fyi",
+  score: 34,
+  engagement: 78,
+  lane: "hot",
+  title: "Design is going back and forth on the collapsed nav",
+  summary: "Five people are weighing tap targets against discoverability.",
+  why: "A busy thread on a surface you have worked on before.",
+  whyShort: "Busy design thread.",
+};
+
 function payload(open: typeof FIBRES, done: typeof FIBRES = []) {
   return {
     fibres: open,
@@ -90,6 +108,11 @@ function payload(open: typeof FIBRES, done: typeof FIBRES = []) {
     openCount: open.length,
     doneCount: done.length,
     clearedCount: done.length,
+    laneCounts: {
+      important: open.filter((fibre) => fibre.lane === "important").length,
+      hot: open.filter((fibre) => fibre.lane === "hot").length,
+      other: open.filter((fibre) => fibre.lane === "other").length,
+    },
     ingested: 0,
     changes: [],
   };
@@ -101,6 +124,7 @@ async function mockFibreService(
 ) {
   let open = [...initial];
   let done: typeof FIBRES = [];
+  const notes: string[] = [];
   await page.route(
     /http:\/\/(?:localhost|127\.0\.0\.1):8787\/.*/,
     async (route) => {
@@ -126,6 +150,24 @@ async function mockFibreService(
         open = [...FIBRES];
         done = [];
         await route.fulfill({ headers: CORS, json: payload(open, done) });
+        return;
+      }
+      if (url.pathname === "/feedback" && method === "POST") {
+        await route.fulfill({
+          headers: CORS,
+          json: { feedback: { id: "fb-1" } },
+        });
+        return;
+      }
+      if (method === "PATCH" && url.pathname.startsWith("/feedback/")) {
+        const body = JSON.parse(route.request().postData() ?? "{}") as {
+          note?: string;
+        };
+        notes.push(body.note ?? "");
+        await route.fulfill({
+          headers: CORS,
+          json: { feedback: { id: "fb-1" } },
+        });
         return;
       }
       if (method === "PATCH" && url.pathname.startsWith("/fibres/")) {
@@ -155,6 +197,7 @@ async function mockFibreService(
       await route.fulfill({ headers: CORS, json: {} });
     },
   );
+  return { notes };
 }
 
 test("fibre inbox lists scored fibres and opens detail", async ({ page }) => {
@@ -224,8 +267,57 @@ test("fibre inbox empty open state has no Inbox Zero copy", async ({
   await expect(page.getByTestId("fibre-zero")).toBeVisible();
   await expect(page.getByTestId("fibre-zero")).toHaveText("");
   await expect(page.getByTestId("fibre-restore")).toHaveCount(0);
-  await expect(page.getByTestId("fibre-tab-open-count")).toHaveText("0");
+  await expect(page.getByTestId("fibre-tab-important-count")).toHaveText("0");
+  await expect(page.getByTestId("fibre-lane-empty")).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-inbox-zero", "");
+});
+
+test("lanes route fibres and each tab counts its own", async ({ page }) => {
+  await installMockBridge(page);
+  await mockFibreService(page, [...FIBRES, HOT_FIBRE]);
+  await page.goto("/");
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
+
+  await expect(page.getByTestId("fibre-tab-important-count")).toHaveText("2");
+  await expect(page.getByTestId("fibre-tab-hot-count")).toHaveText("1");
+  await expect(page.getByTestId("fibre-tab-other-count")).toHaveText("0");
+  await expect(page.getByTestId("fibre-row")).toHaveCount(2);
+
+  await page.getByTestId("fibre-tab-hot").click();
+  await expect(page.getByTestId("fibre-row")).toHaveCount(1);
+  await expect(page.getByTestId("fibre-detail")).toContainText("collapsed nav");
+
+  await page.getByTestId("fibre-tab-other").click();
+  await expect(page.getByTestId("fibre-row")).toHaveCount(0);
+  await expect(page.getByTestId("fibre-lane-empty")).toContainText(
+    "Nothing else waiting",
+  );
+  // Other lanes still hold fibres, so this is not inbox zero.
+  await expect(page.locator("html")).not.toHaveAttribute("data-inbox-zero");
+});
+
+test("dismissing offers to record why, and the reason reaches the engine", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  const { notes } = await mockFibreService(page);
+  await page.goto("/");
+  await expect(page.getByTestId("fibre-row")).toHaveCount(2);
+
+  await page.getByTestId("fibre-dismiss").click();
+  await expect(page.getByTestId("fibre-row")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Add reason" }).click();
+  await expect(page.getByTestId("fibre-reason-dialog")).toBeVisible();
+  await page
+    .getByTestId("fibre-reason-input")
+    .fill("Incident channel noise, the on-call owns this");
+  await page.getByTestId("fibre-reason-save").click();
+
+  await expect(page.getByTestId("fibre-reason-dialog")).toHaveCount(0);
+  await expect
+    .poll(() => notes)
+    .toEqual(["Incident channel noise, the on-call owns this"]);
 });
 
 test("fibre inbox Done tab lists completed fibres", async ({ page }) => {

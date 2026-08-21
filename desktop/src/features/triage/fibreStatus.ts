@@ -1,6 +1,32 @@
-import type { Fibre, FibreStatus, FibresResponse } from "@/features/triage/api";
+import {
+  emptyLaneCounts,
+  isFibreLane,
+  type Fibre,
+  type FibreLane,
+  type FibreLaneCounts,
+  type FibreStatus,
+  type FibresResponse,
+} from "@/features/triage/api";
 
 export type FibresPayload = Partial<FibresResponse> & { fibre?: Fibre };
+
+/** Fibres from an engine that predates lanes still need a column. */
+function laneOf(fibre: Fibre): FibreLane {
+  return isFibreLane(fibre.lane) ? fibre.lane : "other";
+}
+
+export function countLanes(fibres: readonly Fibre[]): FibreLaneCounts {
+  const counts = emptyLaneCounts();
+  for (const fibre of fibres) counts[laneOf(fibre)] += 1;
+  return counts;
+}
+
+export function fibresInLane(
+  fibres: readonly Fibre[],
+  lane: FibreLane,
+): Fibre[] {
+  return fibres.filter((fibre) => laneOf(fibre) === lane);
+}
 
 export function normalizeFibresResponse(
   payload: FibresPayload | null | undefined,
@@ -29,6 +55,7 @@ export function normalizeFibresResponse(
     openCount: payload?.openCount ?? fibres.length,
     doneCount: payload?.doneCount ?? done.length,
     clearedCount: payload?.clearedCount ?? 0,
+    laneCounts: payload?.laneCounts ?? countLanes(fibres),
     changes: payload?.changes,
     ingested: payload?.ingested,
   };
@@ -64,6 +91,7 @@ export function moveFibreStatus(
     done: nextDone,
     openCount: nextOpen.length,
     doneCount: nextDone.length,
+    laneCounts: countLanes(nextOpen),
     clearedCount: Math.max(0, current.clearedCount + clearedDelta),
   };
 }

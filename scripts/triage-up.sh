@@ -2,7 +2,7 @@
 # =============================================================================
 # triage-up.sh — Run the fibre engine that the desktop Inbox calls
 # =============================================================================
-# Usage: ./scripts/triage-up.sh [--llm] [--port N] [-d] [--stop] [--restart] [--yes]
+# Usage: ./scripts/triage-up.sh [--heuristic] [--port N] [-d] [--stop] [--restart] [--yes]
 #
 # Puts the Hermit-pinned Node on PATH, clears a stale instance off the port, and
 # starts triage-service. The desktop app reaches it at http://localhost:8787
@@ -29,7 +29,7 @@ error()   { echo -e "${RED}[triage-up]${NC} $*" >&2; }
 MODE="start"
 BACKGROUND=false
 ASSUME_YES=false
-USE_LLM=false
+USE_LLM=true
 PORT="${PORT:-8787}"
 MODEL="${TRIAGE_MODEL:-}"
 INVOCATION="scripts/triage-up.sh"
@@ -56,9 +56,11 @@ Modes (at most one):
   --status       Report whether the service is up, then exit
 
 Options:
-  --llm          Classify with an LLM (needs OPENAI_API_KEY) instead of the
-                 built-in heuristic
-  --model NAME   Model for --llm (default gpt-4o-mini)
+  --heuristic    Classify with the built-in heuristic instead of an LLM. The
+                 heuristic cannot judge importance in context, so triage is
+                 much blunter — this is the offline fallback, not parity.
+  --llm          Classify with an LLM (the default; needs OPENAI_API_KEY)
+  --model NAME   Model to classify with (default gpt-4o-mini)
   --port N       Listen on N instead of 8787. The desktop app defaults to
                  8787, so set VITE_TRIAGE_API_URL to match if you change it.
   -y, --yes      Non-interactive: replace a stale instance without prompting
@@ -74,6 +76,7 @@ parse_args() {
       --stop) MODE="stop" ;;
       --status) MODE="status" ;;
       --llm) USE_LLM=true ;;
+      --heuristic) USE_LLM=false ;;
       --model)
         shift || { error "--model needs a value"; exit 1; }
         MODEL="$1"
@@ -141,8 +144,8 @@ require_llm_key() {
     return 0
   fi
   if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    error "--llm needs OPENAI_API_KEY in the environment."
-    error "Either export it, or drop --llm to use the heuristic classifier."
+    error "LLM classification is the default and needs OPENAI_API_KEY."
+    error "Export it, or run with --heuristic for the blunter offline mode."
     exit 1
   fi
 }
@@ -285,8 +288,9 @@ export_service_env() {
       export TRIAGE_MODEL="${MODEL}"
     fi
   else
-    # An inherited TRIAGE_LLM would silently override the default mode.
-    unset TRIAGE_LLM
+    # The service treats "0" as an explicit opt-out; anything else with a key
+    # present means LLM, so the flag has to be set rather than unset.
+    export TRIAGE_LLM=0
   fi
 }
 

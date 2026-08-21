@@ -68,6 +68,23 @@ test("candidateFromEvent marks the current user's own messages", () => {
   assert.equal(candidate.authorPubkey, SELF);
 });
 
+test("candidateFromEvent does not read your own author tag as a mention", () => {
+  const candidate = candidateFromEvent(
+    event({
+      pubkey: SELF,
+      tags: [
+        ["h", "channel-1"],
+        ["p", SELF],
+      ],
+    }),
+    channel(),
+    { currentPubkey: SELF },
+  );
+
+  assert.equal(candidate.isSelf, true);
+  assert.equal(candidate.isMention, false);
+});
+
 test("candidateFromEvent uses profile display names for authorLabel", () => {
   const candidate = candidateFromEvent(event(), channel(), {
     currentPubkey: SELF,
@@ -153,6 +170,33 @@ test("candidatesFromInboxItems marks feed mentions and keeps the inbox source", 
   assert.equal(candidates[0].source, "inbox");
   assert.equal(candidates[0].threadRootId, "root-9");
   assert.equal(candidates[0].createdAt, 2_000);
+});
+
+test("candidatesFromInboxItems does not read your own message as a mention", () => {
+  const candidates = candidatesFromInboxItems(
+    [
+      {
+        conversationId: "root-9",
+        id: "event-10",
+        categories: ["mention"],
+        item: {
+          id: "event-10",
+          kind: 40002,
+          pubkey: SELF,
+          content: "I will take this",
+          createdAt: 2_000,
+          channelId: "channel-2",
+          channelName: "design",
+          channelType: "stream",
+          tags: [["p", SELF]],
+        },
+      },
+    ],
+    { currentPubkey: SELF },
+  );
+
+  assert.equal(candidates[0].isSelf, true);
+  assert.equal(candidates[0].isMention, false);
 });
 
 test("mergeCandidates prefers the inbox copy of a duplicated event", () => {

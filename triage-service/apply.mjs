@@ -12,6 +12,14 @@ export const FIBRE_KINDS = [
 
 const KIND_SET = new Set(FIBRE_KINDS);
 
+export const FIBRE_LANES = ["important", "hot", "other"];
+
+/** Above this priority a fibre is important regardless of how busy it is. */
+export const IMPORTANT_SCORE_THRESHOLD = 70;
+
+/** Engagement at or above this is a discussion worth knowing about. */
+export const HOT_ENGAGEMENT_THRESHOLD = 60;
+
 export function isFibreKind(value) {
   return KIND_SET.has(value);
 }
@@ -20,6 +28,13 @@ export function clampScore(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 0;
   return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+/** Lanes are tried in order: important wins over hot, hot wins over other. */
+export function deriveLane(score, engagement) {
+  if (clampScore(score) > IMPORTANT_SCORE_THRESHOLD) return "important";
+  if (clampScore(engagement) >= HOT_ENGAGEMENT_THRESHOLD) return "hot";
+  return "other";
 }
 
 export function messageToArtifact(message) {
@@ -105,7 +120,11 @@ function patchFibreFields(fibre, action, now) {
     fibre.whyShort = fibre.why.slice(0, 120);
   }
   if (action.score !== undefined) fibre.score = clampScore(action.score);
+  if (action.engagement !== undefined) {
+    fibre.engagement = clampScore(action.engagement);
+  }
   if (Array.isArray(action.signals)) fibre.signals = action.signals;
+  fibre.lane = deriveLane(fibre.score, fibre.engagement);
   fibre.updatedAt = now;
 }
 
@@ -149,11 +168,15 @@ export function applyFibreActions({ fibres, messages, actions, now }) {
         (typeof action.title === "string" && action.title.trim()) ||
         sameChannel[0].content.trim().split("\n")[0] ||
         "Untitled fibre";
+      const score = clampScore(action.score ?? 50);
+      const engagement = clampScore(action.engagement ?? 0);
       const fibre = {
         id: randomUUID(),
         kind,
         status: "open",
-        score: clampScore(action.score ?? 50),
+        score,
+        engagement,
+        lane: deriveLane(score, engagement),
         title,
         summary:
           (typeof action.summary === "string" && action.summary.trim()) ||

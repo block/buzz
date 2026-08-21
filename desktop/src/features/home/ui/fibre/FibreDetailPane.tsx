@@ -12,6 +12,7 @@ import {
   resolveFibrePersonLabel,
 } from "@/features/home/ui/fibre/fibreFormat";
 import { fibreKindMeta } from "@/features/home/ui/fibre/fibreKinds";
+import type { FibreListTab } from "@/features/home/ui/fibre/fibreSort";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Fibre } from "@/features/triage/api";
 import { sendChannelMessage } from "@/shared/api/tauri";
@@ -32,7 +33,7 @@ const SHORTCUT_KBD =
 type FibreDetailPaneProps = {
   currentPubkey?: string;
   fibre: Fibre | null;
-  listTab: "open" | "done";
+  listTab: FibreListTab;
   nowMs: number;
   profiles?: UserProfileLookup;
   onDone: (fibre: Fibre) => void;
@@ -454,6 +455,7 @@ export function FibreDetailPane({
               data-testid="fibre-dismiss"
               onClick={() => onDismiss(fibre)}
               size="sm"
+              title="Dismiss (X). Shift+X to dismiss and say why."
               type="button"
               variant="ghost"
             >
