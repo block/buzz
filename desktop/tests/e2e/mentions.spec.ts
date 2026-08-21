@@ -734,13 +734,13 @@ test("selecting a person mention inserts @Name into input", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Hey @bo");
-
   const dropdown = autocomplete(page);
-  await dropdown.getByText("bob").click();
-  await page.keyboard.type("hello");
-
-  await expect(input).toHaveText("Hey @bob hello");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await input.fill("Hey @bo");
+    await dropdown.getByText("bob").click();
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("Hey @bob hello");
+  }
   const mentionChip = input.locator(".human-mention-highlight", {
     hasText: "bob",
   });
@@ -757,6 +757,23 @@ test("selecting a person mention inserts @Name into input", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+});
+
+test("immediate ArrowLeft after a person mention is not bounced past the trailing space", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @bo");
+  await autocomplete(page).getByText("bob").click();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.type("x");
+  const text = (await input.innerText()).replace(/\s+$/, "");
+  expect(text).toBe("Hey @bobx");
+  expect(text).not.toMatch(/@bob x/);
 });
 
 test("channel references keep caret movement through the channel name", async ({
@@ -810,13 +827,13 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Hey @ali");
-
   const dropdown = autocomplete(page);
-  await dropdown.getByText("alice").click();
-  await page.keyboard.type("hello");
-
-  await expect(input).toHaveText("Hey @alice hello");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await input.fill("Hey @ali");
+    await dropdown.getByText("alice").click();
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("Hey @alice hello");
+  }
   const agentMentionChip = input.locator(".agent-mention-highlight", {
     hasText: "alice",
   });

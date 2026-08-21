@@ -24,6 +24,7 @@ import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
 import {
   MentionHighlightExtension,
+  reassertMentionCaretAfterFocus,
   settleAutocompleteMentionInsert,
   syncMentionHighlightFromProps,
 } from "./mentionHighlightExtension";
@@ -867,6 +868,7 @@ export function useRichTextEditor({
       settleAutocompleteMentionInsert(editor, tr, text);
       editor.view.dispatch(tr);
       editor.view.focus();
+      reassertMentionCaretAfterFocus(editor.view);
     },
     [editor, customEmojiWiring.resolveUrl],
   );

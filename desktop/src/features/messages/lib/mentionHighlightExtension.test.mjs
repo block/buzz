@@ -7,7 +7,9 @@ import StarterKit from "@tiptap/starter-kit";
 import {
   assignMentionHighlightNames,
   buildHighlightPatterns,
+  createMentionCaretSettlement,
   findHighlightMatches,
+  insertPosForMentionTextInput,
   selectionAfterMentionTrailingSpace,
   shouldAdvanceMentionCaret,
 } from "./mentionHighlightExtension.ts";
@@ -203,39 +205,72 @@ test("selectionAfterMentionTrailingSpace does not move without a trailing space"
   assert.equal(selectionAfterMentionTrailingSpace(doc, end), end);
 });
 
-test("shouldAdvanceMentionCaret restores a DOM remap while the autocomplete fence is armed", () => {
+test("shouldAdvanceMentionCaret restores a remap while this editor is settling", () => {
   assert.equal(
     shouldAdvanceMentionCaret({
       from: 7,
       next: 8,
-      fenceActive: true,
-      rebuilt: false,
+      settling: true,
+      docChanged: false,
     }),
     true,
   );
 });
 
-test("shouldAdvanceMentionCaret does not steal ArrowLeft after the fence expires", () => {
+test("shouldAdvanceMentionCaret does not steal ArrowLeft after settlement is cancelled", () => {
   assert.equal(
     shouldAdvanceMentionCaret({
       from: 7,
       next: 8,
-      fenceActive: false,
-      rebuilt: false,
+      settling: false,
+      docChanged: false,
     }),
     false,
   );
 });
 
-test("shouldAdvanceMentionCaret still advances after a decoration rebuild", () => {
+test("shouldAdvanceMentionCaret still advances after a document change", () => {
   assert.equal(
     shouldAdvanceMentionCaret({
       from: 7,
       next: 8,
-      fenceActive: false,
-      rebuilt: true,
+      settling: false,
+      docChanged: true,
     }),
     true,
+  );
+});
+
+test("createMentionCaretSettlement keeps two editors independent", () => {
+  const composerA = createMentionCaretSettlement();
+  const composerB = createMentionCaretSettlement();
+  composerA.arm(8);
+  assert.equal(composerB.peek(), null);
+  composerB.arm(12);
+  composerA.cancel();
+  assert.equal(composerA.peek(), null);
+  assert.equal(composerB.peek(), 12);
+});
+
+test("insertPosForMentionTextInput redirects a caret at the chip edge", () => {
+  const doc = document(paragraph(text("@quinn ")));
+  const spacePos = 1 + "@quinn".length;
+  assert.equal(
+    insertPosForMentionTextInput(doc, spacePos, spacePos),
+    spacePos + 1,
+  );
+  assert.equal(
+    insertPosForMentionTextInput(doc, spacePos + 1, spacePos + 1),
+    null,
+  );
+});
+
+test("insertPosForMentionTextInput keeps a selected trailing space", () => {
+  const doc = document(paragraph(text("@quinn ")));
+  const spacePos = 1 + "@quinn".length;
+  assert.equal(
+    insertPosForMentionTextInput(doc, spacePos, spacePos + 1),
+    spacePos + 1,
   );
 });
 

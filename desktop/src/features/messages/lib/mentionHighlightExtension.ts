@@ -15,39 +15,117 @@ import {
 
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
 
-const MENTION_CARET_FENCE_MS = 750;
-let mentionCaretFenceUntil = 0;
+export type MentionCaretSettlement = {
+  arm: (pos: number) => void;
+  peek: () => number | null;
+  cancel: () => void;
+};
 
-export function armMentionCaretFence(): void {
-  mentionCaretFenceUntil = Date.now() + MENTION_CARET_FENCE_MS;
-}
-
-export function clearMentionCaretFence(): void {
-  mentionCaretFenceUntil = 0;
-}
-
-export function mentionCaretFenceActive(now = Date.now()): boolean {
-  return now < mentionCaretFenceUntil;
+export function createMentionCaretSettlement(): MentionCaretSettlement {
+  let pos: number | null = null;
+  return {
+    arm(nextPos: number) {
+      pos = nextPos;
+    },
+    peek() {
+      return pos;
+    },
+    cancel() {
+      pos = null;
+    },
+  };
 }
 
 /**
  * Whether to move an empty caret from `from` to `next` after a mention
- * trailing space. Autocomplete arms a short fence so DOM selection remaps
- * (no doc/meta transaction) cannot put the next keystroke before the space.
- * Arrow keys after the fence expires are left alone.
+ * trailing space. Settlement is per editor: autocomplete arms it, and
+ * ArrowLeft/click cancel it so we do not steal an intentional caret.
  */
 export function shouldAdvanceMentionCaret({
   from,
   next,
-  fenceActive,
-  rebuilt,
+  settling,
+  docChanged,
 }: {
   from: number;
   next: number;
-  fenceActive: boolean;
-  rebuilt: boolean;
+  settling: boolean;
+  docChanged: boolean;
 }): boolean {
-  return next !== from && (fenceActive || rebuilt);
+  return next !== from && (settling || docChanged);
+}
+
+/**
+ * Where to insert typed text when the caret (or a one-character selection)
+ * sits on the trailing space after an `@name` / `#channel` token.
+ * A selected trailing space would otherwise be replaced, producing
+ * `@bobhello`.
+ */
+export function insertPosForMentionTextInput(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): number | null {
+  const next = selectionAfterMentionTrailingSpace(doc, from);
+  if (from === to) {
+    return next === from ? null : next;
+  }
+  if (to === next && next === from + 1) {
+    return next;
+  }
+  return null;
+}
+
+export function setDomCaretAtPos(
+  view: {
+    domAtPos: (pos: number) => { node: Node; offset: number };
+    root: Document | ShadowRoot;
+  },
+  pos: number,
+): void {
+  if (typeof document === "undefined") return;
+  let mapped: { node: Node; offset: number };
+  try {
+    mapped = view.domAtPos(pos);
+  } catch {
+    return;
+  }
+  const range = document.createRange();
+  try {
+    range.setStart(mapped.node, mapped.offset);
+  } catch {
+    return;
+  }
+  range.collapse(true);
+  const root = view.root;
+  const selection =
+    "getSelection" in root && typeof root.getSelection === "function"
+      ? root.getSelection()
+      : window.getSelection();
+  if (!selection) return;
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+export function reassertMentionCaretAfterFocus(view: {
+  state: {
+    doc: ProseMirrorNode;
+    selection: { empty: boolean; from: number };
+    tr: Transaction;
+  };
+  dispatch: (tr: Transaction) => void;
+  domAtPos: (pos: number) => { node: Node; offset: number };
+  root: Document | ShadowRoot;
+}): void {
+  if (!view.state.selection.empty) return;
+  const from = view.state.selection.from;
+  const next = selectionAfterMentionTrailingSpace(view.state.doc, from);
+  if (next !== from) {
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, next)),
+    );
+  }
+  setDomCaretAtPos(view, view.state.selection.from);
 }
 
 export type MentionHighlightStorage = {
@@ -114,7 +192,6 @@ export function settleAutocompleteMentionInsert(
     }
   }
   tr.setMeta(mentionHighlightKey, true);
-  armMentionCaretFence();
 }
 
 export function syncMentionHighlightFromProps(
@@ -162,6 +239,7 @@ export const MentionHighlightExtension = Extension.create({
 
   addProseMirrorPlugins() {
     const extension = this;
+    const settlement = createMentionCaretSettlement();
 
     return [
       new Plugin({
@@ -176,6 +254,16 @@ export const MentionHighlightExtension = Extension.create({
             );
           },
           apply(tr, oldDecorations) {
+            if (
+              tr.getMeta(mentionHighlightKey) &&
+              tr.selection.empty &&
+              (tr.docChanged || settlement.peek() !== null)
+            ) {
+              settlement.arm(
+                selectionAfterMentionTrailingSpace(tr.doc, tr.selection.from),
+              );
+            }
+
             // Names/channels changed — full rebuild required.
             if (tr.getMeta(mentionHighlightKey)) {
               return buildDecorations(
@@ -219,18 +307,18 @@ export const MentionHighlightExtension = Extension.create({
           },
         },
         appendTransaction(transactions, _oldState, newState) {
-          if (!newState.selection.empty) return null;
-          const rebuilt = transactions.some(
-            (tr) => tr.docChanged || tr.getMeta(mentionHighlightKey),
-          );
+          if (!newState.selection.empty) {
+            settlement.cancel();
+            return null;
+          }
           const from = newState.selection.from;
           const next = selectionAfterMentionTrailingSpace(newState.doc, from);
           if (
             !shouldAdvanceMentionCaret({
               from,
               next,
-              fenceActive: mentionCaretFenceActive(),
-              rebuilt,
+              settling: settlement.peek() !== null,
+              docChanged: transactions.some((tr) => tr.docChanged),
             })
           ) {
             return null;
@@ -239,24 +327,77 @@ export const MentionHighlightExtension = Extension.create({
             TextSelection.create(newState.doc, next),
           );
         },
+        view() {
+          let applying = false;
+          return {
+            update(view) {
+              if (applying || settlement.peek() === null) return;
+              if (!view.state.selection.empty) {
+                settlement.cancel();
+                return;
+              }
+              const from = view.state.selection.from;
+              const next = selectionAfterMentionTrailingSpace(
+                view.state.doc,
+                from,
+              );
+              if (next !== from) {
+                applying = true;
+                try {
+                  view.dispatch(
+                    view.state.tr.setSelection(
+                      TextSelection.create(view.state.doc, next),
+                    ),
+                  );
+                } finally {
+                  applying = false;
+                }
+              }
+              setDomCaretAtPos(view, view.state.selection.from);
+            },
+            destroy() {
+              settlement.cancel();
+            },
+          };
+        },
         props: {
           decorations(state) {
             return this.getState(state) ?? DecorationSet.empty;
           },
           handleTextInput(view, from, to, text) {
-            if (from !== to) return false;
-            const next = selectionAfterMentionTrailingSpace(
+            const insertAt = insertPosForMentionTextInput(
               view.state.doc,
               from,
+              to,
             );
-            if (next === from) return false;
-            const tr = view.state.tr.insertText(text, next);
-            tr.setSelection(
-              TextSelection.create(tr.doc, tr.mapping.map(next, 1)),
-            );
+            if (insertAt == null) {
+              settlement.cancel();
+              return false;
+            }
+            const tr = view.state.tr.insertText(text, insertAt);
+            const caret = tr.mapping.map(insertAt, 1);
+            tr.setSelection(TextSelection.create(tr.doc, caret));
             view.dispatch(tr);
-            armMentionCaretFence();
+            settlement.cancel();
+            setDomCaretAtPos(view, caret);
             return true;
+          },
+          handleKeyDown(_view, event) {
+            if (
+              event.key === "ArrowLeft" ||
+              event.key === "ArrowRight" ||
+              event.key === "ArrowUp" ||
+              event.key === "ArrowDown" ||
+              event.key === "Home" ||
+              event.key === "End"
+            ) {
+              settlement.cancel();
+            }
+            return false;
+          },
+          handleClick() {
+            settlement.cancel();
+            return false;
           },
         },
       }),
