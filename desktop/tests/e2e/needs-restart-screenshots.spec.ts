@@ -261,7 +261,7 @@ test.describe("restart-diff screenshots", () => {
     await gotoAgentsView(page);
 
     const personaCard = page.getByTestId(
-      `persona-agent-row-${PERSONA_AGENT.personaId}`,
+      `managed-agent-${PERSONA_AGENT.pubkey}`,
     );
     await expect(personaCard).toBeVisible({ timeout: 10_000 });
     await expect(

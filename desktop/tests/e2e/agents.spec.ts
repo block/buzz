@@ -7,7 +7,11 @@ import type { RelayEvent } from "@/shared/api/types";
 import { emojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  createMockAgentMemoryListing,
+  installMockBridge,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 import { seedActiveIdentity } from "../helpers/onboarding";
 
 function createCatalogEvent(input: {
@@ -225,6 +229,41 @@ async function countCommandInvocations(
     command,
   );
 }
+
+test("Agents view keeps every managed instance that shares a persona visible", async ({
+  page,
+}) => {
+  const personaId = "custom:multi-fizz";
+  const firstPubkey = "a".repeat(64);
+  const secondPubkey = "b".repeat(64);
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Fizz",
+        systemPrompt: "Move fast.",
+      },
+    ],
+    managedAgents: [
+      { pubkey: firstPubkey, name: "Fizz", personaId },
+      { pubkey: secondPubkey, name: "Fizz", personaId },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const cards = page.locator(
+    `[data-testid="managed-agent-${firstPubkey}"], [data-testid="managed-agent-${secondPubkey}"]`,
+  );
+  await expect(cards).toHaveCount(2);
+  await expect(page.getByTestId(`managed-agent-${firstPubkey}`)).toContainText(
+    "aaaaaaaa…aaaa",
+  );
+  await expect(page.getByTestId(`managed-agent-${secondPubkey}`)).toContainText(
+    "bbbbbbbb…bbbb",
+  );
+  await expect(page.getByLabel("Open actions for Fizz")).toHaveCount(1);
+});
 
 test("catalog hides built-ins and shows the shared-agent empty state", async ({
   page,
@@ -2589,7 +2628,7 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  const card = page.getByTestId(`persona-agent-row-${personaId}`);
+  const card = page.getByTestId(`managed-agent-${pubkey}`);
   const startButton = page.getByTestId(`agent-runtime-start-${pubkey}`);
   const badge = startButton.locator("xpath=../..");
   const initialAvatar = await card
@@ -2655,13 +2694,14 @@ test("start pill morphs into the running dot without remounting the avatar", asy
   ).toBe(true);
 });
 
-test("duplicate instances move from the agents gallery into the agent profile", async ({
+test("duplicate instances stay visible in the gallery and agent profile", async ({
   page,
 }) => {
   const personaId = "custom:duplicate-auditor";
   const primaryPubkey = TEST_IDENTITIES.alice.pubkey;
-  const additionalPubkey = TEST_IDENTITIES.charlie.pubkey;
+  const additionalPubkey = TEST_IDENTITIES.outsider.pubkey;
   await installMockBridge(page, {
+    agentMemory: createMockAgentMemoryListing(),
     personas: [
       {
         id: personaId,
@@ -2681,6 +2721,14 @@ test("duplicate instances move from the agents gallery into the agent profile", 
         name: "Duplicate Auditor",
         personaId,
         status: "stopped",
+        channelNames: ["general", "random"],
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: additionalPubkey,
+        name: "Duplicate Auditor",
+        channelNames: ["general", "random"],
       },
     ],
   });
@@ -2690,12 +2738,13 @@ test("duplicate instances move from the agents gallery into the agent profile", 
   await expect(page.getByText("Additional running agents")).toHaveCount(0);
   await expect(
     page.getByTestId(`managed-agent-${additionalPubkey}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await page.getByTestId(`managed-agent-${primaryPubkey}`).click();
   await page.getByTestId("user-profile-tab-runtime").click();
   await page.getByTestId("user-profile-instances").click();
   await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
+  await page.getByTestId("user-profile-tab-info").click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await expect(page.getByTestId("user-profile-agent-status")).toContainText(
@@ -2705,6 +2754,20 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId("user-profile-settings-menu-trigger"),
   ).toHaveCount(0);
   await expect(
-    page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
-  ).toHaveCount(0);
+    page.getByTestId("user-profile-duplicate-agent-row"),
+  ).toBeVisible();
+  await expect(page.getByTestId("user-profile-export-agent-row")).toBeVisible();
+  await page.getByTestId("user-profile-delete-agent-row").click();
+
+  const deleteDialog = page.getByTestId("agent-delete-confirm-dialog");
+  await expect(deleteDialog).toBeVisible();
+  await expect(deleteDialog.getByRole("heading")).toHaveText(
+    "Delete Duplicate Auditor?",
+  );
+  await expect(page.getByTestId("agent-delete-memory-count")).toHaveText("9");
+  await expect(page.getByTestId("agent-delete-channel-count")).toHaveText("2");
+
+  await page.getByTestId("agent-delete-export-action").click();
+  await expect(deleteDialog).toHaveCount(0);
+  await expect(page.getByTestId("agent-snapshot-export-dialog")).toBeVisible();
 });

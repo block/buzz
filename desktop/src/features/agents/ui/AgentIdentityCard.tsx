@@ -11,6 +11,7 @@ type AgentIdentityCardProps = {
   avatarUrl?: string | null;
   dataTestId: string;
   label: string;
+  identityLabel?: string | null;
   modelLabel?: string | null;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
@@ -24,6 +25,7 @@ export function AgentIdentityCard({
   avatarUrl,
   dataTestId,
   label,
+  identityLabel,
   modelLabel,
   onClick,
   statusBadge,
@@ -72,6 +74,11 @@ export function AgentIdentityCard({
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>
+        {identityLabel ? (
+          <span className="min-w-0 truncate font-mono text-2xs font-normal text-secondary-foreground/75">
+            {identityLabel}
+          </span>
+        ) : null}
         {modelLabel ? (
           <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}
