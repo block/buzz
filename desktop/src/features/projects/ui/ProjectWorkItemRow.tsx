@@ -42,32 +42,66 @@ export function ProjectWorkItemRow({
   return (
     <article
       className={cn(
-        "group/work-item flex min-h-10 min-w-0 items-center gap-2 rounded-md px-2 py-2 transition-colors hover:bg-muted/30",
+        "group/work-item mx-2 flex min-h-10 min-w-0 items-center gap-3 rounded-md px-2 py-2 transition-colors hover:bg-muted/30",
         selected && "bg-muted/40",
       )}
       data-project-event-id={eventId}
       data-selected={selected ? "true" : undefined}
       data-testid={testId}
     >
-      {selection && projectSelection ? (
+      <span
+        className="relative flex h-4 w-4 shrink-0 items-center justify-center"
+        data-testid="project-work-item-leading-icon"
+      >
         <span
           className={cn(
-            "flex h-4 w-4 shrink-0 items-center justify-center opacity-0 group-hover/work-item:opacity-100 group-focus-within/work-item:opacity-100",
-            showSelectControl && "opacity-100",
+            "flex items-center justify-center opacity-80 transition-opacity",
+            selection &&
+              "group-hover/work-item:opacity-0 group-focus-within/work-item:opacity-0",
+            showSelectControl && "opacity-0",
           )}
+          data-testid="project-work-item-status-icon"
         >
-          <ProjectEntitySelectControl
-            checked={selected}
-            label={`Select ${selection.item.title}`}
-            onToggle={({ shiftKey }) =>
-              projectSelection.toggle(selection.item, {
-                rangeItems: selection.rangeItems,
-                shiftKey,
-              })
-            }
-          />
+          {statusIcon}
         </span>
-      ) : null}
+        {selection && projectSelection ? (
+          <span
+            className={cn(
+              "absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover/work-item:opacity-100 group-focus-within/work-item:opacity-100",
+              showSelectControl && "opacity-100",
+            )}
+          >
+            <ProjectEntitySelectControl
+              checked={selected}
+              label={`Select ${selection.item.title}`}
+              onToggle={({ shiftKey }) =>
+                projectSelection.toggle(selection.item, {
+                  rangeItems: selection.rangeItems,
+                  shiftKey,
+                })
+              }
+            />
+          </span>
+        ) : null}
+      </span>
+      {onOpen ? (
+        <button
+          className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-normal text-foreground transition-colors hover:text-primary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          data-projects-text-priority="primary"
+          onClick={onOpen}
+          title={title}
+          type="button"
+        >
+          {title}
+        </button>
+      ) : (
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-normal text-foreground"
+          data-projects-text-priority="primary"
+        >
+          {title}
+        </span>
+      )}
       {onOpen ? (
         <button
           className={cn(
@@ -92,30 +126,6 @@ export function ProjectWorkItemRow({
           data-testid="project-work-item-identifier"
         >
           {identifier}
-        </span>
-      )}
-      <span
-        className="flex h-4 w-4 shrink-0 items-center justify-center opacity-80"
-        data-testid="project-work-item-status-icon"
-      >
-        {statusIcon}
-      </span>
-      {onOpen ? (
-        <button
-          className="min-w-0 truncate rounded-sm text-left text-sm font-normal text-foreground transition-colors hover:text-primary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          data-projects-text-priority="primary"
-          onClick={onOpen}
-          title={title}
-          type="button"
-        >
-          {title}
-        </button>
-      ) : (
-        <span
-          className="min-w-0 truncate text-sm font-normal text-foreground"
-          data-projects-text-priority="primary"
-        >
-          {title}
         </span>
       )}
       {metadata ? (

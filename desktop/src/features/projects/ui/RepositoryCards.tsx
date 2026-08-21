@@ -18,10 +18,6 @@ import {
   selectionItemFromRepository,
   type ProjectSelectionItem,
 } from "@/features/projects/lib/projectSelection";
-import {
-  formatExactTimestamp,
-  relativeTime,
-} from "@/features/projects/lib/projectsViewHelpers";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
@@ -155,27 +151,6 @@ function RepositoryIdentity({
   );
 }
 
-function RepositoryUpdatedLabel({
-  repository,
-  summary,
-}: Pick<RepositoryItemProps, "repository" | "summary">) {
-  const updatedAt = summary?.updatedAt || repository.createdAt;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
-          {relativeTime(updatedAt)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {summary?.latestCommit
-          ? `${summary.latestCommit.title || summary.latestCommit.commit.slice(0, 7)} · ${formatExactTimestamp(summary.latestCommit.createdAt)}`
-          : `Created ${formatExactTimestamp(repository.createdAt)}`}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 function repositoryPeople(
   repository: Repository,
   summary: ProjectActivitySummary | undefined,
@@ -261,13 +236,12 @@ export function RepositoryGridCard(props: RepositoryItemProps) {
         >
           {repository.description || "A repository in this project."}
         </p>
-        <div className="pointer-events-auto mt-auto flex items-center justify-between gap-3">
+        <div className="pointer-events-auto mt-auto">
           <ProjectPeopleStack
             profiles={profiles}
             pubkeys={repositoryPeople(repository, summary)}
             workOwnerPubkey={repository.owner}
           />
-          <RepositoryUpdatedLabel repository={repository} summary={summary} />
         </div>
         <div className="mt-2">
           <ProjectStatsRow summary={summary} />

@@ -280,10 +280,12 @@ impl ArchiveSyncIo for AppIo {
             let state: State<'_, AppState> = self.app.state();
             let identity_pk = super::identity_pubkey(&state)?;
             let relay_url = crate::relay::relay_ws_url_with_override(&state);
-            super::run_archive_db_task(move |conn| {
-                super::store::list_save_subscriptions(conn, &identity_pk, &relay_url)
-            })
-            .await
+            state
+                .archive_db
+                .with_conn(move |conn| {
+                    super::store::list_save_subscriptions(conn, &identity_pk, &relay_url)
+                })
+                .await
         })
     }
 

@@ -43,6 +43,8 @@ import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
 import { AgentContextPayloadPreview } from "./AgentContextPayloadPreview";
 import {
+  PROJECT_WORKSPACE_CONTEXT_MARKER,
+  splitProjectDetailAgentContext,
   UNTRUSTED_CONTEXT_NOTICE,
   untrustedPromptValue,
 } from "@/features/projects/lib/projectDetailAgentContext";
@@ -70,6 +72,7 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { ProjectAgentSubmittedContextPill } from "./ProjectAgentSubmittedContextPill";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -94,7 +97,6 @@ type ProjectAgentConversation = {
 };
 
 const MAX_CONTEXT_REPOS = 8;
-const REPO_CONTEXT_MARKER = "Workspace repositories:";
 
 /** Compact machine-readable footer so the agent can scope git queries
  * (repo announcements are addressable by these coordinates). Only sent
@@ -119,7 +121,7 @@ function repoContextBlock(projects: readonly Project[]) {
         `- ${untrustedPromptValue(repository.label)} (address: ${untrustedPromptValue(repository.repoAddress, 400)})`,
     );
   const remaining = repositories.length - listed.length;
-  return ["", "---", REPO_CONTEXT_MARKER, ...listed]
+  return ["", "---", PROJECT_WORKSPACE_CONTEXT_MARKER, ...listed]
     .concat(remaining > 0 ? [`…and ${remaining} more`] : [])
     .concat([UNTRUSTED_CONTEXT_NOTICE])
     .join("\n");
@@ -203,11 +205,9 @@ export function useAgentCandidates() {
 }
 
 /** Live message feed for the conversation's backing DM channel, reduced to
- * plain chat rows (kind 9 / 40002 only). The user's own messages render
- * verbatim — including any machine-appended context footer — so the exact
- * payload signed under the user's identity is always visible. Hiding it
- * while sending it would let relay-controlled metadata ride invisibly on
- * the user's signature. */
+ * plain chat rows (kind 9 / 40002 only). Machine-appended context stays
+ * inspectable beside the user's message, but defaults to a compact disclosure
+ * so the transcript foregrounds what the user actually typed. */
 export function ConversationThread({
   channel,
   agent,
@@ -276,26 +276,47 @@ export function ConversationThread({
       selfAvatarUrl,
     ],
   );
-  const messages = React.useMemo(() => {
+  const conversationMessages = React.useMemo(() => {
     const events = mergeProjectAgentConversationEvents(
       messagesQuery.data ?? [],
       threadReplies.events,
     );
-    return formatTimelineMessages(
+    const contexts = new Map<string, string>();
+    const messages = formatTimelineMessages(
       events,
       channel,
       currentPubkey ?? undefined,
       selfAvatarUrl,
       profiles,
-    ).filter(
-      (message) =>
-        (message.kind === KIND_STREAM_MESSAGE ||
-          message.kind === KIND_STREAM_MESSAGE_V2) &&
-        isAtOrAfterConversationOpener(
-          { created_at: message.createdAt, id: message.id, tags: message.tags },
-          opener,
-        ),
-    );
+    )
+      .filter(
+        (message) =>
+          (message.kind === KIND_STREAM_MESSAGE ||
+            message.kind === KIND_STREAM_MESSAGE_V2) &&
+          isAtOrAfterConversationOpener(
+            {
+              created_at: message.createdAt,
+              id: message.id,
+              tags: message.tags,
+            },
+            opener,
+          ),
+      )
+      .map((message) => {
+        const authorPubkey = message.signerPubkey ?? message.pubkey;
+        if (
+          !normalizedCurrent ||
+          !authorPubkey ||
+          normalizePubkey(authorPubkey) !== normalizedCurrent
+        ) {
+          return message;
+        }
+        const split = splitProjectDetailAgentContext(message.body);
+        if (!split.context) return message;
+        contexts.set(message.id, split.context);
+        return { ...message, body: split.message };
+      });
+    return { contexts, messages };
   }, [
     channel,
     currentPubkey,
@@ -304,7 +325,18 @@ export function ConversationThread({
     selfAvatarUrl,
     threadReplies.events,
     opener,
+    normalizedCurrent,
   ]);
+  const messages = conversationMessages.messages;
+  const renderSubmittedContext = React.useCallback(
+    (message: TimelineMessage) => {
+      const payload = conversationMessages.contexts.get(message.id);
+      return payload ? (
+        <ProjectAgentSubmittedContextPill payload={payload} />
+      ) : null;
+    },
+    [conversationMessages.contexts],
+  );
   const lastMessageId = messages[messages.length - 1]?.id ?? null;
   const handleToggleReaction = React.useCallback(
     async (message: TimelineMessage, emoji: string, remove: boolean) => {
@@ -329,6 +361,7 @@ export function ConversationThread({
         messages={messages}
         onToggleReaction={handleToggleReaction}
         profiles={profiles}
+        renderAfterMessage={renderSubmittedContext}
       />
       {agentWorking.working ? (
         <div className="flex items-center gap-2 pl-11 text-sm text-muted-foreground">

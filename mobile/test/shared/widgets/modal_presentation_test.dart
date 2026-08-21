@@ -111,7 +111,13 @@ void main() {
       await tester.tap(find.text('Open sheet'));
       await tester.pumpAndSettle();
 
-      final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+      final nativeSurface = tester.widget<UiKitView>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is UiKitView &&
+              widget.viewType == 'buzz/concentric_sheet_surface',
+        ),
+      );
       expect(
         nativeSurface.creationParams,
         containsPair('color', lightColorScheme.surface.toARGB32()),
@@ -131,6 +137,13 @@ void main() {
       expect(contentClip.borderRadius, BorderRadius.circular(Radii.dialog * 2));
       expect(contentClip.clipBehavior, Clip.antiAlias);
       expect(find.text('Members'), findsOneWidget);
+      final nativeClose = tester.widget<UiKitView>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is UiKitView && widget.viewType == 'buzz/navigation_glass',
+        ),
+      );
+      expect(nativeClose.creationParams, containsPair('icon', 'close'));
     } finally {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         surfaceChannel,

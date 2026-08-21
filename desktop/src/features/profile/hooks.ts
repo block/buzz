@@ -286,12 +286,15 @@ export function useUserProfileQuery(pubkey?: string) {
 // `summary: null` records a relay-confirmed miss so unknown pubkeys aren't
 // re-requested every page. Entries older than the hook's 60s staleTime are
 // treated as unresolved and refetched.
-type UsersBatchEntry = {
+export type UsersBatchEntry = {
   summary: UserProfileSummary | null;
   fetchedAt: number;
 };
 
-const usersBatchEntryKey = (pubkey: string) => ["users-batch-entry", pubkey];
+export const usersBatchEntryKey = (pubkey: string) => [
+  "users-batch-entry",
+  pubkey,
+];
 
 /**
  * Drop the per-pubkey delta-fetch entries so the next `useUsersBatchQuery`

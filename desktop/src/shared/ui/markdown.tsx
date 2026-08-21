@@ -48,6 +48,7 @@ import {
   isImageOnlyParagraph,
   markdownPropsAreEqual,
 } from "./markdownUtils";
+import { ImageMosaic } from "./markdown/ImageMosaic";
 import {
   CODE_BLOCK_CLASS,
   extractLanguage,
@@ -1233,33 +1234,10 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
   );
 }
 
-function ImageMosaic({ children }: { children: React.ReactNode[] }) {
-  const mosaicRef = React.useRef<HTMLDivElement | null>(null);
-  const isTriptych = children.length === 3;
-  const hasOddTail = children.length > 3 && children.length % 2 === 1;
-  useSmoothCorners(mosaicRef);
-
-  return (
-    <div
-      className={cn(
-        "mt-1 grid w-full min-w-0 max-w-lg grid-cols-2 gap-1.5 overflow-hidden rounded-2xl [&_br]:hidden [&_[data-block-media]]:min-h-0 [&_[data-block-media]]:max-w-none [&_[data-block-media]]:overflow-hidden [&_[data-block-media]>button]:m-0 [&_[data-block-media]>button]:h-full [&_[data-block-media]>button]:w-full [&_[data-block-media]>button]:max-w-none [&_[data-block-media]>button]:rounded-none [&_[data-block-media]_[data-progressive-image-frame]]:!h-full [&_[data-block-media]_[data-progressive-image-frame]]:!w-full [&_[data-block-media]_img]:!h-full [&_[data-block-media]_img]:!max-h-none [&_[data-block-media]_img]:!w-full [&_[data-block-media]_img]:!max-w-none [&_[data-block-media]_img]:rounded-none [&_[data-block-media]_img]:object-cover",
-        isTriptych
-          ? "h-80 grid-rows-2 [&_[data-block-media]]:h-auto [&_[data-block-media]:first-child]:row-span-2"
-          : "[&_[data-block-media]]:h-48",
-        hasOddTail && "[&_[data-block-media]:last-child]:col-span-2",
-      )}
-      data-image-mosaic=""
-      data-image-mosaic-count={children.length}
-      ref={mosaicRef}
-    >
-      {children}
-    </div>
-  );
-}
-
 export function createMarkdownComponents(
   interactive = true,
   mediaInset = false,
+  blockCode = false,
 ): Components {
   const listItemClassName = "[&_p]:inline";
   const listClassName = "space-y-1 pl-6 marker:text-muted-foreground/80";
@@ -1563,7 +1541,7 @@ export function createMarkdownComponents(
       return <p>{children}</p>;
     },
     pre: ({ children }) => {
-      if (!interactive) return <span>{children}</span>;
+      if (!interactive && !blockCode) return <span>{children}</span>;
       let language = "";
       React.Children.forEach(children, (child) => {
         if (
@@ -1699,9 +1677,9 @@ export function createMarkdownComponents(
 }
 
 /**
- * The component map only varies by the three boolean render flags, so at most
- * eight instances ever exist. Module-stable maps mean cached markdown element
- * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
+ * The component map only varies by the four boolean render flags, so at most
+ * sixteen instances ever exist. Module-stable maps mean cached markdown
+ * element trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
 const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
@@ -1719,12 +1697,13 @@ function getMarkdownComponents(
   interactive: boolean,
   leadingInlineContent: boolean,
   mediaInset: boolean,
+  blockCode: boolean,
 ): MarkdownComponentSet {
-  const variant = `${MARKDOWN_COMPONENT_SCHEMA_VERSION}:${interactive ? "i" : ""}${leadingInlineContent ? "l" : ""}${mediaInset ? "m" : ""}`;
+  const variant = `${MARKDOWN_COMPONENT_SCHEMA_VERSION}:${interactive ? "i" : ""}${leadingInlineContent ? "l" : ""}${mediaInset ? "m" : ""}${blockCode ? "c" : ""}`;
   let entry = markdownComponentsByVariant.get(variant);
   if (!entry) {
     entry = {
-      components: createMarkdownComponents(interactive, mediaInset),
+      components: createMarkdownComponents(interactive, mediaInset, blockCode),
       variant,
     };
     markdownComponentsByVariant.set(variant, entry);
@@ -1741,6 +1720,7 @@ function MarkdownInner({
   hardLineBreaks = true,
   imetaByUrl,
   interactive = true,
+  blockCode = false,
   agentMentionPubkeysByName,
   leadingInlineContent,
   mediaInset = false,
@@ -1856,6 +1836,7 @@ function MarkdownInner({
     interactive,
     hasLeadingInlineContent,
     mediaInset,
+    blockCode,
   );
   const markdownNode =
     configNudge === null

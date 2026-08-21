@@ -124,6 +124,7 @@ export function ProjectsChannelsList({ projects }: { projects: Project[] }) {
         <ProjectSelectableGroup
           count={group.rows.length}
           groupKey={group.projectId}
+          headerClassName="mx-0 gap-3 px-4"
           headerTestId="projects-channel-project-group-header"
           icon={<FolderKanban className="h-4 w-4" />}
           items={group.rows.flatMap((row) => {

@@ -256,6 +256,7 @@ export function ProjectsPullRequestsList({
             <ProjectSelectableGroup
               count={group.rows.length}
               groupKey={group.project.id}
+              headerClassName="mx-0 gap-3 px-4"
               headerTestId="projects-review-project-group-header"
               icon={<FolderKanban className="h-4 w-4" />}
               items={groupSelectionItems}

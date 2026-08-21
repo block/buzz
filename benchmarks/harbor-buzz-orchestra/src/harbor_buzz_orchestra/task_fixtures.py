@@ -11,6 +11,25 @@ class DirectoryEntry:
 
     name: str
     role: str
+    identity_id: str | None = None
+    about: str | None = None
+    channel_member: bool = False
+
+    @property
+    def stable_id(self) -> str:
+        """Identity key used for deterministic credentials and scripted events."""
+        return self.identity_id or self.name
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptedMessage:
+    """A relay event injected immediately after the task's triggering event."""
+
+    label: str
+    actor: str
+    content: str
+    reply_to_task: bool = False
+    mention_orchestrator: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +37,7 @@ class BuzzTaskFixture:
     """Relay state a task needs before the agent receives its prompt."""
 
     directory: tuple[DirectoryEntry, ...] = ()
+    scripted_messages: tuple[ScriptedMessage, ...] = ()
     observe_channel_names: tuple[str, ...] = ()
     user_display_name: str | None = None
     # Whether the task's verifier grades the exported relay snapshot. Only
@@ -34,6 +54,11 @@ USER_MENTION_TASK = "user-mention"
 USER_MENTION_DISPLAY_NAME = "John Vincent Doe"
 REPLY_TO_THREAD_TASK = "reply-to-thread"
 READ_NAMED_PATH_TASK = "read-named-path-outside-workspace"
+MULTILINE_MESSAGE_TASK = "multiline-message"
+NARRATIVE_AGENT_NAMES_TASK = "narrative-agent-names"
+INTERLEAVED_AGENT_REPORTS_TASK = "interleaved-agent-reports"
+CROSS_THREAD_REQUESTS_TASK = "cross-thread-requests"
+AMBIGUOUS_USER_MENTION_TASK = "ambiguous-user-mention"
 
 _CREATE_CHANNEL_FIXTURE = BuzzTaskFixture(
     directory=tuple(
@@ -55,11 +80,99 @@ _USER_MENTION_FIXTURE = BuzzTaskFixture(
     requires_evidence=True,
 )
 
+_NARRATIVE_AGENT_NAMES_FIXTURE = BuzzTaskFixture(
+    directory=(
+        DirectoryEntry("Aurora Audit Bot", "bot", channel_member=True),
+        DirectoryEntry("Beacon Deploy Bot", "bot", channel_member=True),
+    ),
+    user_display_name="Maya Elise Chen",
+    requires_evidence=True,
+)
+
+_INTERLEAVED_AGENT_REPORTS_FIXTURE = BuzzTaskFixture(
+    directory=(
+        DirectoryEntry("Ledger Scout", "bot", channel_member=True),
+        DirectoryEntry("Risk Sentinel", "bot", channel_member=True),
+        DirectoryEntry("Ops Forecaster", "bot", channel_member=True),
+    ),
+    scripted_messages=(
+        ScriptedMessage(
+            label="ledger-report",
+            actor="Ledger Scout",
+            content=(
+                "@{orchestrator} Ledger report: North is 17 and South is 23. "
+                "Use both values in the requested synthesis."
+            ),
+            reply_to_task=True,
+        ),
+        ScriptedMessage(
+            label="risk-report",
+            actor="Risk Sentinel",
+            content=(
+                "@{orchestrator} Risk report: subtract a reserve of 11 before "
+                "applying the operations multiplier."
+            ),
+            reply_to_task=True,
+        ),
+        ScriptedMessage(
+            label="operations-report",
+            actor="Ops Forecaster",
+            content=("@{orchestrator} Operations report: the final multiplier is 3."),
+            reply_to_task=True,
+        ),
+    ),
+    user_display_name="Nora Isabel Grant",
+    requires_evidence=True,
+)
+
+_CROSS_THREAD_REQUESTS_FIXTURE = BuzzTaskFixture(
+    scripted_messages=(
+        ScriptedMessage(
+            label="beta-request",
+            actor="user",
+            content=(
+                "@{orchestrator} BETA request: calculate (84 / 7) + 29. "
+                "Reply with the BETA result, labelled BETA."
+            ),
+        ),
+    ),
+    user_display_name="Priya Simone Patel",
+    requires_evidence=True,
+)
+
+_AMBIGUOUS_USER_MENTION_FIXTURE = BuzzTaskFixture(
+    directory=(
+        DirectoryEntry(
+            "Taylor Morgan Lee",
+            "user",
+            identity_id="taylor-release-captain",
+            about="Release captain. Routing code ORCHID-72.",
+            channel_member=True,
+        ),
+        DirectoryEntry(
+            "Taylor Morgan Lee",
+            "user",
+            identity_id="taylor-observer",
+            about="Compliance observer. Routing code COBALT-19.",
+            channel_member=True,
+        ),
+    ),
+    user_display_name="Olivia Grace Park",
+    requires_evidence=True,
+)
+
 _FIXTURES = {
     CREATE_CHANNEL_TASK: _CREATE_CHANNEL_FIXTURE,
     USER_MENTION_TASK: _USER_MENTION_FIXTURE,
     REPLY_TO_THREAD_TASK: BuzzTaskFixture(requires_evidence=True),
     READ_NAMED_PATH_TASK: BuzzTaskFixture(requires_evidence=True),
+    MULTILINE_MESSAGE_TASK: BuzzTaskFixture(
+        user_display_name="Eleanor June Brooks", requires_evidence=True
+    ),
+    NARRATIVE_AGENT_NAMES_TASK: _NARRATIVE_AGENT_NAMES_FIXTURE,
+    INTERLEAVED_AGENT_REPORTS_TASK: _INTERLEAVED_AGENT_REPORTS_FIXTURE,
+    CROSS_THREAD_REQUESTS_TASK: _CROSS_THREAD_REQUESTS_FIXTURE,
+    AMBIGUOUS_USER_MENTION_TASK: _AMBIGUOUS_USER_MENTION_FIXTURE,
 }
 
 

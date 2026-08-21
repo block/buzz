@@ -75,6 +75,7 @@ def build_buzz_evidence(
     completion_message_id: str | None,
     transcript_limit: int,
     observed_channels: object = None,
+    scripted_events: object = None,
 ) -> dict[str, Any]:
     """Normalize relay messages into a versioned contract for task verifiers.
 
@@ -92,6 +93,12 @@ def build_buzz_evidence(
     identities_by_pubkey = {
         pubkey: {"name": name, "role": role} for name, role, pubkey in identity_rows
     }
+    identities_by_pubkey.update(
+        {
+            identity.pubkey: {"name": identity.name, "role": identity.role}
+            for identity in trial.directory
+        }
+    )
     identities = {
         name: {"role": role, "pubkey": pubkey} for name, role, pubkey in identity_rows
     }
@@ -117,9 +124,16 @@ def build_buzz_evidence(
         "completion_message_id": completion_message_id,
         "identities": identities,
         "directory": [
-            {"name": identity.name, "role": identity.role, "pubkey": identity.pubkey}
+            {
+                "identity_id": identity.identity_id or identity.name,
+                "name": identity.name,
+                "role": identity.role,
+                "pubkey": identity.pubkey,
+                "about": identity.about,
+            }
             for identity in trial.directory
         ],
+        "scripted_events": scripted_events if isinstance(scripted_events, list) else [],
         "task_name": trial.task_name,
         "observed_channels": (
             observed_channels if isinstance(observed_channels, list) else []
