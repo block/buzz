@@ -42,6 +42,9 @@ class _MessageList extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final appView = View.of(context);
+    final localSendAnimations = ref.watch(
+      localMessageSendAnimationProvider(channelId),
+    );
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
@@ -622,6 +625,14 @@ class _MessageList extends HookConsumerWidget {
           previous == latestEntryId) {
         return null;
       }
+      final isLocalSend = isRecentLocalMessageSendAnimation(
+        localSendAnimations,
+        latestEntryId,
+      );
+      if (isLocalSend) {
+        followsLatest.value = true;
+        hasUserScrolled.value = false;
+      }
       if (!followsLatest.value || hasUserScrolled.value) {
         hasUnseenLatestEntry.value = true;
       }
@@ -640,7 +651,7 @@ class _MessageList extends HookConsumerWidget {
         }
       });
       return null;
-    }, [latestEntryId]);
+    }, [latestEntryId, localSendAnimations]);
 
     if (entries.isEmpty) {
       return Center(
@@ -781,57 +792,67 @@ class _MessageList extends HookConsumerWidget {
                             message.pubkey.toLowerCase() ||
                         (message.createdAt - prevMessage.createdAt) > 300);
 
-                return Padding(
-                  key: ValueKey('channel-message-group-${message.id}'),
-                  padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (showDayDivider)
-                        DayDivider(
-                          label: formatDayHeading(message.createdAt),
-                          dayTimestamp: message.createdAt,
-                          stickyDayTimestamp: stickyDayTimestamp,
-                        ),
-                      if (message.isSystem)
-                        _SystemMessageRow(
-                          message: message,
-                          groupedMessages: entryGroup.length > 1
-                              ? entryGroup
-                                    .map((entry) => entry.message)
-                                    .toList()
-                              : null,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                          allMessages: null,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                        )
-                      else ...[
-                        _MessageBubble(
-                          message: message,
-                          showAuthor: showAuthor,
-                          channelNames: channelNamesMap,
-                          currentChannelId: channelId,
-                          currentPubkey: currentPubkey,
-                          allMessages: allMessages,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                          composerFocusNode: composerFocusNode,
-                          restoreComposerFocus: restoreComposerFocus,
-                        ),
-                        if (entry.summary != null)
-                          _ThreadSummaryRow(
-                            summary: entry.summary!,
+                return LocalMessageSendTransition(
+                  key: ValueKey('channel-message-send-${message.id}'),
+                  animate: isRecentLocalMessageSendAnimation(
+                    localSendAnimations,
+                    message.id,
+                  ),
+                  startOffsetFactor: showAuthor
+                      ? localMessageSendTransitionAvatarStartOffset
+                      : localMessageSendTransitionStartOffset,
+                  child: Padding(
+                    key: ValueKey('channel-message-group-${message.id}'),
+                    padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (showDayDivider)
+                          DayDivider(
+                            label: formatDayHeading(message.createdAt),
+                            dayTimestamp: message.createdAt,
+                            stickyDayTimestamp: stickyDayTimestamp,
+                          ),
+                        if (message.isSystem)
+                          _SystemMessageRow(
                             message: message,
-                            allMessages: allMessages,
+                            groupedMessages: entryGroup.length > 1
+                                ? entryGroup
+                                      .map((entry) => entry.message)
+                                      .toList()
+                                : null,
                             channelId: channelId,
                             currentPubkey: currentPubkey,
+                            allMessages: null,
                             isMember: isMember,
                             isArchived: isArchived,
+                          )
+                        else ...[
+                          _MessageBubble(
+                            message: message,
+                            showAuthor: showAuthor,
+                            channelNames: channelNamesMap,
+                            currentChannelId: channelId,
+                            currentPubkey: currentPubkey,
+                            allMessages: allMessages,
+                            isMember: isMember,
+                            isArchived: isArchived,
+                            composerFocusNode: composerFocusNode,
+                            restoreComposerFocus: restoreComposerFocus,
                           ),
+                          if (entry.summary != null)
+                            _ThreadSummaryRow(
+                              summary: entry.summary!,
+                              message: message,
+                              allMessages: allMessages,
+                              channelId: channelId,
+                              currentPubkey: currentPubkey,
+                              isMember: isMember,
+                              isArchived: isArchived,
+                            ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 );
               },

@@ -171,15 +171,22 @@ class FrostedAppBar extends StatelessWidget {
       titleStyle,
       titleContentHeight,
     );
+    final usesAutomaticIosGlassBackButton =
+        leading == null &&
+        automaticallyImplyLeading &&
+        canPop &&
+        Theme.of(context).platform == TargetPlatform.iOS;
 
     final effectiveLeading =
         leading ??
         (automaticallyImplyLeading && canPop
-            ? Theme.of(context).platform == TargetPlatform.iOS
+            ? usesAutomaticIosGlassBackButton
                   ? IosGlassNavigationButton(
                       icon: IosGlassNavigationIcon.back,
                       semanticLabel: 'Back',
                       onPressed: () => Navigator.of(context).maybePop(),
+                      width: iosGlassChannelHeaderLeadingWidth,
+                      buttonCenterX: iosGlassChannelHeaderButtonCenterX,
                       foregroundColor: iconColor,
                     )
                   : SizedBox(
@@ -208,7 +215,9 @@ class FrostedAppBar extends StatelessWidget {
                   child: Padding(
                     padding: EdgeInsets.only(
                       left: effectiveLeading != null
-                          ? 0
+                          ? usesAutomaticIosGlassBackButton
+                                ? iosGlassChannelHeaderTitleSpacing
+                                : 0
                           : horizontalInset < Grid.gutter
                           ? Grid.gutter - horizontalInset
                           : 0,

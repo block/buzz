@@ -1,5 +1,61 @@
 part of '../compose_bar.dart';
 
+Future<void> _sendTextOnlyDraft({
+  required BuildContext context,
+  required _MarkdownEditingController controller,
+  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
+  required ObjectRef<int> draftRevision,
+  required FocusNode focusNode,
+  required VoidCallback clearComposer,
+  required Future<void> Function() addMentionedNonMembers,
+  required _ComposeDraftPayload payload,
+  required _OutgoingMentions outgoing,
+  required ComposeBarOnSend onSend,
+  required ScaffoldMessengerState? messenger,
+}) async {
+  final draftText = controller.value;
+  final draftMentions = Map<String, MentionCandidate>.of(mentionMap.value);
+  int? clearedDraftRevision;
+
+  void restoreClearedDraft() {
+    if (!context.mounted ||
+        clearedDraftRevision == null ||
+        draftRevision.value != clearedDraftRevision) {
+      return;
+    }
+    controller.value = draftText;
+    mentionMap.value
+      ..clear()
+      ..addAll(draftMentions);
+    focusNode.requestFocus();
+  }
+
+  try {
+    await addMentionedNonMembers();
+    // Clear before optimistic insertion so the outgoing row and draft never
+    // appear simultaneously during the send transition.
+    if (context.mounted) {
+      clearComposer();
+      clearedDraftRevision = draftRevision.value;
+    }
+    await onSend(
+      payload.content,
+      outgoing.pubkeys,
+      mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
+    );
+  } on StateError {
+    restoreClearedDraft();
+    _reportSendCancelledByCommunitySwitch(messenger);
+  } catch (error) {
+    // The caller runs unawaited, so surface publish failures and restore the
+    // sent draft unless the user has already started a new one.
+    restoreClearedDraft();
+    messenger?.showSnackBar(
+      SnackBar(content: Text(_composeSendErrorMessage(error))),
+    );
+  }
+}
+
 void _useComposeDraftLifecycle({
   required WidgetRef ref,
   required _MarkdownEditingController controller,

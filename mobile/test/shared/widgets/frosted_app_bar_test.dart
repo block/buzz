@@ -99,7 +99,14 @@ void main() {
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (_) => const Stack(
-                  children: [FrostedAppBar(title: Text('Destination'))],
+                  children: [
+                    FrostedAppBar(
+                      title: Text(
+                        'Destination',
+                        key: ValueKey('destination-title'),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -119,8 +126,20 @@ void main() {
       nativeBack.creationParams,
       containsPair('accessibilityLabel', 'Back'),
     );
-    expect(nativeBack.creationParams, containsPair('hitTargetWidth', 48.0));
+    expect(
+      nativeBack.creationParams,
+      containsPair('buttonCenterX', iosGlassChannelHeaderButtonCenterX),
+    );
+    expect(
+      nativeBack.creationParams,
+      containsPair('hitTargetWidth', iosGlassChannelHeaderLeadingWidth),
+    );
     expect(nativeBack.creationParams, containsPair('hitTargetHeight', 48.0));
+    final backRect = tester.getRect(find.byType(IosGlassNavigationButton));
+    final titleRect = tester.getRect(
+      find.byKey(const ValueKey('destination-title')),
+    );
+    expect(titleRect.left - backRect.right, iosGlassChannelHeaderTitleSpacing);
     expect(find.byTooltip('Back'), findsOneWidget);
     expect(
       tester.widget<Tooltip>(find.byTooltip('Back')).excludeFromSemantics,

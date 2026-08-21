@@ -913,6 +913,124 @@ void main() {
       expect(sentContent, 'First line\nSecond line');
     });
 
+    testWidgets('clears text before the optimistic send completes', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a failed send restores an untouched cleared draft', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'retry me');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.completeError(Exception('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'retry me',
+      );
+    });
+
+    testWidgets('a failed send does not overwrite a new draft', (tester) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'first draft');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      await tester.enterText(find.byType(TextField), 'new draft');
+      delivery.completeError(StateError('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'new draft',
+      );
+    });
+
     testWidgets('smoothly resizes the text field when a new line is added', (
       tester,
     ) async {
