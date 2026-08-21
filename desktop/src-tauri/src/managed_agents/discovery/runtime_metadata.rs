@@ -123,4 +123,33 @@ mod tests {
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
     }
+
+    #[test]
+    fn opencode_metadata_pins_native_acp_shape() {
+        let opencode = known_acp_runtime_exact("opencode").unwrap();
+
+        // Native ACP: the CLI is the agent — no adapter tier, and the CLI
+        // itself doubles as the underlying-CLI marker so Phase-1 install runs.
+        assert_eq!(opencode.commands, &["opencode"]);
+        assert_eq!(opencode.underlying_cli, Some("opencode"));
+        assert!(opencode.adapter_install_commands.is_empty());
+        assert!(opencode
+            .cli_install_commands
+            .iter()
+            .any(|cmd| cmd.contains("https://opencode.ai/install")));
+
+        // Skills and config follow opencode's documented project layout.
+        assert_eq!(opencode.skill_dir, Some(".opencode/skills"));
+        assert_eq!(
+            opencode.config_file_path,
+            Some("~/.config/opencode/opencode.json")
+        );
+
+        // No faithful exit-code auth probe exists (`opencode auth list` exits
+        // 0 with zero credentials) and no native model env var is read by
+        // opencode core — both stay None until those become probeable.
+        assert_eq!(opencode.auth_probe_args, None);
+        assert_eq!(opencode.model_env_var, None);
+        assert_eq!(opencode.provider_env_var, None);
+    }
 }

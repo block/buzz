@@ -14,8 +14,9 @@ const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
 };
 
-// Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
-// Keys match the preset `id` values emitted by the backend PRESET_HARNESSES.
+// Public-path logos for bundled harnesses. Served from /harness-logos/ at
+// runtime. Keys match harness `id` values — presets and builtins alike (the
+// opencode logo serves its compiled-in entry after its tier-1 promotion).
 export const PRESET_LOGOS: Record<string, string> = {
   devin: "/harness-logos/devin.svg",
   omp: "/harness-logos/omp.svg",

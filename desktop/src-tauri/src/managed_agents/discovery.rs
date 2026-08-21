@@ -33,6 +33,8 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const OPENCODE_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/desktop/public/harness-logos/opencode.svg";
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -55,6 +57,9 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
                 home.join(".bun/bin"),
+                // opencode's native installer writes here and only appends to
+                // shell rc files, so this is the deterministic probe location.
+                home.join(".opencode/bin"),
             ]);
         }
         // Windows well-known dirs for npm global shims and standalone installer targets.
@@ -185,6 +190,48 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "opencode",
+        label: "OpenCode",
+        commands: &["opencode"],
+        aliases: &[],
+        avatar_url: OPENCODE_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("opencode"),
+        // The vendor installer is one cross-platform bash script (Git Bash on
+        // Windows); opencode publishes no PowerShell installer to route
+        // through the Defender-safe two-step form, so both OSes use the pipe.
+        cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash"],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://opencode.ai/docs",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to OpenCode through the OpenCode CLI's ACP mode (opencode acp).",
+        adapter_install_hint: "",
+        skill_dir: Some(".opencode/skills"),
+        supports_acp_model_switching: false,
+        // No native model env var: opencode resolves its model from config
+        // (`~/.config/opencode/opencode.json`, `provider/model` ids), so model
+        // pinning is config-side rather than env-side.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.config/opencode/opencode.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        // `opencode auth list` exits 0 even with zero credentials, so an
+        // exit-code probe cannot tell logged out from logged in; report
+        // NotApplicable (goose pattern) until a faithful probe exists.
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -450,7 +497,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "opencode" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

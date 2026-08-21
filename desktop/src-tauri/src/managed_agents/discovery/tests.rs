@@ -70,6 +70,16 @@ fn normalizes_claude_and_codex_args_to_empty() {
 }
 
 #[test]
+fn opencode_defaults_to_acp_mode_args() {
+    // Bare `opencode` starts the TUI; ACP needs the `acp` subcommand, so the
+    // empty-args default must be `["acp"]` (goose pattern).
+    assert_eq!(
+        normalize_agent_args("opencode", Vec::new()),
+        vec!["acp".to_string()]
+    );
+}
+
+#[test]
 fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("buzz-agent"),
