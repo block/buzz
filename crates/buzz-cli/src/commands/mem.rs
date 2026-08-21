@@ -28,6 +28,43 @@ use nostr::PublicKey;
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
+const PATCH_INPUT_MAX: usize = 4 * 1024 * 1024;
+
+fn read_patch_input<R: std::io::Read>(reader: R, limit: usize) -> Result<String, CliError> {
+    let mut buf = String::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_string(&mut buf)
+        .map_err(|e| CliError::Other(format!("patch read failed: {e}")))?;
+    if buf.len() > limit {
+        return Err(CliError::Usage(format!(
+            "patch input exceeds {} bytes; split the change into sequential patches, chaining --base-hash through each result",
+            limit
+        )));
+    }
+    Ok(buf)
+}
+
+fn read_patch_source(patch_path: Option<&str>, limit: usize) -> Result<String, CliError> {
+    match patch_path {
+        Some(path) => {
+            let file = std::fs::File::open(path)
+                .map_err(|e| CliError::Usage(format!("failed to read --patch-file {path}: {e}")))?;
+            let s = read_patch_input(file, limit)?;
+            Ok(s) // empty file is allowed to propagate; caller decides
+        }
+        None => {
+            let s = read_patch_input(std::io::stdin(), limit)?;
+            if s.is_empty() {
+                return Err(CliError::Usage(
+                    "refusing to apply empty patch from stdin (an upstream pipeline step likely failed)".into(),
+                ));
+            }
+            Ok(s)
+        }
+    }
+}
+
 /// Resolve the agent's owner pubkey: explicit `--owner` flag wins, otherwise
 /// fall back to the NIP-OA `auth_tag` (which carries owner pubkey in slot 1).
 fn resolve_owner(client: &BuzzClient, owner_flag: Option<&str>) -> Result<PublicKey, CliError> {
@@ -588,8 +625,7 @@ pub async fn cmd_patch(
                 .map_err(|e| CliError::Other(format!("stdin read failed: {e}")))?;
             if buf.is_empty() {
                 return Err(CliError::Usage(
-                    "refusing to apply empty patch from stdin (an upstream pipeline step likely \
-                     failed)"
+                    "refusing to apply empty patch from stdin (an upstream pipeline step likely                      failed)"
                         .into(),
                 ));
             }
@@ -1041,5 +1077,66 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    #[test]
+    fn read_patch_input_exact_limit_ok() {
+        let payload = "a".repeat(PATCH_INPUT_MAX);
+        let out = read_patch_input(payload.as_bytes(), PATCH_INPUT_MAX).unwrap();
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn read_patch_input_over_limit_err_contains_limit() {
+        let payload = "a".repeat(PATCH_INPUT_MAX + 1);
+        let err = read_patch_input(payload.as_bytes(), PATCH_INPUT_MAX).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&PATCH_INPUT_MAX.to_string()), "got: {msg}");
+    }
+
+    #[test]
+    fn read_patch_input_large_diff_above_nip44_survives() {
+        let len = engram::NIP44_PLAINTEXT_MAX + 5000;
+        assert!(len < PATCH_INPUT_MAX);
+        let payload = "x".repeat(len);
+        let out = read_patch_input(payload.as_bytes(), PATCH_INPUT_MAX).unwrap();
+        assert_eq!(out.len(), payload.len());
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn read_patch_input_never_truncates() {
+        for n in [0, 1, 10, 100, PATCH_INPUT_MAX - 1, PATCH_INPUT_MAX] {
+            let payload = "b".repeat(n);
+            let out = read_patch_input(payload.as_bytes(), PATCH_INPUT_MAX).unwrap();
+            assert_eq!(out.len(), n, "truncated at n={n}");
+            assert_eq!(out, payload);
+        }
+        let payload = "b".repeat(PATCH_INPUT_MAX + 1);
+        assert!(read_patch_input(payload.as_bytes(), PATCH_INPUT_MAX).is_err());
+    }
+
+    #[test]
+    fn read_patch_source_file_over_limit_err() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let payload = "a".repeat(PATCH_INPUT_MAX + 1);
+        std::io::Write::write_all(&mut f, payload.as_bytes()).unwrap();
+        let err = read_patch_source(Some(f.path().to_str().unwrap()), PATCH_INPUT_MAX).unwrap_err();
+        assert!(
+            err.to_string().contains(&PATCH_INPUT_MAX.to_string()),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_patch_source_file_large_above_nip44_survives() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let len = engram::NIP44_PLAINTEXT_MAX + 5000;
+        assert!(len < PATCH_INPUT_MAX);
+        let payload = "x".repeat(len);
+        std::io::Write::write_all(&mut f, payload.as_bytes()).unwrap();
+        let out = read_patch_source(Some(f.path().to_str().unwrap()), PATCH_INPUT_MAX).unwrap();
+        assert_eq!(out.len(), len);
+        assert_eq!(out, payload);
     }
 }
