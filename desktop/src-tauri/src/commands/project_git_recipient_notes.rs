@@ -116,7 +116,13 @@ fn build_labeled_recipient_note_event(
         .map(Tag::parse)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("build {label} tags: {error}"))?;
-    let mut builder = EventBuilder::new(Kind::TextNote, content).tags(tags);
+    // The recipients are the payload here, and one of them may be the signer —
+    // assigning yourself, or requesting your own review. `nostr` strips a `p`
+    // tag matching the author unless told not to, which turned those into
+    // events naming nobody. See the same call in `buzz-sdk`.
+    let mut builder = EventBuilder::new(Kind::TextNote, content)
+        .tags(tags)
+        .allow_self_tagging();
     if let Some(created_at) = created_at {
         builder = builder.custom_created_at(Timestamp::from_secs(created_at));
     }

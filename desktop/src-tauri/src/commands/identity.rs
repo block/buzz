@@ -120,7 +120,14 @@ pub async fn sign_event(
             .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+        // Sign exactly the tags the caller composed. `nostr` otherwise removes
+        // any `p` tag naming the author, which made this signer silently drop
+        // part of what it was handed — the self-assignment path in
+        // `issueAssignments.ts` published assignments with no assignee. A
+        // caller that does not want a self `p` tag simply does not add one.
+        let mut builder = EventBuilder::new(Kind::Custom(kind), content)
+            .tags(nostr_tags)
+            .allow_self_tagging();
         if let Some(created_at) = created_at {
             builder = builder.custom_created_at(Timestamp::from(created_at));
         }
