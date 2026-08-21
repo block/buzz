@@ -458,9 +458,13 @@ mod nip11_relay_info {
     /// icon, per-community state served in the standard NIP-11 field, fetched
     /// through `bind_community` so it can only ever be the requesting host's
     /// own community state — intentionally public presentation, exactly what
-    /// upstream NIP-11 `icon` is). So the
+    /// upstream NIP-11 `icon` is). `origin` is the second host-scoped field: it
+    /// echoes the host the client itself connected to, so a client can only
+    /// ever observe its own `origin`, never another tenant's — it carries no
+    /// cross-community information. So the
     /// oracle proof is: the documents are identical *modulo each community's
-    /// own `icon`*, and an unmapped host's document carries no `icon` at all.
+    /// own `icon` and the per-connection `origin`, and an unmapped host's
+    /// document carries no `icon` at all.
     /// The moment any *other* per-community value leaks into the doc, the
     /// icon-stripped bodies diverge and this assertion fails — that is the
     /// mutate-bite this row guards (seed a community-distinguishing field into
@@ -499,10 +503,15 @@ mod nip11_relay_info {
 
         // `icon` is the one deliberately host-scoped field (the NIP-WP
         // workspace icon; each host sees only its own community's icon).
-        // Strip it before the equality proof — every OTHER field must still
+        // `origin` is also host-scoped: it echoes the host the client itself
+        // connected to, so a client can only ever observe its own `origin`,
+        // never another tenant's — it carries no cross-community information.
+        // Strip both before the equality proof — every OTHER field must still
         // be community-agnostic.
         json_a.as_object_mut().map(|o| o.remove("icon"));
         json_b.as_object_mut().map(|o| o.remove("icon"));
+        json_a.as_object_mut().map(|o| o.remove("origin"));
+        json_b.as_object_mut().map(|o| o.remove("origin"));
 
         // The enumeration-oracle obligation: no other field of the served
         // document varies by community. Identical icon-stripped bodies are the
@@ -533,7 +542,7 @@ mod nip11_relay_info {
              a 404 — a status difference between mapped and unmapped hosts would \
              itself be a community-enumeration oracle"
         );
-        let json_unknown: serde_json::Value =
+        let mut json_unknown: serde_json::Value =
             serde_json::from_str(&body_unknown).expect("unmapped-host NIP-11 is valid JSON");
         assert!(
             json_unknown.get("icon").is_none(),
@@ -541,12 +550,15 @@ mod nip11_relay_info {
              carry no `icon` — leaking any community's icon to an unmapped host \
              would cross the tenant boundary"
         );
+        // `origin` is per-connection (the host the client itself dialed), so
+        // strip it from the unmapped-host doc too before the equality proof.
+        json_unknown.as_object_mut().map(|o| o.remove("origin"));
         assert_eq!(
             json_a, json_unknown,
             "NIP-11 served to an unmapped host must match a mapped host's \
-             icon-stripped document: apart from the host's own `icon`, the \
-             relay-info doc carries no host-derived field, so it cannot reveal \
-             whether a given host is configured"
+             icon-stripped document: apart from the host's own `icon` and the \
+             per-connection `origin`, the relay-info doc carries no host-derived \
+             field, so it cannot reveal whether a given host is configured"
         );
     }
 }
