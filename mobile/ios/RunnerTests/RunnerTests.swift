@@ -5,7 +5,105 @@ import XCTest
 
 @testable import Buzz
 
+private extension UIColor {
+  convenience init(hex: UInt32) {
+    self.init(
+      red: CGFloat((hex >> 16) & 0xFF) / 255,
+      green: CGFloat((hex >> 8) & 0xFF) / 255,
+      blue: CGFloat(hex & 0xFF) / 255,
+      alpha: 1
+    )
+  }
+}
+
 class RunnerTests: XCTestCase {
+
+  func testNavigationGlassButtonExpandsToConfiguredHitTarget() {
+    let button = NavigationGlassButton(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+    button.hitTargetInsets = UIEdgeInsets(top: 2, left: 18, bottom: 2, right: 0)
+
+    XCTAssertTrue(button.point(inside: CGPoint(x: -17, y: 20), with: nil))
+    XCTAssertTrue(button.point(inside: CGPoint(x: 20, y: -1), with: nil))
+    XCTAssertFalse(button.point(inside: CGPoint(x: -19, y: 20), with: nil))
+    XCTAssertFalse(button.point(inside: CGPoint(x: 20, y: -3), with: nil))
+  }
+
+  func testNavigationGlassButtonRejectsExpandedHitsWhenDisabled() {
+    let button = NavigationGlassButton(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+    button.hitTargetInsets = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+    button.isEnabled = false
+
+    XCTAssertFalse(button.point(inside: CGPoint(x: -1, y: 20), with: nil))
+  }
+
+  func testNavigationGlassFallbackContrastsSupportedAccentsInLightMode() {
+    let accents: [(name: String, color: UIColor)] = [
+      ("Neutral", UIColor(hex: 0x000000)),
+      ("Blue", UIColor(hex: 0x3B82F6)),
+      ("Cyan", UIColor(hex: 0x06B6D4)),
+      ("Green", UIColor(hex: 0x22C55E)),
+      ("Orange", UIColor(hex: 0xF97316)),
+      ("Red", UIColor(hex: 0xEF4444)),
+      ("Pink", UIColor(hex: 0xEC4899)),
+      ("Lilac", UIColor(hex: 0xC0A2F1)),
+      ("Purple", UIColor(hex: 0xA855F7)),
+      ("Indigo", UIColor(hex: 0x6366F1)),
+      ("White", .white),
+    ]
+
+    for accent in accents {
+      let background = NavigationGlassButtonPlatformView.fallbackBackgroundColor(
+        foregroundColor: accent.color,
+        interfaceStyle: .light
+      )
+      var red: CGFloat = 0
+      var green: CGFloat = 0
+      var blue: CGFloat = 0
+      var alpha: CGFloat = 0
+      XCTAssertTrue(
+        background.getRed(&red, green: &green, blue: &blue, alpha: &alpha),
+        accent.name
+      )
+      XCTAssertEqual(alpha, 1, accuracy: 0.001, accent.name)
+      XCTAssertGreaterThanOrEqual(
+        NavigationGlassButtonPlatformView.contrastRatio(
+          foregroundColor: accent.color,
+          backgroundColor: background
+        ),
+        3,
+        accent.name
+      )
+    }
+  }
+
+  func testNavigationGlassFallbackKeepsSystemSurfaceInDarkMode() {
+    let darkAccents = [
+      UIColor(hex: 0xE1E4E8),
+      UIColor(hex: 0x60A5FA),
+      UIColor(hex: 0x22D3EE),
+      UIColor(hex: 0x4ADE80),
+      UIColor(hex: 0xFB923C),
+      UIColor(hex: 0xF87171),
+      UIColor(hex: 0xF472B6),
+      UIColor(hex: 0xC0A2F1),
+      UIColor(hex: 0xC084FC),
+      UIColor(hex: 0x818CF8),
+    ]
+
+    for accent in darkAccents {
+      let background = NavigationGlassButtonPlatformView.fallbackBackgroundColor(
+        foregroundColor: accent,
+        interfaceStyle: .dark
+      )
+      XCTAssertGreaterThanOrEqual(
+        NavigationGlassButtonPlatformView.contrastRatio(
+          foregroundColor: accent,
+          backgroundColor: background
+        ),
+        3
+      )
+    }
+  }
 
   func testRelativeTrackInsertionTimesPreserveAudioDelay() {
     let times = AppDelegate.relativeTrackInsertionTimes(

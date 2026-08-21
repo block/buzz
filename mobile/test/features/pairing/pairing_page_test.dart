@@ -139,6 +139,21 @@ void main() {
       expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
     });
 
+    testWidgets('uses the native glass back control on iOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(
+        WidgetHelpers.testable(child: const PairingPage(addingCommunity: true)),
+      );
+
+      final nativeBack = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(nativeBack.viewType, 'buzz/navigation_glass');
+      expect(nativeBack.creationParams, containsPair('icon', 'back'));
+      expect(find.byTooltip('Back'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('reveals pairing code field and connect action', (
       tester,
     ) async {

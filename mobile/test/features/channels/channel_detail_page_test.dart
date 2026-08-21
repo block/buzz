@@ -3,7 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollDirection, SemanticsAction;
+import 'package:flutter/rendering.dart'
+    show RenderParagraph, ScrollDirection, SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -44,6 +45,7 @@ import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5195,6 +5197,246 @@ void main() {
   });
 
   group('App bar', () {
+    testWidgets('matches the channel header placement on iOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const nativeChannel = MethodChannel('buzz/navigation_glass/43');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        nativeChannel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          nativeChannel,
+          null,
+        ),
+      );
+
+      final root = _textMsg(
+        id: 'thread-header-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+      );
+      final timelineMessages = formatTimeline([root]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          textScaler: const TextScaler.linear(2),
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ThreadDetailPage(
+                      threadHead: timelineMessages.single,
+                      allMessages: timelineMessages,
+                      channelId: _testChannel.id,
+                      currentPubkey: null,
+                      isMember: true,
+                      isArchived: false,
+                    ),
+                  ),
+                ),
+                child: const Text('Open thread'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open thread'));
+      await tester.pumpAndSettle();
+
+      final backFinder = find.byKey(const ValueKey('thread-ios-glass-back'));
+      final nativeView = tester.widget<UiKitView>(
+        find.descendant(of: backFinder, matching: find.byType(UiKitView)),
+      );
+      expect(nativeView.viewType, IosGlassNavigationButton.viewType);
+      expect(
+        (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
+        iosGlassChannelHeaderButtonCenterX,
+      );
+      expect(
+        (nativeView.creationParams as Map<String, Object>)['hitTargetWidth'],
+        iosGlassChannelHeaderLeadingWidth,
+      );
+      expect(
+        (nativeView.creationParams as Map<String, Object>)['hitTargetHeight'],
+        48.0,
+      );
+
+      final backRect = tester.getRect(backFinder);
+      final titleRect = tester.getRect(
+        find.byKey(const ValueKey('thread-app-bar-title')),
+      );
+      expect(backRect.width, iosGlassChannelHeaderLeadingWidth);
+      expect(
+        titleRect.left - backRect.right,
+        moreOrLessEquals(iosGlassChannelHeaderTitleSpacing),
+      );
+      expect(tester.takeException(), isNull);
+
+      nativeView.onPlatformViewCreated!(43);
+      await tester.pump();
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        nativeChannel.name,
+        nativeChannel.codec.encodeMethodCall(const MethodCall('pressed')),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ThreadDetailPage), findsNothing);
+      expect(find.text('Open thread'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets(
+      'keeps the native iOS glass header aligned at large text sizes',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+        final message = _textMsg(
+          id: 'avatar-alignment',
+          pubkey: 'alice',
+          content: 'Hello',
+          createdAt: 1000,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [message],
+            textScaler: const TextScaler.linear(2),
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(channel: _testChannel),
+                    ),
+                  ),
+                  child: const Text('Open channel'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Open channel'));
+        await tester.pumpAndSettle();
+
+        final nativeViewFinder = find.descendant(
+          of: find.byKey(const ValueKey('channel-ios-glass-back')),
+          matching: find.byType(UiKitView),
+        );
+        final nativeView = tester.widget<UiKitView>(nativeViewFinder);
+        expect(nativeView.viewType, 'buzz/navigation_glass');
+        expect(
+          (nativeView.creationParams as Map<String, Object>)['icon'],
+          'back',
+        );
+        expect(
+          (nativeView.creationParams as Map<String, Object>)['brightness'],
+          'light',
+        );
+        expect(
+          (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
+          38.0,
+        );
+        final backButtonRect = tester.getRect(
+          find.byKey(const ValueKey('channel-ios-glass-back')),
+        );
+        expect(backButtonRect.width, 58);
+        final channelIconRect = tester.getRect(
+          find.byKey(const ValueKey('channel-header-avatar')),
+        );
+        expect(
+          channelIconRect.left - backButtonRect.right,
+          moreOrLessEquals(Grid.xs),
+        );
+        expect(
+          backButtonRect.center.dy,
+          moreOrLessEquals(channelIconRect.center.dy),
+        );
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets(
+        'keeps a narrow long channel title aligned on ${platform.name}',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = platform;
+          addTearDown(
+            () => debugDefaultTargetPlatformOverride = previousPlatform,
+          );
+          tester.view.physicalSize = const Size(320, 700);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          final channel = _testChannel.copyWith(
+            name: 'a-very-long-channel-name-that-must-truncate',
+          );
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: const [],
+              channel: channel,
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ChannelDetailPage(channel: channel),
+                      ),
+                    ),
+                    child: const Text('Open channel'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.text('Open channel'));
+          await tester.pumpAndSettle();
+
+          final backRect = platform == TargetPlatform.iOS
+              ? tester.getRect(
+                  find.byKey(const ValueKey('channel-ios-glass-back')),
+                )
+              : tester.getRect(find.byTooltip('Back'));
+          final avatarRect = tester.getRect(
+            find.byKey(const ValueKey('channel-header-avatar')),
+          );
+          final titleSpacing = avatarRect.left - backRect.right;
+          final title = tester.renderObject<RenderParagraph>(
+            find.byKey(const ValueKey('channel-header-name')),
+          );
+          final titleDidExceedMaxLines = title.didExceedMaxLines;
+          debugDefaultTargetPlatformOverride = previousPlatform;
+
+          expect(
+            titleSpacing,
+            moreOrLessEquals(
+              platform == TargetPlatform.iOS
+                  ? iosGlassChannelHeaderTitleSpacing
+                  : 0,
+            ),
+          );
+          expect(titleDidExceedMaxLines, isTrue);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
     testWidgets('shows a tappable channel name and collective member count', (
       tester,
     ) async {
@@ -5221,12 +5463,66 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('channel-header-avatar'))),
         const Size.square(40),
       );
+      final channelHeaderAvatarRect = tester.getRect(
+        find.byKey(const ValueKey('channel-header-avatar')),
+      );
+      final channelHeaderTextStackRect = tester.getRect(
+        find.byKey(const ValueKey('channel-header-text-stack')),
+      );
+      expect(channelHeaderTextStackRect.height, 40);
+      expect(
+        channelHeaderTextStackRect.center.dy,
+        moreOrLessEquals(channelHeaderAvatarRect.center.dy),
+      );
       expect(
         tester
             .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
             .style
             ?.fontSize,
-        AppTheme.light().textTheme.titleMedium?.fontSize,
+        AppTheme.light().textTheme.titleSmall?.fontSize,
+      );
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
+            .style
+            ?.fontWeight,
+        FontWeight.w600,
+      );
+      final channelHeaderAvatar = tester.widget<Container>(
+        find.byKey(const ValueKey('channel-header-avatar')),
+      );
+      expect(
+        (channelHeaderAvatar.decoration as BoxDecoration).color,
+        AppTheme.light().colorScheme.surface,
+      );
+      final channelHeaderAvatarBorder =
+          (channelHeaderAvatar.decoration as BoxDecoration).border! as Border;
+      expect(
+        channelHeaderAvatarBorder.top.color,
+        AppTheme.light().colorScheme.inverseSurface.withValues(alpha: 0.07),
+      );
+      expect(channelHeaderAvatarBorder.top.width, 1);
+      expect(
+        channelHeaderAvatarBorder.top.strokeAlign,
+        BorderSide.strokeAlignOutside,
+      );
+      expect(
+        tester
+            .widget<Icon>(
+              find.descendant(
+                of: find.byKey(const ValueKey('channel-header-avatar')),
+                matching: find.byIcon(LucideIcons.hash),
+              ),
+            )
+            .color,
+        AppTheme.light().colorScheme.primary,
+      );
+      expect(
+        tester.getRect(find.byKey(const ValueKey('channel-header-name'))).left -
+            tester
+                .getRect(find.byKey(const ValueKey('channel-header-avatar')))
+                .right,
+        moreOrLessEquals(Grid.twelve),
       );
       expect(
         tester
@@ -5236,6 +5532,15 @@ void main() {
             .style
             ?.fontSize,
         AppTheme.light().textTheme.bodySmall?.fontSize,
+      );
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const ValueKey('channel-header-member-count')),
+            )
+            .style
+            ?.color,
+        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.65),
       );
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Channel actions'), findsNothing);
@@ -8690,6 +8995,20 @@ void main() {
       expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
     });
 
+    test(
+      'thread tail accepts exact scroll extent while item positions lag',
+      () {
+        expect(
+          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 0),
+          isTrue,
+        );
+        expect(
+          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 1),
+          isFalse,
+        );
+      },
+    );
+
     testWidgets('thread Latest settles across expanding lazy scroll extents', (
       tester,
     ) async {
@@ -8891,6 +9210,14 @@ void main() {
         final targetPixels = threadScrollable.position.maxScrollExtent;
         await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
         await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest-hidden')),
+          findsOneWidget,
+          reason:
+              'Latest should leave immediately once its navigation starts, '
+              'rather than lingering over the thread at the tail.',
+        );
 
         expect(
           find.descendant(of: list, matching: find.byType(Scrollable)),

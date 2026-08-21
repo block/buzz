@@ -12,6 +12,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -34,6 +35,7 @@ import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
+import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
@@ -56,6 +58,7 @@ const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
 const _landingHighlightOpacity = 0.12;
+const _threadTailScrollTolerance = 0.5;
 
 // Keep the direct-position correction finite in case the viewport cannot
 // expose its tail (for example, continuously changing media dimensions).
@@ -243,6 +246,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final tailIntent = useMemoized(_ThreadTailIntent.new);
     final initialTailSettle = useMemoized(InitialThreadTailSettle.new);
     final isAtThreadTail = useState(true);
+    final isNavigatingToThreadTail = useState(false);
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
@@ -371,6 +375,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           tailIntent.isDragging ||
           userOptedOutOfTailFollow.value) {
         tailCorrectionInProgress.value = false;
+        isNavigatingToThreadTail.value = false;
         isAtThreadTail.value = threadTailIsVisible();
         return;
       }
@@ -391,8 +396,19 @@ class ThreadDetailPage extends HookConsumerWidget {
         return;
       }
       tailCorrectionInProgress.value = false;
+      isNavigatingToThreadTail.value = false;
       if (revealViewport) initialViewportReady.value = true;
-      isAtThreadTail.value = reachedTail;
+      // Item positions can trail the ScrollPosition by a frame after an
+      // animated jump. Once the bounded lazy-layout correction is exhausted,
+      // trust an exact end-of-scroll position too: there is nowhere further
+      // for Latest to navigate, so leaving the control visible is misleading.
+      final position = activeThreadScrollPosition.value;
+      isAtThreadTail.value = threadTailCorrectionReachedEnd(
+        tailIsVisible: reachedTail,
+        extentAfter: position != null && position.hasContentDimensions
+            ? position.extentAfter
+            : null,
+      );
     }
 
     void correctThreadTailInstantly() {
@@ -470,6 +486,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       userOptedOutOfTailFollow.value = false;
       userDragDetachedTailFollow.value = false;
       followsThreadTail.value = true;
+      isNavigatingToThreadTail.value = true;
       tailCorrectionInProgress.value = true;
       final generation = ++tailCorrectionGeneration.value;
 
@@ -477,6 +494,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         if (!await animateActiveScrollPositionToTail()) {
           if (generation == tailCorrectionGeneration.value) {
             tailCorrectionInProgress.value = false;
+            isNavigatingToThreadTail.value = false;
           }
           return;
         }
@@ -802,11 +820,33 @@ class ThreadDetailPage extends HookConsumerWidget {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
       }
     });
+    final usesNativeIosGlassBackButton =
+        Navigator.canPop(context) &&
+        Theme.of(context).platform == TargetPlatform.iOS;
 
     return FrostedScaffold(
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: const FrostedAppBar(
-        title: Text('Thread'),
+      appBar: FrostedAppBar(
+        leading: usesNativeIosGlassBackButton
+            ? IosGlassNavigationButton(
+                key: const ValueKey('thread-ios-glass-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back',
+                onPressed: () => Navigator.of(context).maybePop(),
+                width: iosGlassChannelHeaderLeadingWidth,
+                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                nativeViewSuppressed: messageActionBackdropActive,
+              )
+            : null,
+        iconColor: context.colors.primary,
+        title: Padding(
+          padding: EdgeInsets.only(
+            left: usesNativeIosGlassBackButton
+                ? iosGlassChannelHeaderTitleSpacing
+                : 0,
+          ),
+          child: const Text('Thread', key: ValueKey('thread-app-bar-title')),
+        ),
         titleStyle: channelTitleTextStyle,
       ),
       body: Stack(
@@ -821,6 +861,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                     initialTailSettle.abandon();
                     initialViewportReady.value = true;
                     tailCorrectionInProgress.value = false;
+                    isNavigatingToThreadTail.value = false;
                     tailIntent.beginDrag();
                     userOptedOutOfTailFollow.value = true;
                     userDragDetachedTailFollow.value = true;
@@ -933,6 +974,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 visible:
                     threadViewportVisible &&
                     hasFetchedReplies &&
+                    !isNavigatingToThreadTail.value &&
                     !isAtThreadTail.value,
                 onPressed: scrollToThreadLatest,
               ),
