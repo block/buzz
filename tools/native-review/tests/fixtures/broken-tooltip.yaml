@@ -1,0 +1,13 @@
+schema_version: 1
+flow: broken_tooltip
+platforms: [macos]
+fixture: local_review_channel
+record: {video: "off", screenshots: true, accessibility: true}
+steps:
+  - name: impossible_locator
+    locate: [{id: this-element-must-not-exist}]
+    act: {type: click}
+    expect:
+      exists: {id: still-impossible}
+    timeout_ms: 50
+cleanup: {terminate_app: true, remove_state: true}

@@ -15,6 +15,11 @@ BOB_PUBKEY="bb22a5299220cad76ffd46190ccbeede8ab5dc260faa28b6e5a2cb31b9aff260"
 CHARLIE_PUBKEY="554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea"
 TYLER_PUBKEY="e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34"
 AGENT_PUBKEY="db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36"
+REVIEW_PUBKEY="${BUZZ_REVIEW_PUBKEY:-}"
+if [[ -n "$REVIEW_PUBKEY" && ! "$REVIEW_PUBKEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "BUZZ_REVIEW_PUBKEY must be exactly 64 hexadecimal characters." >&2
+  exit 1
+fi
 
 if command -v psql >/dev/null 2>&1; then
   run_psql() { PGPASSWORD="$DB_PASS" psql -h"$DB_HOST" -p"$DB_PORT" -U"$DB_USER" -d"$DB_NAME" -qtA "$@"; }
@@ -128,5 +133,16 @@ VALUES
 ON CONFLICT DO NOTHING
 ;
 "
+
+if [[ -n "$REVIEW_PUBKEY" ]]; then
+  run_sql "
+INSERT INTO channel_members
+  (community_id, channel_id, pubkey, role, invited_by)
+VALUES
+  ('${COMMUNITY_ID}', '${UUID_GENERAL}', decode('${REVIEW_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex'))
+ON CONFLICT DO NOTHING
+;
+"
+fi
 
 echo "Desktop e2e data ready."

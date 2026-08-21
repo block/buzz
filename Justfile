@@ -1024,3 +1024,16 @@ benchmark-check:
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
     docker compose --project-name buzz-benchmark down
+
+# Validate macOS native-review tooling and report required OS permissions.
+native-review-doctor:
+    ./tools/native-review/bin/review-native doctor
+
+# Run locked Python contracts plus deterministic Swift driver tests.
+native-review-test:
+    uv run --project tools/native-review --locked python -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+    swift test --package-path tools/native-review/swift
+
+# Run one declarative journey against the isolated local desktop fixture.
+native-review-desktop JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml":
+    ./tools/native-review/bin/review-native run "{{JOURNEY}}"
