@@ -2868,9 +2868,20 @@ async fn tokio_main() -> Result<()> {
                                 )
                                 .await;
                                 if !allowed {
-                                    tracing::debug!(
+                                    // info!, deliberately: this drop is the only
+                                    // signal that an event addressed to this agent
+                                    // was rejected. At debug level a fleet running
+                                    // at info sees nothing — a mis-scoped
+                                    // `respond_to`, a workflow message signed by an
+                                    // unexpected key, or a revoked sibling all
+                                    // present as the agent silently ignoring a
+                                    // mention, indistinguishable from a stall
+                                    // until someone attaches a debugger.
+                                    tracing::info!(
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
+                                        event_id = %buzz_event.event.id.to_hex(),
+                                        kind = buzz_event.event.kind.as_u16(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
