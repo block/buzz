@@ -18,28 +18,50 @@
 //! NOT the mechanism here: a session can legitimately run for days, and
 //! deleting its shim/session dir out from under it would break a live agent
 //! mid-command. Instead every directory this crate creates is *claimed*, and
-//! a claim has two independent parts. Both must say "gone" before anything is
-//! removed:
+//! a claim has three independent parts. All three must say "gone" before
+//! anything is removed:
 //!
 //! 1. **Owner marker** — a file recording the creating process's pid. The
 //!    sweep deletes only when that pid is positively confirmed dead.
-//! 2. **Directory lease** — a lock file the creating process holds open, and
-//!    that every command it spawns inherits. The sweep deletes only when the
-//!    lease is provably unheld.
+//! 2. **Owner lease** — a lock file the creating process holds open for
+//!    exactly as long as it lives, released by the kernel when it dies,
+//!    `SIGKILL` included. It answers the same question the pid does, minus
+//!    the pid's weak spot: pid numbers get recycled, and a stranger's process
+//!    wearing our dead owner's number reads as `Alive` forever. A held lease
+//!    is proof the owner itself is still there.
+//! 3. **Command registry** — a directory holding one file per command the
+//!    owner spawned, created before the spawn and removed when the command is
+//!    reaped. The sweep deletes only when every registered command is
+//!    provably gone.
 //!
-//! The pid alone is not enough, and the reason is the shell tool. On Unix a
-//! spawned command gets its own process group (`shell::set_process_group`), so
-//! a `SIGKILL` of the server leaves the command running — the `Drop` guard
-//! that would have killed its group never runs. That surviving command still
-//! has the shim directory first on `PATH` and can invoke `buzz`/`rg`/`tree`/the
-//! git helpers out of it at any later moment. "Owner pid is dead" says nothing
-//! about that command. The lease does: it is held on the open file
-//! description, so an inherited descriptor keeps it held for exactly as long
-//! as any process that came from this server is alive, and it is released by
-//! the kernel the moment the last of them exits — including on `SIGKILL`,
-//! where no user-space cleanup runs at all.
+//! The owner being dead is not enough, and the reason is the shell tool. On
+//! Unix a spawned command gets its own process group
+//! (`shell::set_process_group`), so a `SIGKILL` of the server leaves the
+//! command running — the `Drop` guard that would have killed its group never
+//! runs. That surviving command still has the shim directory first on `PATH`
+//! and can invoke `buzz`/`rg`/`tree`/the git helpers out of it at any later
+//! moment. "Owner is gone" says nothing about that command. The registry
+//! does, and it is the reason removal is safe at all.
 //!
-//! Windows differs on both halves and is documented at [`acquire_lease`].
+//! ## Why the registry is on disk and not a descriptor
+//!
+//! The obvious cheaper trick is to have the lease descriptor inherited by
+//! every spawned command, so the kernel tracks command lifetime for free.
+//! That was the previous shape of this module and it is not sound. An
+//! inherited descriptor lands in the command's own descriptor table, where
+//! the command owns it: `bash` hands out descriptors 3 upward for its own
+//! redirections, plenty of programs close everything above 2 on startup, and
+//! any of that silently drops the lease while the command runs happily on.
+//! The sweep then sees a free lease and deletes a live command's binaries.
+//!
+//! A registry entry is not reachable from the command at all. Nothing the
+//! command does to its descriptors, its environment or its signal handlers
+//! can retract it. Buzz writes it, Buzz removes it, and if Buzz is killed
+//! before it can remove it the entry stays and the directory survives, which
+//! is the direction this module errs in everywhere else too.
+//!
+//! Windows differs and is documented at [`acquire_lease`] and
+//! [`command_liveness`].
 //!
 //! ## Untrusted input
 //!
@@ -53,9 +75,10 @@
 //! ## Failure direction
 //!
 //! Every uncertain case — marker missing, marker corrupt or not a regular
-//! file, lease held or unreadable, pid alive, pid liveness undeterminable, or
-//! a removal failure — leaves the directory alone and logs. The safe failure
-//! mode is a persisted leak, never a deleted live session.
+//! file, lease held or unreadable, pid alive, pid liveness undeterminable, a
+//! registry that cannot be read or holds an entry whose command cannot be
+//! ruled out, or a removal failure — leaves the directory alone and logs. The
+//! safe failure mode is a persisted leak, never a deleted live session.
 
 use std::path::Path;
 
@@ -68,9 +91,21 @@ pub(crate) const OWNER_PREFIX: &str = "buzz-dev-mcp-";
 /// creates.
 const MARKER_FILE_NAME: &str = ".buzz-dev-mcp-owner";
 
-/// Lease file name. Held open (and locked, on Unix) for as long as the
-/// directory is in use. See [`acquire_lease`].
+/// Lease file name. Held open (and locked, on Unix) by the owning process for
+/// as long as it lives. See [`acquire_lease`].
 const LEASE_FILE_NAME: &str = ".buzz-dev-mcp-lease";
+
+/// Command registry directory name, inside every claimed directory. Holds one
+/// file per command the owner has spawned and not yet reaped. See
+/// [`register_command`].
+const CMDS_DIR_NAME: &str = ".buzz-dev-mcp-cmds";
+
+/// Hard cap on registry entries read in one sweep of one directory. A real
+/// registry holds one entry per concurrently running command, so single
+/// digits. The cap only exists so a hostile directory in a world-writable
+/// temp root cannot turn the startup sweep into an unbounded amount of work;
+/// hitting it means the directory is not something to delete anyway.
+const MAX_REGISTRY_ENTRIES: usize = 4096;
 
 /// Hard cap on the marker read. A real marker is two short `key=value` lines,
 /// around 40 bytes. Anything bigger is not one of ours and is not read.
@@ -88,14 +123,15 @@ pub(crate) struct DirClaim {
     _lease: Lease,
 }
 
-/// Claim `dir`: take the lease first, then write the owner marker.
+/// Claim `dir`: take the lease, create the command registry, then write the
+/// owner marker.
 ///
 /// The order matters and is load-bearing. The sweep treats "no marker" as
 /// "never touch this directory", so writing the marker last means a marked
-/// directory always has a lease behind it. If the lease cannot be taken, the
-/// directory gets no marker at all and is permanently off-limits to the
-/// sweep — a leak, which is the failure direction this module chooses every
-/// time.
+/// directory always has both a lease and a registry behind it. If either
+/// cannot be created, the directory gets no marker at all and is permanently
+/// off-limits to the sweep — a leak, which is the failure direction this
+/// module chooses every time.
 ///
 /// Best-effort: a failure here only affects a *future* startup sweep, never
 /// this session, so it must not fail directory creation.
@@ -112,6 +148,19 @@ pub(crate) fn claim_dir(dir: &Path) -> Option<DirClaim> {
             return None;
         }
     };
+
+    // Before the marker, for the same reason the lease comes first: a marked
+    // directory must never be missing a part of its claim. A registry that
+    // cannot be created means commands cannot be registered, which means the
+    // sweep must never be allowed to reason about this directory at all.
+    if let Err(e) = std::fs::create_dir_all(dir.join(CMDS_DIR_NAME)) {
+        tracing::warn!(
+            error = %e,
+            dir = %dir.display(),
+            "buzz-dev-mcp: could not create the command registry; this directory will never be auto-reclaimed"
+        );
+        return None;
+    }
 
     if let Err(e) = write_owner_marker(dir) {
         tracing::warn!(
@@ -272,6 +321,22 @@ enum Liveness {
     Unknown,
 }
 
+/// Verdict on a directory's command registry, same reasoning as [`Liveness`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandsState {
+    /// The registry exists and every command in it is provably gone.
+    Idle,
+    /// At least one registered command is alive, or cannot be ruled out
+    /// (an entry still being registered, an unparseable name, a liveness
+    /// check that failed). All of these authorize exactly the same action,
+    /// which is none.
+    Busy,
+    /// No registry directory at all: a directory this crate did not claim,
+    /// or claimed with a version that had no registry. Not accountable, so
+    /// not deletable.
+    Missing,
+}
+
 /// Tri-state result of a lease probe, same reasoning as [`Liveness`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseState {
@@ -286,41 +351,44 @@ enum LeaseState {
 
 /// The whole deletion policy, as one pure function.
 ///
-/// Removal needs positive proof on *both* axes: the process that created the
-/// directory is gone, AND nothing that inherited its lease is still running.
-/// Every other combination — including the three `Missing` cases, since
-/// [`claim_dir`] writes the lease before the marker and so a marked directory
-/// without a lease file is a directory whose state we cannot account for —
-/// leaves the directory alone.
-fn may_remove(owner: Liveness, lease: LeaseState) -> bool {
-    matches!(owner, Liveness::Dead) && matches!(lease, LeaseState::Free)
+/// Removal needs positive proof on *all three* axes: the pid that created the
+/// directory is confirmed dead, the owner's lease is confirmed unheld, and
+/// every command the owner registered is confirmed gone. Every other
+/// combination — including each `Missing` case, since [`claim_dir`] writes
+/// the lease and the registry before the marker and so a marked directory
+/// missing either is a directory whose state we cannot account for — leaves
+/// the directory alone.
+fn may_remove(owner: Liveness, lease: LeaseState, commands: CommandsState) -> bool {
+    matches!(owner, Liveness::Dead)
+        && matches!(lease, LeaseState::Free)
+        && matches!(commands, CommandsState::Idle)
 }
 
-/// Take the directory lease.
+/// Take the directory lease: proof that the process which created this
+/// directory is still running.
 ///
-/// **Unix.** The lock is `flock(LOCK_SH)`, and `FD_CLOEXEC` is cleared on the
-/// descriptor so that every command this process spawns inherits it. `flock`
-/// locks belong to the open file description rather than to a process, so an
-/// inherited descriptor holds the same lock: the lease stays held while the
-/// server or *any* command descended from it is alive, and the kernel drops
-/// it when the last of them exits, `SIGKILL` included. That is what makes the
-/// sweep safe against the orphaned-command case in the module docs.
+/// The lease covers the owner and nothing else. Commands the owner spawns are
+/// tracked by the registry ([`register_command`]), not by this descriptor —
+/// see the module docs for why an inherited descriptor cannot do that job.
+/// `FD_CLOEXEC` is therefore left at its default, so this descriptor never
+/// reaches a spawned command in the first place.
+///
+/// **Unix.** The lock is `flock(LOCK_SH)`. It is released when the owner
+/// exits however it exits, `SIGKILL` included, because the kernel closes the
+/// descriptor. The guard's `Drop` also unlocks explicitly on the clean path
+/// (`nix`'s `Flock` issues `LOCK_UN`), which reaches the same state by a
+/// different route.
 ///
 /// **Windows.** The handle is opened denying `FILE_SHARE_DELETE`, so the
 /// directory cannot be removed while the server lives, and the probe below
-/// detects the open handle. It is deliberately *not* marked inheritable:
-/// spawned commands there are held in a Job Object with
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`shell::KillGroup`), so a hard kill
-/// of the server takes the whole command tree with it and no orphan can
-/// outlive the pid check. Inheriting the handle instead would keep a file
-/// open inside the directory during the normal shutdown path, where a
-/// just-terminated child that has not finished exiting would block
-/// `TempDir`'s own cleanup and turn every clean exit into a leak. The one
-/// case where the Job Object cannot be established is handled at the spawn
-/// site, by surrendering the claim (see [`surrender_claim`]).
+/// detects the open handle. Spawned commands there are held in a Job Object
+/// with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`shell::KillGroup`), so a hard
+/// kill of the server takes the whole command tree with it. The one case
+/// where the Job Object cannot be established is handled at the spawn site,
+/// by surrendering the claim (see [`surrender_claim`]).
 #[cfg(unix)]
 fn acquire_lease(path: &Path) -> std::io::Result<Lease> {
-    use nix::fcntl::{fcntl, FcntlArg, FdFlag, Flock, FlockArg};
+    use nix::fcntl::{Flock, FlockArg};
 
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -328,10 +396,6 @@ fn acquire_lease(path: &Path) -> std::io::Result<Lease> {
         .write(true)
         .truncate(false)
         .open(path)?;
-    // Must happen before any command is spawned, which is why the claim is
-    // taken at directory-creation time.
-    fcntl(&file, FcntlArg::F_SETFD(FdFlag::empty()))
-        .map_err(|errno| std::io::Error::from_raw_os_error(errno as i32))?;
     Flock::lock(file, FlockArg::LockSharedNonblock)
         .map(|lock| Lease { _lock: lock })
         .map_err(|(_file, errno)| std::io::Error::from_raw_os_error(errno as i32))
@@ -433,6 +497,187 @@ fn probe_lease(path: &Path) -> LeaseState {
     }
 }
 
+/// A registry slot reserved for a command that has not been spawned yet.
+///
+/// Reserved *before* the spawn on purpose. The dangerous window is a command
+/// that is alive with no registry entry naming it, and that window is exactly
+/// "after spawn, before the entry is written". Writing a placeholder first
+/// closes it: the entry is already on disk when the command draws its first
+/// breath, and the sweep treats a placeholder as an unfinished registration
+/// it cannot reason about, so the directory is safe either way.
+///
+/// Dropping one without calling [`PendingCommand::confirm`] or
+/// [`PendingCommand::abandon`] leaves the placeholder behind, which costs the
+/// directory its reclaimability and nothing else.
+pub(crate) struct PendingCommand {
+    paths: Vec<std::path::PathBuf>,
+}
+
+/// A registered, running command. Dropping it deregisters, which is what
+/// makes the directory reclaimable once every command has finished.
+pub(crate) struct CommandLifetime {
+    paths: Vec<std::path::PathBuf>,
+}
+
+/// Reserve a registry slot in each of `dirs` for a command about to be
+/// spawned.
+///
+/// Best-effort per directory: a directory whose registry cannot be written
+/// (never claimed, claimed by an older version, or unwritable) simply gets no
+/// entry. That is not silently unsafe — a directory with no registry reads as
+/// [`CommandsState::Missing`], which never authorizes a delete.
+pub(crate) fn register_command(dirs: &[&Path]) -> PendingCommand {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Unique per reservation within this process; combined with the pid it is
+    // unique across every process sharing the temp root.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = format!(
+        "pending-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+
+    let mut paths = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let path = dir.join(CMDS_DIR_NAME).join(&name);
+        match std::fs::File::create(&path) {
+            Ok(_) => paths.push(path),
+            Err(e) => tracing::debug!(
+                error = %e,
+                path = %path.display(),
+                "buzz-dev-mcp: could not reserve a command registry slot"
+            ),
+        }
+    }
+    PendingCommand { paths }
+}
+
+impl PendingCommand {
+    /// Bind the reservation to the spawned command's lifetime handle: its
+    /// process group on Unix, its pid on Windows. Renames rather than
+    /// rewrites, so there is no instant where the slot is absent.
+    pub(crate) fn confirm(self, handle: u32) -> CommandLifetime {
+        let mut paths = Vec::with_capacity(self.paths.len());
+        for pending in &self.paths {
+            let Some(parent) = pending.parent() else {
+                continue;
+            };
+            let final_path = parent.join(handle.to_string());
+            match std::fs::rename(pending, &final_path) {
+                Ok(()) => paths.push(final_path),
+                Err(e) => {
+                    // The placeholder is still there and still blocks
+                    // reclamation, so nothing is at risk; the directory just
+                    // stays unreclaimable until a human clears it.
+                    tracing::debug!(
+                        error = %e,
+                        path = %pending.display(),
+                        "buzz-dev-mcp: could not name the command registry slot; leaving the placeholder"
+                    );
+                }
+            }
+        }
+        CommandLifetime { paths }
+    }
+
+    /// Give the reservation back, for a command that never started.
+    pub(crate) fn abandon(self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for CommandLifetime {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::debug!(
+                    error = %e,
+                    path = %path.display(),
+                    "buzz-dev-mcp: could not deregister a finished command"
+                );
+            }
+        }
+    }
+}
+
+/// Read a directory's command registry.
+///
+/// Like the marker read, this parses state owned by some other process in a
+/// world-writable directory, so every unexpected shape resolves to
+/// [`CommandsState::Busy`] rather than to a delete: an entry name that is not
+/// a number, a registry that is a file or a symlink to somewhere strange, a
+/// liveness check that fails, or more entries than any real session has.
+fn probe_commands(dir: &Path) -> CommandsState {
+    let registry = dir.join(CMDS_DIR_NAME);
+    let entries = match std::fs::read_dir(&registry) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return CommandsState::Missing,
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                path = %registry.display(),
+                "buzz-dev-mcp: startup sweep: unreadable command registry; treating the dir as in use"
+            );
+            return CommandsState::Busy;
+        }
+    };
+
+    for (seen, entry) in entries.enumerate() {
+        if seen >= MAX_REGISTRY_ENTRIES {
+            return CommandsState::Busy;
+        }
+        let Ok(entry) = entry else {
+            return CommandsState::Busy;
+        };
+        let name = entry.file_name();
+        let Some(handle) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            // A placeholder from `register_command`, or something that is not
+            // ours at all. Either way it is not a command that can be ruled
+            // out.
+            return CommandsState::Busy;
+        };
+        if command_liveness(handle) != Liveness::Dead {
+            return CommandsState::Busy;
+        }
+    }
+
+    CommandsState::Idle
+}
+
+/// Is the command behind a registry entry still running?
+///
+/// **Unix.** The handle is a process group id, and the question is asked of
+/// the whole group with `killpg`, not of one pid. A command is a `bash` that
+/// forks freely; the group is what `shell::KillGroup` manages and what
+/// survives a hard kill of the server, so the group is the unit whose life
+/// the directory depends on. `killpg` succeeds while *any* member is alive,
+/// including when the leader has already exited.
+///
+/// **Windows.** The handle is a pid, checked exactly like an owner pid.
+///
+/// A recycled id makes a finished command look alive, which costs a leaked
+/// directory. There is no failure in the other direction: an id that is
+/// provably gone cannot come back.
+#[cfg(unix)]
+fn command_liveness(pgid: u32) -> Liveness {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(pgid as i32), None) {
+        Ok(()) => Liveness::Alive,
+        Err(Errno::ESRCH) => Liveness::Dead,
+        Err(_) => Liveness::Unknown,
+    }
+}
+
+#[cfg(not(unix))]
+fn command_liveness(pid: u32) -> Liveness {
+    pid_liveness(pid)
+}
+
 #[cfg(unix)]
 fn pid_liveness(pid: u32) -> Liveness {
     use nix::errno::Errno;
@@ -528,8 +773,9 @@ pub(crate) struct SweepStats {
 
 /// Startup sweep: scan `temp_root` for entries left behind by a killed
 /// buzz-dev-mcp process (see module docs). Removes an entry ONLY when its
-/// marker names a pid that is positively confirmed dead AND its lease is
-/// provably unheld. Every other case is left alone and logged.
+/// marker names a pid that is positively confirmed dead, its lease is
+/// provably unheld, and every command it registered is provably gone. Every
+/// other case is left alone and logged.
 ///
 /// Best-effort end to end: nothing here returns an error or panics, since a
 /// stuck or hostile temp directory must never prevent the MCP server from
@@ -621,19 +867,22 @@ fn sweep_one(dir: &Path, stats: &mut SweepStats, remove: &dyn Fn(&Path) -> std::
 
     let owner = pid_liveness(marker.pid);
     let lease = probe_lease(&dir.join(LEASE_FILE_NAME));
-    if !may_remove(owner, lease) {
+    let commands = probe_commands(dir);
+    if !may_remove(owner, lease, commands) {
         if owner == Liveness::Dead {
-            // The creating process is gone but something it spawned still
-            // holds the lease: exactly the orphaned-command case the lease
-            // exists for. Logged at info because it is the interesting one —
-            // the directory will be reclaimed on a later startup, once that
+            // The creating process is gone but the directory is still spoken
+            // for, by a surviving command or by a lease that has not been
+            // released: exactly the orphaned-command case this policy exists
+            // for. Logged at info because it is the interesting one — the
+            // directory will be reclaimed on a later startup, once that
             // command finishes.
             stats.skipped_in_use += 1;
             tracing::info!(
                 dir = %dir.display(),
                 pid = marker.pid,
                 ?lease,
-                "buzz-dev-mcp: startup sweep: owner is gone but the temp dir is still leased; leaving it"
+                ?commands,
+                "buzz-dev-mcp: startup sweep: owner is gone but the temp dir is still in use; leaving it"
             );
         } else {
             stats.skipped_alive_or_unknown += 1;
@@ -667,19 +916,29 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// Stand in for a directory this crate created: an unheld lease file plus
-    /// a marker naming `pid`. Written by hand rather than via [`claim_dir`]
-    /// because most cases need an owner pid other than this process's.
+    /// Stand in for a directory this crate created and then lost its owner:
+    /// an unheld lease file, an empty command registry, and a marker naming
+    /// `pid`. Written by hand rather than via [`claim_dir`] because most
+    /// cases need an owner pid other than this process's.
     fn claimed_dir(root: &Path, name: &str, pid: u32) -> std::path::PathBuf {
         let dir = root.join(format!("{OWNER_PREFIX}{name}"));
         std::fs::create_dir(&dir).expect("mkdir");
         std::fs::write(dir.join(LEASE_FILE_NAME), b"").expect("write lease");
+        std::fs::create_dir(dir.join(CMDS_DIR_NAME)).expect("mkdir registry");
         std::fs::write(
             dir.join(MARKER_FILE_NAME),
             format!("pid={pid}\ncreated=1\n"),
         )
         .expect("write marker");
         dir
+    }
+
+    /// Write a registry entry naming `handle` into an already-claimed `dir`,
+    /// the way [`register_command`] does for a running command.
+    fn register_handle(dir: &Path, handle: u32) -> std::path::PathBuf {
+        let path = dir.join(CMDS_DIR_NAME).join(handle.to_string());
+        std::fs::write(&path, b"").expect("write registry entry");
+        path
     }
 
     /// Spawn and immediately reap a trivial child process so its pid is
@@ -700,24 +959,37 @@ mod tests {
         pid
     }
 
-    /// The deletion policy in full. Only one of the nine states authorizes
-    /// removal: the owner is provably dead and the lease is provably unheld.
-    /// Everything else — every `Unknown`, every `InUse`, every `Missing` —
-    /// must not delete.
+    /// The deletion policy in full. Only one of the twenty-seven states
+    /// authorizes removal: the owner is provably dead, the lease is provably
+    /// unheld, and the registry is provably idle. Everything else — every
+    /// `Unknown`, every `InUse`, every `Busy`, every `Missing` — must not
+    /// delete.
     #[test]
-    fn only_a_dead_owner_with_a_free_lease_authorizes_removal() {
+    fn removal_needs_a_dead_owner_a_free_lease_and_an_idle_registry() {
         let owners = [Liveness::Alive, Liveness::Dead, Liveness::Unknown];
         let leases = [LeaseState::Free, LeaseState::InUse, LeaseState::Missing];
+        let registries = [
+            CommandsState::Idle,
+            CommandsState::Busy,
+            CommandsState::Missing,
+        ];
+        let mut authorized = 0;
         for owner in owners {
             for lease in leases {
-                let expected = owner == Liveness::Dead && lease == LeaseState::Free;
-                assert_eq!(
-                    may_remove(owner, lease),
-                    expected,
-                    "may_remove({owner:?}, {lease:?})"
-                );
+                for commands in registries {
+                    let expected = owner == Liveness::Dead
+                        && lease == LeaseState::Free
+                        && commands == CommandsState::Idle;
+                    authorized += usize::from(may_remove(owner, lease, commands));
+                    assert_eq!(
+                        may_remove(owner, lease, commands),
+                        expected,
+                        "may_remove({owner:?}, {lease:?}, {commands:?})"
+                    );
+                }
             }
         }
+        assert_eq!(authorized, 1, "exactly one state may delete");
     }
 
     #[test]
@@ -934,35 +1206,59 @@ mod tests {
         assert!(target.exists());
     }
 
+    /// A child that stays up for the whole test, in its own process group on
+    /// Unix so its pid is also its process group id — the same shape
+    /// `shell::run` spawns commands in.
+    fn long_lived_child() -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            // `ping` is the portable long sleep on Windows: no console
+            // needed, one probe a second, and a single process rather than a
+            // `cmd` wrapper that would leave a grandchild behind on kill.
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "61", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
+        cmd.spawn().expect("spawn long-lived child")
+    }
+
     /// The regression for the orphaned-command case in the module docs: the
-    /// process that created the directory is gone, but a command it spawned
-    /// is still running with the inherited lease. The directory must survive
-    /// — and become reclaimable the moment that command exits.
+    /// process that created the directory is gone, a command it spawned is
+    /// still running, and the directory has to survive until that command
+    /// exits.
     ///
-    /// The owner "dying" is modelled by dropping the lease in this process
-    /// after the child has inherited it. That is the same thing the kernel
-    /// does on `SIGKILL`: the owner's descriptor closes, and the lock stays
-    /// held by the inherited one, because an `flock` belongs to the open file
-    /// description rather than to a process.
-    #[cfg(unix)]
+    /// The owner's death is not modelled by tidying up. The claim is dropped,
+    /// the marker is rewritten to a pid that is genuinely dead, and the
+    /// command's registry entry is deliberately leaked with `mem::forget`,
+    /// because that is exactly what a `SIGKILL` leaves behind: an owner that
+    /// never got to deregister anything.
     #[test]
     fn a_command_that_outlives_its_owner_keeps_the_directory() {
         let root = tempdir().expect("tempdir");
         let dir = root.path().join(format!("{OWNER_PREFIX}test-orphan-cmd"));
         std::fs::create_dir(&dir).expect("mkdir");
-        let lease_path = dir.join(LEASE_FILE_NAME);
 
         let claim = claim_dir(&dir).expect("claim");
-        // Spawned after the claim, so it inherits the lease descriptor.
-        let mut child = std::process::Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn long-lived child");
+        // Registered before the spawn and confirmed after, the way
+        // `shell::run` does it.
+        let pending = register_command(&[dir.as_path()]);
+        let mut child = long_lived_child();
+        let handle = child.id();
+        std::mem::forget(pending.confirm(handle));
 
-        // The owner is gone; only the spawned command is left.
+        // The owner is gone: lease released, marker naming a dead pid. The
+        // pid check alone would authorize a delete right here.
         drop(claim);
-        // Its marker still names a dead pid, so the pid check alone would
-        // authorize a delete here.
         std::fs::write(
             dir.join(MARKER_FILE_NAME),
             format!("pid={}\ncreated=1\n", dead_pid()),
@@ -970,9 +1266,9 @@ mod tests {
         .expect("rewrite marker with a dead owner");
 
         assert_eq!(
-            probe_lease(&lease_path),
-            LeaseState::InUse,
-            "the spawned command must still hold the inherited lease"
+            probe_commands(&dir),
+            CommandsState::Busy,
+            "a registered, running command must hold the directory"
         );
         let stats = sweep_stale_dirs(root.path());
         assert_eq!(stats.removed, 0, "{stats:?}");
@@ -982,14 +1278,179 @@ mod tests {
             "a directory still in use by a surviving command must not be removed"
         );
 
-        // Once that command exits, the kernel releases the last reference to
-        // the lease and the directory becomes reclaimable.
+        // The command exits. Its entry is still on disk, because the process
+        // that would have removed it is dead, so what the sweep is really
+        // being asked is whether the thing the entry names is still running.
         child.kill().expect("kill child");
         child.wait().expect("reap child");
-        assert_eq!(probe_lease(&lease_path), LeaseState::Free);
+        assert!(
+            dir.join(CMDS_DIR_NAME).join(handle.to_string()).exists(),
+            "the stale entry must still be on disk, or this proves nothing"
+        );
+        assert_eq!(probe_commands(&dir), CommandsState::Idle);
         let stats = sweep_stale_dirs(root.path());
         assert_eq!(stats.removed, 1, "{stats:?}");
         assert!(!dir.exists());
+    }
+
+    /// The window between "the command is alive" and "the command has a
+    /// name" is covered by the placeholder, and the placeholder alone must
+    /// hold the directory.
+    #[test]
+    fn an_unconfirmed_registration_blocks_removal() {
+        let root = tempdir().expect("tempdir");
+        let target = claimed_dir(root.path(), "test-pending", dead_pid());
+        let pending = register_command(&[target.as_path()]);
+
+        assert_eq!(probe_commands(&target), CommandsState::Busy);
+        let stats = sweep_stale_dirs(root.path());
+        assert_eq!(stats.removed, 0, "{stats:?}");
+        assert_eq!(stats.skipped_in_use, 1, "{stats:?}");
+        assert!(target.exists());
+
+        // Handed back by a spawn that failed, the directory is reclaimable
+        // again.
+        pending.abandon();
+        assert_eq!(probe_commands(&target), CommandsState::Idle);
+        assert_eq!(sweep_stale_dirs(root.path()).removed, 1);
+    }
+
+    /// Deregistration on the normal path is a `Drop`, and without it every
+    /// directory would stay pinned by commands that finished hours ago.
+    #[test]
+    fn dropping_a_command_lifetime_deregisters_it() {
+        let root = tempdir().expect("tempdir");
+        let target = claimed_dir(root.path(), "test-deregister", dead_pid());
+        let registered = register_command(&[target.as_path()]).confirm(std::process::id());
+
+        assert_eq!(
+            probe_commands(&target),
+            CommandsState::Busy,
+            "the handle names this test process, which is alive"
+        );
+        drop(registered);
+        assert_eq!(probe_commands(&target), CommandsState::Idle);
+    }
+
+    /// A command reaches the shim dir and the session dir both, so it is
+    /// registered in both, and either entry is enough to save its directory.
+    #[test]
+    fn a_command_is_registered_in_every_directory_it_can_reach() {
+        let root = tempdir().expect("tempdir");
+        let shim = claimed_dir(root.path(), "test-two-dirs-shim", dead_pid());
+        let session = claimed_dir(root.path(), "test-two-dirs-session", dead_pid());
+        let registered =
+            register_command(&[shim.as_path(), session.as_path()]).confirm(std::process::id());
+
+        let stats = sweep_stale_dirs(root.path());
+        assert_eq!(stats.removed, 0, "{stats:?}");
+        assert_eq!(stats.skipped_in_use, 2, "{stats:?}");
+        assert!(shim.exists() && session.exists());
+
+        drop(registered);
+        assert_eq!(sweep_stale_dirs(root.path()).removed, 2);
+    }
+
+    /// An entry whose name is not a number cannot be checked, and anything
+    /// that cannot be checked holds the directory.
+    #[test]
+    fn an_unreadable_registry_entry_blocks_removal() {
+        let root = tempdir().expect("tempdir");
+        let target = claimed_dir(root.path(), "test-garbage-entry", dead_pid());
+        std::fs::write(target.join(CMDS_DIR_NAME).join("not-a-pid"), b"").expect("write entry");
+
+        assert_eq!(probe_commands(&target), CommandsState::Busy);
+        let stats = sweep_stale_dirs(root.path());
+        assert_eq!(stats.removed, 0, "{stats:?}");
+        assert!(target.exists());
+    }
+
+    /// A directory with no registry at all — claimed by an older build, or
+    /// never claimed by this crate — is not accountable and is never deleted.
+    #[test]
+    fn dead_owner_without_a_registry_is_not_swept() {
+        let root = tempdir().expect("tempdir");
+        let target = claimed_dir(root.path(), "test-no-registry", dead_pid());
+        std::fs::remove_dir(target.join(CMDS_DIR_NAME)).expect("remove registry");
+
+        assert_eq!(probe_commands(&target), CommandsState::Missing);
+        let stats = sweep_stale_dirs(root.path());
+        assert_eq!(stats.removed, 0, "{stats:?}");
+        assert!(target.exists());
+    }
+
+    /// A registry that is a file rather than a directory is the shape a
+    /// hostile world-writable temp root can plant. It reads as in use.
+    #[test]
+    fn a_registry_that_is_not_a_directory_blocks_removal() {
+        let root = tempdir().expect("tempdir");
+        let target = claimed_dir(root.path(), "test-registry-is-a-file", dead_pid());
+        std::fs::remove_dir(target.join(CMDS_DIR_NAME)).expect("remove registry");
+        std::fs::write(target.join(CMDS_DIR_NAME), b"not a directory").expect("write file");
+
+        assert_eq!(probe_commands(&target), CommandsState::Busy);
+        assert_eq!(sweep_stale_dirs(root.path()).removed, 0);
+        assert!(target.exists());
+    }
+
+    /// `claim_dir` has to leave a registry behind. Without one, every
+    /// directory this crate creates reads as unaccountable forever and the
+    /// sweep reclaims nothing.
+    #[test]
+    fn claiming_a_directory_creates_an_empty_registry() {
+        let root = tempdir().expect("tempdir");
+        let dir = root.path().join(format!("{OWNER_PREFIX}test-claim-registry"));
+        std::fs::create_dir(&dir).expect("mkdir");
+
+        let _claim = claim_dir(&dir).expect("claim");
+
+        assert!(dir.join(CMDS_DIR_NAME).is_dir(), "registry directory");
+        assert_eq!(probe_commands(&dir), CommandsState::Idle);
+    }
+
+    /// The registry names a process *group*, and that is load-bearing rather
+    /// than incidental. A command is a shell that forks, and the shell can
+    /// exit while what it started keeps running with the shim dir on `PATH`.
+    /// A pid check says the command is gone. The group check does not, and
+    /// the group is the same unit `shell::KillGroup` manages.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_whose_leader_exited_is_still_alive() {
+        let root = tempdir().expect("tempdir");
+        let target = claimed_dir(root.path(), "test-group-outlives-leader", dead_pid());
+
+        // A leader that backgrounds a long sleep and exits immediately. With
+        // no job control the sleep stays in the leader's process group.
+        let mut leader = {
+            use std::os::unix::process::CommandExt as _;
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "sleep 60 & exit 0"]);
+            c.process_group(0);
+            c.spawn().expect("spawn group leader")
+        };
+        let pgid = leader.id();
+        leader.wait().expect("reap leader");
+
+        assert_eq!(
+            pid_liveness(pgid),
+            Liveness::Dead,
+            "the shell that was the command is gone"
+        );
+        assert_eq!(
+            command_liveness(pgid),
+            Liveness::Alive,
+            "what it left running is not"
+        );
+
+        register_handle(&target, pgid);
+        let stats = sweep_stale_dirs(root.path());
+        assert_eq!(stats.removed, 0, "{stats:?}");
+        assert!(target.exists());
+
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
     }
 
     /// A marker that is a FIFO must be skipped, and — the part that matters —
