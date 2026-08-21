@@ -3,12 +3,13 @@ import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { cn } from "@/shared/lib/cn";
-import { isMacPlatform } from "@/shared/lib/platform";
+import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
 import {
   INITIAL_HANDOFF_STATE,
   accumulateScrollLines,
   encodePaste,
   encodeTerminalKey,
+  isTerminalPasteChord,
   matchTabChord,
   reduceHandoff,
   stepSession,
@@ -785,6 +786,12 @@ export function TerminalSubstrate({
               return;
             }
             if (isToggleChord(event.nativeEvent)) return;
+            const pastePlatform = isMacPlatform()
+              ? "mac"
+              : isLinuxPlatform()
+                ? "linux"
+                : "windows";
+            if (isTerminalPasteChord(event.nativeEvent, pastePlatform)) return;
             const encoded = encodeTerminalKey(event);
             if (encoded) {
               event.preventDefault();
