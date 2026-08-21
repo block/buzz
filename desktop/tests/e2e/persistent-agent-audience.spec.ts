@@ -9,10 +9,14 @@ const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
 
-async function seedTheme(page: Page, theme: string) {
-  await page.addInitScript((selectedTheme) => {
-    window.localStorage.setItem("buzz-theme", selectedTheme);
-  }, theme);
+async function seedTheme(page: Page, theme: string, accent = "#c0a2f1") {
+  await page.addInitScript(
+    ({ selectedTheme, selectedAccent }) => {
+      window.localStorage.setItem("buzz-theme", selectedTheme);
+      window.localStorage.setItem("buzz-accent-color", selectedAccent);
+    },
+    { selectedTheme: theme, selectedAccent: accent },
+  );
 }
 
 async function automaticallyMention(
