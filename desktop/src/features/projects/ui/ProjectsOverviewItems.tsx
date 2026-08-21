@@ -98,13 +98,16 @@ export function ProjectsOverviewProjectItems({
   );
   // Mount cards progressively; a one-shot mount of every card blocked the
   // main thread on tab entry.
+  // Cards cost ~5ms each to mount (activity bar, people stack, menus); the
+  // viewport fits under a dozen, so a small first window keeps the tab-entry
+  // commit short and the rest streams in within a few frames.
   // Grid cards are the expensive layout; while list view is active the
   // counter stays dormant at its initial window so a later list→grid switch
   // still mounts incrementally instead of in one full-collection commit.
   const mountedCount = useIncrementalMount(
     visibleProjects.length,
-    30,
-    60,
+    12,
+    36,
     viewMode === "grid",
   );
   const mountedProjects = React.useMemo(
@@ -218,11 +221,12 @@ export function ProjectsOverviewRepositoryItems({
     [visibleRepositories],
   );
   // Mount cards progressively (see ProjectsOverviewProjectItems).
+  // Small first window: see ProjectsOverviewProjectItems.
   // Dormant outside grid layout; see ProjectsOverviewProjectItems.
   const mountedCount = useIncrementalMount(
     visibleRepositories.length,
-    30,
-    60,
+    12,
+    36,
     viewMode === "grid",
   );
   const mountedRepositories = React.useMemo(
