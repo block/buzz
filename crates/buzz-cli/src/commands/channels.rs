@@ -13,12 +13,22 @@ use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAg
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
+/// Extracts the channel summary fields from a kind 39000 channel-metadata event.
+///
+/// The timestamp carried here is the time of the **last channel-metadata write**,
+/// not the channel's creation: kind 39000 is addressable/replaceable, so its
+/// `created_at` is overwritten on every metadata update and the channel's birth
+/// time is not recoverable from it. `updated_at` names this value honestly;
+/// `created_at` is a deprecated alias kept for one release so existing scripts
+/// do not break silently — prefer `updated_at`.
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
+    let updated_at = e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
     serde_json::json!({
         "channel_id": extract_d_tag(e),
         "name": extract_tag_value(e, "name"),
         "description": extract_tag_value(e, "about"),
-        "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+        "updated_at": updated_at,
+        "created_at": updated_at,
     })
 }
 
@@ -1197,7 +1207,6 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        extract_channel_metadata,
         finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
         ResolvedAgent, RosterResolution, SkippedSlug,
