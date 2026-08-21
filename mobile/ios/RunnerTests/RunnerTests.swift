@@ -37,35 +37,34 @@ class RunnerTests: XCTestCase {
   }
 
   func testNavigationGlassFallbackContrastsSupportedAccentsInLightMode() {
-    let accents: [(name: String, color: UIColor, usesDarkSurface: Bool)] = [
-      ("Neutral", UIColor(hex: 0x000000), false),
-      ("Blue", UIColor(hex: 0x3B82F6), false),
-      ("Cyan", UIColor(hex: 0x06B6D4), true),
-      ("Green", UIColor(hex: 0x22C55E), true),
-      ("Orange", UIColor(hex: 0xF97316), true),
-      ("Red", UIColor(hex: 0xEF4444), false),
-      ("Pink", UIColor(hex: 0xEC4899), false),
-      ("Lilac", UIColor(hex: 0xC0A2F1), true),
-      ("Purple", UIColor(hex: 0xA855F7), false),
-      ("Indigo", UIColor(hex: 0x6366F1), false),
+    let accents: [(name: String, color: UIColor)] = [
+      ("Neutral", UIColor(hex: 0x000000)),
+      ("Blue", UIColor(hex: 0x3B82F6)),
+      ("Cyan", UIColor(hex: 0x06B6D4)),
+      ("Green", UIColor(hex: 0x22C55E)),
+      ("Orange", UIColor(hex: 0xF97316)),
+      ("Red", UIColor(hex: 0xEF4444)),
+      ("Pink", UIColor(hex: 0xEC4899)),
+      ("Lilac", UIColor(hex: 0xC0A2F1)),
+      ("Purple", UIColor(hex: 0xA855F7)),
+      ("Indigo", UIColor(hex: 0x6366F1)),
+      ("White", .white),
     ]
 
     for accent in accents {
-      XCTAssertEqual(
-        NavigationGlassButtonPlatformView.usesDarkFallbackSurface(
+      let background = NavigationGlassButtonPlatformView.fallbackBackgroundColor(
+        foregroundColor: accent.color,
+        interfaceStyle: .light
+      )
+      XCTAssertGreaterThanOrEqual(
+        NavigationGlassButtonPlatformView.contrastRatio(
           foregroundColor: accent.color,
-          interfaceStyle: .light
+          backgroundColor: background
         ),
-        accent.usesDarkSurface,
+        3,
         accent.name
       )
     }
-    XCTAssertTrue(
-      NavigationGlassButtonPlatformView.usesDarkFallbackSurface(
-        foregroundColor: .white,
-        interfaceStyle: .light
-      )
-    )
   }
 
   func testNavigationGlassFallbackKeepsSystemSurfaceInDarkMode() {
@@ -83,11 +82,16 @@ class RunnerTests: XCTestCase {
     ]
 
     for accent in darkAccents {
-      XCTAssertFalse(
-        NavigationGlassButtonPlatformView.usesDarkFallbackSurface(
+      let background = NavigationGlassButtonPlatformView.fallbackBackgroundColor(
+        foregroundColor: accent,
+        interfaceStyle: .dark
+      )
+      XCTAssertGreaterThanOrEqual(
+        NavigationGlassButtonPlatformView.contrastRatio(
           foregroundColor: accent,
-          interfaceStyle: .dark
-        )
+          backgroundColor: background
+        ),
+        3
       )
     }
   }

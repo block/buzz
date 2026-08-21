@@ -255,24 +255,33 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView
   }
 
-  /// Whether the pre-iOS-26 fallback should use a dark surface so the
-  /// foreground maintains non-text UI contrast in light appearance.
-  static func usesDarkFallbackSurface(
+  /// Returns the pre-iOS-26 surface that maximizes contrast with the requested
+  /// foreground while preserving the system surface when it already passes.
+  static func fallbackBackgroundColor(
     foregroundColor: UIColor?,
     interfaceStyle: UIUserInterfaceStyle
-  ) -> Bool {
-    guard interfaceStyle != .dark, let foregroundColor else { return false }
+  ) -> UIColor {
     let traits = UITraitCollection(userInterfaceStyle: interfaceStyle)
     let backgroundColor = UIColor.secondarySystemBackground.resolvedColor(with: traits)
+    guard interfaceStyle != .dark, let foregroundColor else { return backgroundColor }
+    let resolvedForeground = foregroundColor.resolvedColor(with: traits)
+    if contrastRatio(foregroundColor: resolvedForeground, backgroundColor: backgroundColor) >= 3 {
+      return backgroundColor
+    }
+    return .black
+  }
+
+  static func contrastRatio(
+    foregroundColor: UIColor,
+    backgroundColor: UIColor
+  ) -> CGFloat {
     guard
-      let foregroundLuminance = relativeLuminance(
-        of: foregroundColor.resolvedColor(with: traits)
-      ),
+      let foregroundLuminance = relativeLuminance(of: foregroundColor),
       let backgroundLuminance = relativeLuminance(of: backgroundColor)
-    else { return false }
+    else { return 1 }
     let lighter = max(foregroundLuminance, backgroundLuminance)
     let darker = min(foregroundLuminance, backgroundLuminance)
-    return (lighter + 0.05) / (darker + 0.05) < 3
+    return (lighter + 0.05) / (darker + 0.05)
   }
 
   private static func relativeLuminance(of color: UIColor) -> CGFloat? {
@@ -310,10 +319,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       button.configuration?.baseForegroundColor = foregroundColor
     }
     if #unavailable(iOS 26.0) {
-      button.configuration?.baseBackgroundColor = Self.usesDarkFallbackSurface(
+      button.configuration?.baseBackgroundColor = Self.fallbackBackgroundColor(
         foregroundColor: foregroundColor,
         interfaceStyle: interfaceStyle
-      ) ? UIColor.black.withAlphaComponent(0.62) : UIColor.secondarySystemBackground
+      )
     }
     button.setNeedsUpdateConfiguration()
   }

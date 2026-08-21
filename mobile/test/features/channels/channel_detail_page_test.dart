@@ -5540,7 +5540,7 @@ void main() {
             )
             .style
             ?.color,
-        AppTheme.light().colorScheme.primary.withValues(alpha: 0.65),
+        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.65),
       );
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Channel actions'), findsNothing);

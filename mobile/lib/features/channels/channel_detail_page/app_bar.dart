@@ -121,7 +121,9 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: context.textTheme.bodySmall?.copyWith(
-                          color: context.colors.primary.withValues(alpha: 0.65),
+                          color: context.colors.onSurface.withValues(
+                            alpha: 0.65,
+                          ),
                         ),
                       ),
                     ],
