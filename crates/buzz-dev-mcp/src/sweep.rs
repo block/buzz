@@ -933,8 +933,25 @@ mod tests {
         dir
     }
 
+    /// A registry handle that stays alive for as long as this test process
+    /// does. On Unix that has to be a process *group* id, because that is
+    /// what the registry names and what `killpg` can answer for: this
+    /// process's own pid is not a group id unless it happens to be a group
+    /// leader, and under a test runner it is not.
+    fn live_handle() -> u32 {
+        #[cfg(unix)]
+        {
+            nix::unistd::getpgrp().as_raw() as u32
+        }
+        #[cfg(not(unix))]
+        {
+            std::process::id()
+        }
+    }
+
     /// Write a registry entry naming `handle` into an already-claimed `dir`,
     /// the way [`register_command`] does for a running command.
+    #[cfg(unix)]
     fn register_handle(dir: &Path, handle: u32) -> std::path::PathBuf {
         let path = dir.join(CMDS_DIR_NAME).join(handle.to_string());
         std::fs::write(&path, b"").expect("write registry entry");
@@ -1321,12 +1338,12 @@ mod tests {
     fn dropping_a_command_lifetime_deregisters_it() {
         let root = tempdir().expect("tempdir");
         let target = claimed_dir(root.path(), "test-deregister", dead_pid());
-        let registered = register_command(&[target.as_path()]).confirm(std::process::id());
+        let registered = register_command(&[target.as_path()]).confirm(live_handle());
 
         assert_eq!(
             probe_commands(&target),
             CommandsState::Busy,
-            "the handle names this test process, which is alive"
+            "the handle names this test process's group, which is alive"
         );
         drop(registered);
         assert_eq!(probe_commands(&target), CommandsState::Idle);
@@ -1340,7 +1357,7 @@ mod tests {
         let shim = claimed_dir(root.path(), "test-two-dirs-shim", dead_pid());
         let session = claimed_dir(root.path(), "test-two-dirs-session", dead_pid());
         let registered =
-            register_command(&[shim.as_path(), session.as_path()]).confirm(std::process::id());
+            register_command(&[shim.as_path(), session.as_path()]).confirm(live_handle());
 
         let stats = sweep_stale_dirs(root.path());
         assert_eq!(stats.removed, 0, "{stats:?}");
