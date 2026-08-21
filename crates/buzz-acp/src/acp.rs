@@ -82,10 +82,13 @@ pub enum AcpError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("failed to spawn agent command: {source}")]
+    #[error("failed to spawn agent command {command:?}: {source}{missing}")]
     Spawn {
         command: String,
         source: std::io::Error,
+        /// Set when `source` is NotFound, so operators read "not found on
+        /// PATH" instead of a bare errno that reads like a missing directory.
+        missing: String,
     },
 
     #[error("JSON error: {0}")]
@@ -540,9 +543,19 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
-        let mut child = cmd.spawn().map_err(|source| AcpError::Spawn {
-            command: command.to_string(),
-            source,
+        let mut child = cmd.spawn().map_err(|source| {
+            // #6473: "No such file or directory" alone reads like a missing
+            // working directory; name the command and say PATH explicitly.
+            let missing = if source.kind() == std::io::ErrorKind::NotFound {
+                " — binary not found on PATH".to_string()
+            } else {
+                String::new()
+            };
+            AcpError::Spawn {
+                command: command.to_string(),
+                source,
+                missing,
+            }
         })?;
 
         let stdin = child
