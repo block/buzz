@@ -380,6 +380,28 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy text'), findsOneWidget);
+      expect(find.text('Select text'), findsOneWidget);
+    });
+
+    testWidgets('Select text puts the post body into selection mode', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildPostCard(post: _makePost()));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsNothing);
+
+      await tester.longPress(find.byType(ForumPostCard));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Select text'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(find.text('Done'), findsOneWidget);
+
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SelectionArea), findsNothing);
     });
 
     testWidgets('long press shows Delete only for own posts', (tester) async {

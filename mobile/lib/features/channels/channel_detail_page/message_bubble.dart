@@ -77,6 +77,8 @@ class _MessageBubble extends HookConsumerWidget {
       agentMentionPubkeys: agentMentionPubkeys,
     );
 
+    final selecting = ref.watch(messageTextSelectionIdProvider) == message.id;
+
     void openMessageActions(MessageLongPressDetails details) {
       showMessageActions(
         context: context,
@@ -94,6 +96,9 @@ class _MessageBubble extends HookConsumerWidget {
         onPopoverDismissed: () => details.setSourceHidden(false),
         composerFocusNode: composerFocusNode,
         restoreComposerFocus: restoreComposerFocus,
+        onSelectText: () {
+          ref.read(messageTextSelectionIdProvider.notifier).state = message.id;
+        },
       );
     }
 
@@ -108,13 +113,14 @@ class _MessageBubble extends HookConsumerWidget {
         clipBehavior: Clip.none,
         child: MessageLongPressInkWell(
           key: ValueKey('message-row-${message.id}'),
+          enabled: !selecting,
           onLongPressDetails: openMessageActions,
           borderRadius: BorderRadius.circular(Radii.md),
           highlightColor: context.colors.primary.withValues(alpha: 0.1),
           snapshotKey: messageSnapshotKey,
           // Tap opens the thread; long-press still opens the action sheet.
           // MessageContent handles mention, channel-link, and media taps.
-          onTap: allMessages == null
+          onTap: selecting || allMessages == null
               ? null
               : () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -209,11 +215,21 @@ class _MessageBubble extends HookConsumerWidget {
                                               ),
                                         ),
                                       ],
+                                      if (selecting) ...[
+                                        const SizedBox(width: Grid.half),
+                                        const MessageTextSelectionDoneButton(),
+                                      ],
                                     ],
                                   ),
+                                )
+                              else if (selecting)
+                                const Align(
+                                  alignment: Alignment.centerRight,
+                                  child: MessageTextSelectionDoneButton(),
                                 ),
                               MessageContent(
                                 content: message.content,
+                                selectable: selecting,
                                 mentionNames: resolvedMentionNames,
                                 agentMentionPubkeys: agentMentionPubkeys,
                                 channelNames: channelNames,
