@@ -344,7 +344,7 @@ export const WorkflowFormBuilder = React.forwardRef<
   WorkflowFormBuilderProps
 >(function WorkflowFormBuilder(
   {
-    channels: _channels,
+    channels,
     disabled,
     nameLeadingContainer,
     mode,
@@ -636,9 +636,17 @@ export const WorkflowFormBuilder = React.forwardRef<
                     />
 
                     {formState.steps.map((step, index) => {
-                      const stepName = step.name?.trim();
                       const actionLabel = ACTION_LABELS[step.action];
-                      const nodeDescription = workflowStepDescription(step);
+                      const channelLabel = step.channel
+                        ? channels.find(
+                            (channel) => channel.id === step.channel,
+                          )?.name
+                        : undefined;
+                      const nodeDescription = workflowStepDescription(step, {
+                        channelLabel,
+                      });
+                      const showActionSubtitle =
+                        nodeDescription !== actionLabel;
                       return (
                         <WorkflowNode
                           description={nodeDescription}
@@ -656,7 +664,9 @@ export const WorkflowFormBuilder = React.forwardRef<
                             selectedNode.stepId === step.id
                           }
                           showTitle={false}
-                          subtitle={stepName ? actionLabel : undefined}
+                          subtitle={
+                            showActionSubtitle ? actionLabel : undefined
+                          }
                           terminal={index === formState.steps.length - 1}
                           title={`Step ${index + 1}`}
                         />

@@ -89,7 +89,7 @@ test("describes configured workflow steps on the canvas", () => {
 test("falls back to the action label until a step is configured", () => {
   assert.equal(
     workflowStepDescription({ id: "message", action: "send_message" }),
-    "Send message",
+    "Send Message",
   );
 });
 

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -228,10 +228,24 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   const dialog = await openCreateWorkflow(page, name);
 
   await dialog.getByLabel("Message text").fill("deploy");
-  await expect(dialog.getByText("Message contains “deploy”")).toBeVisible();
+  const triggerNode = dialog.getByRole("button", {
+    name: "Trigger: Message contains “deploy”",
+  });
+  await expect(triggerNode).toContainText("Trigger");
+  await expect(triggerNode).toContainText("Message contains “deploy”");
 
   await addMessageStep(page, dialog);
-  await expect(dialog.getByText("“Workflow notification”")).toBeVisible();
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+  const definition = parseYaml(await yamlEditor.inputValue());
+  definition.steps[0].channel = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
+  await yamlEditor.fill(stringifyYaml(definition));
+  await dialog.getByRole("tab", { name: "Form" }).click();
+  const stepNode = dialog.getByRole("button", {
+    name: "Step 1: “Workflow notification” in #agents",
+  });
+  await expect(stepNode).toContainText("Send Message");
+  await expect(stepNode).toContainText("“Workflow notification” in #agents");
   await dialog.getByRole("button", { name: "Create" }).click();
 
   const card = page

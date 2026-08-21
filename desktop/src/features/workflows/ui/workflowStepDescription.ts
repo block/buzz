@@ -71,10 +71,6 @@ function configuredStepDetail(
   }
 }
 
-function sentenceCaseLabel(value: string): string {
-  return value ? `${value[0]}${value.slice(1).toLocaleLowerCase()}` : value;
-}
-
 /** Build the concise action summary rendered on a workflow step node. */
 export function workflowStepDescription(
   step: StepFormState,
@@ -83,5 +79,5 @@ export function workflowStepDescription(
   const name = options.includeName === false ? undefined : step.name?.trim();
   const detail = configuredStepDetail(step, options.channelLabel);
   if (name && detail) return `${name} · ${detail}`;
-  return name || detail || sentenceCaseLabel(ACTION_LABELS[step.action]);
+  return name || detail || ACTION_LABELS[step.action];
 }
