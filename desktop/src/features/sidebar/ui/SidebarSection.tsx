@@ -25,7 +25,11 @@ import {
   ProfileAvatarWithStatus,
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { useQueryClient } from "@tanstack/react-query";
+
+import { prefetchChannelMessages } from "@/features/messages/hooks";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
+import { useHoverIntent } from "@/shared/hooks/useHoverIntent";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import {
@@ -274,6 +278,13 @@ export function ChannelMenuButton({
 }) {
   const resolvedLabel = label ?? channel.name;
   const ephemeralDisplay = getEphemeralChannelDisplay(channel);
+  const queryClient = useQueryClient();
+  // Hover intent warms the channel's message window so the click lands on a
+  // cache hit. Respects the window's staleTime — re-hovering a fresh channel
+  // never refetches.
+  const hoverPrefetch = useHoverIntent(() =>
+    prefetchChannelMessages(queryClient, channel),
+  );
   const {
     hasSidebarUnreadProjections,
     topLevelUnreadChannelIds,
@@ -313,6 +324,8 @@ export function ChannelMenuButton({
       data-testid={`channel-${channel.name}`}
       isActive={isActive}
       onClick={() => onSelectChannel(channel.id)}
+      onMouseEnter={hoverPrefetch.onMouseEnter}
+      onMouseLeave={hoverPrefetch.onMouseLeave}
       tooltip={resolvedLabel}
       type="button"
     >

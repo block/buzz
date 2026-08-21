@@ -5579,7 +5579,20 @@ async function handleGetChannelWindow(
   };
 
   if (!args.cursor) {
-    return execute();
+    // TEST-ONLY probe: head (cursorless) window fetches, keyed for specs that
+    // assert prefetch behavior. Continuations keep their own counter below.
+    const headProbe = window as unknown as {
+      __CHANNEL_WINDOW_HEAD_FETCH_COUNT__?: number;
+      __CHANNEL_WINDOW_HEAD_COMPLETE_COUNT__?: number;
+    };
+    headProbe.__CHANNEL_WINDOW_HEAD_FETCH_COUNT__ =
+      (headProbe.__CHANNEL_WINDOW_HEAD_FETCH_COUNT__ ?? 0) + 1;
+    const result = await execute();
+    // Completion counter: specs asserting a warmed cache must wait for this,
+    // not the start counter — a started-but-pending prefetch proves nothing.
+    headProbe.__CHANNEL_WINDOW_HEAD_COMPLETE_COUNT__ =
+      (headProbe.__CHANNEL_WINDOW_HEAD_COMPLETE_COUNT__ ?? 0) + 1;
+    return result;
   }
 
   const probe = window as unknown as {
