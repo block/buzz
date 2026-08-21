@@ -21,7 +21,11 @@ RUN cargo build --locked --profile sprig -p sprig \
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-RUN apk add --no-cache bash ca-certificates curl git \
+RUN apk add --no-cache bash ca-certificates curl git nodejs npm \
+    && npm install --global --omit=dev \
+      @agentclientprotocol/codex-acp@1.4.0 \
+      @openai/codex@0.147.0 \
+    && npm cache clean --force \
     && adduser -D -h /home/agent agent \
     && install -d -o agent -g agent /workspace /home/agent \
     && git config --system gpg.format x509 \

@@ -11,7 +11,9 @@ assert_run() {
 }
 
 assert_run '
-  command -v bash git update-ca-certificates >/dev/null
+  command -v bash git update-ca-certificates codex codex-acp >/dev/null
+  test "$(codex --version)" = "codex-cli 0.147.0"
+  test "$(codex-acp --version)" = "@agentclientprotocol/codex-acp 1.4.0"
   test "$(readlink /usr/local/bin/buzz-acp)" = sprig
   for name in buzz-agent buzz-dev-mcp rg tree buzz git-credential-nostr git-sign-nostr; do
     test "$(readlink "/usr/local/bin/$name")" = sprig
