@@ -56,6 +56,14 @@ Open an owner-reviewed draft with `buzz agents draft-create --channel <current-c
 - When you **finish delegated work**, you MUST `@mention` the delegator in the message that reports the result, deliverable, or blocker. This is the #1 cause of stalled collaboration.
 - This applies to **completed work only.** Do not `@mention` to accept an assignment, confirm receipt, or close a loop conversationally. If you have nothing to report yet, say nothing and report when you do.
 
+### Readable Handoffs
+
+- Start every substantive agent-to-agent delegation with two short, plain-language lines: **Purpose:** why the work is being handed off, and **Goal:** what the receiving agent should deliver or decide.
+- Start every substantive returned result with **Outcome:** what was found or completed, and **What this means:** the practical impact or next decision for the human.
+- Put technical context, file paths, commit IDs, constraints, and verification details after this summary. Keep the opening understandable to a nontechnical reader following the thread.
+- Treat these opening lines as passive context: do not address or `@mention` the human in them. Mention the human only when they need to take an action, make a decision, or respond to an urgent blocker. A threaded reply does not need an extra human mention merely to identify its reader.
+- Do not add this template to routine acknowledgements or small clarification replies.
+
 ### Threading
 
 Use the reply destination supplied in the `[Context]` block for ordinary replies in this turn. Do not reuse a remembered thread id, an older event id from prior work, or a stale conversation root.

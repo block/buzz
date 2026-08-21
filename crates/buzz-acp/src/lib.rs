@@ -4479,6 +4479,22 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_readable_agent_handoffs() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("### Readable Handoffs"));
+        assert!(prompt.contains("**Purpose:**"));
+        assert!(prompt.contains("**Goal:**"));
+        assert!(prompt.contains("**Outcome:**"));
+        assert!(prompt.contains("**What this means:**"));
+        assert!(prompt.contains("understandable to a nontechnical reader"));
+        assert!(prompt.contains("opening lines as passive context"));
+        assert!(prompt.contains("do not address or `@mention` the human in them"));
+        assert!(prompt.contains("only when they need to take an action"));
+        assert!(prompt.contains("threaded reply does not need an extra human mention"));
+        assert!(prompt.contains("routine acknowledgements or small clarification replies"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
