@@ -1752,7 +1752,7 @@ test("empty channel shows intro actions", async ({ page }) => {
     addAgentsAction.getByText("Add agents", { exact: true }),
   ).toBeVisible();
   await expect(
-    addAgentsAction.getByText("Choose agents to add to this channel.", {
+    addAgentsAction.getByText("Bring them in.", {
       exact: true,
     }),
   ).toBeVisible();
