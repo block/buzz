@@ -129,6 +129,34 @@ export function MachineOnboardingFlow({
     [],
   );
 
+  // If boot already resolved a durable identity (e.g. legacy-file → keyring
+  // migration), surface "Continue setup" instead of the misleading
+  // "Create a new identity key" primary action. Ephemeral first-run keys
+  // keep the create label until the user deliberately continues.
+  // See https://github.com/block/buzz/issues/4472.
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const identity = await getIdentity();
+        if (cancelled) return;
+        const durable =
+          identity.storage === "system-keyring" ||
+          identity.storage === "local-file" ||
+          identity.storage === "environment";
+        if (!durable) return;
+        setSelectedPubkey(identity.pubkey);
+        setIdentityStorage(identity.storage);
+        queryClient.setQueryData(["identity"], identity);
+      } catch {
+        // No readable identity yet — keep the create-new label.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [queryClient]);
+
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
     setError(null);
