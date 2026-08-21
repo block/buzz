@@ -23,10 +23,7 @@ import {
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { resetLinkPreviewPreparations } from "@/features/messages/lib/linkPreviewPreparationStore";
-import {
-  initPersistentAgentAudienceStore,
-  resetPersistentAgentAudienceStore,
-} from "@/features/messages/lib/persistentAgentAudience";
+import { resetPersistentAgentAudienceStore } from "@/features/messages/lib/persistentAgentAudience";
 import {
   resetActiveAgentTurnsStore,
   saveActiveAgentTurnsForCommunity,
@@ -337,7 +334,6 @@ export function useCommunityInit(
         // trip). This runs after applyCommunity succeeds and before the app
         // renders so components see the restored timers on first render.
         restoreActiveAgentTurnsForCommunity(activeCommunity.id);
-        initPersistentAgentAudienceStore(activeCommunity.id);
         // Prime the ref so the NEXT switch saves this community's state.
         prevCommunityIdRef.current = activeCommunity.id;
         setResult({

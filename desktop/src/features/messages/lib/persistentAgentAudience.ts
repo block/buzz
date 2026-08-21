@@ -1,10 +1,8 @@
 import * as React from "react";
 
-const AUDIENCES_STORAGE_KEY_PREFIX = "buzz:persistent-agent-audiences:v3";
-export const MAX_PERSISTENT_AGENT_AUDIENCES = 200;
+export const MAX_IN_MEMORY_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
-let activeCommunityId: string | null = null;
 let audiences: Record<string, string[]> = {};
 let snapshot = buildSnapshot();
 
@@ -28,36 +26,9 @@ function boundAudiences(
   value: Record<string, string[]>,
 ): Record<string, string[]> {
   const entries = Object.entries(value);
-  return entries.length <= MAX_PERSISTENT_AGENT_AUDIENCES
+  return entries.length <= MAX_IN_MEMORY_AGENT_AUDIENCES
     ? value
-    : Object.fromEntries(entries.slice(-MAX_PERSISTENT_AGENT_AUDIENCES));
-}
-
-function getAudiencesStorageKey(communityId: string): string {
-  return `${AUDIENCES_STORAGE_KEY_PREFIX}:${encodeURIComponent(communityId)}`;
-}
-
-function readAudiences(communityId: string): Record<string, string[]> {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed: unknown = JSON.parse(
-      window.localStorage.getItem(getAudiencesStorageKey(communityId)) ?? "{}",
-    );
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return {};
-
-    const result: Record<string, string[]> = {};
-    for (const [scope, value] of Object.entries(parsed)) {
-      if (scope && Array.isArray(value)) {
-        result[scope] = normalizePubkeys(
-          value.filter((entry): entry is string => typeof entry === "string"),
-        );
-      }
-    }
-    return boundAudiences(result);
-  } catch {
-    return {};
-  }
+    : Object.fromEntries(entries.slice(-MAX_IN_MEMORY_AGENT_AUDIENCES));
 }
 
 function buildSnapshot(): PersistentAgentAudienceSnapshot {
@@ -67,18 +38,6 @@ function buildSnapshot(): PersistentAgentAudienceSnapshot {
 function emit(): void {
   snapshot = buildSnapshot();
   for (const listener of listeners) listener();
-}
-
-function persistAudiences(): void {
-  if (!activeCommunityId) return;
-  try {
-    window.localStorage.setItem(
-      getAudiencesStorageKey(activeCommunityId),
-      JSON.stringify(audiences),
-    );
-  } catch {
-    // Persistence is best-effort; the live session still uses in-memory state.
-  }
 }
 
 export function getPersistentAgentAudienceScope({
@@ -91,19 +50,7 @@ export function getPersistentAgentAudienceScope({
   return `${owner}:${channelId}:channel`;
 }
 
-export function initPersistentAgentAudienceStore(communityId: string): void {
-  const normalizedCommunityId = communityId.trim();
-  if (!normalizedCommunityId) {
-    resetPersistentAgentAudienceStore();
-    return;
-  }
-  activeCommunityId = normalizedCommunityId;
-  audiences = readAudiences(normalizedCommunityId);
-  emit();
-}
-
 export function resetPersistentAgentAudienceStore(): void {
-  activeCommunityId = null;
   audiences = {};
   emit();
 }
@@ -124,14 +71,12 @@ export function setPersistentAgentAudience(
     const nextAudiences = { ...audiences };
     delete nextAudiences[scope];
     audiences = boundAudiences({ ...nextAudiences, [scope]: current });
-    persistAudiences();
     return;
   }
 
   const nextAudiences = { ...audiences };
   delete nextAudiences[scope];
   audiences = boundAudiences({ ...nextAudiences, [scope]: normalized });
-  persistAudiences();
   emit();
 }
 
