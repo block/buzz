@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,6 +8,21 @@ import {
   hasMention,
 } from "./hasMention.ts";
 import { extractMentionPubkeys } from "./extractMentionPubkeys.ts";
+
+const useMentionsSource = await readFile(
+  new URL("./useMentions.ts", import.meta.url),
+  "utf8",
+);
+
+test("channel bot members reach the unknown-directory visibility fallback", () => {
+  const addCandidateSource = useMentionsSource.slice(
+    useMentionsSource.indexOf("const addCandidate ="),
+    useMentionsSource.indexOf("const current = candidatesByPubkey"),
+  );
+
+  assert.match(addCandidateSource, /shouldHideAgentFromMentions/);
+  assert.doesNotMatch(addCandidateSource, /isAgentIdentityInAllowedList/);
+});
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
