@@ -50,6 +50,7 @@ import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
+import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
@@ -333,6 +334,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 onPressed: () => Navigator.of(context).maybePop(),
                 width: iosGlassChannelHeaderLeadingWidth,
                 buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                nativeViewSuppressed: messageActionBackdropActive,
               )
             : null,
         iconColor: context.colors.primary,

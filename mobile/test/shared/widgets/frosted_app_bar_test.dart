@@ -1,5 +1,6 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -120,6 +121,50 @@ void main() {
     expect(nativeBack.creationParams, containsPair('hitTargetWidth', 48.0));
     expect(nativeBack.creationParams, containsPair('hitTargetHeight', 48.0));
     expect(find.byTooltip('Back'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('replaces native glass while a Flutter backdrop is active', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final suppressNativeView = ValueNotifier(false);
+    addTearDown(suppressNativeView.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: IosGlassNavigationButton(
+            icon: IosGlassNavigationIcon.back,
+            semanticLabel: 'Back',
+            onPressed: () {},
+            nativeViewSuppressed: suppressNativeView,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(UiKitView), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
+      findsNothing,
+    );
+
+    suppressNativeView.value = true;
+    await tester.pump();
+
+    expect(find.byType(UiKitView), findsNothing);
+    expect(
+      find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
+      findsOneWidget,
+    );
+
+    suppressNativeView.value = false;
+    await tester.pump();
+
+    expect(find.byType(UiKitView), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 }

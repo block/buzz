@@ -35,6 +35,7 @@ import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
+import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
@@ -58,19 +59,6 @@ const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
 const _landingHighlightOpacity = 0.12;
 const _threadTailScrollTolerance = 0.5;
-
-/// Returns whether a bounded tail correction reached the effective end.
-///
-/// Item positions can lag the active scroll position by a frame, so an exact
-/// end-of-scroll measurement is sufficient even while the tail item still
-/// reports outside the visible boundary.
-@visibleForTesting
-bool threadTailCorrectionReachedEnd({
-  required bool tailIsVisible,
-  required double? extentAfter,
-}) =>
-    tailIsVisible ||
-    (extentAfter != null && extentAfter <= _threadTailScrollTolerance);
 
 // Keep the direct-position correction finite in case the viewport cannot
 // expose its tail (for example, continuously changing media dimensions).
@@ -847,6 +835,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 onPressed: () => Navigator.of(context).maybePop(),
                 width: iosGlassChannelHeaderLeadingWidth,
                 buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                nativeViewSuppressed: messageActionBackdropActive,
               )
             : null,
         iconColor: context.colors.primary,

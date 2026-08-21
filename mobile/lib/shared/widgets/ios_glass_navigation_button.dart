@@ -34,6 +34,7 @@ class IosGlassNavigationButton extends HookWidget {
     this.height = 48,
     this.buttonCenterX,
     this.foregroundColor,
+    this.nativeViewSuppressed,
   });
 
   static const viewType = 'buzz/navigation_glass';
@@ -45,6 +46,7 @@ class IosGlassNavigationButton extends HookWidget {
   final double height;
   final double? buttonCenterX;
   final Color? foregroundColor;
+  final ValueListenable<bool>? nativeViewSuppressed;
 
   @override
   Widget build(BuildContext context) {
@@ -81,29 +83,76 @@ class IosGlassNavigationButton extends HookWidget {
       return null;
     }, [nativeChannel.value, brightness, foregroundValue, enabled]);
 
+    Widget buildControl({required bool suppressNativeView}) {
+      if (suppressNativeView) {
+        final resolvedButtonCenterX = buttonCenterX ?? width / 2;
+        return Stack(
+          key: const ValueKey('ios-glass-navigation-flutter-fallback'),
+          children: [
+            Positioned(
+              left: resolvedButtonCenterX - 20,
+              top: (height - 40) / 2,
+              width: 40,
+              height: 40,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: context.colors.surface.withValues(alpha: 0.72),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: context.colors.inverseSurface.withValues(
+                      alpha: 0.07,
+                    ),
+                  ),
+                ),
+                child: Icon(
+                  icon == IosGlassNavigationIcon.back
+                      ? Icons.arrow_back_ios_new_rounded
+                      : Icons.close_rounded,
+                  size: 20,
+                  color: effectiveForeground,
+                ),
+              ),
+            ),
+          ],
+        );
+      }
+      return UiKitView(
+        viewType: viewType,
+        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+        creationParams: <String, Object>{
+          'icon': icon.name,
+          'accessibilityLabel': semanticLabel,
+          'brightness': brightness,
+          'foregroundColor': foregroundValue,
+          'enabled': enabled,
+          'buttonCenterX': buttonCenterX ?? width / 2,
+          'hitTargetWidth': width,
+          'hitTargetHeight': height,
+        },
+        creationParamsCodec: const StandardMessageCodec(),
+        onPlatformViewCreated: (viewId) {
+          nativeChannel.value = MethodChannel('$viewType/$viewId');
+        },
+      );
+    }
+
     return Tooltip(
       message: semanticLabel,
       child: SizedBox(
         width: width,
         height: height,
-        child: UiKitView(
-          viewType: viewType,
-          hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-          creationParams: <String, Object>{
-            'icon': icon.name,
-            'accessibilityLabel': semanticLabel,
-            'brightness': brightness,
-            'foregroundColor': foregroundValue,
-            'enabled': enabled,
-            'buttonCenterX': buttonCenterX ?? width / 2,
-            'hitTargetWidth': width,
-            'hitTargetHeight': height,
-          },
-          creationParamsCodec: const StandardMessageCodec(),
-          onPlatformViewCreated: (viewId) {
-            nativeChannel.value = MethodChannel('$viewType/$viewId');
-          },
-        ),
+        child: nativeViewSuppressed == null
+            ? buildControl(suppressNativeView: false)
+            : ValueListenableBuilder<bool>(
+                valueListenable: nativeViewSuppressed!,
+                builder: (context, suppressNativeView, _) => IgnorePointer(
+                  ignoring: suppressNativeView,
+                  child: ExcludeSemantics(
+                    excluding: suppressNativeView,
+                    child: buildControl(suppressNativeView: suppressNativeView),
+                  ),
+                ),
+              ),
       ),
     );
   }
