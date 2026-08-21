@@ -10,6 +10,7 @@ const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
 const SCOPE = `${OWNER}:${CHANNEL_ID}:thread:${THREAD_ROOT_ID}`;
+const DRAFT_STORE_KEY = `buzz-drafts.v2:ws://localhost:3000:${OWNER}`;
 
 async function seedAudience(page: Page, pubkeys: string[], theme = "buzz") {
   await page.addInitScript(
@@ -271,6 +272,34 @@ test("persistent agents restore through the native inline mention UI", async ({
   await expect(input).toContainText("@Morgarita");
   await expect(input).not.toContainText("@Vogue");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+});
+
+test("leaving an untouched persistent-agent thread does not create a draft", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const input = threadComposer(page).getByTestId("message-input");
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+
+  await openGeneral(page);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ draftKey, storeKey }) => {
+          const drafts = JSON.parse(localStorage.getItem(storeKey) ?? "{}");
+          return drafts[draftKey] ?? null;
+        },
+        {
+          draftKey: `thread:${THREAD_ROOT_ID}`,
+          storeKey: DRAFT_STORE_KEY,
+        },
+      ),
+    )
+    .toBeNull();
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {

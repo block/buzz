@@ -193,6 +193,7 @@ function installDOMShim() {
     }
   };
   globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
 }
 
 installDOMShim();
@@ -233,6 +234,7 @@ import { act } from "react";
 // Production hook under test — owns the restore effect, cleanup, and the
 // synchronous ref write that is the StrictMode fix.
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot.ts";
+import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration.ts";
 
 // Real storage functions — the test uses them, not a replica.
 import {
@@ -246,6 +248,11 @@ import {
   saveQueuedAttachmentsForDraft,
   takeQueuedAttachmentsForDraft,
 } from "../lib/backgroundMediaUploadStore.ts";
+import {
+  getPersistentAgentAudienceScope,
+  setPersistentAgentAudience,
+  setPersistentAgentAudienceEnabled,
+} from "../lib/persistentAgentAudience.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -289,6 +296,142 @@ async function mountStrictMode(Comp) {
       });
     },
   };
+}
+
+const AUDIENCE_OWNER_PUBKEY = "1".repeat(64);
+const AGENT_ADA = {
+  displayName: "Agent Ada",
+  pubkey: "a".repeat(64),
+};
+const AGENT_BEA = {
+  displayName: "Agent Bea",
+  pubkey: "b".repeat(64),
+};
+
+function createPersistentAudienceDraftHarness({ agents, initialRoute }) {
+  setupStore(AUDIENCE_OWNER_PUBKEY);
+  setPersistentAgentAudienceEnabled(false);
+  setPersistentAgentAudienceEnabled(true);
+
+  let route = initialRoute;
+  let editorContent = "";
+  let setPendingImetaFromTest = () => {};
+  const spoileredRef = { current: new Set() };
+  const hydrationRef = { current: null };
+  const agentByPubkey = new Map(agents.map((agent) => [agent.pubkey, agent]));
+
+  const scopeFor = (candidate) => {
+    const scope = getPersistentAgentAudienceScope({
+      ownerPubkey: AUDIENCE_OWNER_PUBKEY,
+      channelId: candidate.channelId,
+      threadRootId: candidate.threadRootId,
+    });
+    assert.ok(scope);
+    return scope;
+  };
+  const seedRouteAudience = (candidate) => {
+    setPersistentAgentAudience(scopeFor(candidate), candidate.agentPubkeys);
+  };
+  seedRouteAudience(route);
+
+  const extractMentionPubkeys = (content) =>
+    agents
+      .filter((agent) => content.includes(`@${agent.displayName}`))
+      .map((agent) => agent.pubkey);
+  const mentions = {
+    cancelMentionAutocomplete: () => {},
+    clearMentions: () => {},
+    extractMentionPubkeys,
+    getMentionDisplayName: (pubkey) =>
+      agentByPubkey.get(pubkey)?.displayName ?? null,
+    insertResolvedMention: ({
+      replaceFromOffset,
+      replaceToOffset,
+      displayName,
+    }) => ({
+      replaceFromOffset,
+      replaceToOffset,
+      insertText: `@${displayName} `,
+    }),
+    registerMentionPubkey: () => {},
+  };
+  const richText = {
+    getMarkdown: () => editorContent,
+    getPlainTextAndCursor: () => ({
+      cursor: editorContent.length,
+      text: editorContent,
+    }),
+    replacePlainTextRange: (from, to, text) => {
+      editorContent =
+        editorContent.slice(0, from) + text + editorContent.slice(to);
+    },
+  };
+
+  function HarnessComposer() {
+    const [pendingImeta, setPendingImeta] = React.useState([]);
+    setPendingImetaFromTest = setPendingImeta;
+
+    useDraftPersistLifecycle({
+      effectiveDraftKey: route.draftKey,
+      channelId: route.channelId,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        extractMentionPubkeys(content).map((pubkey) => ({
+          displayName: agentByPubkey.get(pubkey).displayName,
+          pubkey,
+          isAgent: true,
+        })),
+      restoreMentionRefs: () => {},
+      livePendingImeta: pendingImeta,
+      setPendingImeta,
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+      draftContentResolverRef: hydrationRef,
+    });
+
+    hydrationRef.current = usePersistentAgentMentionHydration({
+      audienceScope: scopeFor(route),
+      hydrationKey: route.draftKey,
+      isEditing: false,
+      mentions,
+      richText,
+    });
+    return null;
+  }
+
+  return {
+    HarnessComposer,
+    addAttachment: async (attachment) => {
+      await act(async () => {
+        setPendingImetaFromTest([attachment]);
+      });
+    },
+    appendEditorContent: (content) => {
+      editorContent += content;
+    },
+    getEditorContent: () => editorContent,
+    resolvePostSendContent: (pubkeys) => {
+      editorContent = hydrationRef.current.resolvePostSendContent(pubkeys);
+    },
+    switchRoute: (nextRoute) => {
+      seedRouteAudience(nextRoute);
+      route = nextRoute;
+    },
+  };
+}
+
+async function flushPersistentAudienceHydration() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -661,4 +804,157 @@ test("discarding_a_draft_drops_its_retained_local_files", () => {
   deleteDraftEntry("chan-deleted");
 
   assert.deepEqual(takeQueuedAttachmentsForDraft("chan-deleted"), []);
+});
+
+test("persistent audience hydration alone does not create a thread draft", async (t) => {
+  t.after(() => setPersistentAgentAudienceEnabled(false));
+  const route = {
+    agentPubkeys: [AGENT_ADA.pubkey],
+    channelId: "channel-audience-only",
+    draftKey: "thread:audience-only",
+    threadRootId: "audience-only",
+  };
+  const harness = createPersistentAudienceDraftHarness({
+    agents: [AGENT_ADA],
+    initialRoute: route,
+  });
+
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  await flushPersistentAudienceHydration();
+  assert.equal(
+    harness.getEditorContent(),
+    `@${AGENT_ADA.displayName} `,
+    "precondition: opening the thread hydrates its saved agent audience",
+  );
+
+  await handle.unmount();
+  assert.equal(
+    loadDraftEntry(route.draftKey),
+    undefined,
+    "preselected agent recipients are not authored draft content",
+  );
+
+  const authoredHandle = await mountStrictMode(harness.HarnessComposer);
+  await flushPersistentAudienceHydration();
+  harness.appendEditorContent("please investigate");
+  await authoredHandle.unmount();
+  assert.equal(
+    loadDraftEntry(route.draftKey)?.content,
+    `@${AGENT_ADA.displayName} please investigate`,
+    "user-authored content still persists with its preselected recipient",
+  );
+});
+
+test("persistent audience hydration preserves an existing mention-only draft", async (t) => {
+  t.after(() => setPersistentAgentAudienceEnabled(false));
+  const route = {
+    agentPubkeys: [AGENT_ADA.pubkey],
+    channelId: "channel-existing-mention",
+    draftKey: "thread:existing-mention",
+    threadRootId: "existing-mention",
+  };
+  const harness = createPersistentAudienceDraftHarness({
+    agents: [AGENT_ADA],
+    initialRoute: route,
+  });
+  const savedContent = `@${AGENT_ADA.displayName} `;
+  persistDraftEntry(
+    route.draftKey,
+    savedContent,
+    route.channelId,
+    [],
+    [],
+    [{ ...AGENT_ADA, isAgent: true }],
+  );
+
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  await flushPersistentAudienceHydration();
+  await handle.unmount();
+
+  assert.equal(
+    loadDraftEntry(route.draftKey)?.content,
+    savedContent,
+    "restored authored content is never mistaken for programmatic hydration",
+  );
+});
+
+test("persistent audience hydration keeps an attachment draft without mention text", async (t) => {
+  t.after(() => setPersistentAgentAudienceEnabled(false));
+  const route = {
+    agentPubkeys: [AGENT_ADA.pubkey],
+    channelId: "channel-audience-attachment",
+    draftKey: "thread:audience-attachment",
+    threadRootId: "audience-attachment",
+  };
+  const harness = createPersistentAudienceDraftHarness({
+    agents: [AGENT_ADA],
+    initialRoute: route,
+  });
+
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  await flushPersistentAudienceHydration();
+  await harness.addAttachment(IMG_A);
+  await handle.unmount();
+
+  const saved = loadDraftEntry(route.draftKey);
+  assert.ok(saved, "the attachment keeps the draft alive");
+  assert.equal(saved.content, "", "hydrated recipients are not draft text");
+  assert.deepEqual(saved.pendingImeta, [IMG_A]);
+});
+
+test("persistent audience hydration does not leak ghost drafts across thread switches", async (t) => {
+  t.after(() => setPersistentAgentAudienceEnabled(false));
+  const routeA = {
+    agentPubkeys: [AGENT_ADA.pubkey],
+    channelId: "channel-switch",
+    draftKey: "thread:switch-a",
+    threadRootId: "switch-a",
+  };
+  const routeB = {
+    agentPubkeys: [AGENT_BEA.pubkey],
+    channelId: "channel-switch",
+    draftKey: "thread:switch-b",
+    threadRootId: "switch-b",
+  };
+  const harness = createPersistentAudienceDraftHarness({
+    agents: [AGENT_ADA, AGENT_BEA],
+    initialRoute: routeA,
+  });
+
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  await flushPersistentAudienceHydration();
+  assert.equal(harness.getEditorContent(), `@${AGENT_ADA.displayName} `);
+
+  await act(async () => {
+    harness.switchRoute(routeB);
+  });
+  await handle.rerender();
+  await flushPersistentAudienceHydration();
+  assert.equal(loadDraftEntry(routeA.draftKey), undefined);
+  assert.equal(harness.getEditorContent(), `@${AGENT_BEA.displayName} `);
+
+  await handle.unmount();
+  assert.equal(loadDraftEntry(routeB.draftKey), undefined);
+});
+
+test("persistent audience post-send recipients do not become a draft", async (t) => {
+  t.after(() => setPersistentAgentAudienceEnabled(false));
+  const route = {
+    agentPubkeys: [AGENT_ADA.pubkey],
+    channelId: "channel-post-send",
+    draftKey: "thread:post-send",
+    threadRootId: "post-send",
+  };
+  const harness = createPersistentAudienceDraftHarness({
+    agents: [AGENT_ADA],
+    initialRoute: route,
+  });
+
+  const handle = await mountStrictMode(harness.HarnessComposer);
+  await flushPersistentAudienceHydration();
+  harness.resolvePostSendContent([AGENT_ADA.pubkey]);
+  assert.equal(harness.getEditorContent(), `@${AGENT_ADA.displayName} `);
+  await handle.unmount();
+
+  assert.equal(loadDraftEntry(route.draftKey), undefined);
 });
