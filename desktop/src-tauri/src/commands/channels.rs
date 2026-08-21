@@ -194,6 +194,36 @@ fn parse_channel_uuid(channel_id: &str) -> Result<uuid::Uuid, String> {
     uuid::Uuid::parse_str(channel_id).map_err(|_| format!("invalid channel UUID: {channel_id}"))
 }
 
+fn build_external_agent_auth_tag(
+    owner_keys: &nostr::Keys,
+    members: &ChannelMembersResponse,
+    agent_pubkey: &str,
+) -> Result<String, String> {
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let owner_is_channel_owner = members
+        .members
+        .iter()
+        .any(|member| member.pubkey.eq_ignore_ascii_case(&owner_pubkey) && member.role == "owner");
+    if !owner_is_channel_owner {
+        return Err("only a channel owner can authorize an external agent".to_string());
+    }
+
+    let agent = nostr::PublicKey::from_hex(agent_pubkey)
+        .map_err(|e| format!("invalid agent pubkey: {e}"))?;
+    let normalized_agent_pubkey = agent.to_hex();
+    let agent_is_bot_member = members.members.iter().any(|member| {
+        member.pubkey.eq_ignore_ascii_case(&normalized_agent_pubkey)
+            && member.role == "bot"
+            && member.is_agent
+    });
+    if !agent_is_bot_member {
+        return Err("the external agent must be a bot member of this channel".to_string());
+    }
+
+    buzz_sdk_pkg::nip_oa::compute_auth_tag(owner_keys, &agent, "")
+        .map_err(|e| format!("failed to authorize external agent: {e}"))
+}
+
 fn normalize_channel_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
@@ -576,6 +606,60 @@ pub async fn change_channel_member_role(
     let builder = events::build_add_member(uuid, &pubkey, Some(role_str))?;
     submit_event(builder, &state).await?;
     Ok(())
+}
+
+/// Create an owner-reviewed NIP-OA credential for an existing external bot.
+///
+/// The backend repeats the UI policy checks before signing: the current
+/// identity must be a channel owner, the target must be an agent with the bot
+/// role in that channel, and a valid target profile must not already name an
+/// owner. The credential is returned to the caller but never persisted by
+/// Desktop.
+#[tauri::command]
+pub async fn authorize_external_agent(
+    channel_id: String,
+    agent_pubkey: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let channel_uuid = parse_channel_uuid(&channel_id)?;
+    let normalized_channel_id = channel_uuid.to_string();
+    let agent = nostr::PublicKey::from_hex(&agent_pubkey)
+        .map_err(|e| format!("invalid agent pubkey: {e}"))?;
+    let normalized_agent_pubkey = agent.to_hex();
+
+    let member_events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [39002],
+            "#d": [normalized_channel_id],
+            "limit": 1
+        })],
+    )
+    .await?;
+    let members = member_events
+        .first()
+        .map(nostr_convert::channel_members_from_event)
+        .transpose()?
+        .ok_or_else(|| "channel members not found".to_string())?;
+
+    let profile_events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [0],
+            "authors": [normalized_agent_pubkey],
+            "limit": 1
+        })],
+    )
+    .await?;
+    if profile_events
+        .first()
+        .is_some_and(nostr_convert::profile_has_valid_oa_owner)
+    {
+        return Err("this external agent already has a valid owner authorization".to_string());
+    }
+
+    let owner_keys = state.signing_keys()?;
+    build_external_agent_auth_tag(&owner_keys, &members, &agent.to_hex())
 }
 
 #[tauri::command]

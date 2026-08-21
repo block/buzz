@@ -4410,6 +4410,76 @@ test("members sidebar retains distinct same-persona managed agents", async ({
   await expect(page.getByText("Pinky", { exact: true })).toHaveCount(2);
 });
 
+test("channel owner can authorize an unowned external agent", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  const externalAgentPubkey =
+    "abababababababababababababababababababababababababababababababab";
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: externalAgentPubkey,
+        name: "Hermes",
+        channelNames: ["general"],
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: externalAgentPubkey,
+        displayName: "Hermes",
+        ownerPubkey: null,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId: GENERAL_CHANNEL_ID,
+    pubkeys: [externalAgentPubkey],
+    role: "bot",
+  });
+  await page.evaluate(async () => {
+    await (
+      window as Window & {
+        __BUZZ_E2E_QUERY_CLIENT__?: {
+          invalidateQueries: () => Promise<void>;
+        };
+      }
+    ).__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+  });
+
+  await openMembersSidebar(page, "general");
+  await openMemberMenu(page, externalAgentPubkey);
+  await page
+    .getByTestId(`sidebar-authorize-agent-${externalAgentPubkey}`)
+    .click();
+
+  await expect(
+    page.getByTestId("external-agent-authorization-dialog"),
+  ).toContainText("Your private key stays on this device");
+  await page.getByTestId("external-agent-authorization-confirm").click();
+
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Hermes authorized" }),
+  ).toBeVisible();
+
+  const commandLog = await readCommandPayloadLog(page);
+  expect(
+    commandLog.some(
+      (entry) =>
+        entry.command === "authorize_external_agent" &&
+        (entry.payload as { agentPubkey?: string }).agentPubkey ===
+          externalAgentPubkey,
+    ),
+  ).toBe(true);
+  expect(
+    commandLog.some((entry) => entry.command === "copy_text_to_clipboard"),
+  ).toBe(true);
+});
+
 test("private-channel members can add people and managed agents without admin", async ({
   page,
 }) => {

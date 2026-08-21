@@ -31,6 +31,73 @@ const PK_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const PK_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const PK_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
+fn member(pubkey: String, role: &str, is_agent: bool) -> crate::models::ChannelMemberInfo {
+    crate::models::ChannelMemberInfo {
+        pubkey,
+        role: role.to_string(),
+        is_agent,
+        joined_at: None,
+        display_name: None,
+    }
+}
+
+fn members(rows: Vec<crate::models::ChannelMemberInfo>) -> ChannelMembersResponse {
+    ChannelMembersResponse {
+        members: rows,
+        next_cursor: None,
+    }
+}
+
+#[test]
+fn external_agent_auth_requires_owner_and_bot_membership() {
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let channel_members = members(vec![
+        member(owner.public_key().to_hex(), "owner", false),
+        member(agent.public_key().to_hex(), "bot", true),
+    ]);
+
+    let auth_tag =
+        build_external_agent_auth_tag(&owner, &channel_members, &agent.public_key().to_hex())
+            .expect("channel owner should authorize bot member");
+    let recovered_owner = buzz_sdk_pkg::nip_oa::verify_auth_tag(&auth_tag, &agent.public_key())
+        .expect("authorization must verify");
+
+    assert_eq!(recovered_owner, owner.public_key());
+}
+
+#[test]
+fn external_agent_auth_rejects_non_owner_signer() {
+    let signer = Keys::generate();
+    let agent = Keys::generate();
+    let channel_members = members(vec![
+        member(signer.public_key().to_hex(), "admin", false),
+        member(agent.public_key().to_hex(), "bot", true),
+    ]);
+
+    let error =
+        build_external_agent_auth_tag(&signer, &channel_members, &agent.public_key().to_hex())
+            .expect_err("admin must not mint owner authorization");
+
+    assert!(error.contains("only a channel owner"));
+}
+
+#[test]
+fn external_agent_auth_rejects_non_bot_target() {
+    let owner = Keys::generate();
+    let target = Keys::generate();
+    let channel_members = members(vec![
+        member(owner.public_key().to_hex(), "owner", false),
+        member(target.public_key().to_hex(), "member", false),
+    ]);
+
+    let error =
+        build_external_agent_auth_tag(&owner, &channel_members, &target.public_key().to_hex())
+            .expect_err("human member must not receive an agent authorization");
+
+    assert!(error.contains("must be a bot member"));
+}
+
 #[test]
 fn directory_cursor_keeps_same_second_tiebreaker() {
     let timestamp = Timestamp::from(1_700_000_000);

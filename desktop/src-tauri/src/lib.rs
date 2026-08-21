@@ -634,6 +634,7 @@ pub fn run() {
             add_channel_members,
             remove_channel_member,
             change_channel_member_role,
+            authorize_external_agent,
             join_channel,
             leave_channel,
             get_canvas,
