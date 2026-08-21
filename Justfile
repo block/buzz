@@ -1024,3 +1024,37 @@ benchmark-check:
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
     docker compose --project-name buzz-benchmark down
+
+# Run the complete native-review support test suite in an isolated pinned environment.
+native-review-test:
+    ./tools/native-review/bin/test-native-review
+
+# Validate macOS native-review tooling and report required OS permissions.
+native-review-doctor:
+    ./tools/native-review/bin/review-native doctor
+
+# Run one declarative journey against the isolated local desktop fixture.
+native-review-desktop JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml":
+    ./tools/native-review/bin/review-native run "{{JOURNEY}}"
+
+# Capture a repeatable native performance cohort (minimum 3 runs).
+native-review-benchmark JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml" RUNS="5":
+    ./tools/native-review/bin/review-native benchmark "{{JOURNEY}}" --runs "{{RUNS}}"
+
+# Compare baseline and candidate receipt cohorts with explicit budget policy.
+# Pass BASELINE/CANDIDATE as repeated CLI args, e.g. "--baseline a --baseline b".
+native-review-compare BASELINE CANDIDATE BUDGET="tools/native-review/performance/tooltip-fresh-dwell.yaml":
+    ./tools/native-review/bin/review-native compare {{BASELINE}} {{CANDIDATE}} --budget "{{BUDGET}}"
+
+# Run the native iOS Simulator pairing journey with MP4 and screenshot evidence.
+native-review-ios DEVICE="iPhone 17 Pro":
+    ./tools/native-review/bin/review-ios --device "{{DEVICE}}"
+
+# Emit a redacted, relay-compatible clip + receipt + focused log excerpt.
+native-review-finding RECEIPT OUTPUT MATCH="":
+    ./tools/native-review/bin/review-native finding-bundle "{{RECEIPT}}" --output "{{OUTPUT}}" {{ if MATCH == "" { "" } else { "--match " + quote(MATCH) } }}
+
+# Publish the review report with its exact-SHA video and optional timecoded highlights.
+# MENTION is the delegator pubkey; pass an empty string only when no callback is required.
+native-review-publish RECEIPT SUMMARY CHANNEL REPLY_TO HIGHLIGHTS="" MENTION="":
+    ./tools/native-review/bin/review-native publish-review "{{RECEIPT}}" --summary "{{SUMMARY}}" --channel "{{CHANNEL}}" --reply-to "{{REPLY_TO}}" {{ if HIGHLIGHTS == "" { "" } else { "--highlights " + quote(HIGHLIGHTS) } }} {{ if MENTION == "" { "" } else { "--mention " + quote(MENTION) } }}

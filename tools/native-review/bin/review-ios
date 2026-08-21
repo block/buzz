@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+TOOL_ROOT="$ROOT/tools/native-review"
+. "$ROOT/bin/activate-hermit"
+exec uv run --with 'pyyaml==6.0.3' python "$TOOL_ROOT/ios_review.py" "$@"

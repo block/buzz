@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT"
+. "$ROOT/bin/activate-hermit"
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/buzz-native-review-tests.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+python3 -m venv "$tmp_dir/venv"
+"$tmp_dir/venv/bin/pip" --disable-pip-version-check --quiet install 'pyyaml==6.0.3'
+"$tmp_dir/venv/bin/python" -m unittest discover \
+  -s tools/native-review/tests -p 'test_*.py'
+swift test --package-path tools/native-review/swift
