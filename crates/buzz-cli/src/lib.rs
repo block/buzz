@@ -5,6 +5,9 @@ mod error;
 mod links;
 mod validate;
 
+#[cfg(test)]
+mod cli_message_command_tests;
+
 use clap::{Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
@@ -479,6 +482,12 @@ pub enum MessagesCmd {
         /// Comma-separated event kinds to filter (e.g. 1,1984)
         #[arg(long)]
         kinds: Option<String>,
+    },
+    /// Retrieve one signed message event without stripping tags or signature
+    Raw {
+        /// Event ID (64-char hex)
+        #[arg(long)]
+        event: String,
     },
     /// Get the containing thread for a message or Buzz message link
     #[command(
@@ -2127,27 +2136,6 @@ mod tests {
     }
 
     #[test]
-    fn messages_thread_accepts_link_or_explicit_identifiers() {
-        let channel = "123e4567-e89b-12d3-a456-426614174000";
-        let event = "a".repeat(64);
-        let link = format!("buzz://message?channel={channel}&id={event}");
-
-        assert!(
-            Cli::try_parse_from(["buzz", "messages", "thread", "--link", link.as_str(),]).is_ok()
-        );
-        assert!(Cli::try_parse_from([
-            "buzz",
-            "messages",
-            "thread",
-            "--channel",
-            channel,
-            "--event",
-            event.as_str(),
-        ])
-        .is_ok());
-    }
-
-    #[test]
     fn messages_thread_rejects_partial_or_mixed_targets() {
         let channel = "123e4567-e89b-12d3-a456-426614174000";
         let event = "a".repeat(64);
@@ -2273,6 +2261,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "raw",
                 "search",
                 "send",
                 "send-diff",
@@ -2410,7 +2399,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

@@ -2,14 +2,18 @@
 
 mod acp;
 mod config;
+mod context_compiler;
 mod engram_fetch;
 mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
 mod queue;
+#[cfg(test)]
+mod queue_authority_tests;
 mod relay;
 mod setup_mode;
+mod turn_metrics;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -3201,81 +3205,10 @@ async fn tokio_main() -> Result<()> {
                 event_id,
                 ack,
             })) => {
-                // Mid-turn steer attempt resolved (either transport:
-                // `_goose/unstable/session/steer` or `_session/steering`).
-                // Locked semantics (Eva + Max + Perci, unanimous on Option X):
-                //
-                //   Success
-                //     The agent received the steer via the non-cancelling
-                //     path. Drop the withheld event so normal dispatch
-                //     never redelivers it.
-                //
-                //     Also covers `_session/steering`'s `startedNewTurn`
-                //     outcome: the message was delivered, but into a fresh
-                //     turn because the one being steered had already
-                //     finished. Delivery is what this arm keys on, so the
-                //     event is still dropped. The read loop deliberately
-                //     does NOT renew its hard deadline in that case (the
-                //     awaited turn is settled), while
-                //     `extend_in_flight_deadline` below still applies —
-                //     the agent really is running more work, so the
-                //     channel's in-flight budget should reflect it.
-                //
-                //   Err(_) where the write never landed (Transport /
-                //   ExpectedRunIdMissing):
-                //     Delivery state of the underlying message is "never
-                //     attempted on the wire". Release withheld back to the
-                //     queue front AND issue the cancel+merge fallback so
-                //     the message still reaches the agent.
-                //
-                //   Err(OutcomeRejected { .. })
-                //     A `_session/steering` request returned a JSON-RPC
-                //     success whose `outcome` was not `injected` or
-                //     `startedNewTurn` (codex's `failed`, an unknown value,
-                //     or a bare `{}` with no `outcome` at all). The steer
-                //     did not land, so this is treated exactly like a write
-                //     that never happened: release withheld AND fire the
-                //     cancel+merge fallback. Handled by the catch-all
-                //     `Err(_)` arm below.
-                //
-                //   Err(AgentError { code: -32601, .. })
-                //     The agent returned method_not_found — it does not
-                //     implement the steer extension. Release withheld AND
-                //     fire the cancel+merge fallback so the message still
-                //     reaches the agent via the universal path.
-                //
-                //   Err(AgentError { code: other, .. })
-                //     The write landed and the agent returned a JSON-RPC
-                //     error at the application level (e.g. wrong run id).
-                //     The agent's turn is still running (or just completed).
-                //     Release withheld for normal dispatch; do NOT fire the
-                //     fallback signal — the agent already saw the steer
-                //     attempt. If the turn is still running, normal dispatch
-                //     re-delivers when it completes. If the turn already
-                //     ended, there is nothing to cancel.
-                //
-                //   PromptCompletedNeutral
-                //     The read loop wrote the steer (or was preparing to)
-                //     but the prompt completed before the response landed.
-                //     Delivery state is unknown — but the prompt completing
-                //     means there is no in-flight turn to signal anymore.
-                //     Release withheld for normal dispatch; do NOT fire
-                //     the fallback signal (it would target a turn that
-                //     just ended; normal dispatch already handles
-                //     redelivery via the released queue entry).
-                //
-                //   Err(PromptCompleted)
-                //     `SteerError::PromptCompleted` is returned synchronously
-                //     by `pool::send_steer` when no task is in flight (handled
-                //     in `try_native_steer`'s Err branch, which falls through
-                //     to cancel+merge). It is never routed through the ack
-                //     channel, so this variant never appears in `SteerAckEvent`.
-                //
-                //   Watcher Err (oneshot dropped)
-                //     Should not happen — the read loop drains
-                //     pending_steer on every return path. If it does,
-                //     treat as PromptCompletedNeutral to avoid leaking
-                //     the withheld event in `withheld_native_steer`.
+                // Successful delivery drops the withheld event. Definite
+                // non-delivery releases it and signals cancel+merge; agent
+                // application errors or an already-completed prompt release it
+                // for normal dispatch without targeting a settled turn.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
                     Ok(pool::SteerAck::Success { .. }) => (false, true, false),
                     // -32601 = method_not_found: agent does not implement the
@@ -3310,7 +3243,12 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
-                if let Ok(pool::SteerAck::Success { session_id }) = &ack {
+                if let Ok(pool::SteerAck::Success {
+                    session_id,
+                    outcome,
+                }) = &ack
+                {
+                    tracing::debug!(?outcome, "recording successful steer delivery");
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
                     if !pool.record_successful_steer(
                         channel_id,
@@ -3594,30 +3532,9 @@ fn signal_in_flight_task(
     false
 }
 
-/// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
-///
-/// Caller invariants:
-/// - `event` has already been pushed into `EventQueue::queues[channel_id]`
-///   via [`EventQueue::push`] — its `event.id` must still be locatable
-///   there so [`EventQueue::mark_native_steer_pending`] can move it to the
-///   side table.
-/// - `multiple_event_handling` resolved to `ControlSignal::Steer`; this
-///   function is the non-cancelling fork of that signal.
-///
-/// Returns `true` if the native attempt was accepted by the read loop
-/// (capacity-1 mpsc `try_send` succeeded, event withheld synchronously,
-/// ack watcher spawned). On `true` the caller MUST NOT issue the
-/// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
-/// will issue it from the ack arm if the native attempt fails.
-///
-/// Returns `false` if `pool.send_steer` failed (no in-flight task,
-/// `steer_tx` already full from a prior in-flight steer, or read loop
-/// torn down). The caller MUST fall through to
-/// `signal_in_flight_task(channel_id, ControlSignal::Steer)` so the
-/// event still reaches the agent via the universal path.
-///
-/// The withheld event is NOT released here on `false` because no withhold
-/// was established: `mark_native_steer_pending` only runs on `Ok(())`.
+/// Attempt non-cancelling ACP steer for an event already queued in the channel.
+/// `true` means the event was withheld and the ack watcher owns fallback;
+/// `false` means the caller must use universal cancel+merge steering.
 fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
@@ -3626,32 +3543,54 @@ fn try_native_steer(
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
-    // Build the steer body: framing strings come from
-    // `queue::native_steer_framing()` (Eva's drift-proof requirement —
-    // native and cancel+merge fallback share these so the agent gets the
-    // same orientation regardless of transport). The single event block
-    // is rendered by `queue::format_event_block`, the same function
-    // `queue::format_prompt` uses internally for `[Buzz event: …]`
-    // sections, so the rendering also cannot drift.
-    //
-    // Passing `None` for `channel_info` / `profile_lookup` is intentional:
-    // native steer is a *delta* into a live turn — the agent already saw
-    // channel context and the actor's profile in the original prompt,
-    // duplicating it here would defeat the point of non-cancelling
-    // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
+    // Reuse the normal deterministic compiler. Missing channel/profile inputs
+    // keep this live steer to the newly arrived delta.
+    let (_, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
     let be = queue::BatchEvent {
         event,
         prompt_tag: prompt_tag.clone(),
         received_at: std::time::Instant::now(),
     };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let steer_batch = queue::FlushBatch {
+        channel_id,
+        events: vec![be],
+        cancelled_events: Vec::new(),
+        cancel_reason: None,
+    };
+    let Some(mut compiled) =
+        queue::compile_prompt(&steer_batch, &queue::FormatPromptArgs::default())
+    else {
+        return false;
+    };
+    let continuation = format!(
+        "<continuation-guidance>{}</continuation-guidance>",
+        context_compiler::escape_text(closing),
+    );
+    let body = format!(
+        "<buzz-turn-update mode=\"steer\">\n{}\n{continuation}\n</buzz-turn-update>",
+        compiled.prompt_sections.join("\n"),
+    );
+    let framing = format!("<buzz-turn-update mode=\"steer\">\n{continuation}\n</buzz-turn-update>");
+    context_compiler::append_manifest_layer(
+        &mut compiled.manifest,
+        context_compiler::ContextLayerInput {
+            order: 8,
+            layer: "steer_delivery_contract",
+            scope: "turn",
+            source: "native_steer_framing",
+            authority: "routing_constraint",
+            freshness: "current",
+            content: &framing,
+            version: None,
+            truncated: false,
+        },
+    );
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
         prompt_blocks: vec![body],
+        context_manifest: Some(compiled.manifest),
         ack_tx,
     };
 
@@ -3920,8 +3859,8 @@ fn handle_prompt_result(
                 // cancel_reason (set by the pool task per the control signal)
                 // selects steer vs interrupt framing. It is always set on this
                 // path; if somehow unset, fall back to the gentler Steer framing
-                // — consistent with MergeFraming::for_reason(None) and the
-                // system default — rather than telling the agent to supersede.
+                // — consistent with the compiler's default merge disposition
+                // — rather than telling the agent to supersede.
                 //
                 // CancelDrainTimeout shares this path with Cancelled: a failed
                 // 5s drain after a control-signal cancel is a cleanup-deadline
@@ -5100,7 +5039,7 @@ mod heartbeat_base_prompt_tests {
         let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
-            "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
+            "<base>\nyou are a helpful agent\n</base>\n\n[System: Heartbeat]\nrun feed get"
         );
     }
 
@@ -8523,23 +8462,16 @@ mod observer_payload_trim_tests {
     }
 
     #[test]
-    fn test_multi_block_prompt_retains_every_section_header_after_elision() {
-        // The real session/prompt fix: format_prompt now emits one block per
-        // section, so the observer payload is params.prompt = [{text: "[Base]…"},
-        // {text: "[Agent Memory — core]…"}, … {text: "[Buzz event: …]…<huge>"}].
-        // An oversized section is its own leaf, so eliding its body keeps the
-        // leaf's head-3000 (which begins with the section's [Header] line) — every
-        // header survives, so the desktop "Prompt context" panel counts them all.
-        // This is the regression the single-fat-leaf shape caused (the trailing
-        // [Buzz event] header fell into the elided middle and the count collapsed
-        // to 1).
+    fn test_multi_block_prompt_retains_every_semantic_boundary_after_elision() {
         let sections = [
-            "[Base]\nyou are a helpful agent".to_string(),
-            "[System]\npersona text".to_string(),
-            "[Agent Memory — core]\nremember this".to_string(),
-            "[Context]\nScope: thread".to_string(),
-            // The triggering event body, oversized on its own.
-            format!("[Buzz event: @mention]\nContent: {}", "E".repeat(90_000)),
+            "<buzz-turn>".to_string(),
+            "<ambient-context>\nScope: thread\nChannel: c\n</ambient-context>".to_string(),
+            format!(
+                "<event type=\"mention\">\nContent: {}\n</event>",
+                "E".repeat(90_000)
+            ),
+            "<delivery channel_id=\"c\" scope=\"thread\" />".to_string(),
+            "</buzz-turn>".to_string(),
         ];
         let block_refs: Vec<&str> = sections.iter().map(String::as_str).collect();
         // Mirror the wire shape build_prompt_params produces: each block is its
@@ -8570,22 +8502,22 @@ mod observer_payload_trim_tests {
             .as_array()
             .expect("prompt array survives");
         let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
-        for header in [
-            "[Base]",
-            "[System]",
-            "[Agent Memory — core]",
-            "[Context]",
-            "[Buzz event: @mention]",
+        for boundary in [
+            "<buzz-turn>",
+            "<ambient-context>",
+            "<event type=\"mention\">",
+            "<delivery channel_id=\"c\" scope=\"thread\" />",
+            "</buzz-turn>",
         ] {
             assert!(
-                texts.iter().any(|t| t.starts_with(header)),
-                "section header {header} must survive at the head of its own block"
+                texts.iter().any(|t| t.starts_with(boundary)),
+                "semantic boundary {boundary} must survive in its own block"
             );
         }
-        // The oversized event body was elided in place (header kept, middle cut).
+        // The oversized instruction body was elided in place (boundary kept).
         let event_block = texts
             .iter()
-            .find(|t| t.starts_with("[Buzz event: @mention]"))
+            .find(|t| t.starts_with("<event type=\"mention\""))
             .unwrap();
         assert!(
             event_block.contains("…[elided"),

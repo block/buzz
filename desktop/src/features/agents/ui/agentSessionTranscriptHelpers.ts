@@ -20,6 +20,9 @@ export function parsePromptText(text: string): {
   userPubkey: string | null;
   userEventId: string | null;
 } {
+  const semanticTurn = parseSemanticTurn(text);
+  if (semanticTurn) return semanticTurn;
+
   const sections = parsePromptSections(text).filter(
     (s) => s.body.trim().length > 0,
   );
@@ -56,48 +59,121 @@ export function parsePromptText(text: string): {
 }
 
 /**
- * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
- * `Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
- * deterministically.
- *
- * The harness composes the value in order:
- *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
- * with any section omitted when absent. Extraction runs in reverse producer
- * order so that each `lastIndexOf` search operates on the full input and each
- * extraction boundary is unambiguous.
- *
- * Five extraction passes:
- *
- * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
- *    - Start-of-string: canvas-only input.
- *    - Appended frame (`\n\n[Channel Canvas]\n`): blank-line separator used by
- *      `with_canvas()`; LAST occurrence guards against an embedded header in a
- *      persona body (single preceding newline only).
- *
- * 2. **Core** (`[Agent Memory — core]`): appended before canvas by `with_core()`.
- *    Same two cases, same last-occurrence guard.
- *
- * 3. **Team Instructions** (`[Team Instructions]`): appended before core by
- *    `with_team()` in `buzz-acp/src/pool.rs`. Same two cases (start-of-string
- *    or `\n\n[Team Instructions]\n` inline), same last-occurrence guard. Output
- *    position: after System, before Core Memory.
- *
- * 4. **Base/System**: remainder after the three top-level section extractions.
- *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
- *    inside a body can start a new section.
- *
- * 5. **Legacy Team Instructions** (backward compat): if the `System` body
- *    contains the exact canonical delimiter `\n\n---\n# Team Instructions\n`
- *    (produced by the now-removed `compose_prompt()` in buzz-persona), the body
- *    is split at the **last** occurrence of that boundary. The text before
- *    becomes the `System` body; the text after becomes a `Team Instructions`
- *    section inserted immediately after `System`. Non-canonical lookalikes
- *    (bare `---` without the heading, a `# Team Instructions` on a different
- *    line, or only a single preceding newline) are kept literal inside `System`.
+ * Read the deterministic Buzz-owned turn envelope without treating it as
+ * strict XML. Natural-language bodies are escaped by the harness, so the
+ * semantic closing tags are unambiguous while preserving a lightweight wire
+ * format for every ACP adapter.
+ */
+function parseSemanticTurn(text: string): {
+  sections: PromptSection[];
+  userText: string;
+  userTitle: string;
+  userPubkey: string | null;
+  userEventId: string | null;
+} | null {
+  const turnStart = text.indexOf("<buzz-turn");
+  if (turnStart === -1) return null;
+
+  const prefix = text.slice(0, turnStart).trim();
+  const turn = text.slice(turnStart);
+  const sections = prefix ? parseSystemPromptSections(prefix) : [];
+
+  const ambient = turn.match(
+    /<ambient-context\b[^>]*>([\s\S]*?)<\/ambient-context>/,
+  );
+  if (ambient?.[1]?.trim()) {
+    sections.push({ title: "Ambient context", body: ambient[1].trim() });
+  }
+
+  const legacyInstruction = turn.match(
+    /<current-instruction\b([^>]*)>([\s\S]*?)<\/current-instruction>/,
+  );
+  // Current events follow ambient context; older envelopes may still wrap
+  // them in <current-instruction>.
+  const ambientEnd =
+    ambient?.index === undefined ? 0 : ambient.index + ambient[0].length;
+  const eventSource = legacyInstruction?.[2] ?? turn.slice(ambientEnd);
+  const eventMatches = Array.from(
+    eventSource.matchAll(/<event\b([^>]*)>([\s\S]*?)<\/event>/g),
+  );
+  if (!eventMatches.length) {
+    return {
+      sections,
+      userText: "",
+      userTitle: "Buzz event",
+      userPubkey: null,
+      userEventId: null,
+    };
+  }
+
+  sections.push({
+    title: "Current instruction",
+    body: eventMatches
+      .map((match) => match[0])
+      .join("\n")
+      .trim(),
+  });
+  const delivery = turn.match(/<delivery\b[^>]*\/>/);
+  if (delivery) sections.push({ title: "Delivery", body: delivery[0] });
+
+  const instructionAttributes = legacyInstruction
+    ? parseSemanticAttributes(legacyInstruction[1])
+    : {};
+  const userText = eventMatches
+    .map((match) => {
+      const taggedContent = match[2].match(
+        /<content>([\s\S]*?)<\/content>/,
+      )?.[1];
+      const content = taggedContent ?? match[2].replace(/^\s*Content:\s?/, "");
+      return decodeSemanticText(content).trim();
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  const lastEventAttributes = eventMatches.length
+    ? parseSemanticAttributes(eventMatches[eventMatches.length - 1][1])
+    : {};
+  const promptTag = lastEventAttributes.type ?? lastEventAttributes.prompt_tag;
+  const actor = instructionAttributes.actor ?? lastEventAttributes.actor;
+  const eventId =
+    instructionAttributes.event_id ?? lastEventAttributes.event_id;
+
+  return {
+    sections,
+    userText,
+    userTitle: promptTag ? titleCase(promptTag) : "Buzz event",
+    userPubkey: actor?.toLowerCase() ?? null,
+    userEventId: eventId?.toLowerCase() ?? null,
+  };
+}
+
+function parseSemanticAttributes(value: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const match of value.matchAll(/([a-zA-Z_][\w-]*)="([^"]*)"/g)) {
+    attributes[match[1]] = decodeSemanticText(match[2]);
+  }
+  return attributes;
+}
+
+function decodeSemanticText(value: string): string {
+  return value
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+/**
+ * Split paired semantic standing-context tags into transcript sections.
+ * Bracket-header parsing below remains for stored observer history.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
 ): PromptSection[] {
+  const semantic = parseSemanticStandingSections(systemPrompt);
+  if (semantic) return semantic;
+
+  // Legacy bracket-framed prompts.
   const sections: PromptSection[] = [];
 
   // ── 1. Extract [Channel Canvas] ───────────────────────────────────────────
@@ -212,6 +288,29 @@ export function parseSystemPromptSections(
   if (canvasBody) sections.push({ title: "Channel Canvas", body: canvasBody });
 
   return sections;
+}
+
+function parseSemanticStandingSections(
+  systemPrompt: string,
+): PromptSection[] | null {
+  const titles: Record<string, string> = {
+    workspace: "Workspace",
+    base: "Base",
+    system: "System",
+    "team-instructions": "Team Instructions",
+    "core-memory": "Core Memory",
+    "huddle-instructions": "Huddle Instructions",
+    "channel-canvas": "Channel Canvas",
+  };
+  const tags = Object.keys(titles).join("|");
+  const matches = Array.from(
+    systemPrompt.matchAll(new RegExp(`<(${tags})>([\\s\\S]*?)<\\/\\1>`, "g")),
+  );
+  if (!matches.length) return null;
+  return matches.map((match) => ({
+    title: titles[match[1]],
+    body: decodeSemanticText(match[2]).trim(),
+  }));
 }
 
 function parsePromptSections(text: string): PromptSection[] {

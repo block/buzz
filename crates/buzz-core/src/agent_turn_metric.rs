@@ -103,6 +103,56 @@ pub struct PricingIdentity {
     pub cache_class: Option<String>,
 }
 
+/// One deterministic layer in the Buzz context manifest for a turn.
+///
+/// Values are strings rather than closed enums so older metric consumers can
+/// retain manifests emitted by newer compilers without rejecting the payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextLayerManifest {
+    /// Canonical one-based layer order.
+    pub order: u8,
+
+    /// Stable layer name (for example `platform_contract`).
+    pub layer: String,
+
+    /// Boundary at which the source applies (`runtime`, `channel`, `thread`, …).
+    pub scope: String,
+
+    /// Normalized source name, independent of adapter-specific prompt syntax.
+    pub source: String,
+
+    /// Content-addressed source version (`sha256:<hex>` or a signed event ID).
+    pub version: String,
+
+    /// How the model may use this layer (`instructions`, `evidence`, …).
+    pub authority: String,
+
+    /// Freshness known to the compiler (`configured`, `current`,
+    /// `session_start`, or `cached`).
+    pub freshness: String,
+
+    /// Deterministic attention estimate using the compiler's documented heuristic.
+    pub estimated_tokens: u64,
+
+    /// Whether the compiler knowingly omitted content from this layer.
+    pub truncated: bool,
+}
+
+/// Ordered, content-addressed description of the context used for one turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextManifest {
+    /// Manifest schema version. Prompt-envelope versioning is independent.
+    pub schema_version: u32,
+
+    /// SHA-256 of the canonical serialized layer array.
+    pub hash: String,
+
+    /// Present layers in canonical order. Empty layers are omitted.
+    pub layers: Vec<ContextLayerManifest>,
+}
+
 /// Decrypted payload of a `kind:44200` Agent Turn Metric event.
 /// nullable unless constrained by the NIP (e.g. `session_id` + `turn_seq`
 /// are required whenever `cumulative` is present).
@@ -157,6 +207,13 @@ pub struct AgentTurnMetricPayload {
     /// treat omission as "price unknown".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_identity: Option<PricingIdentity>,
+
+    /// Buzz-owned context manifest used to compile this turn's prompt.
+    ///
+    /// It remains inside the encrypted payload: source versions, channel
+    /// scope, and token allocation are private owner diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_manifest: Option<ContextManifest>,
 }
 
 fn default_delta_reliable() -> bool {
@@ -256,6 +313,7 @@ mod tests {
             delta_reliable: true,
             stop_reason: Some(StopReason::EndTurn),
             pricing_identity: None,
+            context_manifest: None,
         }
     }
 
@@ -312,6 +370,33 @@ mod tests {
             payload.delta_reliable,
             "deltaReliable should default to true"
         );
+    }
+
+    #[test]
+    fn context_manifest_round_trips_and_remains_optional() {
+        let mut payload = sample_payload();
+        let without_manifest = serde_json::to_value(&payload).expect("serialize payload");
+        assert!(without_manifest.get("contextManifest").is_none());
+
+        payload.context_manifest = Some(ContextManifest {
+            schema_version: 1,
+            hash: "sha256:abc".to_string(),
+            layers: vec![ContextLayerManifest {
+                order: 7,
+                layer: "current_instruction".to_string(),
+                scope: "turn".to_string(),
+                source: "nostr_event".to_string(),
+                version: "event-id".to_string(),
+                authority: "authoritative".to_string(),
+                freshness: "current".to_string(),
+                estimated_tokens: 42,
+                truncated: false,
+            }],
+        });
+        let json = serde_json::to_string(&payload).expect("serialize manifest");
+        let decoded: AgentTurnMetricPayload =
+            serde_json::from_str(&json).expect("deserialize manifest");
+        assert_eq!(decoded, payload);
     }
 
     #[test]
@@ -402,6 +487,7 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            context_manifest: None,
         }
     }
 
@@ -426,6 +512,7 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            context_manifest: None,
         }
     }
 

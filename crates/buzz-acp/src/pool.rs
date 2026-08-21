@@ -41,6 +41,7 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::turn_metrics::publish_agent_turn_metric;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -411,12 +412,21 @@ pub enum ControlSignal {
 /// universal `ControlSignal::Steer` cancel+merge path.
 pub struct SteerRequest {
     /// Prompt body text blocks. Each entry becomes one `text` content
-    /// block in `params.prompt`. Built by the main loop via
-    /// `queue::native_steer_framing()` + `queue::format_event_block` so
-    /// the wording cannot drift from the cancel+merge fallback path.
+    /// block in `params.prompt`.
     pub prompt_blocks: Vec<String>,
+    /// Manifest for exactly the prompt blocks delivered by this update.
+    pub context_manifest: Option<buzz_core::agent_turn_metric::ContextManifest>,
     /// Oneshot for the read loop to report the outcome.
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
+}
+
+/// Where a successful ACP steer was delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerDeliveryOutcome {
+    /// Added to the prompt Buzz is currently awaiting.
+    Injected,
+    /// Adapter started a distinct turn after the awaited prompt had settled.
+    StartedNewTurn,
 }
 
 /// Why a mid-turn steer failed, on either transport
@@ -484,7 +494,10 @@ pub enum SteerAck {
     /// The agent returned a successful response to the steer request.
     /// The main loop must drop the withheld event (`remove_event`) — it
     /// has been delivered via the non-cancelling path.
-    Success { session_id: String },
+    Success {
+        session_id: String,
+        outcome: SteerDeliveryOutcome,
+    },
     /// The steer was attempted but failed. Delivery state for the
     /// underlying message is unknown after prompt completion; the main
     /// loop must release the withheld event and fall back to the
@@ -1608,15 +1621,15 @@ pub(crate) fn prepend_standing_for_legacy(
 }
 
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
-/// header, keeping the base/persona boundary recoverable downstream.
+/// paired tag, keeping the base/persona boundary recoverable downstream.
 ///
-/// The header framing matches the legacy per-turn path (`queue::base_section`
-/// for `[Base]`, `[System]\n{...}` for the persona) so the desktop observer can
+/// The semantic framing matches the legacy per-turn path (`queue::base_section`
+/// for `<base>`, `<system>…</system>` for the persona) so the desktop observer can
 /// split the combined value into labeled sub-sections. Each prompt is wrapped
-/// only when present, so a persona-only agent yields `[System]\n{persona}`
-/// rather than an unlabeled blob that would be mislabeled as `[Base]`.
+/// only when present, so a persona-only agent still carries an explicit
+/// `<system>…</system>` boundary.
 ///
-/// Prepends a `[Workspace]` section naming the agent's absolute working
+/// Prepends a `<workspace>` section naming the agent's absolute working
 /// directory. The base prompt describes the workspace layout but never its
 /// absolute root, so without this anchor a model fills the gap by searching
 /// `$HOME` (triggering macOS TCC prompts) or by inventing its own workspace
@@ -1630,51 +1643,60 @@ fn framed_system_prompt(
 ) -> Option<String> {
     let body = match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
-            "{}\n\n[System]\n{sp}",
-            crate::queue::base_section(bp)
+            "{}\n\n{}",
+            crate::queue::base_section(bp),
+            crate::context_compiler::semantic_section("system", sp),
         )),
         (Some(bp), None) => Some(crate::queue::base_section(bp)),
-        (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+        (None, Some(sp)) => Some(crate::context_compiler::semantic_section("system", sp)),
         (None, None) => None,
     }?;
     // Anchor the workspace only when a base prompt is present — the workspace
     // section grounds the base prompt's layout description, so it is meaningless
-    // for a persona-only (`[System]`-only) agent that never received that layout.
+    // for a persona-only (`<system>`-only) agent that never received that layout.
     match (base_prompt, workspace_section(cwd)) {
         (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
         _ => Some(body),
     }
 }
 
-/// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
+/// Render the `<workspace>` grounding section, or `None` when `cwd` is unusable.
 ///
 /// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
 /// to `/` on failure): a `/`-rooted workspace line would actively encourage the
 /// `$HOME`-wide scan this section exists to prevent.
 fn workspace_section(cwd: &str) -> Option<String> {
     if cwd != "/" && cwd.starts_with('/') {
-        Some(format!(
-            "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
-             files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
-             `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
-             here. This is where you already are, so start here rather than scanning \
+        let content = format!(
+            "Your absolute working directory is `{cwd}`. All workspace files — \
+             `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, `OUTBOX/` \
+             — and any repositories you clone (under `{cwd}/REPOS/`) live here. \
+             This is where you already are, so start here rather than scanning \
              `$HOME`. Any specific path the user names is fine to read."
+        );
+        Some(crate::context_compiler::semantic_section(
+            "workspace",
+            &content,
         ))
     } else {
         None
     }
 }
 
-/// Append the team-owned instruction section after `[System]` and before core memory.
+/// Append team-owned instructions after `<system>` and before core memory.
 fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
     let instructions = instructions
         .map(str::trim)
         .filter(|value| !value.is_empty());
     match (prompt, instructions) {
-        (Some(prompt), Some(instructions)) => {
-            Some(format!("{prompt}\n\n[Team Instructions]\n{instructions}"))
-        }
-        (None, Some(instructions)) => Some(format!("[Team Instructions]\n{instructions}")),
+        (Some(prompt), Some(instructions)) => Some(format!(
+            "{prompt}\n\n{}",
+            crate::context_compiler::semantic_section("team-instructions", instructions)
+        )),
+        (None, Some(instructions)) => Some(crate::context_compiler::semantic_section(
+            "team-instructions",
+            instructions,
+        )),
         (Some(prompt), None) => Some(prompt),
         (None, None) => None,
     }
@@ -1682,14 +1704,21 @@ fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<Strin
 
 /// Append the agent's core memory section onto the framed system prompt.
 ///
-/// Core already carries its own `[Agent Memory — core]` header from
+/// Core already carries its own `<core-memory>` boundary from
 /// `engram_fetch::build_core_section`, so it is joined with a blank-line
 /// separator and never re-labeled. Either side may be absent.
 fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
+    let core = core.map(|core| {
+        crate::context_compiler::normalize_semantic_section(
+            "core-memory",
+            "Agent Memory — core",
+            core,
+        )
+    });
     match (framed, core) {
         (Some(framed), Some(core)) => Some(format!("{framed}\n\n{core}")),
         (Some(framed), None) => Some(framed),
-        (None, Some(core)) => Some(core.to_string()),
+        (None, Some(core)) => Some(core),
         (None, None) => None,
     }
 }
@@ -1700,25 +1729,36 @@ fn with_huddle_instructions(prompt: Option<String>, instructions: Option<&str>) 
         .map(str::trim)
         .filter(|value| !value.is_empty());
     match (prompt, instructions) {
-        (Some(prompt), Some(instructions)) => {
-            Some(format!("{prompt}\n\n[Huddle Instructions]\n{instructions}"))
-        }
-        (None, Some(instructions)) => Some(format!("[Huddle Instructions]\n{instructions}")),
+        (Some(prompt), Some(instructions)) => Some(format!(
+            "{prompt}\n\n{}",
+            crate::context_compiler::semantic_section("huddle-instructions", instructions)
+        )),
+        (None, Some(instructions)) => Some(crate::context_compiler::semantic_section(
+            "huddle-instructions",
+            instructions,
+        )),
         (Some(prompt), None) => Some(prompt),
         (None, None) => None,
     }
 }
 
-/// Append the `[Channel Canvas]` metadata section onto the accumulated system prompt.
+/// Append `<channel-canvas>` metadata onto the accumulated system prompt.
 ///
-/// The canvas section already carries its `[Channel Canvas]` header (from
+/// The canvas section already carries its `<channel-canvas>` boundary (from
 /// `render_canvas_section`), so it is joined with a blank-line separator.
 /// Either side may be absent.
 fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
+    let canvas = canvas.map(|canvas| {
+        crate::context_compiler::normalize_semantic_section(
+            "channel-canvas",
+            "Channel Canvas",
+            canvas,
+        )
+    });
     match (prompt, canvas) {
         (Some(prompt), Some(canvas)) => Some(format!("{prompt}\n\n{canvas}")),
         (Some(prompt), None) => Some(prompt),
-        (None, Some(canvas)) => Some(canvas.to_string()),
+        (None, Some(canvas)) => Some(canvas),
         (None, None) => None,
     }
 }
@@ -1775,6 +1815,7 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
+    agent.acp.reset_turn_context_manifest();
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -2193,6 +2234,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &format!("{turn_id}:initial"),
                         Some(acp_stop_to_core(&stop_reason)),
+                        None,
                     )
                     .await;
                 }
@@ -2228,6 +2270,7 @@ pub async fn run_prompt_task(
                                 &session_id,
                                 &format!("{turn_id}:initial"),
                                 Some(acp_stop_to_core(&stop_reason)),
+                                None,
                             )
                             .await;
                             agent.state.invalidate(&source);
@@ -2387,7 +2430,7 @@ pub async fn run_prompt_task(
             );
         }
 
-        crate::queue::format_prompt(
+        let compiled = crate::queue::compile_prompt(
             b,
             &crate::queue::FormatPromptArgs {
                 agent_core: standing.agent_core,
@@ -2403,7 +2446,14 @@ pub async fn run_prompt_task(
                 agent_canvas: standing.agent_canvas,
                 standing_context_sent,
             },
-        )
+        );
+        match compiled {
+            Some(compiled) => {
+                agent.acp.set_turn_context_manifest(compiled.manifest);
+                compiled.prompt_sections
+            }
+            None => Vec::new(),
+        }
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
@@ -2433,8 +2483,8 @@ pub async fn run_prompt_task(
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
     // own block. Per-section blocks let the observer size trimmer elide a
-    // section body in place while every `[Header]` line survives at the head
-    // of its own leaf — so the "Prompt context" panel counts every section.
+    // section body in place while the semantic turn boundaries survive in
+    // separate leaves for local diagnostics.
     let prompt_blocks: Vec<&str> = match slash_command {
         Some(ref cmd) => std::iter::once(cmd.as_str())
             .chain(prompt_sections.iter().map(String::as_str))
@@ -2461,6 +2511,7 @@ pub async fn run_prompt_task(
             "promptBytes": prompt_bytes,
             "standingContextIncluded": standing_context_included,
             "eventDeltaCount": pending_delivered_event_ids.len(),
+            "contextManifest": agent.acp.turn_context_manifest(),
         }),
     );
 
@@ -2541,6 +2592,7 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                    agent.acp.turn_context_manifest(),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -2577,6 +2629,7 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                    agent.acp.turn_context_manifest(),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -2640,6 +2693,7 @@ pub async fn run_prompt_task(
                             &session_id,
                             &turn_id,
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            agent.acp.turn_context_manifest(),
                         )
                         .await;
                         send_prompt_result(
@@ -2713,6 +2767,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(core_stop),
+                agent.acp.turn_context_manifest(),
             )
             .await;
 
@@ -2736,6 +2791,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                agent.acp.turn_context_manifest(),
             )
             .await;
             send_prompt_result(
@@ -2768,6 +2824,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                        agent.acp.turn_context_manifest(),
                     )
                     .await;
                     // Timeout triggers respawn in handle_prompt_result —
@@ -2796,6 +2853,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        agent.acp.turn_context_manifest(),
                     )
                     .await;
                     send_prompt_result(
@@ -2821,6 +2879,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        agent.acp.turn_context_manifest(),
                     )
                     .await;
                     send_prompt_result(
@@ -2850,6 +2909,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                agent.acp.turn_context_manifest(),
             )
             .await;
             send_prompt_result(
@@ -2877,6 +2937,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                agent.acp.turn_context_manifest(),
             )
             .await;
             send_prompt_result(
@@ -3042,7 +3103,7 @@ fn huddle_instructions_from_query_response(
 }
 
 /// Fetch the latest canvas event for `channel_id` and return a rendered
-/// `[Channel Canvas]` metadata section, or `None` if absent/blank/error.
+/// `<channel-canvas>` metadata section, or `None` if absent/blank/error.
 ///
 /// Failure modes (all fail open — no crash, no block):
 /// * relay returns no event → `None`
@@ -3105,7 +3166,7 @@ async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<Str
     canvas_section_from_query_response(events, &channel_id.to_string())
 }
 
-/// Parse a canvas query response array and render a `[Channel Canvas]` section.
+/// Parse a canvas query response array and render a `<channel-canvas>` section.
 ///
 /// Extracted as a pure function so tests can exercise the parsing/validation
 /// logic without async machinery or relay connectivity.
@@ -3222,16 +3283,18 @@ pub(crate) fn canvas_section_from_query_response(
     Some(render_canvas_section(&id, &timestamp, channel_uuid))
 }
 
-/// Render the `[Channel Canvas]` metadata section string.
+/// Render the `<channel-canvas>` metadata section string.
 ///
 /// Pure function — kept separate so unit tests can exercise rendering
 /// without async machinery or relay connectivity.
 pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uuid: &str) -> String {
-    format!(
-        "[Channel Canvas]\n\
-         Canvas revision (event ID): {event_id}\n\
-         Last modified: {timestamp}\n\
-         Fetch current content with: buzz canvas get --channel {channel_uuid}"
+    crate::context_compiler::semantic_section(
+        "channel-canvas",
+        &format!(
+            "Canvas revision (event ID): {event_id}\n\
+             Last modified: {timestamp}\n\
+             Fetch current content with: buzz canvas get --channel {channel_uuid}"
+        ),
     )
 }
 
@@ -4319,164 +4382,6 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
     }
 }
 
-/// Build the `(turn, cumulative)` `TokenCounts` pair for a NIP-AM kind-44200
-/// payload from a completed `TurnUsage`.
-///
-/// Extracted as a pure function so the mapping logic can be tested independently
-/// of relay/crypto infrastructure. `publish_agent_turn_metric` is the only
-/// production caller.
-///
-/// - `turn` is `None` when `delta_reliable` is false; otherwise it carries the
-///   per-turn i/o/total/cost deltas for this turn.
-/// - `cumulative` always carries the session-aggregate i/o/cost totals.
-///   `total_tokens` is `Some` only when the session accumulated a genuine
-///   provider-reported total on every turn — never derived from i/o sums
-///   (NIP-AM MUST NOT).
-pub(crate) fn build_turn_metric_counts(
-    usage: &crate::usage::TurnUsage,
-) -> (
-    Option<buzz_core::agent_turn_metric::TokenCounts>,
-    Option<buzz_core::agent_turn_metric::TokenCounts>,
-) {
-    use buzz_core::agent_turn_metric::TokenCounts;
-
-    let turn_counts = if usage.delta_reliable {
-        Some(TokenCounts {
-            input_tokens: usage.turn_input_tokens,
-            output_tokens: usage.turn_output_tokens,
-            // Field-local: present only when both the previous and current
-            // cumulative totals were available and monotonic. Never derived
-            // from input+output.
-            total_tokens: usage.turn_total_tokens,
-            cost_usd: usage.turn_cost_usd,
-            // Field-local: present when the cumulative counter was monotonic
-            // across this turn. Zero means no cache hits this turn (not absent).
-            cache_read_tokens: usage.turn_cache_read_tokens,
-            // Field-local: same contract as cache_read_tokens.
-            cache_write_tokens: usage.turn_cache_write_tokens,
-        })
-    } else {
-        // Defense-in-depth: UsageTracker already sets all turn_* fields to None
-        // when delta_reliable is false, so the None arm here is technically
-        // redundant. The explicit guard prevents a future refactor from
-        // accidentally publishing unreliable per-turn counts.
-        None
-    };
-    let cumulative_counts = Some(TokenCounts {
-        input_tokens: usage.cumulative_input_tokens,
-        output_tokens: usage.cumulative_output_tokens,
-        // Present when every turn in the session reported a genuine provider
-        // total. None when the session has never emitted one or any turn lacked
-        // one. Never derived from input+output (NIP-AM MUST NOT).
-        total_tokens: usage.cumulative_total_tokens,
-        cost_usd: usage.cumulative_cost_usd,
-        // Session-cumulative cache-read tokens; None when the harness never
-        // reported this field (e.g. goose or older buzz-agent sessions).
-        // Passes through directly — do not wrap in Some() as the field already
-        // carries provenance (None vs Some(0) are distinct meanings).
-        cache_read_tokens: usage.cumulative_cache_read_tokens,
-        // Session-cumulative cache-write tokens; same provenance contract as
-        // cache_read_tokens.
-        cache_write_tokens: usage.cumulative_cache_write_tokens,
-    });
-    (turn_counts, cumulative_counts)
-}
-
-/// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
-///
-/// Does nothing when `usage` is `None` (goose emitted no usage notification
-/// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
-/// Errors are logged at WARN and never surface to the caller — metric
-/// publishing must never fail a turn.
-async fn publish_agent_turn_metric(
-    ctx: &PromptContext,
-    usage: Option<crate::usage::TurnUsage>,
-    channel_id: Option<uuid::Uuid>,
-    session_id: &str,
-    turn_id: &str,
-    stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
-) {
-    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
-    use nostr::{EventBuilder, Kind, Tag};
-
-    let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
-        (Some(u), Some(pk)) => (u, pk),
-        _ => return,
-    };
-
-    let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let payload = AgentTurnMetricPayload {
-        harness: ctx.harness_name.clone(),
-        model: usage.model.clone(),
-        channel_id: channel_id.map(|id| id.to_string()),
-        session_id: Some(usage.session_id.clone()),
-        turn_id: Some(turn_id.to_string()),
-        turn_seq: Some(usage.turn_seq),
-        timestamp,
-        turn: turn_counts,
-        cumulative: cumulative_counts,
-        delta_reliable: usage.delta_reliable,
-        stop_reason,
-        pricing_identity: usage.pricing_identity.clone(),
-    };
-    let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
-        &ctx.agent_keys,
-        owner_pk,
-        &payload,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                target: "pool::metrics",
-                session_id,
-                turn_id,
-                "NIP-AM: encrypt failed: {e}"
-            );
-            return;
-        }
-    };
-    let agent_hex = ctx.agent_keys.public_key().to_hex();
-    let owner_hex = owner_pk.to_hex();
-    let event = match EventBuilder::new(
-        Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
-        ciphertext,
-    )
-    .tags([
-        Tag::parse(["p", &owner_hex]).expect("p tag"),
-        Tag::parse(["agent", &agent_hex]).expect("agent tag"),
-    ])
-    .sign_with_keys(&ctx.agent_keys)
-    {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(
-                target: "pool::metrics",
-                session_id,
-                turn_id,
-                "NIP-AM: sign failed: {e}"
-            );
-            return;
-        }
-    };
-    const METRIC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-    match tokio::time::timeout(METRIC_TIMEOUT, ctx.rest_client.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(
-            target: "pool::metrics",
-            session_id,
-            turn_id,
-            "NIP-AM: publish failed: {e}"
-        ),
-        Err(_) => tracing::warn!(
-            target: "pool::metrics",
-            session_id,
-            turn_id,
-            "NIP-AM: publish timed out"
-        ),
-    }
-}
-
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
 
@@ -4798,7 +4703,10 @@ mod tests {
             &base_only(Some("you are a helpful agent")),
             "hello channel",
         );
-        assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
+        assert_eq!(
+            composed,
+            "<base>\nyou are a helpful agent\n</base>\n\nhello channel"
+        );
     }
 
     #[test]
@@ -4819,7 +4727,7 @@ mod tests {
         // construction — and it has never carried the persona. Pin that the
         // shared helper does not start handing heartbeats [System].
         let composed = prepend_standing_for_legacy(1, &base_only(Some("be helpful")), "tick");
-        assert_eq!(composed, "[Base]\nbe helpful\n\ntick");
+        assert_eq!(composed, "<base>\nbe helpful\n</base>\n\ntick");
     }
 
     #[test]
@@ -4900,12 +4808,12 @@ mod tests {
         // left the agent acting on its first turn with no persona and no memory.
         let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
         let positions: Vec<usize> = [
-            "[Base]",
-            "[System]",
-            "[Team Instructions]",
-            "[Agent Memory — core]",
-            "[Huddle Instructions]",
-            "[Channel Canvas]",
+            "<base>",
+            "<system>",
+            "<team-instructions>",
+            "<core-memory>",
+            "<huddle-instructions>",
+            "<channel-canvas>",
             "do the thing",
         ]
         .iter()
@@ -4959,13 +4867,16 @@ mod tests {
         // what pins the framing against a `[Session]` section reappearing here.
         let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
             .expect("both present yields Some");
-        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+        assert_eq!(
+            framed,
+            "<base>\nbase text\n</base>\n\n<system>\npersona text\n</system>"
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
         let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        assert_eq!(framed, "<base>\nbase text\n</base>");
     }
 
     #[test]
@@ -4974,7 +4885,7 @@ mod tests {
         // its own [System] header even when no base prompt exists.
         let framed =
             framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+        assert_eq!(framed, "<system>\npersona text\n</system>");
     }
 
     #[test]
@@ -4987,12 +4898,12 @@ mod tests {
         let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
             .expect("base yields Some");
         assert!(
-            framed.starts_with("[Workspace]\n"),
+            framed.starts_with("<workspace>\n"),
             "workspace section must lead: {framed}"
         );
         assert!(framed.contains("`/Users/me/.buzz`"));
         assert!(
-            framed.contains("\n\n[Base]\nbase text"),
+            framed.contains("</workspace>\n\n<base>\nbase text\n</base>"),
             "base must follow the workspace section: {framed}"
         );
     }
@@ -5003,14 +4914,14 @@ mod tests {
         // agent never received that layout, so no [Workspace] anchor is emitted.
         let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
             .expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+        assert_eq!(framed, "<system>\npersona text\n</system>");
     }
 
     #[test]
     fn test_framed_system_prompt_root_cwd_omits_workspace() {
         // The "/" fallback must never be named — it would invite a $HOME scan.
         let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        assert_eq!(framed, "<base>\nbase text\n</base>");
     }
 
     #[test]
@@ -5022,28 +4933,28 @@ mod tests {
     #[test]
     fn test_with_core_appends_below_framed() {
         let framed = with_core(
-            Some("[System]\npersona".to_string()),
+            Some("<system>\npersona\n</system>".to_string()),
             Some("[Agent Memory — core]\nbe helpful"),
         )
         .expect("both present yields Some");
         assert_eq!(
             framed,
-            "[System]\npersona\n\n[Agent Memory — core]\nbe helpful"
+            "<system>\npersona\n</system>\n\n<core-memory>\nbe helpful\n</core-memory>"
         );
     }
 
     #[test]
     fn test_with_core_framed_only_passes_through() {
-        let framed = with_core(Some("[System]\npersona".to_string()), None)
+        let framed = with_core(Some("<system>\npersona\n</system>".to_string()), None)
             .expect("framed-only yields Some");
-        assert_eq!(framed, "[System]\npersona");
+        assert_eq!(framed, "<system>\npersona\n</system>");
     }
 
     #[test]
     fn test_with_core_core_only_is_just_core() {
         let framed = with_core(None, Some("[Agent Memory — core]\nbe helpful"))
             .expect("core-only yields Some");
-        assert_eq!(framed, "[Agent Memory — core]\nbe helpful");
+        assert_eq!(framed, "<core-memory>\nbe helpful\n</core-memory>");
     }
 
     #[test]
@@ -6037,10 +5948,13 @@ done"#
                 .as_str()
                 .expect("text prompt")
         };
-        assert_eq!(prompt_text(0), "[Base]\nstanding-once\n\nheartbeat-1");
+        assert_eq!(
+            prompt_text(0),
+            "<base>\nstanding-once\n</base>\n\nheartbeat-1"
+        );
         assert_eq!(
             prompt_text(1),
-            "[Base]\nstanding-once\n\nheartbeat-2",
+            "<base>\nstanding-once\n</base>\n\nheartbeat-2",
             "retry after ACP failure must resend standing context"
         );
         assert_eq!(
@@ -6160,13 +6074,13 @@ done"#
                 .as_str()
                 .expect("text prompt")
         };
-        assert!(prompt_text(0).contains("[Base]\nstanding-once"));
+        assert!(prompt_text(0).contains("<base>\nstanding-once\n</base>"));
         assert!(
-            prompt_text(1).contains("[Base]\nstanding-once"),
+            prompt_text(1).contains("<base>\nstanding-once\n</base>"),
             "retry after channel ACP failure must resend standing context"
         );
         assert!(
-            !prompt_text(2).contains("[Base]\nstanding-once"),
+            !prompt_text(2).contains("<base>\nstanding-once\n</base>"),
             "turn after channel ACP success must omit standing context"
         );
     }
@@ -7543,6 +7457,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            None,
         )
         .await;
     }
@@ -7578,6 +7493,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            None,
         )
         .await;
     }
@@ -7617,6 +7533,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            None,
         )
         .await;
     }
@@ -7657,6 +7574,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-cancel",
             "turn-cancel",
             Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+            None,
         )
         .await;
     }
@@ -7697,6 +7615,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "sess-ba",
             "turn-ba",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            None,
         )
         .await;
     }
@@ -7727,7 +7646,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
         };
 
-        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+        let (turn, cumulative) = crate::turn_metrics::build_turn_metric_counts(&usage);
 
         // Serialise to JSON — this is what ultimately goes on the wire.
         let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
@@ -7779,7 +7698,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             pricing_identity: None,
         };
 
-        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+        let (turn, cumulative) = crate::turn_metrics::build_turn_metric_counts(&usage);
 
         let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
         let cum_json =
@@ -7857,7 +7776,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let t1 = tracker.take().expect("turn 1");
 
         // Turn 1: cumulative must carry the cache count; turn delta is None (no baseline).
-        let (turn1, cum1) = crate::pool::build_turn_metric_counts(&t1);
+        let (turn1, cum1) = crate::turn_metrics::build_turn_metric_counts(&t1);
         // delta_reliable = false on first turn → no turn counts.
         assert!(turn1.is_none(), "first turn: no reliable turn counts");
         let cum1 = cum1.expect("cumulative always present");
@@ -7878,7 +7797,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         }
         let t2 = tracker.take().expect("turn 2");
 
-        let (turn2, cum2) = crate::pool::build_turn_metric_counts(&t2);
+        let (turn2, cum2) = crate::turn_metrics::build_turn_metric_counts(&t2);
 
         let turn2 = turn2.expect("reliable turn counts on turn 2");
         // Per-turn cache delta: 11_000 - 5_033 = 5_967.
@@ -7968,7 +7887,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn huddle_instructions_append_as_system_section() {
         assert_eq!(
             with_huddle_instructions(Some("base".into()), Some("  reply now  ")).as_deref(),
-            Some("base\n\n[Huddle Instructions]\nreply now")
+            Some("base\n\n<huddle-instructions>\nreply now\n</huddle-instructions>")
         );
     }
 
@@ -8025,10 +7944,11 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let section = render_canvas_section(id, ts, uuid);
         assert_eq!(
             section,
-            "[Channel Canvas]\n\
+            "<channel-canvas>\n\
              Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n\
              Last modified: 2024-01-15T10:30:00+00:00\n\
-             Fetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae"
+             Fetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae\n\
+             </channel-canvas>"
         );
     }
 
@@ -8037,13 +7957,19 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[test]
     fn test_with_canvas_appends_to_existing_prompt() {
         let result = with_canvas(Some("base content".into()), Some("[Channel Canvas]\nstuff"));
-        assert_eq!(result.unwrap(), "base content\n\n[Channel Canvas]\nstuff");
+        assert_eq!(
+            result.unwrap(),
+            "base content\n\n<channel-canvas>\nstuff\n</channel-canvas>"
+        );
     }
 
     #[test]
     fn test_with_canvas_returns_canvas_alone_when_no_prompt() {
         let result = with_canvas(None, Some("[Channel Canvas]\nstuff"));
-        assert_eq!(result.unwrap(), "[Channel Canvas]\nstuff");
+        assert_eq!(
+            result.unwrap(),
+            "<channel-canvas>\nstuff\n</channel-canvas>"
+        );
     }
 
     #[test]
@@ -8140,7 +8066,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert!(section.contains(&id), "section must contain the event id");
         assert!(section.contains("buzz canvas get --channel"));
         assert!(section.contains(CHANNEL_UUID));
-        assert!(section.starts_with("[Channel Canvas]"));
+        assert!(section.starts_with("<channel-canvas>"));
         // Timestamp must use Z suffix, not +00:00
         assert!(section.contains('Z'), "timestamp must use Z suffix");
     }

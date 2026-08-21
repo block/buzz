@@ -216,6 +216,10 @@ echo 'Body with `backticks` and $vars stays literal.' \
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 
+# messages raw — preserves the signed event's tags and signature
+buzz messages raw --event "$EVENT_ID" | jq .
+# Expected: {"id":"...","pubkey":"...","kind":9,"tags":[...],"content":"...","sig":"..."}
+
 # messages thread from the root, a reply, and a canonical link
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
 buzz messages thread --channel "$CHANNEL_ID" --event "$REPLY_ID" | jq .
@@ -566,7 +570,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 2 | `messages send-diff` | ☐ | Stdin, metadata, branch/PR |
 | 3 | `messages edit` | ☐ | |
 | 4 | `messages delete` | ☐ | |
-| 5 | `messages get` | ☐ | With limit |
+| 5 | `messages get` / `messages raw` | ☐ | Limit; raw preserves tags and signature |
 | 6 | `messages thread` | ☐ | |
 | 7 | `messages search` | ☐ | With limit |
 | 8 | `messages vote` | ☐ | Up and down |

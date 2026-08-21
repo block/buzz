@@ -1969,7 +1969,7 @@ mod tests {
         // This is the core acceptance test for Thufir's finding: the old code
         // would publish cacheReadTokens: 0 for every harness regardless of
         // whether the field was reported.
-        use crate::pool::build_turn_metric_counts;
+        use crate::turn_metrics::build_turn_metric_counts;
 
         let usage = TurnUsage {
             session_id: "sess-pool-none".into(),
@@ -2010,7 +2010,7 @@ mod tests {
     fn pool_reported_cache_field_publishes_nonzero_cache_read_tokens_in_kind44200() {
         // End-to-end: a buzz-agent payload with a nonzero cache count must
         // publish cacheReadTokens in both turn and cumulative counts.
-        use crate::pool::build_turn_metric_counts;
+        use crate::turn_metrics::build_turn_metric_counts;
 
         let usage = TurnUsage {
             session_id: "sess-pool-some".into(),

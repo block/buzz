@@ -24,8 +24,9 @@ persist it, so it cannot answer "how many tokens did my agents use last
 week?". Transcript-grade durable telemetry is explicitly out of scope — the
 persistence-averse reasoning behind NIP-AO's ephemerality contract applies to
 conversation content, not to a small usage record. Kind 44200 stores only the
-metric: token counts, an estimated cost, and correlation identifiers, all
-encrypted to the owner.
+metric: token counts, an estimated cost, correlation identifiers, and an
+optional content-addressed context manifest, all encrypted to the owner. The
+manifest describes sources and allocation; it does not contain prompt bodies.
 
 ## Definitions
 
@@ -70,7 +71,7 @@ event community-global (owner-scoped) rather than channel-scoped.
 `content` MUST be encrypted with NIP-44 v2 using `(agent_privkey,
 owner_pubkey)` — identical to NIP-AO telemetry. Plaintext SHOULD be zeroized
 after encrypt/decrypt. Decrypted payload MUST NOT exceed 65,535 bytes
-(payloads are typically well under 1 KB).
+(payloads are typically only a few KB).
 
 ## Decrypted Payload
 
@@ -124,14 +125,59 @@ The `content` field decrypts to a UTF-8 JSON object:
     "cacheClass": "ephemeral"                    // cache-write class; omit when not applicable
   },
 
+  // Buzz-owned description of the context compiled for this turn. The hash is
+  // SHA-256 over the canonical JSON serialization of `layers`; empty layers
+  // are omitted and the remaining layers are ordered by `order`. Versions are
+  // signed event IDs where one event is authoritative, otherwise content hashes.
+  "contextManifest": {         // OPTIONAL
+    "schemaVersion": 1,
+    "hash": "sha256:<hex>",
+    "layers": [{
+      "order": 7,
+      "layer": "current_instruction",
+      "scope": "turn",
+      "source": "nostr_event",
+      "version": "<event-id>",
+      "authority": "authoritative",
+      "freshness": "current",
+      "estimatedTokens": 184,
+      "truncated": false
+    }]
+  },
+
   "stopReason": "end_turn"               // optional
 }
 ```
 
 `harness` and `timestamp` are REQUIRED. All other fields are OPTIONAL or
 nullable, except as constrained below: `pricingIdentity` is optional but not
-nullable (omit it entirely rather than set it to null). Consumers MUST ignore
-unknown fields (forward compatibility).
+nullable (omit it entirely rather than set it to null). `contextManifest` is
+also optional and not nullable. Consumers MUST ignore unknown fields (forward
+compatibility).
+
+### Context manifest
+
+`contextManifest`, when present, records the deterministic Buzz context layers
+used to construct the turn. It MUST NOT include raw prompt content. A layer's
+`version` is either a signed source event ID or `sha256:<lowercase-hex>` of the
+exact layer content. `estimatedTokens` is an attention estimate, not provider
+billing usage; publishers MUST document and keep their heuristic stable for a
+manifest schema version. Buzz schema version 1 uses `ceil(Unicode scalar
+values / 4)`.
+
+Layers MUST appear in ascending `order`; multiple independently versioned
+sources MAY share an order and retain their deterministic source/acceptance
+order. Empty layers MUST be omitted, and `hash` MUST be
+`sha256:<lowercase-hex>` of the compact JSON serialization of the `layers`
+array using the field order shown above. `truncated` means the compiler
+knowingly omitted source content; retrieval pointers belong in the prompt's
+compact context-status framing rather than in this metrics object.
+
+For non-cancelling steering, an update reported as `injected` MUST be appended
+to the active turn manifest before terminal metric publication. Failed,
+rejected, or indeterminate updates MUST NOT be appended. An adapter-reported
+`startedNewTurn` update belongs to that distinct turn and MUST NOT be merged
+into the settled original turn's manifest.
 
 ### Ordering and delta recomputation
 

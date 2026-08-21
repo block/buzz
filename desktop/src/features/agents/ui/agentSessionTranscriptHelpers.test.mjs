@@ -136,6 +136,104 @@ test("parsePromptText leading text before a header becomes a Prompt section", ()
   );
 });
 
+test("parsePromptText reads the semantic Buzz turn envelope", () => {
+  const text = [
+    "<buzz-turn>",
+    "<ambient-context>",
+    "Scope: channel",
+    "Channel: agents",
+    "</ambient-context>",
+    `<event type="mention" actor="${HEX_UPPER}" author="Morgan" event_id="${HEX_UPPER}" kind="9">`,
+    "Content: fix &lt;deploy&gt; &amp; verify\nthen report",
+    "</event>",
+    '<delivery channel_id="channel-1" scope="channel" />',
+    "</buzz-turn>",
+  ].join("\n");
+
+  const result = parsePromptText(text);
+
+  assert.equal(result.userText, "fix <deploy> & verify\nthen report");
+  assert.equal(result.userTitle, "Mention");
+  assert.equal(result.userPubkey, HEX);
+  assert.equal(result.userEventId, HEX);
+  assert.deepEqual(
+    result.sections.map((section) => section.title),
+    ["Ambient context", "Current instruction", "Delivery"],
+  );
+});
+
+test("parsePromptText ignores interrupted events inside ambient context", () => {
+  const text = [
+    "<buzz-turn>",
+    "<ambient-context>",
+    '<interrupted-turn disposition="continue_prior_work">',
+    `<event type="mention" actor="${HEX}" event_id="${HEX}">`,
+    "Content: earlier request",
+    "</event>",
+    "</interrupted-turn>",
+    "</ambient-context>",
+    `<event type="mention" actor="${HEX}" event_id="${HEX_UPPER}">`,
+    "Content: current request",
+    "</event>",
+    '<delivery channel_id="channel-1" scope="channel" />',
+    "</buzz-turn>",
+  ].join("\n");
+
+  const result = parsePromptText(text);
+
+  assert.equal(result.userText, "current request");
+  assert.equal(result.userEventId, HEX);
+  assert.match(result.sections[0].body, /earlier request/);
+});
+
+test("parsePromptText keeps legacy standing sections before a semantic turn", () => {
+  const text = [
+    "[Base]",
+    "standing rules",
+    "",
+    "<buzz-turn>",
+    `<event type="dm" actor="${HEX}" event_id="${HEX}" kind="9">`,
+    "Content: hello",
+    "</event>",
+    '<delivery channel_id="channel-1" scope="dm" />',
+    "</buzz-turn>",
+  ].join("\n");
+
+  const result = parsePromptText(text);
+  assert.equal(result.userText, "hello");
+  assert.deepEqual(
+    result.sections.map((section) => section.title),
+    ["Base", "Current instruction", "Delivery"],
+  );
+});
+
+test("parsePromptText reads paired standing sections before a semantic turn", () => {
+  const text = [
+    "<base>",
+    "standing rules",
+    "</base>",
+    "",
+    "<system>",
+    "persona rules",
+    "</system>",
+    "",
+    "<buzz-turn>",
+    `<event type="dm" actor="${HEX}" author="Morgan" event_id="${HEX}">`,
+    "Content: hello",
+    "</event>",
+    '<delivery channel_id="channel-1" scope="dm" />',
+    "</buzz-turn>",
+  ].join("\n");
+
+  const result = parsePromptText(text);
+
+  assert.equal(result.userText, "hello");
+  assert.deepEqual(
+    result.sections.map((section) => section.title),
+    ["Base", "System", "Current instruction", "Delivery"],
+  );
+});
+
 test("extractPromptText joins text blocks from params.prompt", () => {
   const payload = {
     params: {
@@ -199,6 +297,73 @@ test("parseSystemPromptSections splits both prompts into Base and System", () =>
     { title: "Base", body: "base text" },
     { title: "System", body: "persona text" },
   ]);
+});
+
+test("parseSystemPromptSections reads paired semantic standing sections", () => {
+  const framed = [
+    "<workspace>",
+    "/workspace",
+    "</workspace>",
+    "",
+    "<base>",
+    "base text",
+    "</base>",
+    "",
+    "<system>",
+    "persona text",
+    "</system>",
+    "",
+    "<team-instructions>",
+    "team text",
+    "</team-instructions>",
+    "",
+    "<core-memory>",
+    "memory text",
+    "</core-memory>",
+    "",
+    "<huddle-instructions>",
+    "huddle text",
+    "</huddle-instructions>",
+    "",
+    "<channel-canvas>",
+    "canvas text",
+    "</channel-canvas>",
+  ].join("\n");
+
+  assert.deepEqual(parseSystemPromptSections(framed), [
+    { title: "Workspace", body: "/workspace" },
+    { title: "Base", body: "base text" },
+    { title: "System", body: "persona text" },
+    { title: "Team Instructions", body: "team text" },
+    { title: "Core Memory", body: "memory text" },
+    { title: "Huddle Instructions", body: "huddle text" },
+    { title: "Channel Canvas", body: "canvas text" },
+  ]);
+});
+
+test("parseSystemPromptSections round-trips every escaped standing closing tag", () => {
+  const tags = [
+    ["workspace", "Workspace"],
+    ["base", "Base"],
+    ["system", "System"],
+    ["team-instructions", "Team Instructions"],
+    ["core-memory", "Core Memory"],
+    ["huddle-instructions", "Huddle Instructions"],
+    ["channel-canvas", "Channel Canvas"],
+  ];
+  const body = tags.map(([tag]) => `literal </${tag}>`).join(" & ");
+  const encoded = body
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  const framed = tags
+    .map(([tag]) => `<${tag}>\n${encoded}\n</${tag}>`)
+    .join("\n\n");
+
+  assert.deepEqual(
+    parseSystemPromptSections(framed),
+    tags.map(([, title]) => ({ title, body })),
+  );
 });
 
 test("parseSystemPromptSections yields one Base section for a base-only frame", () => {

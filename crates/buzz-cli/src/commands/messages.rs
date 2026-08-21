@@ -12,6 +12,8 @@ use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
 };
 
+use super::messages_fetch::{cmd_get_raw_event, fetch_event};
+
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Delegates marker parsing and collapse to [`buzz_core::nip10`] (shared with
@@ -53,26 +55,6 @@ fn thread_ref_from_parent_tags(
         root_event_id: root_eid,
         parent_event_id: parent_eid,
     })
-}
-
-/// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
-///
-/// Fetches the parent event from the relay and inspects its NIP-10 `e` tags to
-/// determine the thread root:
-/// - Direct reply (parent is top-level): `root == parent`.
-/// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
-///
-/// Ensures CLI-sent replies thread correctly using the same NIP-10 logic.
-async fn fetch_event(client: &BuzzClient, event_id: &str) -> Result<serde_json::Value, CliError> {
-    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
-    let raw = client.query(&filter).await?;
-    let events: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    events
-        .as_array()
-        .and_then(|events| events.first())
-        .cloned()
-        .ok_or_else(|| CliError::NotFound(format!("event {event_id} not found")))
 }
 
 async fn resolve_thread_ref(
@@ -999,6 +981,7 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::Raw { event } => cmd_get_raw_event(client, &event).await,
         MessagesCmd::Thread {
             channel,
             event,

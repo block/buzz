@@ -2,9 +2,9 @@
 //!
 //! Manages per-channel event queues with per-channel in-flight tracking.
 //! When the harness is ready to prompt the agent, it flushes the channel with
-//! the oldest pending event, draining ALL events for that channel into a single
-//! batch. Multiple channels can be in-flight simultaneously; each channel is
-//! independent.
+//! the oldest pending event, draining only contiguous events whose authoritative
+//! actor and destination match. Multiple channels can be in-flight
+//! simultaneously; each channel is independent.
 //!
 //! ## Dedup modes
 //!
@@ -13,12 +13,16 @@
 //!   still queue normally.
 //! - **Queue** — all events accumulate; batched on the next flush cycle.
 
-use nostr::{Event, ToBech32};
+use nostr::Event;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::DedupMode;
+use crate::context_compiler::{
+    content_version, escape_attribute, escape_text, normalize_semantic_section, semantic_section,
+    CompiledContext, ContextCompiler, ContextLayerInput,
+};
 
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
@@ -85,8 +89,16 @@ pub struct FlushBatch {
     /// How the prior turn was cancelled, when [`cancelled_events`] is non-empty.
     /// `None` for normal (non-merge) batches; falls back to the gentler
     /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
-    /// (see [`MergeFraming::for_reason`]).
+    /// (see [`format_cancelled_context`]).
     pub cancel_reason: Option<CancelReason>,
+}
+
+fn authority_batch_key(event: &QueuedEvent) -> (String, String) {
+    let thread = parse_thread_tags(&event.event);
+    let destination = thread
+        .root_event_id
+        .unwrap_or_else(|| event.event.id.to_hex());
+    (event.event.pubkey.to_hex(), destination)
 }
 
 /// Per-channel event queue with per-channel in-flight enforcement.
@@ -118,7 +130,8 @@ pub struct FlushBatch {
 ///                  AND (no retry_after OR retry_after[c] <= now)
 ///     if candidates empty: return None
 ///     channel = pick candidate with oldest head event (min received_at)
-///     events = drain up to MAX_BATCH_EVENTS from queues[channel]
+///     authority = (head actor, head destination)
+///     events = drain up to MAX_BATCH_EVENTS while authority matches
 ///     in_flight_channels.insert(channel)
 ///     in_flight_deadlines.insert(channel, now + in_flight_deadline)
 ///     return Some(FlushBatch { channel, events })
@@ -255,8 +268,9 @@ impl EventQueue {
     ///
     /// Returns `None` if all non-in-flight, non-throttled queues are empty.
     /// Otherwise picks the channel with the oldest pending event (FIFO fairness
-    /// across channels), drains ALL events for that channel into a single batch,
-    /// inserts into `in_flight_channels`, and returns the batch.
+    /// across channels), drains one contiguous actor-and-destination group for
+    /// that channel into a batch, inserts into `in_flight_channels`, and
+    /// returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
         let now = Instant::now();
 
@@ -332,9 +346,16 @@ impl EventQueue {
             }
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // Drain one actor/destination group. Each top-level event ID is its own
+        // destination, so unrelated instructions are never coalesced merely
+        // because they share a channel.
         let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
+        let authority_key = queue.front().map(authority_batch_key)?;
+        let drain_count = queue
+            .iter()
+            .take(MAX_BATCH_EVENTS)
+            .take_while(|queued| authority_batch_key(queued) == authority_key)
+            .count();
         let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
@@ -1090,111 +1111,64 @@ fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup
     }
 }
 
-/// Format the per-event `[Event]` block for a single [`BatchEvent`].
+/// Format one event as normalized semantic context.
 ///
-/// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
-/// time, content, all tags (never stripped), and parsed structural fields.
+/// Includes the signed event ID, kind, actor identities, time, normalized
+/// reply relationships, and mentions. Raw Nostr tags are deliberately omitted
+/// from the default prompt; agents can retrieve the signed event through Buzz
+/// when a task genuinely needs protocol-level data.
 ///
 /// Reused by the goose-native steer path (lib.rs mode-gate) to render the
 /// single withheld event for delivery via `_goose/unstable/session/steer`,
 /// without paying for the batch-level context blocks the in-flight turn
 /// already has.
 pub(crate) fn format_event_block(
-    channel_id: Uuid,
-    channel_info: Option<&PromptChannelInfo>,
     be: &BatchEvent,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
     let hex = be.event.pubkey.to_hex();
-    let npub = be.event.pubkey.to_bech32().unwrap_or_else(|_| hex.clone());
-
-    let time = chrono::DateTime::from_timestamp(be.event.created_at.as_secs() as i64, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| be.event.created_at.as_secs().to_string());
-
-    let kind = be.event.kind.as_u16() as u32;
     let event_id = be.event.id.to_hex();
-
-    let channel_display = match channel_info {
-        Some(ci) => format!("{} (#{channel_id})", ci.name),
-        None => channel_id.to_string(),
-    };
-
-    let mut block = format!(
-        "Event ID: {event_id}\n\
-         Channel: {channel_display}\n\
-         Kind: {kind}\n\
-         From: {}\n\
-         Time: {time}\n\
-         Content: {}",
-        match resolve_prompt_label(&hex, profile_lookup) {
-            Some(label) => format!("{label} (npub: {npub}, hex: {hex})"),
-            None => format!("{npub} (hex: {hex})"),
-        },
-        be.event.content,
-    );
-
-    // Always include tags — they carry structural information.
-    let tags_json: Vec<&[String]> = be.event.tags.iter().map(|t| t.as_slice()).collect();
-    if let Ok(tags_str) = serde_json::to_string(&tags_json) {
-        block.push_str(&format!("\nTags: {tags_str}"));
-    }
-
-    // Parsed structural fields.
+    let author_attribute = resolve_prompt_label(&hex, profile_lookup)
+        .map(|label| format!(" author=\"{}\"", escape_attribute(&label)))
+        .unwrap_or_default();
     let thread = parse_thread_tags(&be.event);
-    let mut parsed_parts = Vec::new();
+    let mut attributes = vec![
+        format!(
+            "type=\"{}\"",
+            escape_attribute(be.prompt_tag.trim_start_matches('@'))
+        ),
+        format!("actor=\"{}\"", escape_attribute(&hex)),
+        format!("event_id=\"{}\"", escape_attribute(&event_id)),
+    ];
+    if !author_attribute.is_empty() {
+        attributes.insert(2, author_attribute.trim().to_string());
+    }
     if let Some(ref p) = thread.parent_event_id {
-        parsed_parts.push(format!("parent={p}"));
+        if thread.root_event_id.as_deref() != Some(p) {
+            attributes.push(format!("parent=\"{}\"", escape_attribute(p)));
+        }
     }
     if let Some(ref r) = thread.root_event_id {
-        parsed_parts.push(format!("root={r}"));
+        attributes.push(format!("thread_root=\"{}\"", escape_attribute(r)));
     }
     if !thread.mentioned_pubkeys.is_empty() {
-        parsed_parts.push(format!(
-            "mentions=[{}]",
-            thread
-                .mentioned_pubkeys
-                .iter()
-                .map(|pubkey| format_prompt_actor(pubkey, profile_lookup))
-                .collect::<Vec<_>>()
-                .join(", ")
+        attributes.push(format!(
+            "mentions=\"{}\"",
+            escape_attribute(
+                &thread
+                    .mentioned_pubkeys
+                    .iter()
+                    .map(|pubkey| format_prompt_actor(pubkey, profile_lookup))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         ));
     }
-    if !parsed_parts.is_empty() {
-        block.push_str(&format!("\nParsed: {}", parsed_parts.join(", ")));
-    }
-
-    block
-}
-
-/// Append a reply instruction when the agent is responding to a thread event.
-///
-/// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
-/// while still allowing an explicit human request to post at the channel root or
-/// top level.
-fn append_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
-         If the requested destination is ambiguous, ask before sending."
-    ));
-}
-
-/// Append a new-thread reply instruction for a human-facing top-level mention.
-///
-/// The triggering mention has no thread tags, so the agent's reply becomes the
-/// thread root. Anchoring to the triggering event (rather than leaving the
-/// choice open) prevents replying into a stale/unrelated prior thread.
-fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
-         (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
-    ));
+    format!(
+        "<event {}>\nContent: {}\n</event>",
+        attributes.join(" "),
+        escape_text(&be.event.content)
+    )
 }
 
 /// Decide whether a turn is human-facing for reply-anchor purposes.
@@ -1249,22 +1223,27 @@ fn resolve_reply_anchor(
     )
 }
 
-/// Maximum length (in characters) of a channel description rendered into `[Context]`.
+/// Maximum length (in characters) of a channel description rendered into the
+/// ambient channel snapshot.
 ///
 /// Limits prompt bloat from unusually long descriptions; a raw embedded newline
-/// in a description must not be able to spoof another `[Context]` field, so
+/// in a description must not be able to spoof another semantic attribute, so
 /// multiline text is collapsed to single-space-joined lines before truncation.
 const MAX_DESCRIPTION_LEN: usize = 500;
 
-/// Append a `Description: …` line to a `[Context]` block when non-empty.
-///
-/// Collapses internal newlines (any `\r\n`, `\r`, or `\n`) to a single space
-/// so a multi-line description cannot inject a fake `[Context]` field line.
-/// Truncates at [`MAX_DESCRIPTION_LEN`] characters with a `…` marker.
-fn append_channel_description(s: &mut String, channel_info: Option<&PromptChannelInfo>) {
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedChannelDescription {
+    value: String,
+    truncated: bool,
+}
+
+/// Normalize a channel description for an XML-like attribute.
+fn normalized_channel_description(
+    channel_info: Option<&PromptChannelInfo>,
+) -> Option<NormalizedChannelDescription> {
     let desc = match channel_info.and_then(|ci| ci.description.as_deref()) {
         Some(d) if !d.is_empty() => d,
-        _ => return,
+        _ => return None,
     };
     // Collapse newlines to spaces so the description can never spoof another field.
     let collapsed: String = desc
@@ -1274,11 +1253,12 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
         .collect::<Vec<_>>()
         .join(" ");
     if collapsed.is_empty() {
-        return;
+        return None;
     }
     // Truncate at a character boundary (not byte boundary) to avoid splitting
     // multi-byte sequences.
-    let truncated = if collapsed.chars().count() > MAX_DESCRIPTION_LEN {
+    let was_truncated = collapsed.chars().count() > MAX_DESCRIPTION_LEN;
+    let value = if was_truncated {
         let end = collapsed
             .char_indices()
             .nth(MAX_DESCRIPTION_LEN)
@@ -1288,108 +1268,23 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
     } else {
         collapsed
     };
-    s.push_str(&format!("\nDescription: {truncated}"));
+    Some(NormalizedChannelDescription {
+        value,
+        truncated: was_truncated,
+    })
 }
 
-/// Format a `[Context]` hints section based on event scope.
-///
-/// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
-/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
-/// replies; in the channel branch a `Some` anchor means a human-facing
-/// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
-fn format_context_hints(
-    channel_id: Uuid,
-    channel_info: Option<&PromptChannelInfo>,
-    thread_tags: &ThreadTags,
-    is_dm: bool,
-    has_conversation_context: bool,
-    conversation_context_had_delivered_events: bool,
-    reply_anchor: Option<&str>,
-) -> String {
-    let channel_display = match channel_info {
-        Some(ci) => format!("{} (#{channel_id})", ci.name),
-        None => channel_id.to_string(),
-    };
-
-    // DM check comes first — a DM reply has both thread tags AND is_dm=true,
-    // and the scope should be "dm" (not "thread") because the agent is in a DM.
-    if is_dm {
-        let is_reply = thread_tags.root_event_id.is_some();
-        // DM replies use thread command because /messages excludes thread replies.
-        // DM non-replies use get for recent conversation.
-        let ctx_hint = if has_conversation_context && is_reply {
-            "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
-        } else if has_conversation_context {
-            "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
-        } else if conversation_context_had_delivered_events && is_reply {
-            "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read the reply chain."
-        } else if conversation_context_had_delivered_events {
-            "Earlier conversation context was already delivered in this session. Use `buzz messages get --channel <UUID>` to re-read it."
-        } else if is_reply {
-            "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch the reply chain."
-        } else {
-            "Use `buzz messages get --channel <UUID>` for conversation context."
-        };
-        let mut s = format!(
-            "[Context]\n\
-             Scope: dm\n\
-             Channel: {channel_display}\n\
-             {ctx_hint}"
-        );
-        // If this is a DM reply, include thread structural info as supplementary.
-        if let Some(ref root) = thread_tags.root_event_id {
-            s.push_str(&format!("\nThread root: {root}"));
-            if let Some(ref parent) = thread_tags.parent_event_id {
-                if parent != root {
-                    s.push_str(&format!("\nParent: {parent}"));
-                }
-            }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
-            }
-        }
-        s
-    } else if let Some(ref root) = thread_tags.root_event_id {
-        let ctx_hint = if has_conversation_context {
-            "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
-        } else if conversation_context_had_delivered_events {
-            "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read it."
-        } else {
-            "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context."
-        };
-        let mut s = format!(
-            "[Context]\n\
-             Scope: thread\n\
-             Channel: {channel_display}"
-        );
-        append_channel_description(&mut s, channel_info);
-        s.push_str(&format!("\nThread root: {root}"));
-        if let Some(ref parent) = thread_tags.parent_event_id {
-            if parent != root {
-                s.push_str(&format!("\nParent: {parent}"));
-            }
-        }
-        s.push_str(&format!("\n{ctx_hint}"));
-        if let Some(event_id) = reply_anchor {
-            append_reply_instruction(&mut s, event_id);
-        }
-        s
-    } else {
-        let mut s = format!(
-            "[Context]\n\
-             Scope: channel\n\
-             Channel: {channel_display}"
-        );
-        append_channel_description(&mut s, channel_info);
-        s.push_str(
-            "\nHint: Use `buzz messages get --channel <UUID>` for recent messages if needed.",
-        );
-        if let Some(event_id) = reply_anchor {
-            append_new_thread_reply_instruction(&mut s, event_id);
-        }
-        s
+fn format_channel_snapshot(channel_info: Option<&PromptChannelInfo>) -> String {
+    let mut lines = Vec::new();
+    if let Some(info) = channel_info {
+        lines.push(format!("Channel: {}", escape_text(&info.name)));
     }
+    if channel_info.is_none_or(|info| info.channel_type != "dm") {
+        if let Some(description) = normalized_channel_description(channel_info) {
+            lines.push(format!("Description: {}", escape_text(&description.value)));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Format a conversation context section (thread or DM).
@@ -1397,34 +1292,61 @@ fn format_conversation_context(
     ctx: &ConversationContext,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
-    let (label, messages, total, truncated) = match ctx {
+    let (messages, total, truncated) = match ctx {
         ConversationContext::Thread {
             messages,
             total,
             truncated,
-        } => ("Thread Context", messages, total, truncated),
+        }
+        | ConversationContext::Dm {
+            messages,
+            total,
+            truncated,
+        } => (messages, total, truncated),
+    };
+
+    let mut s = format!(
+        "<recent-thread-delta included=\"{}\" total=\"{total}\" truncated=\"{truncated}\">",
+        messages.len(),
+    );
+    for msg in messages {
+        let actor =
+            resolve_prompt_label(&msg.pubkey, profile_lookup).unwrap_or_else(|| msg.pubkey.clone());
+        s.push_str(&format!(
+            "\n{}: {}",
+            escape_text(&actor),
+            escape_text(&msg.content)
+        ));
+    }
+    s.push_str("\n</recent-thread-delta>");
+    s
+}
+
+fn conversation_context_version(ctx: &ConversationContext) -> String {
+    let (scope, messages, total, truncated) = match ctx {
+        ConversationContext::Thread {
+            messages,
+            total,
+            truncated,
+        } => ("thread", messages, total, truncated),
         ConversationContext::Dm {
             messages,
             total,
             truncated,
-        } => ("Conversation Context", messages, total, truncated),
+        } => ("dm", messages, total, truncated),
     };
-
-    let trunc_label = if *truncated { ", truncated" } else { "" };
-    let mut s = format!(
-        "[{label} ({} of {total} messages{trunc_label})]",
-        messages.len()
-    );
-    for (i, msg) in messages.iter().enumerate() {
-        s.push_str(&format!(
-            "\n[{}] {} ({}): {}",
-            i + 1,
-            format_prompt_actor(&msg.pubkey, profile_lookup),
-            msg.timestamp,
-            msg.content,
-        ));
-    }
-    s
+    let source = serde_json::json!({
+        "scope": scope,
+        "total": total,
+        "truncated": truncated,
+        "messages": messages.iter().map(|message| serde_json::json!([
+            message.event_id,
+            message.pubkey,
+            message.timestamp,
+            message.content,
+        ])).collect::<Vec<_>>(),
+    });
+    content_version(&source.to_string())
 }
 
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
@@ -1441,15 +1363,15 @@ pub struct FormatPromptArgs<'a> {
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
-    /// (legacy agents), they are injected as `[Base]` and `[System]` sections.
+    /// (legacy agents), they are injected as `<base>` and `<system>` sections.
     pub has_system_prompt_support: bool,
     /// Base prompt content for legacy agents (protocol_version < 2).
     pub base_prompt: Option<&'a str>,
     /// System prompt content for legacy agents (protocol_version < 2).
     pub system_prompt: Option<&'a str>,
-    /// Team instructions for legacy agents, rendered after `[System]`.
+    /// Team instructions for legacy agents, rendered after `<system>`.
     pub team_instructions: Option<&'a str>,
-    /// Rendered `[Channel Canvas]` metadata section for legacy agents.
+    /// Rendered `<channel-canvas>` metadata section for legacy agents.
     ///
     /// For modern agents (protocol_version >= 2) the section is delivered via
     /// the system role in session/new; omit here to avoid duplication.
@@ -1493,256 +1415,371 @@ impl StandingContext<'_> {
             sections.push(base_section(bp));
         }
         if let Some(sp) = self.system_prompt {
-            sections.push(format!("[System]\n{sp}"));
+            sections.push(semantic_section("system", sp));
         }
         if let Some(team) = self
             .team_instructions
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            sections.push(format!("[Team Instructions]\n{team}"));
+            sections.push(semantic_section("team-instructions", team));
         }
         if let Some(core) = self.agent_core {
-            sections.push(core.to_string());
+            sections.push(normalize_semantic_section(
+                "core-memory",
+                "Agent Memory — core",
+                core,
+            ));
         }
         if let Some(instructions) = self
             .huddle_instructions
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            sections.push(format!("[Huddle Instructions]\n{instructions}"));
+            sections.push(semantic_section("huddle-instructions", instructions));
         }
         if let Some(canvas) = self.agent_canvas {
-            sections.push(canvas.to_string());
+            sections.push(normalize_semantic_section(
+                "channel-canvas",
+                "Channel Canvas",
+                canvas,
+            ));
         }
         sections
     }
 }
 
-/// Format the `[Base]` section for the base prompt.
+/// Format the `<base>` section for the base prompt.
 ///
-/// Single source of truth for the `[Base]` framing so the format is defined in
-/// exactly one place across all dispatch paths (batch flush, heartbeat,
-/// initial message).
+/// Shared `<base>` framing for batch, heartbeat, and initial-message paths.
 pub(crate) fn base_section(base_prompt: &str) -> String {
-    format!("[Base]\n{}", base_prompt.trim_end())
+    semantic_section("base", base_prompt.trim_end())
 }
 
-/// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
-///
-/// Produces a stable prompt with these sections (in order):
-/// 0. [`StandingContext`] — `[Base]`, `[System]`, `[Team Instructions]`,
-///    `[Agent Memory — core]`, `[Channel Canvas]`. Legacy agents only, and only
-///    on the session's first message (see `standing_context_sent`)
-/// 1. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 2. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 3. `[Event]` / `[Buzz events]` — the triggering event(s)
-///
-/// Each section is returned as its own block rather than one joined string so
-/// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
-/// the body of an oversized section in place, leaving every `[Header]` line at
-/// the head of its own leaf — so the desktop "Prompt context" panel always
-/// counts every section. The receiving agent reconstructs the full prompt by
-/// joining the blocks (legacy agents see a single `\n` between sections rather
-/// than a blank line; sections self-delimit with their `[Header]` line).
-///
-/// For agents with `protocol_version >= 2`, base_prompt and system_prompt are
-/// delivered via the system role in `session/new` and omitted from this message.
-pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<String> {
-    // Scope is always derived from the LAST event in the batch — that's the
-    // one the agent is responding to. Thread/DM context is supplementary info
-    // included alongside, not a scope override. This prevents mixed batches
-    // (thread reply + later plain message) from being mislabeled as "thread".
-    let last_event = match batch.events.last() {
-        Some(e) => e,
-        None => {
-            tracing::error!("format_prompt called with empty batch — returning empty prompt");
-            return Vec::new();
-        }
+fn format_current_instruction(
+    batch: &FlushBatch,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> String {
+    batch
+        .events
+        .iter()
+        .map(|event| format_event_block(event, profile_lookup))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_context_status(
+    batch: &FlushBatch,
+    last: &BatchEvent,
+    is_dm: bool,
+    has_context: bool,
+    context_truncated: bool,
+    had_delivered_context: bool,
+) -> String {
+    let thread = parse_thread_tags(&last.event);
+    let command = if thread.root_event_id.is_some() {
+        format!(
+            "buzz messages thread --channel {} --event {}",
+            batch.channel_id,
+            last.event.id.to_hex()
+        )
+    } else {
+        format!("buzz messages get --channel {}", batch.channel_id)
     };
-    let thread_tags = parse_thread_tags(&last_event.event);
-    let is_dm = args
-        .channel_info
-        .map(|ci| ci.channel_type == "dm")
-        .unwrap_or(false);
-
-    let mut sections: Vec<String> = Vec::with_capacity(7);
-
-    // Standing context — base prompt, persona, team instructions, core memory
-    // and canvas. Modern agents received all of it via the system role in
-    // session/new. Legacy agents get it here, in the session's first message
-    // only; `standing_context_sent` means an earlier message in this session
-    // already carried it.
-    if !args.has_system_prompt_support && !args.standing_context_sent {
-        sections.extend(
-            StandingContext {
-                base_prompt: args.base_prompt,
-                system_prompt: args.system_prompt,
-                team_instructions: args.team_instructions,
-                agent_core: args.agent_core,
-                huddle_instructions: args.huddle_instructions,
-                agent_canvas: args.agent_canvas,
-            }
-            .sections(),
-        );
+    let scope = if is_dm {
+        "dm"
+    } else if thread.root_event_id.is_some() {
+        "thread"
+    } else {
+        "channel"
+    };
+    if has_context && !context_truncated {
+        return format!("Scope: {scope}");
     }
+    let status = if context_truncated {
+        "truncated"
+    } else if had_delivered_context {
+        "already delivered"
+    } else {
+        "not loaded"
+    };
+    format!(
+        "Scope: {scope}\nHistory: {status}; retrieve: {}",
+        escape_text(&command)
+    )
+}
 
-    // 2. Context hints (with a human-aware reply anchor).
-    //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
-    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
-    //   - top-level     → anchor to the triggering event (it becomes the root)
-    // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
+fn format_cancelled_context(
+    batch: &FlushBatch,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<String> {
+    if batch.cancelled_events.is_empty() {
+        return None;
+    }
+    let disposition = match batch.cancel_reason.unwrap_or(CancelReason::Steer) {
+        CancelReason::Interrupt => "superseded",
+        CancelReason::Steer => "continue_prior_work",
+    };
+    let mut section = format!("<interrupted-turn disposition=\"{disposition}\">");
+    for event in &batch.cancelled_events {
+        section.push('\n');
+        section.push_str(&format_event_block(event, profile_lookup));
+    }
+    section.push_str("\n</interrupted-turn>");
+    Some(section)
+}
+
+fn format_delivery_contract(
+    batch: &FlushBatch,
+    last: &BatchEvent,
+    channel_info: Option<&PromptChannelInfo>,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> String {
+    let thread = parse_thread_tags(&last.event);
+    let is_dm = channel_info
+        .map(|info| info.channel_type == "dm")
+        .unwrap_or(false);
+    let sender = last.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
+        thread
             .root_event_id
             .is_some()
-            .then(|| last_event.event.id.to_hex())
+            .then(|| last.event.id.to_hex())
     } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
+        resolve_reply_anchor(&sender, &thread, &last.event.id.to_hex(), profile_lookup)
     };
-    sections.push(format_context_hints(
-        batch.channel_id,
-        args.channel_info,
-        &thread_tags,
+    let scope = if is_dm {
+        "dm"
+    } else if thread.root_event_id.is_some() {
+        "thread"
+    } else {
+        "channel"
+    };
+    let mut attributes = vec![
+        format!("channel_id=\"{}\"", batch.channel_id),
+        format!("scope=\"{scope}\""),
+    ];
+    if let Some(reply_to) = reply_anchor.as_deref() {
+        attributes.push(format!("reply_to=\"{}\"", escape_attribute(reply_to)));
+    }
+    if !batch.cancelled_events.is_empty() {
+        let disposition = match batch.cancel_reason.unwrap_or(CancelReason::Steer) {
+            CancelReason::Interrupt => "supersede_prior_work",
+            CancelReason::Steer => "continue_prior_work",
+        };
+        attributes.push(format!("merge_disposition=\"{disposition}\""));
+    }
+    format!("<delivery {} />", attributes.join(" "))
+}
+
+/// Compile one turn into deterministic semantic prompt blocks and the exact
+/// content manifest used for encrypted diagnostics.
+pub(crate) fn compile_prompt(
+    batch: &FlushBatch,
+    args: &FormatPromptArgs<'_>,
+) -> Option<CompiledContext> {
+    let Some(last) = batch.events.last() else {
+        tracing::error!("compile_prompt called with empty batch");
+        return None;
+    };
+    let is_dm = args
+        .channel_info
+        .map(|info| info.channel_type == "dm")
+        .unwrap_or(false);
+    let channel_snapshot = format_channel_snapshot(args.channel_info);
+    let recent_truncated = args
+        .conversation_context
+        .is_some_and(|context| match context {
+            ConversationContext::Thread { truncated, .. }
+            | ConversationContext::Dm { truncated, .. } => *truncated,
+        });
+    let context_status = format_context_status(
+        batch,
+        last,
         is_dm,
         args.conversation_context.is_some(),
+        recent_truncated,
         args.conversation_context_had_delivered_events,
-        reply_anchor.as_deref(),
-    ));
-
-    // 3. Conversation context (thread or DM).
-    if let Some(ctx) = args.conversation_context {
-        sections.push(format_conversation_context(ctx, args.profile_lookup));
-    }
-
-    // 4. Cancelled + re-prompt framing. When a turn was cancelled to deliver
-    //    new events mid-flight, the merged prompt is framed two ways depending
-    //    on why it was cancelled (see [`CancelReason`]):
-    //    - `Interrupt`: the new request *supersedes* the interrupted work.
-    //    - `Steer` (default): a message arrived while the agent was working; it
-    //      should *continue* its work and weave the message in if relevant.
-    let has_cancelled = !batch.cancelled_events.is_empty();
-    let framing = MergeFraming::for_reason(batch.cancel_reason);
-
-    // 4a. Cancelled events section.
-    if has_cancelled {
-        let mut s = framing.prior_header.to_string();
-        for (i, be) in batch.cancelled_events.iter().enumerate() {
-            s.push_str(&format!(
-                "\n\n--- Event {} ({}) ---\n{}",
-                i + 1,
-                be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
-            ));
+    );
+    let recent_delta = args
+        .conversation_context
+        .map(|context| format_conversation_context(context, args.profile_lookup));
+    let recent_version = args.conversation_context.map(conversation_context_version);
+    let interrupted = format_cancelled_context(batch, args.profile_lookup);
+    let current_instruction = format_current_instruction(batch, args.profile_lookup);
+    let delivery = format_delivery_contract(batch, last, args.channel_info, args.profile_lookup);
+    let legacy_prefix = if !args.has_system_prompt_support && !args.standing_context_sent {
+        StandingContext {
+            base_prompt: args.base_prompt,
+            system_prompt: args.system_prompt,
+            team_instructions: args.team_instructions,
+            agent_core: args.agent_core,
+            huddle_instructions: args.huddle_instructions,
+            agent_canvas: args.agent_canvas,
         }
-        sections.push(s);
-    }
-
-    // 4b. Event block(s).
-    let event_section = if batch.events.len() == 1 {
-        let be = &batch.events[0];
-        if has_cancelled {
-            format!(
-                "{}\n\n--- Event 1 ({}) ---\n{}",
-                framing.new_header_single,
-                be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
-            )
-        } else {
-            format!(
-                "[Buzz event: {}]\n{}",
-                be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
-            )
-        }
+        .sections()
     } else {
-        let header = if has_cancelled {
-            format!(
-                "{} — {} events]",
-                framing.new_header_multi_prefix,
-                batch.events.len()
-            )
-        } else {
-            format!("[Buzz events — {} events]", batch.events.len())
-        };
-        let mut s = header;
-        for (i, be) in batch.events.iter().enumerate() {
-            s.push_str(&format!(
-                "\n\n--- Event {} ({}) ---\n{}",
-                i + 1,
-                be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
-            ));
-        }
-        s
+        Vec::new()
     };
-    sections.push(event_section);
 
-    // 4c. Closing note for cancel + re-prompt.
-    if has_cancelled {
-        sections.push(framing.closing_note.to_string());
+    let persona_and_team = [
+        args.system_prompt,
+        args.team_instructions,
+        args.huddle_instructions,
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    let channel_truncated = !is_dm
+        && normalized_channel_description(args.channel_info)
+            .is_some_and(|description| description.truncated);
+    let current_version = (batch.events.len() == 1).then(|| batch.events[0].event.id.to_hex());
+
+    let mut compiler = ContextCompiler::new(current_instruction.clone(), delivery.clone())
+        .with_legacy_prefix(legacy_prefix)
+        .with_ambient(Some(context_status.clone()))
+        .with_ambient(Some(channel_snapshot.clone()))
+        .with_ambient(recent_delta.clone())
+        .with_ambient(interrupted.clone())
+        .with_layer(ContextLayerInput {
+            order: 1,
+            layer: "platform_contract",
+            scope: "runtime",
+            source: "base_prompt",
+            authority: "instructions",
+            freshness: "configured",
+            content: args.base_prompt.unwrap_or_default(),
+            version: None,
+            truncated: false,
+        })
+        .with_layer(ContextLayerInput {
+            order: 2,
+            layer: "persona_and_team_guidance",
+            scope: "agent_community",
+            source: "agent_configuration",
+            authority: "instructions",
+            freshness: "configured",
+            content: &persona_and_team,
+            version: None,
+            truncated: false,
+        })
+        .with_layer(ContextLayerInput {
+            order: 3,
+            layer: "core_memory",
+            scope: "agent_owner",
+            source: "core_engram",
+            authority: "advisory_context",
+            freshness: "session_start",
+            content: args.agent_core.unwrap_or_default(),
+            version: None,
+            truncated: false,
+        })
+        .with_layer(ContextLayerInput {
+            order: 4,
+            layer: "channel_snapshot",
+            scope: "channel",
+            source: "channel_metadata",
+            authority: "shared_evidence",
+            freshness: "cached",
+            content: &channel_snapshot,
+            version: None,
+            truncated: channel_truncated,
+        })
+        .with_layer(ContextLayerInput {
+            order: 4,
+            layer: "channel_canvas",
+            scope: "channel",
+            source: "channel_canvas",
+            authority: "shared_evidence",
+            freshness: "session_start",
+            content: args.agent_canvas.unwrap_or_default(),
+            version: None,
+            truncated: false,
+        })
+        .with_layer(ContextLayerInput {
+            order: 6,
+            layer: "context_status",
+            scope: "turn",
+            source: "delivery_state",
+            authority: "evidence",
+            freshness: "current",
+            content: &context_status,
+            version: None,
+            truncated: false,
+        });
+    if let Some(recent_delta) = recent_delta.as_deref() {
+        let recent_scope = match args.conversation_context {
+            Some(ConversationContext::Dm { .. }) => "dm",
+            _ => "thread",
+        };
+        compiler = compiler.with_layer(ContextLayerInput {
+            order: 6,
+            layer: "recent_thread_delta",
+            scope: recent_scope,
+            source: "relay_events",
+            authority: "evidence",
+            freshness: "current",
+            content: recent_delta,
+            version: recent_version.as_deref(),
+            truncated: recent_truncated,
+        });
     }
-
-    sections
+    if let Some(interrupted) = interrupted.as_deref() {
+        compiler = compiler.with_layer(ContextLayerInput {
+            order: 6,
+            layer: "interrupted_turn",
+            scope: "thread",
+            source: "cancelled_events",
+            authority: "evidence",
+            freshness: "current",
+            content: interrupted,
+            version: None,
+            truncated: false,
+        });
+    }
+    Some(
+        compiler
+            .with_layer(ContextLayerInput {
+                order: 7,
+                layer: "current_instruction",
+                scope: "turn",
+                source: "nostr_event",
+                authority: "authoritative",
+                freshness: "current",
+                content: &current_instruction,
+                version: current_version.as_deref(),
+                truncated: false,
+            })
+            .with_layer(ContextLayerInput {
+                order: 8,
+                layer: "delivery_contract",
+                scope: "turn",
+                source: "buzz_routing",
+                authority: "routing_constraint",
+                freshness: "current",
+                content: &delivery,
+                version: None,
+                truncated: false,
+            })
+            .compile(),
+    )
 }
 
-/// Prompt-framing strings for a merged (cancel + re-prompt) turn, selected by
-/// [`CancelReason`]. `Interrupt` frames the new events as superseding the prior
-/// work; `Steer` (the default mid-turn path) frames them as messages that
-/// arrived while the agent was working, to be woven in without abandoning the
-/// in-progress task.
-struct MergeFraming {
-    /// Header for the prior (cancelled) events section.
-    prior_header: &'static str,
-    /// Header for a single newly-arrived event.
-    new_header_single: &'static str,
-    /// Header prefix for multiple newly-arrived events; ` — N events]` is
-    /// appended (note the unclosed `[`).
-    new_header_multi_prefix: &'static str,
-    /// Closing instruction appended after the event block(s).
-    closing_note: &'static str,
-}
-
-impl MergeFraming {
-    fn for_reason(reason: Option<CancelReason>) -> Self {
-        match reason {
-            // Default to steer framing if a merge somehow lacks a reason: the
-            // gentler "continue your work" wording is the safer fallback.
-            None | Some(CancelReason::Steer) => MergeFraming {
-                // We never capture the agent's partial work — session/cancel is
-                // terminal and returns nothing — so this section holds the
-                // *original request*, not a transcript. The header must not
-                // overclaim preserved state (per Dawn's framing review).
-                prior_header: "[What you were working on]",
-                new_header_single: "[New message — arrived while you were working]",
-                new_header_multi_prefix: "[New messages — arrived while you were working",
-                closing_note: "Note: A new message arrived while you were working. Continue your \
-                     in-progress work and incorporate the new message if it's relevant; if it's \
-                     unrelated, you may briefly acknowledge it and carry on.",
-            },
-            Some(CancelReason::Interrupt) => MergeFraming {
-                prior_header: "[Previous request — interrupted before completion]",
-                new_header_single: "[New request — supersedes previous]",
-                new_header_multi_prefix: "[New request — supersedes previous",
-                closing_note: "Note: The previous request was interrupted. Please address the new \
-                     request.\nIf the new request is unrelated to the previous one, you may \
-                     briefly acknowledge the interruption.",
-            },
-        }
-    }
+/// Compatibility wrapper for callers and snapshots that only need prompt
+/// blocks. Production dispatch calls [`compile_prompt`] to retain the manifest.
+#[cfg(test)]
+pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<String> {
+    compile_prompt(batch, args)
+        .map(|compiled| compiled.prompt_sections)
+        .unwrap_or_default()
 }
 
 /// Framing strings for the goose-native steer path (lib.rs mode-gate),
-/// pulled from the same source-of-truth as the cancel+merge fallback
-/// (`MergeFraming::for_reason(Some(CancelReason::Steer))`).
+/// semantically matching the `continue_prior_work` disposition emitted by the
+/// compiler for the cancel+merge fallback.
 ///
 /// Returns `(new_header_single, closing_note)`. Native-steer renders only
 /// the new-message header + the single event block + the closing note —
@@ -1752,14 +1789,18 @@ impl MergeFraming {
 /// "weave it in, don't abandon your work" orientation (Eva's drift-proof
 /// requirement: native and fallback must not diverge in UX).
 pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
-    let framing = MergeFraming::for_reason(Some(CancelReason::Steer));
-    (framing.new_header_single, framing.closing_note)
+    (
+        "[New message — arrived while you were working]",
+        "Note: A new message arrived while you were working. Continue your in-progress work and \
+         incorporate the new message if it's relevant; if it's unrelated, you may briefly \
+         acknowledge it and carry on.",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use std::time::Duration;
 
     /// Build a test event with the given content and kind.
@@ -1791,22 +1832,23 @@ mod tests {
         }
     }
 
-    /// Build a QueuedEvent with an explicit Nostr `created_at` timestamp.
-    fn make_queued_created_at(
+    fn make_thread_queued(
         channel_id: Uuid,
+        keys: &Keys,
+        root: &str,
         content: &str,
-        created_at_secs: u64,
+        received_at: Instant,
+        created_at: Option<u64>,
     ) -> QueuedEvent {
-        let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(9), content)
-            .custom_created_at(Timestamp::from(created_at_secs))
-            .tags([])
-            .sign_with_keys(&keys)
-            .unwrap();
+        let mut builder = EventBuilder::new(Kind::Custom(9), content)
+            .tags([Tag::parse(["e", root, "", "reply"]).expect("valid thread tag")]);
+        if let Some(created_at) = created_at {
+            builder = builder.custom_created_at(Timestamp::from(created_at));
+        }
         QueuedEvent {
             channel_id,
-            event,
-            received_at: Instant::now(),
+            event: builder.sign_with_keys(keys).unwrap(),
+            received_at,
             prompt_tag: "test".into(),
         }
     }
@@ -1821,12 +1863,14 @@ mod tests {
 
     #[test]
     fn test_base_section_prepends_header_and_trims_trailing_whitespace() {
-        // Trailing whitespace/newlines are stripped; the [Base] header is
-        // prepended exactly once with a single newline separator.
-        assert_eq!(base_section("hello  \n\n"), "[Base]\nhello");
-        assert_eq!(base_section("hello"), "[Base]\nhello");
+        // Trailing whitespace is stripped and the boundary appears once.
+        assert_eq!(base_section("hello  \n\n"), "<base>\nhello\n</base>");
+        assert_eq!(base_section("hello"), "<base>\nhello\n</base>");
         // Internal newlines and leading whitespace are preserved verbatim.
-        assert_eq!(base_section("  line1\nline2 "), "[Base]\n  line1\nline2");
+        assert_eq!(
+            base_section("  line1\nline2 "),
+            "<base>\n  line1\nline2\n</base>"
+        );
     }
 
     #[test]
@@ -1890,10 +1934,13 @@ mod tests {
     fn test_batch_drain_all_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
+        let keys = Keys::generate();
+        let root = "a".repeat(64);
+        let now = Instant::now();
 
-        q.push(make_queued(ch, "msg1"));
-        q.push(make_queued(ch, "msg2"));
-        q.push(make_queued(ch, "msg3"));
+        q.push(make_thread_queued(ch, &keys, &root, "msg1", now, None));
+        q.push(make_thread_queued(ch, &keys, &root, "msg2", now, None));
+        q.push(make_thread_queued(ch, &keys, &root, "msg3", now, None));
 
         assert_eq!(pending_count(&q), 3);
 
@@ -1918,9 +1965,26 @@ mod tests {
         // chronological regardless of delivery order.
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
+        let keys = Keys::generate();
+        let root = "b".repeat(64);
+        let now = Instant::now();
 
-        q.push(make_queued_created_at(ch, "newest", 2_000));
-        q.push(make_queued_created_at(ch, "oldest", 1_000));
+        q.push(make_thread_queued(
+            ch,
+            &keys,
+            &root,
+            "newest",
+            now,
+            Some(2_000),
+        ));
+        q.push(make_thread_queued(
+            ch,
+            &keys,
+            &root,
+            "oldest",
+            now,
+            Some(1_000),
+        ));
 
         let batch = q.flush_next().expect("should return batch");
         assert_eq!(batch.events.len(), 2);
@@ -1932,8 +1996,8 @@ mod tests {
         let newest_id = batch.events[1].event.id.to_hex();
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {newest_id}")),
-            "reply anchor must target the newest event; prompt was:\n{prompt}"
+            prompt.contains(&format!("event_id=\"{newest_id}\"")),
+            "current instruction must identify the newest event; prompt was:\n{prompt}"
         );
     }
 
@@ -1988,41 +2052,6 @@ mod tests {
         assert!(q.flush_next().is_none());
     }
 
-    #[test]
-    fn test_format_prompt_single() {
-        let ch = Uuid::new_v4();
-        let event = make_event("Hello @agent");
-        let npub = event
-            .pubkey
-            .to_bech32()
-            .unwrap_or_else(|_| event.pubkey.to_hex());
-
-        let batch = FlushBatch {
-            channel_id: ch,
-            events: vec![BatchEvent {
-                event,
-                prompt_tag: "@mention".into(),
-                received_at: Instant::now(),
-            }],
-            cancelled_events: vec![],
-            cancel_reason: None,
-        };
-
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-
-        // Should contain [Context] section before the event.
-        assert!(prompt.contains("[Context]"));
-        assert!(prompt.contains("Scope: channel"));
-        assert!(prompt.contains("[Buzz event: @mention]\n"));
-        assert!(prompt.contains(&format!("Channel: {}", ch)));
-        assert!(prompt.contains(&format!("From: {}", npub)));
-        assert!(prompt.contains("Content: Hello @agent"));
-        // Event ID should be present.
-        assert!(prompt.contains("Event ID:"));
-        // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
-        assert!(!prompt.contains("--- Event 1 ---"));
-    }
-
     /// Helper: build a merged (cancel + re-prompt) batch with one cancelled
     /// event and one new event, framed by `reason`.
     fn make_merged_batch(reason: Option<CancelReason>) -> FlushBatch {
@@ -2048,15 +2077,13 @@ mod tests {
         let batch = make_merged_batch(Some(CancelReason::Steer));
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Steer framing: the new message "arrived while you were working" and
-        // the agent should "continue" — NOT supersede framing.
         assert!(
-            prompt.contains("arrived while you were working"),
-            "steer prompt should frame the new message as arriving mid-task: {prompt}"
+            prompt.contains("<interrupted-turn disposition=\"continue_prior_work\">"),
+            "steer prompt should preserve prior work as ambient task state: {prompt}"
         );
         assert!(
-            prompt.contains("Continue your"),
-            "steer prompt should instruct the agent to continue its work: {prompt}"
+            prompt.contains("merge_disposition=\"continue_prior_work\""),
+            "steer delivery should instruct the agent to continue its work: {prompt}"
         );
         assert!(
             !prompt.contains("supersedes"),
@@ -2072,13 +2099,12 @@ mod tests {
         let batch = make_merged_batch(Some(CancelReason::Interrupt));
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Interrupt framing: the new request supersedes the previous one.
         assert!(
-            prompt.contains("supersedes previous"),
+            prompt.contains("merge_disposition=\"supersede_prior_work\""),
             "interrupt prompt should use supersede framing: {prompt}"
         );
         assert!(
-            prompt.contains("interrupted before completion"),
+            prompt.contains("<interrupted-turn disposition=\"superseded\">"),
             "interrupt prompt should label the prior work as interrupted: {prompt}"
         );
         assert!(
@@ -2089,12 +2115,11 @@ mod tests {
 
     #[test]
     fn test_format_prompt_no_reason_defaults_to_steer_framing() {
-        // A merged batch with no recorded reason falls back to the gentler
-        // steer framing (the safer default — see MergeFraming::for_reason).
+        // A merged batch with no recorded reason falls back to continue.
         let batch = make_merged_batch(None);
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains("arrived while you were working"),
+            prompt.contains("merge_disposition=\"continue_prior_work\""),
             "unset reason should default to steer framing: {prompt}"
         );
         assert!(!prompt.contains("supersedes"));
@@ -2130,25 +2155,19 @@ mod tests {
         assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
         let prompt = format_prompt(&merged, &FormatPromptArgs::default()).join("\n\n");
 
-        // Steer framing — "arrived while you were working" / "Continue", never
-        // supersede — survives the full queue→render path.
         assert!(
-            prompt.contains("arrived while you were working"),
+            prompt.contains("<interrupted-turn disposition=\"continue_prior_work\">"),
             "end-to-end steer prompt must carry steer framing: {prompt}"
         );
         assert!(
-            prompt.contains("Continue your"),
+            prompt.contains("merge_disposition=\"continue_prior_work\""),
             "end-to-end steer prompt must instruct continue: {prompt}"
         );
         assert!(
             !prompt.contains("supersedes"),
             "end-to-end steer prompt must NOT supersede: {prompt}"
         );
-        // The honest prior header (no overclaimed partial-work capture).
-        assert!(
-            prompt.contains("[What you were working on]"),
-            "steer prior header must be the honest variant: {prompt}"
-        );
+        assert!(prompt.contains("<ambient-context>"));
         // Both the original work and the steering message survive the merge.
         assert!(prompt.contains("draft the migration plan"));
         assert!(prompt.contains("actually scope it to v2 only"));
@@ -2180,7 +2199,8 @@ mod tests {
             cancel_reason: Some(CancelReason::Steer),
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        assert!(prompt.contains("New messages — arrived while you were working — 2 events]"));
+        assert_eq!(prompt.matches("<event ").count(), 3);
+        assert!(prompt.contains("merge_disposition=\"continue_prior_work\""));
         assert!(!prompt.contains("supersedes"));
     }
 
@@ -2237,16 +2257,16 @@ mod tests {
         // human-aware reply anchoring from PR #1281: for human-facing turns in
         // a thread, the anchor is always the thread root.
         assert!(
-            prompt.contains(&format!("--reply-to {thread_b}")),
+            prompt.contains(&format!("reply_to=\"{thread_b}\"")),
             "reply instruction should target the steering thread root: {prompt}"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {thread_a}")),
+            !prompt.contains(&format!("reply_to=\"{thread_a}\"")),
             "reply instruction must NOT target the original thread: {prompt}"
         );
         // Steer framing still frames the original as in-progress work to continue.
-        assert!(prompt.contains("[What you were working on]"));
-        assert!(prompt.contains("arrived while you were working"));
+        assert!(prompt.contains("<interrupted-turn disposition=\"continue_prior_work\">"));
+        assert!(prompt.contains("merge_disposition=\"continue_prior_work\""));
         assert!(!prompt.contains("supersedes"));
     }
 
@@ -2256,8 +2276,11 @@ mod tests {
     fn test_requeue_preserves_events() {
         let mut queue = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
-        queue.push(make_queued(ch, "msg1"));
-        queue.push(make_queued(ch, "msg2"));
+        let keys = Keys::generate();
+        let root = "1".repeat(64);
+        let now = Instant::now();
+        queue.push(make_thread_queued(ch, &keys, &root, "msg1", now, None));
+        queue.push(make_thread_queued(ch, &keys, &root, "msg2", now, None));
 
         let batch = queue.flush_next().unwrap();
         assert_eq!(batch.events.len(), 2);
@@ -2291,8 +2314,11 @@ mod tests {
     fn test_retry_throttled_batch_is_undispatched_but_not_flushable() {
         let mut queue = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
-        queue.push(make_queued(ch, "msg1"));
-        queue.push(make_queued(ch, "msg2"));
+        let keys = Keys::generate();
+        let root = "2".repeat(64);
+        let now = Instant::now();
+        queue.push(make_thread_queued(ch, &keys, &root, "msg1", now, None));
+        queue.push(make_thread_queued(ch, &keys, &root, "msg2", now, None));
 
         // Drive a real failure → requeue-with-backoff → mark_complete cycle.
         let batch = queue.flush_next().unwrap();
@@ -2411,11 +2437,11 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        assert!(prompt.contains("[Context]"));
-        assert!(prompt.contains("[Buzz events — 3 events]"));
-        assert!(prompt.contains("--- Event 1 (tag-a) ---"));
-        assert!(prompt.contains("--- Event 2 (tag-b) ---"));
-        assert!(prompt.contains("--- Event 3 (tag-c) ---"));
+        assert!(prompt.contains("<buzz-turn>"));
+        assert_eq!(prompt.matches("<event ").count(), 3);
+        assert!(prompt.contains("type=\"tag-a\""));
+        assert!(prompt.contains("type=\"tag-b\""));
+        assert!(prompt.contains("type=\"tag-c\""));
         assert!(prompt.contains("Content: first message"));
         assert!(prompt.contains("Content: second message"));
         assert!(prompt.contains("Content: third message"));
@@ -2442,7 +2468,7 @@ mod tests {
         // so they must NOT appear in the user message.
         assert!(!prompt.contains("[System]"));
         assert!(!prompt.contains("[Base]"));
-        assert!(prompt.starts_with("[Context]"));
+        assert!(prompt.starts_with("<buzz-turn>"));
     }
 
     #[test]
@@ -2469,8 +2495,8 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"),
-            "expected core block first, then [Context]; got: {prompt}"
+            prompt.starts_with("<core-memory>\nbe helpful\n</core-memory>\n\n<buzz-turn>"),
+            "expected core block first, then the Buzz turn; got: {prompt}"
         );
     }
 
@@ -2501,10 +2527,10 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("[Agent Memory — core]"),
+            !prompt.contains("<core-memory>"),
             "modern agents must not get core in the user message; got: {prompt}"
         );
-        assert!(prompt.starts_with("[Context]"));
+        assert!(prompt.starts_with("<buzz-turn>"));
     }
 
     #[test]
@@ -2530,7 +2556,7 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"));
+        assert!(prompt.starts_with("<core-memory>\nbe helpful\n</core-memory>\n\n<buzz-turn>"));
     }
 
     #[test]
@@ -2554,7 +2580,7 @@ mod tests {
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(!prompt.contains("[Base]"));
         assert!(!prompt.contains("[System]"));
-        assert!(prompt.starts_with("[Context]"));
+        assert!(prompt.starts_with("<buzz-turn>"));
     }
 
     #[test]
@@ -2588,19 +2614,19 @@ mod tests {
 
         // Both sections must be present
         assert!(
-            prompt.contains("[Base]\ntest base prompt"),
-            "missing [Base] section"
+            prompt.contains("<base>\ntest base prompt\n</base>"),
+            "missing <base> section"
         );
         assert!(
-            prompt.contains("[System]\ntest system prompt"),
-            "missing [System] section"
+            prompt.contains("<system>\ntest system prompt\n</system>"),
+            "missing <system> section"
         );
 
-        // [Base] and [System] must appear BEFORE [Agent Memory] and [Context]
-        let base_pos = prompt.find("[Base]").unwrap();
-        let system_pos = prompt.find("[System]").unwrap();
-        let core_pos = prompt.find("[Agent Memory").unwrap();
-        let context_pos = prompt.find("[Context]").unwrap();
+        // Standing context must appear before the dynamic turn envelope.
+        let base_pos = prompt.find("<base>").unwrap();
+        let system_pos = prompt.find("<system>").unwrap();
+        let core_pos = prompt.find("<core-memory>").unwrap();
+        let context_pos = prompt.find("<buzz-turn").unwrap();
 
         assert!(base_pos < system_pos, "[Base] should come before [System]");
         assert!(
@@ -2609,7 +2635,7 @@ mod tests {
         );
         assert!(
             core_pos < context_pos,
-            "[Agent Memory] should come before [Context]"
+            "[Agent Memory] should come before <buzz-turn>"
         );
     }
 
@@ -2648,17 +2674,17 @@ mod tests {
         let later = format_prompt(&batch, &args(true)).join("\n\n");
 
         for section in [
-            "[Base]",
-            "[System]",
-            "[Team Instructions]",
-            "[Agent Memory — core]",
-            "[Channel Canvas]",
+            "<base>",
+            "<system>",
+            "<team-instructions>",
+            "<core-memory>",
+            "<channel-canvas>",
         ] {
             assert!(first.contains(section), "first message missing {section}");
             assert!(!later.contains(section), "turn 2 repeated {section}");
         }
         // What the turn is actually about survives, and now leads.
-        assert!(later.starts_with("[Context]"), "got: {later}");
+        assert!(later.starts_with("<buzz-turn>"), "got: {later}");
         assert!(later.contains("hello"));
         assert!(
             later.len() < first.len(),
@@ -2704,7 +2730,7 @@ mod tests {
             !prompt.contains("[System]"),
             "[System] should be suppressed for modern agents"
         );
-        assert!(prompt.starts_with("[Context]"));
+        assert!(prompt.starts_with("<buzz-turn>"));
     }
 
     #[test]
@@ -2744,22 +2770,20 @@ mod tests {
         )
         .join("\n\n");
 
-        // Verify section ordering: [Agent Memory] < [Context] < [Thread Context]
-        let core_pos = prompt
-            .find("[Agent Memory")
-            .expect("[Agent Memory] missing");
-        let context_pos = prompt.find("[Context]").expect("[Context] missing");
+        // Verify standing context precedes the semantic turn and recent delta.
+        let core_pos = prompt.find("<core-memory>").expect("<core-memory> missing");
+        let context_pos = prompt.find("<buzz-turn").expect("<buzz-turn> missing");
         let thread_pos = prompt
-            .find("[Thread Context")
-            .expect("[Thread Context] missing");
+            .find("<recent-thread-delta")
+            .expect("<recent-thread-delta> missing");
 
         assert!(
             core_pos < context_pos,
-            "[Agent Memory] must come before [Context]"
+            "<core-memory> must come before <buzz-turn>"
         );
         assert!(
             context_pos < thread_pos,
-            "[Context] must come before [Thread Context]"
+            "<buzz-turn> must come before <recent-thread-delta>"
         );
         // No [Base] or [System] in user message
         assert!(!prompt.contains("[Base]"));
@@ -3277,8 +3301,8 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.contains("engineering (#"));
-        assert!(prompt.contains("Scope: channel"));
+        assert!(prompt.contains("Channel: engineering"));
+        assert!(prompt.contains("scope=\"channel\""));
     }
 
     #[test]
@@ -3309,7 +3333,7 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.contains("Scope: dm"));
+        assert!(prompt.contains("scope=\"dm\""));
     }
 
     #[test]
@@ -3336,9 +3360,9 @@ mod tests {
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        assert!(prompt.contains("Scope: thread"));
+        assert!(prompt.contains("scope=\"thread\""));
         assert!(prompt.contains(
-            "Thread root: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "thread_root=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
         ));
     }
 
@@ -3391,9 +3415,11 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.contains("[Thread Context (2 of 5 messages, truncated)]"));
+        assert!(
+            prompt.contains("<recent-thread-delta included=\"2\" total=\"5\" truncated=\"true\">")
+        );
         assert!(prompt.contains("Let's refactor auth"));
-        assert!(prompt.contains("Thread context included below"));
+        assert!(prompt.contains("Scope: thread"));
     }
 
     #[test]
@@ -3435,8 +3461,10 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.contains("Scope: dm"));
-        assert!(prompt.contains("[Conversation Context (1 of 1 messages)]"));
+        assert!(prompt.contains("scope=\"dm\""));
+        assert!(
+            prompt.contains("<recent-thread-delta included=\"1\" total=\"1\" truncated=\"false\">")
+        );
         assert!(prompt.contains("Can you deploy?"));
     }
 
@@ -3500,11 +3528,13 @@ mod tests {
         )
         .join("\n\n");
 
-        assert!(prompt.contains("From: Wes (npub:"));
+        assert!(prompt.contains(&format!(
+            "<event type=\"mention\" actor=\"{author_hex}\" author=\"Wes\""
+        )));
         assert!(prompt.contains(
-            "mentions=[Rick (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)]"
+            "mentions=\"Rick (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)\""
         ));
-        assert!(prompt.contains("[1] Wes ("));
+        assert!(prompt.contains("Wes:"));
     }
 
     #[test]
@@ -3647,7 +3677,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_prompt_dm_reply_hints_get_thread() {
+    fn test_format_prompt_dm_reply_omits_hint_when_history_is_complete() {
         let ch = Uuid::new_v4();
         // DM reply event — has thread e-tags.
         let event = make_event_with_tags(
@@ -3697,18 +3727,16 @@ mod tests {
         .join("\n\n");
         // Scope should be "dm", not "thread".
         assert!(
-            prompt.contains("Scope: dm"),
-            "DM reply should have Scope: dm, got:\n{prompt}"
+            prompt.contains("scope=\"dm\""),
+            "DM reply should have dm scope, got:\n{prompt}"
         );
-        // Hint should point to the thread command, not get.
-        assert!(
-            prompt.contains("buzz messages thread"),
-            "DM reply hint should mention `buzz messages thread`, got:\n{prompt}"
-        );
+        // Complete recent history needs no repeated retrieval hint.
+        assert!(!prompt.contains("buzz messages thread"));
+        assert!(prompt.contains("<recent-thread-delta"));
         // Thread structural info should be present.
         assert!(
             prompt.contains(
-                "Thread root: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "thread_root=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
             ),
             "DM reply should include thread root"
         );
@@ -3740,8 +3768,7 @@ mod tests {
         };
 
         let trigger_only_prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        assert!(trigger_only_prompt.contains("fetch thread context"));
-        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+        assert!(trigger_only_prompt.contains("History: not loaded"));
 
         let prompt = format_prompt(
             &batch,
@@ -3752,10 +3779,9 @@ mod tests {
         )
         .join("\n\n");
 
-        assert!(prompt.contains("Earlier thread context was already delivered in this session"));
+        assert!(prompt.contains("History: already delivered"));
         assert!(prompt.contains("buzz messages thread"));
-        assert!(!prompt.contains("Thread context included below"));
-        assert!(!prompt.contains("[Thread Context"));
+        assert!(!prompt.contains("<recent-thread-delta"));
     }
 
     #[test]
@@ -3785,8 +3811,7 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(trigger_only_prompt.contains("for conversation context"));
-        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+        assert!(trigger_only_prompt.contains("History: not loaded"));
 
         let prompt = format_prompt(
             &batch,
@@ -3798,12 +3823,9 @@ mod tests {
         )
         .join("\n\n");
 
-        assert!(
-            prompt.contains("Earlier conversation context was already delivered in this session")
-        );
+        assert!(prompt.contains("History: already delivered"));
         assert!(prompt.contains("buzz messages get"));
-        assert!(!prompt.contains("Conversation context included below"));
-        assert!(!prompt.contains("[Conversation Context"));
+        assert!(!prompt.contains("<recent-thread-delta"));
     }
 
     #[test]
@@ -3835,7 +3857,7 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.contains("Scope: dm"));
+        assert!(prompt.contains("scope=\"dm\""));
         assert!(
             prompt.contains("buzz messages get"),
             "DM non-reply hint should mention `buzz messages get`"
@@ -3864,17 +3886,16 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("Event ID: {event_id}")),
+            prompt.contains(&format!("event_id=\"{event_id}\"")),
             "prompt should contain the event ID"
         );
     }
 
     #[test]
-    fn test_format_event_block_includes_hex_and_npub() {
+    fn test_format_event_block_includes_actor_hex_without_duplicate_npub() {
         let ch = Uuid::new_v4();
         let event = make_event("test");
         let hex = event.pubkey.to_hex();
-        let npub = event.pubkey.to_bech32().unwrap();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3887,33 +3908,8 @@ mod tests {
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        assert!(
-            prompt.contains(&format!("From: {npub} (hex: {hex})")),
-            "prompt should contain both npub and hex"
-        );
-    }
-
-    #[test]
-    fn test_format_event_block_always_includes_tags() {
-        let ch = Uuid::new_v4();
-        // Kind 9 (stream message) — tags were previously stripped.
-        let event = make_event_with_tags("hello", vec![vec!["h".into(), ch.to_string()]]);
-        let batch = FlushBatch {
-            channel_id: ch,
-            events: vec![BatchEvent {
-                event,
-                prompt_tag: "test".into(),
-                received_at: Instant::now(),
-            }],
-            cancelled_events: vec![],
-            cancel_reason: None,
-        };
-
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        assert!(
-            prompt.contains("Tags:"),
-            "tags should always be included, even for stream messages"
-        );
+        assert!(prompt.contains(&format!("actor=\"{hex}\"")));
+        assert!(!prompt.contains("actor_npub="));
     }
 
     #[test]
@@ -4068,10 +4064,13 @@ mod tests {
     fn test_requeue_as_cancelled_merges_in_flush_next() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
+        let keys = Keys::generate();
+        let root = "3".repeat(64);
+        let now = Instant::now();
 
         // Push 2 events, flush into a batch.
-        q.push(make_queued(ch, "old-1"));
-        q.push(make_queued(ch, "old-2"));
+        q.push(make_thread_queued(ch, &keys, &root, "old-1", now, None));
+        q.push(make_thread_queued(ch, &keys, &root, "old-2", now, None));
         let batch = q.flush_next().unwrap();
         assert_eq!(batch.events.len(), 2);
 
@@ -4219,10 +4218,13 @@ mod tests {
     fn test_double_cancel_preserves_all_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
+        let keys = Keys::generate();
+        let root = "4".repeat(64);
+        let now = Instant::now();
 
         // First flush: 2 events.
-        q.push(make_queued(ch, "orig-1"));
-        q.push(make_queued(ch, "orig-2"));
+        q.push(make_thread_queued(ch, &keys, &root, "orig-1", now, None));
+        q.push(make_thread_queued(ch, &keys, &root, "orig-2", now, None));
         let batch1 = q.flush_next().unwrap();
         assert_eq!(batch1.events.len(), 2);
 
@@ -4280,17 +4282,11 @@ mod tests {
         // triggering event id.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
+            prompt.contains(&format!("reply_to=\"{root_id}\"")),
             "human-facing thread reply should anchor to the thread root"
         );
-        assert!(
-            prompt.contains("For ordinary replies in this turn"),
-            "channel thread reply should describe reply-to as the default"
-        );
-        assert!(
-            prompt.contains("send that message without `--reply-to`"),
-            "channel thread reply should allow explicit channel-root/top-level requests"
-        );
+        assert!(!prompt.contains("reply_policy="));
+        assert!(!prompt.contains("explicit_broadcast_may_omit_reply_to="));
         assert!(
             !prompt.contains("Do not broadcast to the channel"),
             "reply instruction should not forbid explicit human-requested root posts"
@@ -4331,7 +4327,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
+            prompt.contains(&format!("reply_to=\"{event_id}\"")),
             "DM thread reply should include reply instruction"
         );
     }
@@ -4357,12 +4353,12 @@ mod tests {
         // stale older thread.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
+            prompt.contains(&format!("reply_to=\"{event_id}\"")),
             "top-level human message should anchor a new thread at the triggering event"
         );
         assert!(
-            prompt.contains("new top-level message"),
-            "top-level human message should use the new-thread instruction"
+            prompt.contains("scope=\"channel\""),
+            "top-level human message should carry channel scope"
         );
     }
 
@@ -4395,7 +4391,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
+            !prompt.contains(" reply_to=\""),
             "DM non-reply should NOT include reply instruction"
         );
     }
@@ -4428,15 +4424,15 @@ mod tests {
         // keep the conversation flat — NOT the triggering event or parent.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
+            prompt.contains(&format!("reply_to=\"{root_id}\"")),
             "human-facing nested reply should anchor to the thread root"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {event_id}")),
+            !prompt.contains(&format!("reply_to=\"{event_id}\"")),
             "instruction should NOT anchor to the triggering event id"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {parent_id}")),
+            !prompt.contains(&format!("reply_to=\"{parent_id}\"")),
             "instruction should NOT anchor to the parent event id"
         );
     }
@@ -4462,13 +4458,10 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
+            prompt.contains(&format!("reply_to=\"{root_id}\"")),
             "human-facing thread reply should anchor to the thread root"
         );
-        assert!(
-            prompt.contains("channel-root, top-level"),
-            "instruction should tell agents to honor explicit root/top-level requests"
-        );
+        assert!(!prompt.contains("explicit_broadcast_may_omit_reply_to="));
         assert!(
             !prompt.contains("on EVERY `buzz messages send` call"),
             "instruction should not make reply-to absolute for every send"
@@ -4506,7 +4499,7 @@ mod tests {
         // to that thread's root.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
+            prompt.contains(&format!("reply_to=\"{root_id}\"")),
             "batched prompt should anchor to the last (threaded) event's root"
         );
     }
@@ -4543,12 +4536,12 @@ mod tests {
         // anchored to that top-level event (NOT the earlier thread's root).
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {plain_id}")),
+            prompt.contains(&format!("reply_to=\"{plain_id}\"")),
             "batched top-level-last prompt should anchor to the last (top-level) event"
         );
         assert!(
-            prompt.contains("new top-level message"),
-            "batched top-level-last prompt should use the new-thread instruction"
+            prompt.contains("scope=\"channel\""),
+            "batched top-level-last prompt should use channel scope"
         );
     }
 
@@ -4702,11 +4695,28 @@ mod tests {
     fn test_native_steer_earlier_events_flush_during_ack_window() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
+        let keys = Keys::generate();
+        let root = "5".repeat(64);
+        let now = Instant::now();
 
         // Three events arrive in order: e1, e2 (already queued), then e3
         // (the latest mid-turn mention being steered).
-        let e1 = make_queued_at(ch, "e1", Duration::from_millis(30));
-        let e2 = make_queued_at(ch, "e2", Duration::from_millis(20));
+        let e1 = make_thread_queued(
+            ch,
+            &keys,
+            &root,
+            "e1",
+            now - Duration::from_millis(30),
+            None,
+        );
+        let e2 = make_thread_queued(
+            ch,
+            &keys,
+            &root,
+            "e2",
+            now - Duration::from_millis(20),
+            None,
+        );
         let e3 = make_queued_at(ch, "e3", Duration::from_millis(10));
         let e1_id = e1.event.id.to_hex();
         let e2_id = e2.event.id.to_hex();
@@ -4868,7 +4878,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains("[Channel Canvas]"),
+            prompt.contains("<channel-canvas>"),
             "legacy agent prompt must include canvas section; got: {prompt}"
         );
     }
@@ -4897,7 +4907,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("[Channel Canvas]"),
+            !prompt.contains("<channel-canvas>"),
             "modern agent must not get canvas in user message (it's in systemPrompt); got: {prompt}"
         );
     }
@@ -4917,7 +4927,7 @@ mod tests {
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            !prompt.contains("[Channel Canvas]"),
+            !prompt.contains("<channel-canvas>"),
             "no canvas section expected when agent_canvas is None; got: {prompt}"
         );
     }
@@ -5156,94 +5166,75 @@ mod tests {
     // ── channel description delivery ─────────────────────────────────────────
 
     #[test]
-    fn test_append_channel_description_adds_description_line() {
+    fn test_normalized_channel_description_returns_description() {
         let ci = PromptChannelInfo {
             name: "team".into(),
             channel_type: "stream".into(),
             description: Some("Engineering discussions".into()),
         };
-        let mut s = "[Context]\nScope: channel\nChannel: team (#abc)".to_string();
-        append_channel_description(&mut s, Some(&ci));
-        assert!(
-            s.contains("\nDescription: Engineering discussions"),
-            "description must be appended; got: {s}"
+        assert_eq!(
+            normalized_channel_description(Some(&ci))
+                .map(|description| description.value)
+                .as_deref(),
+            Some("Engineering discussions")
         );
     }
 
     #[test]
-    fn test_append_channel_description_absent_when_none() {
+    fn test_normalized_channel_description_absent_when_none() {
         let ci = PromptChannelInfo {
             name: "team".into(),
             channel_type: "stream".into(),
             description: None,
         };
-        let mut s = "[Context]\nScope: channel".to_string();
-        append_channel_description(&mut s, Some(&ci));
-        assert!(
-            !s.contains("Description:"),
-            "no description must be appended when None; got: {s}"
-        );
+        assert_eq!(normalized_channel_description(Some(&ci)), None);
     }
 
     #[test]
-    fn test_append_channel_description_absent_when_channel_info_none() {
-        let mut s = "[Context]\nScope: channel".to_string();
-        append_channel_description(&mut s, None);
-        assert!(
-            !s.contains("Description:"),
-            "no description must be appended when channel_info is None; got: {s}"
-        );
+    fn test_normalized_channel_description_absent_when_channel_info_none() {
+        assert_eq!(normalized_channel_description(None), None);
     }
 
     #[test]
-    fn test_append_channel_description_collapses_newlines_spoof_prevention() {
-        // A multiline description must not be able to inject a fake [Context] field.
+    fn test_normalized_channel_description_collapses_newlines_spoof_prevention() {
+        // A multiline description must not be able to inject another attribute.
         let ci = PromptChannelInfo {
             name: "team".into(),
             channel_type: "stream".into(),
             description: Some("Line one\nScope: injected\nLine two".into()),
         };
-        let mut s = "[Context]\nScope: channel".to_string();
-        append_channel_description(&mut s, Some(&ci));
-        // The whole description is on a single Description line — no injected field.
-        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
         assert_eq!(
-            desc_line, "Description: Line one Scope: injected Line two",
-            "multiline description must collapse to one line, never a fake field"
-        );
-        assert_eq!(
-            s.lines().filter(|l| l.starts_with("Description:")).count(),
-            1,
-            "exactly one Description line is rendered"
+            normalized_channel_description(Some(&ci))
+                .map(|description| description.value)
+                .as_deref(),
+            Some("Line one Scope: injected Line two")
         );
     }
 
     #[test]
-    fn test_append_channel_description_truncates_at_cap() {
+    fn test_normalized_channel_description_truncates_at_cap() {
         let long_desc = "x".repeat(600);
         let ci = PromptChannelInfo {
             name: "team".into(),
             channel_type: "stream".into(),
             description: Some(long_desc),
         };
-        let mut s = "[Context]\nScope: channel".to_string();
-        append_channel_description(&mut s, Some(&ci));
-        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        let description = normalized_channel_description(Some(&ci)).unwrap();
         assert!(
-            desc_line.ends_with('…'),
-            "truncated description must end with '…'; got: {desc_line}"
+            description.value.ends_with('…'),
+            "truncated description must end with '…'; got: {}",
+            description.value
         );
-        // Value = first MAX_DESCRIPTION_LEN chars + the "…" marker.
-        let value = desc_line.strip_prefix("Description: ").unwrap();
+        assert!(description.truncated);
         assert_eq!(
-            value.chars().count(),
+            description.value.chars().count(),
             MAX_DESCRIPTION_LEN + 1,
             "truncated value is exactly the cap plus the ellipsis marker"
         );
     }
 
     #[test]
-    fn test_append_channel_description_multibyte_truncation_is_char_safe() {
+    fn test_normalized_channel_description_multibyte_truncation_is_char_safe() {
         // Truncation must land on a char boundary, never split a multi-byte code point.
         let long_desc = "é".repeat(600);
         let ci = PromptChannelInfo {
@@ -5251,26 +5242,18 @@ mod tests {
             channel_type: "stream".into(),
             description: Some(long_desc),
         };
-        let mut s = "[Context]\nScope: channel".to_string();
-        append_channel_description(&mut s, Some(&ci));
-        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
-        let value = desc_line.strip_prefix("Description: ").unwrap();
-        assert_eq!(value.chars().count(), MAX_DESCRIPTION_LEN + 1);
+        let description = normalized_channel_description(Some(&ci)).unwrap();
+        assert_eq!(description.value.chars().count(), MAX_DESCRIPTION_LEN + 1);
     }
 
     #[test]
-    fn test_append_channel_description_whitespace_only_is_absent() {
+    fn test_normalized_channel_description_whitespace_only_is_absent() {
         let ci = PromptChannelInfo {
             name: "team".into(),
             channel_type: "stream".into(),
             description: Some("\n  \r\n \n".into()),
         };
-        let mut s = "[Context]\nScope: channel".to_string();
-        append_channel_description(&mut s, Some(&ci));
-        assert!(
-            !s.contains("Description:"),
-            "a whitespace-only description collapses to empty and is not rendered; got: {s}"
-        );
+        assert_eq!(normalized_channel_description(Some(&ci)), None);
     }
 
     fn description_batch(ch: Uuid, event: Event) -> FlushBatch {
@@ -5305,12 +5288,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains("Scope: channel"),
+            prompt.contains("scope=\"channel\""),
             "channel-scope turn expected; got: {prompt}"
         );
         assert!(
             prompt.contains("Description: Engineering discussions and planning."),
-            "description must appear in [Context] for channel turns; got: {prompt}"
+            "description must appear in the channel snapshot; got: {prompt}"
         );
     }
 
@@ -5342,12 +5325,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains("Scope: thread"),
+            prompt.contains("scope=\"thread\""),
             "thread-scope turn expected; got: {prompt}"
         );
         assert!(
             prompt.contains("Description: Engineering discussions and planning."),
-            "description must appear in [Context] for thread turns; got: {prompt}"
+            "description must appear in the channel snapshot; got: {prompt}"
         );
     }
 
@@ -5370,11 +5353,11 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains("Scope: dm"),
+            prompt.contains("scope=\"dm\""),
             "dm-scope turn expected; got: {prompt}"
         );
         assert!(
-            !prompt.contains("Description:"),
+            !prompt.contains("description=\""),
             "DM turn must not include a Description field; got: {prompt}"
         );
     }
@@ -5394,11 +5377,11 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains("Scope: channel"),
+            prompt.contains("scope=\"channel\""),
             "channel-scope turn expected; got: {prompt}"
         );
         assert!(
-            !prompt.contains("Description:"),
+            !prompt.contains("description=\""),
             "unresolved metadata must not render a Description field; got: {prompt}"
         );
     }
