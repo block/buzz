@@ -77,3 +77,78 @@ tests:
           path: kind
           value: HTTPRoute
         template: templates/httproute.yaml
+      - notContains:
+          path: spec.rules
+          content:
+            matches:
+              - path:
+                  type: PathPrefix
+                  value: /pair
+            backendRefs:
+              - name: RELEASE-NAME-buzz-pairing
+                port: 5000
+        template: templates/httproute.yaml
+
+  - it: HTTPRoute default rules route /pair to the pairing relay when enabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      httproute.enabled: true
+      httproute.parentRefs:
+        - name: my-gateway
+          namespace: gateway-system
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.example.com
+    asserts:
+      - contains:
+          path: spec.rules
+          content:
+            matches:
+              - path:
+                  type: PathPrefix
+                  value: /pair
+            backendRefs:
+              - name: RELEASE-NAME-buzz-pairing
+                port: 5000
+        template: templates/httproute.yaml
+      - contains:
+          path: spec.rules
+          content:
+            matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+            backendRefs:
+              - name: RELEASE-NAME-buzz
+                port: 3000
+        template: templates/httproute.yaml
+
+  - it: Ingress default host routes /pair to the pairing relay when enabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      ingress.enabled: true
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.example.com
+    asserts:
+      - contains:
+          path: spec.rules[0].http.paths
+          content:
+            path: /pair
+            pathType: Prefix
+            backend:
+              service:
+                name: RELEASE-NAME-buzz-pairing
+                port:
+                  number: 5000
+        template: templates/ingress.yaml
