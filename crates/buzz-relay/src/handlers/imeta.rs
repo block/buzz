@@ -168,8 +168,10 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
             if extract_ext_from_media_url(&url_value) != Some("ics") {
                 return Err("calendar imeta url must use the .ics extension".into());
             }
-            if !filename_value.is_empty() && !filename_value.to_ascii_lowercase().ends_with(".ics")
-            {
+            if filename_value.is_empty() {
+                return Err("calendar imeta filename is required".into());
+            }
+            if !filename_value.to_ascii_lowercase().ends_with(".ics") {
                 return Err("calendar imeta filename must use the .ics extension".into());
             }
         }
@@ -601,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn calendar_imeta_requires_ics_url_and_validates_optional_filename() {
+    fn calendar_imeta_requires_ics_url_and_filename() {
         let without_filename = vec![
             "imeta".into(),
             format!("url /media/{HASH}.ics"),
@@ -609,7 +611,8 @@ mod tests {
             format!("x {HASH}"),
             "size 512".into(),
         ];
-        assert!(validate_imeta_tags(&[without_filename], BASE).is_ok());
+        let err = validate_imeta_tags(&[without_filename], BASE).unwrap_err();
+        assert!(err.contains("filename is required"), "{err}");
 
         let with_filename = vec![
             "imeta".into(),
@@ -617,7 +620,7 @@ mod tests {
             "m text/calendar".into(),
             format!("x {HASH}"),
             "size 512".into(),
-            "filename Planning.ics".into(),
+            "filename Planning.ICS".into(),
         ];
         assert!(validate_imeta_tags(&[with_filename], BASE).is_ok());
 
