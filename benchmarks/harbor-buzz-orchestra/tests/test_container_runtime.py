@@ -19,7 +19,11 @@ from harbor_buzz_orchestra.container_runtime import (
     RuntimeLaunchError,
 )
 from harbor_buzz_orchestra.manifest import ExperimentManifest
-from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
+from harbor_buzz_orchestra.provisioning import (
+    AgentCredential,
+    FixtureActor,
+    TrialHandle,
+)
 from harbor_buzz_orchestra.task_fixtures import fixture_for
 
 
@@ -453,6 +457,51 @@ async def test_send_mentions_by_pubkey_so_task_text_stays_inert(tmp_path, monkey
     assert calls[-1][-2:] == ("--content", "plain content")
 
 
+async def test_sends_task_declared_actor_messages_and_records_event_ids(
+    tmp_path, monkeypatch
+):
+    rt = runtime(tmp_path)
+    orch = credential("solo-1", "orchestrator", "orch-model")
+    reporters = tuple(
+        FixtureActor(name, credential(name, "bot", ""))
+        for name in ("Ledger Scout", "Risk Sentinel", "Ops Forecaster")
+    )
+    trial = replace(
+        trial_handle((orch,)),
+        task_name="interleaved-agent-reports",
+        fixture_actors=reporters,
+    )
+    calls = []
+
+    async def send(actor, trial_arg, content, **kwargs):
+        calls.append((actor.agent_id, trial_arg, content, kwargs))
+        return {"event_id": f"event-{len(calls)}"}
+
+    monkeypatch.setattr(rt, "_send", send)
+
+    events = await rt._send_scripted_messages(
+        trial=trial, orchestrator=orch, task_event_id="task-root"
+    )
+
+    assert [event["label"] for event in events] == [
+        "ledger-report",
+        "risk-report",
+        "operations-report",
+    ]
+    assert [event["event_id"] for event in events] == [
+        "event-1",
+        "event-2",
+        "event-3",
+    ]
+    assert {call[0] for call in calls} == {
+        "Ledger Scout",
+        "Risk Sentinel",
+        "Ops Forecaster",
+    }
+    assert all(call[3]["mention"] == orch.nostr_pubkey for call in calls)
+    assert all(call[3]["reply_to"] == "task-root" for call in calls)
+
+
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):
     rt = runtime(tmp_path, poll_seconds=0)
     orch = credential("orch-1", "orchestrator", "orch-model")
@@ -498,6 +547,46 @@ async def test_solo_turn_end_completes_without_done_message(tmp_path, monkeypatc
 
     monkeypatch.setattr(rt, "_buzz_json", buzz_json)
     assert await rt._wait_for_done(environment, orch, trial, [], solo=solo) is None
+
+
+async def test_scripted_events_wait_for_second_agent_message(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    message_rounds = iter(
+        [
+            [{"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}],
+            [{"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}],
+            [
+                {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"},
+                {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "BETA"},
+            ],
+        ]
+    )
+    turn_rounds = iter([(1, 1), (2, 1), (2, 2)])
+
+    async def buzz_json(*args, **kwargs):
+        return next(message_rounds)
+
+    async def turn_counts(*args, **kwargs):
+        return next(turn_rounds)
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_turn_counts", turn_counts)
+
+    result = await rt._wait_for_done(
+        Environment(),
+        orch,
+        trial,
+        [],
+        solo=solo,
+        minimum_agent_messages=2,
+    )
+
+    assert result["id"] == "beta"
 
 
 async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch):

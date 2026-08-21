@@ -14,9 +14,10 @@ from harbor_buzz_orchestra.manifest import ExperimentManifest
 from harbor_buzz_orchestra.provisioning import (
     AgentCredential,
     DirectoryIdentity,
+    FixtureActor,
     TrialHandle,
 )
-from harbor_buzz_orchestra.task_fixtures import fixture_for
+from harbor_buzz_orchestra.task_fixtures import DirectoryEntry, fixture_for
 
 from .buzz_cli import BuzzCli
 from .keys import compute_auth_tag, generate_keypair, keypair_from_secret
@@ -170,6 +171,27 @@ class BuzzTrialProvisioner:
         for credential in credentials:
             cli.add_member(channel_id, credential.nostr_pubkey)
         directory = self._seed_directory(task_name, cli)
+        fixture = fixture_for(task_name)
+        directory_credentials = {
+            entry.stable_id: self._directory_credential(entry)
+            for entry in fixture.directory
+        }
+        for entry in fixture.directory:
+            if entry.channel_member:
+                cli.add_member(
+                    channel_id,
+                    directory_credentials[entry.stable_id].nostr_pubkey,
+                    "bot" if entry.role == "bot" else "member",
+                )
+        scripted_actor_ids = {
+            message.actor
+            for message in fixture.scripted_messages
+            if message.actor != "user"
+        }
+        fixture_actors = tuple(
+            FixtureActor(identity_id, directory_credentials[identity_id])
+            for identity_id in sorted(scripted_actor_ids)
+        )
         return TrialHandle(
             run_id=run_id,
             trial_id=trial_id,
@@ -181,6 +203,7 @@ class BuzzTrialProvisioner:
             user_relay_url=self._config.relay_http_url,
             task_name=task_name or "",
             directory=directory,
+            fixture_actors=fixture_actors,
         )
 
     def _seed_directory(
@@ -188,9 +211,7 @@ class BuzzTrialProvisioner:
     ) -> tuple[DirectoryIdentity, ...]:
         """Publish stable task-directory profiles, skipping those already seeded."""
         entries = fixture_for(task_name).directory
-        credentials = [
-            self._directory_credential(entry.name, entry.role) for entry in entries
-        ]
+        credentials = [self._directory_credential(entry) for entry in entries]
         if not credentials:
             return ()
         existing = {
@@ -200,21 +221,23 @@ class BuzzTrialProvisioner:
             )
             if isinstance(profile, dict)
         }
-        for credential in credentials:
-            if credential.nostr_pubkey not in existing:
-                self._cli_for(credential).set_profile(credential.agent_id)
+        for entry, credential in zip(entries, credentials, strict=True):
+            if credential.nostr_pubkey not in existing or entry.about is not None:
+                self._cli_for(credential).set_profile(entry.name, entry.about)
         return tuple(
             DirectoryIdentity(
-                name=credential.agent_id,
+                name=entry.name,
                 role=credential.role,
                 pubkey=credential.nostr_pubkey,
+                identity_id=entry.stable_id,
+                about=entry.about or "",
             )
-            for credential in credentials
+            for entry, credential in zip(entries, credentials, strict=True)
         )
 
-    def _directory_credential(self, name: str, role: str) -> AgentCredential:
+    def _directory_credential(self, entry: DirectoryEntry) -> AgentCredential:
         """Derive one community-stable benchmark identity without storing its key."""
-        return self._stable_credential(name, name, role)
+        return self._stable_credential(entry.stable_id, entry.name, entry.role)
 
     def _stable_credential(
         self, identity_id: str, display_name: str, role: str
@@ -341,6 +364,12 @@ class BuzzTrialProvisioner:
             directory=tuple(
                 DirectoryIdentity(**identity)
                 for identity in stored.get("directory", [])
+            ),
+            fixture_actors=tuple(
+                FixtureActor(
+                    actor["identity_id"], AgentCredential(**actor["credential"])
+                )
+                for actor in stored.get("fixture_actors", [])
             ),
         )
 
