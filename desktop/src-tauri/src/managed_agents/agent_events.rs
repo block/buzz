@@ -117,7 +117,12 @@ pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, St
         record.system_prompt.as_deref(),
     )
     .map_err(|error| format!("Managed agent definition is unsafe to publish: {error}"))?;
-    let content = serde_json::to_string(&agent_event_content(record))
+    let event_content = agent_event_content(record);
+    if let Some(provider) = event_content.provider.as_deref() {
+        crate::managed_agents::validate_provider_value(provider)?;
+    }
+
+    let content = serde_json::to_string(&event_content)
         .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
     let tags =
         vec![Tag::parse(["d", record.pubkey.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];

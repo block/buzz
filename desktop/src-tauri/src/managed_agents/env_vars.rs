@@ -167,6 +167,7 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
             "total env var payload is {total} bytes; limit is {MAX_ENV_TOTAL_BYTES}"
         ));
     }
+    super::validate_provider_env_urls(env_vars)?;
     Ok(())
 }
 

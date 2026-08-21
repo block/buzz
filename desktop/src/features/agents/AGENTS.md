@@ -236,6 +236,12 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
+15. **Provider translation belongs to runtime metadata.** When Buzz's canonical
+    provider ID or env names differ from what a harness reads, declare the
+    mapping on `KnownAcpRuntime` and apply it after effective config precedence
+    is resolved. Do not duplicate provider aliases in UI components or
+    individual readiness, discovery, and spawn call sites.
+
 12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
