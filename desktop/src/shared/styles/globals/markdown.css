@@ -275,7 +275,7 @@
   font-size: var(--inline-code-font-size);
   font-family: ui-monospace, monospace;
   background: hsl(var(--muted));
-  color: inherit;
+  color: hsl(var(--code-foreground));
 }
 
 /* Code block content — higher specificity than the inline chips above; kept
