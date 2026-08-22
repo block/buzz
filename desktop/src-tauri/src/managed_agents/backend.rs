@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[path = "provider_platform.rs"]
+mod provider_platform;
+
 const STDERR_CAP: usize = 65536;
 /// Provider responses should be small JSON objects. Cap stdout to prevent a
 /// buggy or malicious provider from OOM-ing the desktop process.
@@ -481,6 +484,7 @@ fn stage_provider(
     std::fs::set_permissions(&staged_path, permissions)
         .map_err(|error| format!("failed to protect staged provider: {error}"))?;
     drop(staged);
+    provider_platform::verify_provider_platform_signature(&staged_path)?;
 
     #[cfg(windows)]
     let execution_guard = {
@@ -570,17 +574,7 @@ pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String
 /// Windows leaves the executable/script extension, which is not part of the
 /// provider id.
 fn provider_id_from_filename(name: &str) -> Option<&str> {
-    let raw = name.strip_prefix("buzz-backend-")?;
-    let id = [".exe", ".bat", ".cmd"]
-        .into_iter()
-        .find_map(|extension| {
-            raw.get(raw.len().saturating_sub(extension.len())..)
-                .filter(|suffix| suffix.eq_ignore_ascii_case(extension))
-                .map(|_| &raw[..raw.len() - extension.len()])
-        })
-        .unwrap_or(raw);
-
-    (!id.is_empty()).then_some(id)
+    provider_platform::provider_id_from_filename(name)
 }
 
 /// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.
@@ -617,6 +611,8 @@ pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
             dirs.push(local_bin);
         }
     }
+
+    provider_platform::augment_provider_search_dirs(&mut dirs);
 
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
