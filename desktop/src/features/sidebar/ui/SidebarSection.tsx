@@ -3,9 +3,6 @@ import {
   BellOff,
   ChevronDown,
   CircleDot,
-  FileText,
-  Hash,
-  Lock,
   X,
 } from "lucide-react";
 
@@ -20,6 +17,7 @@ import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurn
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
+import { ChannelRowIcon } from "@/features/channels/ui/ChannelRowIcon";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -239,15 +237,7 @@ function SidebarChannelIcon({
     );
   }
 
-  if (channel.visibility === "private") {
-    return <Lock className={cn("h-4 w-4", className)} />;
-  }
-
-  if (channel.channelType === "forum") {
-    return <FileText className={cn("h-4 w-4", className)} />;
-  }
-
-  return <Hash className={cn("h-4 w-4", className)} />;
+  return <ChannelRowIcon channel={channel} className={className} />;
 }
 
 export function ChannelMenuButton({
