@@ -7,6 +7,7 @@ import {
   applyLastMessages,
   canFetchChannelsForIdentity,
   channelsQueryKey,
+  queueChannelStateInvalidation,
   reconcileRefreshedCachedChannel,
   refreshChannelsQuery,
   requireFullChannelList,
@@ -371,4 +372,36 @@ test("invalidateChannelMembersRosters dedupes and targets member keys", async ()
     ["channels", "ch-a", "members"],
     ["channels", "ch-b", "members"],
   ]);
+});
+
+test("queueChannelStateInvalidation_returnsBeforeChannelsRefetchSettles", async () => {
+  let settleRefetch;
+  const refetch = new Promise((resolve) => {
+    settleRefetch = resolve;
+  });
+  let invalidateCalls = 0;
+  const queryClient = {
+    invalidateQueries: async () => {
+      invalidateCalls += 1;
+      await refetch;
+    },
+  };
+
+  const result = queueChannelStateInvalidation(queryClient, "channel-1");
+  assert.equal(
+    result,
+    undefined,
+    "must not return a thenable; awaiting onSettled would re-block Add",
+  );
+
+  assert.equal(invalidateCalls, 1, "the channels query must start immediately");
+  assert.equal(
+    typeof settleRefetch,
+    "function",
+    "the channels refetch must still be pending after the caller returns",
+  );
+
+  settleRefetch();
+  await Promise.resolve();
+  await Promise.resolve();
 });
