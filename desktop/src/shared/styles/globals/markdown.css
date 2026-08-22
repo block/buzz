@@ -211,6 +211,11 @@
   white-space: nowrap;
 }
 
+.message-markdown
+  .inline-chip-leading-fragment.inline-chip-with-icon:empty::after {
+  content: "\200b";
+}
+
 .message-markdown .inline-chip-leading-fragment.inline-chip-with-icon::before {
   display: block;
   left: 0;
