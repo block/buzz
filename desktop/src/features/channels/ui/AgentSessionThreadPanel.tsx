@@ -16,6 +16,7 @@ import {
   scopeByChannel,
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
+import type { AgentSessionTranscriptVariant } from "@/features/agents/ui/agentSessionTranscriptContext";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
@@ -81,6 +82,15 @@ type AgentSessionThreadPanelProps = {
   onClose: () => void;
   widthPx: number;
   transparentChrome?: boolean;
+  /**
+   * Transcript presentation. Caller-pinned only: the panel keeps the dense
+   * activity feed unless a host explicitly asks for `conversation` (the
+   * full-cover focus view does). There is deliberately no width or layout
+   * heuristic here — an automatic wide-pane mode would be a separate product
+   * decision, and swapping the whole presentation as a reader drags a resize
+   * handle across a threshold is not one we want to make implicitly.
+   */
+  transcriptVariant?: AgentSessionTranscriptVariant;
 };
 
 export function AgentSessionThreadPanel({
@@ -95,6 +105,7 @@ export function AgentSessionThreadPanel({
   onClose,
   widthPx,
   transparentChrome = false,
+  transcriptVariant = "default",
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
@@ -495,6 +506,7 @@ export function AgentSessionThreadPanel({
             rawLayout="exclusive"
             showHeader={false}
             showRaw={showRawFeed}
+            transcriptVariant={transcriptVariant}
           />
         </div>
       </AuxiliaryPanelBody>
