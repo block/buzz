@@ -39,6 +39,22 @@ export function activityLedgerTodaySnapshotDayGate(
   return { action: rebuildAttempted ? "discard" : "rebuild", day };
 }
 
+/** Never let a snapshot remain valid after its local Today has ended. */
+export function activityLedgerTodaySnapshotExpiresAt(
+  publicationTime: Date,
+): number {
+  const generatedAt = Math.floor(publicationTime.getTime() / 1_000);
+  const nextLocalMidnight = new Date(
+    publicationTime.getFullYear(),
+    publicationTime.getMonth(),
+    publicationTime.getDate() + 1,
+  );
+  return Math.min(
+    generatedAt + SNAPSHOT_LIFETIME_SECONDS,
+    Math.floor(nextLocalMidnight.getTime() / 1_000),
+  );
+}
+
 export function canPublishActivityLedgerTodaySnapshot(
   ownerPubkey: string | undefined,
   managedAgentsLoaded: boolean,
@@ -173,12 +189,15 @@ export function useActivityLedgerTodaySnapshot(): void {
           // the day gate, so a slow reconstruction never receives fresh
           // validity after its local day has ended.
           const generatedAt = Math.floor(publicationTime.getTime() / 1_000);
+          const expiresAt =
+            activityLedgerTodaySnapshotExpiresAt(publicationTime);
+          if (expiresAt <= generatedAt) return;
           await writeOwnerTodaySnapshot({
             schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
             ownerPubkey,
             relayUrl,
             generatedAt,
-            expiresAt: generatedAt + SNAPSHOT_LIFETIME_SECONDS,
+            expiresAt,
             capability: OWNER_TODAY_SNAPSHOT_CAPABILITY,
             surface,
             rawEvents: [],

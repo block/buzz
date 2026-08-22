@@ -21,7 +21,10 @@ const TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL = 100;
 const TODAY_ARCHIVE_MAX_EVENTS_PER_JOURNAL = 300;
 const TODAY_SNAPSHOT_MAX_SUMMARY_CHARS = 4_096;
 const TODAY_SNAPSHOT_MAX_EVENT_DETAIL_CHARS = 8_192;
-const TODAY_ARCHIVE_ENVELOPE_OVERLAP_SECONDS = 2;
+// ObserverPublishQueue can retain roughly 64 seconds of sustained
+// over-production before an inner frame is signed into an outer envelope.
+// Include tick/second-rounding headroom, then assign strictly by inner time.
+const TODAY_ARCHIVE_ENVELOPE_OVERLAP_SECONDS = 70;
 
 export type TodaySnapshotProjection = {
   bounded: boolean;

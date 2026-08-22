@@ -405,8 +405,8 @@ test("Today archive query overlaps midnight but assigns by inner event time", as
   const day = "2026-08-21";
   const exact = activityLedgerDayRange(day);
   const query = activityLedgerArchiveQueryRange(day);
-  assert.ok(query.startCreatedAt < exact.startCreatedAt);
-  assert.ok(query.endCreatedAt > exact.endCreatedAt + 1);
+  assert.equal(exact.startCreatedAt - query.startCreatedAt, 70);
+  assert.equal(query.endCreatedAt - exact.endCreatedAt, 70);
 
   const innerTimestamp = new Date(
     (exact.endCreatedAt - 1) * 1_000,

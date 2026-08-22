@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   activityLedgerTodaySnapshotDayGate,
+  activityLedgerTodaySnapshotExpiresAt,
   canPublishActivityLedgerTodaySnapshot,
   loadActivityLedgerTodayAuthority,
 } from "./useActivityLedgerTodaySnapshot.ts";
@@ -29,6 +30,21 @@ test("Today snapshot day gate never publishes a previous-day reconstruction", ()
       true,
     ),
     { action: "discard", day: "2026-08-22" },
+  );
+});
+
+test("Today snapshot validity is clipped at the next local midnight", () => {
+  const midday = new Date(2026, 7, 21, 12, 0, 0);
+  assert.equal(
+    activityLedgerTodaySnapshotExpiresAt(midday),
+    Math.floor(midday.getTime() / 1_000) + 5 * 60,
+  );
+
+  const beforeMidnight = new Date(2026, 7, 21, 23, 59, 30);
+  const midnight = new Date(2026, 7, 22, 0, 0, 0);
+  assert.equal(
+    activityLedgerTodaySnapshotExpiresAt(beforeMidnight),
+    Math.floor(midnight.getTime() / 1_000),
   );
 });
 
