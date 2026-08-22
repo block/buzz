@@ -289,3 +289,54 @@ tests:
           path: spec.template.spec.initContainers[1].name
           value: install-wrapper
         template: templates/deployment.yaml
+
+  - it: emits literal empty S3 keys for credentialSource chain (IRSA / Pod Identity)
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media
+      s3.credentialSource: chain
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ACCESS_KEY
+            value: ""
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_SECRET_KEY
+            value: ""
+        template: templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ACCESS_KEY
+            valueFrom: {}
+          any: true
+        template: templates/deployment.yaml
+
+  - it: keeps optional S3 secretKeyRefs for credentialSource static (default)
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media
+      s3.credentialSource: static
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-buzz-relay
+                key: BUZZ_S3_ACCESS_KEY
+                optional: true
+        template: templates/deployment.yaml
