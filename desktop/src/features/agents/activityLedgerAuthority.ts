@@ -55,13 +55,11 @@ function isCurrentVerificationEvidence(
   ) {
     return false;
   }
-  return (
-    validSourceEventId(event.provenance.sourceEventId) &&
-    (event.category === "turn" ||
-      event.category === "tool" ||
-      event.category === "permission" ||
-      event.category === "status")
-  );
+  // Every retained observer frame changes the journal an owner is verifying.
+  // A later message, prompt, thought, or plan is still later activity, even
+  // when it is only CLAIMED. Requiring its signed source prevents an older
+  // receipt from promoting an expanded journal back to VERIFIED.
+  return validSourceEventId(event.provenance.sourceEventId);
 }
 
 function currentVerificationSourceEventId(

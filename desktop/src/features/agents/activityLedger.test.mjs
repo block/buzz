@@ -568,3 +568,34 @@ test("buildTodayActivitySurface marks abandoned turns incomplete", () => {
   assert.equal(feed.journals[0].status, "incomplete");
   assert.equal(feed.journals[0].proofState, "UNKNOWN");
 });
+
+test("Today marks a stale cross-midnight liveness-only turn incomplete", () => {
+  const feed = buildTodayActivitySurface(
+    [
+      {
+        agentPubkey: AGENT_A,
+        agentName: "Fizz",
+        events: normalizeActivityEvents([
+          observerEvent({
+            timestamp: "2026-08-21T03:59:00.000Z",
+          }),
+          observerEvent({
+            seq: 2,
+            timestamp: "2026-08-21T04:01:00.000Z",
+            kind: "turn_liveness",
+            sourceEventId: "e".repeat(64),
+          }),
+        ]),
+      },
+    ],
+    {
+      day: "2026-08-21",
+      asOf: "2026-08-21T04:10:00.000Z",
+      incompleteAfterMs: 60_000,
+    },
+  );
+
+  assert.equal(feed.journals.length, 1);
+  assert.equal(feed.journals[0].status, "incomplete");
+  assert.equal(feed.journals[0].proofState, "UNKNOWN");
+});

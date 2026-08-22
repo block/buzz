@@ -277,6 +277,61 @@ test("later turn completion invalidates an older verification", () => {
   );
 });
 
+test("every later journal frame invalidates an older verification", () => {
+  const journal = observedJournal();
+  for (const [index, category] of [
+    "message",
+    "prompt",
+    "thought",
+    "plan",
+  ].entries()) {
+    const laterSourceId = (index + 10).toString(16).padStart(64, "0");
+    const laterEvent = {
+      ...journal.events[0],
+      id: `later-${category}`,
+      category,
+      title: `Later ${category}`,
+      status: "completed",
+      proofState: category === "prompt" ? "RECEIPTED" : "CLAIMED",
+      timestamp: `2026-08-21T14:0${index + 3}:00.000Z`,
+      provenance: {
+        ...journal.events[0].provenance,
+        sourceEventId: laterSourceId,
+        sourceCreatedAt: 1_787_319_780 + index * 60,
+        observerKind: "acp_read",
+        seq: index + 3,
+        timestamp: `2026-08-21T14:0${index + 3}:00.000Z`,
+      },
+    };
+    const current = {
+      ...journal,
+      endedAt: laterEvent.timestamp,
+      eventCount: journal.eventCount + 1,
+      events: [...journal.events, laterEvent],
+    };
+
+    assert.notEqual(
+      applyValidatedJournalAuthority(current, [artifact()], relayUrl)
+        .proofState,
+      "VERIFIED",
+      category,
+    );
+    assert.equal(
+      applyValidatedJournalAuthority(
+        current,
+        [
+          artifact({
+            sourceEventIds: [sourceId, terminalSourceId, laterSourceId].sort(),
+          }),
+        ],
+        relayUrl,
+      ).proofState,
+      "VERIFIED",
+      category,
+    );
+  }
+});
+
 test("reapplying authority ignores its synthetic owner verification event", () => {
   const journal = observedJournal();
   const verified = applyValidatedJournalAuthority(

@@ -790,7 +790,9 @@ export function groupMissionJournals(
       Number.isFinite(asOf) &&
       asOf - Date.parse(endedAt) >= incompleteAfterMs &&
       bucket.some(
-        (event) => event.category === "turn" && event.status === "running",
+        (event) =>
+          (event.category === "turn" && event.status === "running") ||
+          event.provenance.observerKind === "turn_liveness",
       );
 
     let status: MissionJournalStatus = "observed";
