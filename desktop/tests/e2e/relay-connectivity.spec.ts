@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const RELAY_UNREACHABLE = "relay unreachable: connection refused";
@@ -13,15 +14,12 @@ const MOCK_PUBKEY = "deadbeef".repeat(8);
 const MOCK_RELAY_URL = "ws://localhost:3000";
 const SELF_PROFILE_CACHE_KEY = `buzz-self-profile.v1:${MOCK_RELAY_URL}:${MOCK_PUBKEY}`;
 
-async function settle(page: import("@playwright/test").Page) {
-  await page.evaluate(() =>
-    // Tolerate cancelled animations: a SkeletonReveal animation cancelled
-    // mid-flight (skeleton → live content swap) rejects `.finished` with an
-    // AbortError. allSettled lets the animations that DO finish settle instead
-    // of aborting the whole wait on the first cancel.
-    Promise.allSettled(document.getAnimations().map((a) => a.finished)),
-  );
-}
+// Defer to the shared bounded helper. The degraded relay card now renders a
+// looping spinner while the client auto-reconnects, and a looping animation's
+// `.finished` never resolves — an unbounded wait here hangs until Playwright
+// aborts the evaluate. `waitForAnimations` races the settle against a ceiling
+// and also tolerates animations cancelled mid-flight.
+const settle = waitForAnimations;
 
 type ConnectionState =
   | "idle"
@@ -103,8 +101,11 @@ test.describe("relay connectivity", () => {
     await expect(relayCard).toBeVisible({
       timeout: 5_000,
     });
-    await expect(relayCard).toContainText("Can't reach the relay");
-    await expect(relayCard).toContainText("Click to connect");
+    // The backoff loop is retrying on its own — the card reports that rather
+    // than asking the user to click.
+    await expect(relayCard).toContainText("Reconnecting");
+    await expect(relayCard).toContainText("Trying to restore the connection");
+    await expect(relayCard).not.toContainText("Click to connect");
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     await settle(page);
 
@@ -124,8 +125,9 @@ test.describe("relay connectivity", () => {
     await expect(relayCard).toBeVisible({
       timeout: 5_000,
     });
-    await expect(relayCard).toContainText("Can't reach the relay");
-    await expect(relayCard).toContainText("Click to connect");
+    await expect(relayCard).toContainText("Reconnecting");
+    await expect(relayCard).toContainText("Trying to restore the connection");
+    await expect(relayCard).not.toContainText("Click to connect");
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     await settle(page);
 
@@ -218,13 +220,15 @@ test.describe("relay connectivity", () => {
     await expect(relayCard).toBeVisible({
       timeout: 5_000,
     });
-    await expect(relayCard).toContainText("Can't reach the relay");
-    await expect(relayCard).toContainText("Click to connect");
+    await expect(relayCard).toContainText("Reconnecting");
+    await expect(relayCard).toContainText("Trying to restore the connection");
 
     await driveConnectionDegraded(page, "connected");
 
     await expect(relayCard).toContainText("Connected");
-    await expect(relayCard).not.toContainText("Click to connect");
+    await expect(relayCard).not.toContainText(
+      "Trying to restore the connection",
+    );
     await page.waitForTimeout(3_000);
     await expect(relayCard).toContainText("Connected");
     await expect(relayCard).toBeHidden({

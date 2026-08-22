@@ -772,6 +772,7 @@ export function AppSidebar({
             (isMobile ? openMobile : sidebarOpen) ? (
               <SidebarRelayConnectionCard
                 className="mb-2"
+                isAutoReconnecting={relayConnectionCard.isRelayAutoReconnecting}
                 isConnected={relayConnectionCard.isRelayConnectionSuccess}
                 isReconnectPending={relayConnectionCard.isRelayReconnectPending}
                 isWaitingOnReconnectHook={
