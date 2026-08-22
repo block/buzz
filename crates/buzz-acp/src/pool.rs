@@ -59,6 +59,10 @@ pub struct SuccessfulSteerDelivery {
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Authors whose events are part of this prompt turn. Exact control
+    /// commands from an authorized community member may only cancel a turn
+    /// when that member owns at least one triggering event.
+    pub prompt_author_pubkeys: Vec<String>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -1766,6 +1770,9 @@ pub async fn run_prompt_task(
         turn_id.clone(),
         turn_started_at.clone(),
     ));
+    agent.acp.set_local_publication_publisher(
+        crate::local_publication::LocalPublicationPublisher::from_env(ctx.rest_client.clone()),
+    );
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -2285,6 +2292,7 @@ pub async fn run_prompt_task(
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+        agent.acp.set_buzz_prompt_metadata(None);
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
         //
@@ -2342,6 +2350,65 @@ pub async fn run_prompt_task(
         pending_delivered_event_ids.extend(conversation_context_event_ids(
             conversation_context.as_ref(),
         ));
+
+        if let Some(trigger) = b.events.last() {
+            let trigger_event_id = trigger.event.id.to_hex();
+            let thread = crate::queue::parse_thread_tags(&trigger.event);
+            let tags: Vec<&[String]> = trigger
+                .event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice())
+                .collect();
+            let structured_context = conversation_context.as_ref().map(|context| {
+                let (kind, messages, total, truncated) = match context {
+                    ConversationContext::Thread {
+                        messages,
+                        total,
+                        truncated,
+                    } => ("thread", messages, total, truncated),
+                    ConversationContext::Dm {
+                        messages,
+                        total,
+                        truncated,
+                    } => ("dm", messages, total, truncated),
+                };
+                serde_json::json!({
+                    "kind": kind,
+                    "total": total,
+                    "truncated": truncated,
+                    "messages": messages
+                        .iter()
+                        .filter(|message| message.event_id != trigger_event_id)
+                        .map(|message| serde_json::json!({
+                            "eventId": message.event_id,
+                            "authorPublicKey": message.pubkey,
+                            "authoredAt": message.timestamp,
+                            "text": message.content,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            });
+            agent.acp.set_buzz_prompt_metadata(Some(serde_json::json!({
+                "contractVersion": 2,
+                "eventId": trigger_event_id,
+                "channelId": b.channel_id.to_string(),
+                "channelName": channel_info.as_ref().map(|info| info.name.as_str()),
+                "kind": trigger.event.kind.as_u16() as u32,
+                "authorPublicKey": trigger.event.pubkey.to_hex(),
+                "authoredAt": chrono::DateTime::from_timestamp(
+                    trigger.event.created_at.as_secs() as i64,
+                    0,
+                ).map(|time| time.to_rfc3339()),
+                "text": trigger.event.content,
+                "tags": tags,
+                "threadRootEventId": thread.root_event_id,
+                "replyToEventId": trigger_event_id,
+                "conversationContext": structured_context,
+            })));
+        } else {
+            agent.acp.set_buzz_prompt_metadata(None);
+        }
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
@@ -3767,6 +3834,19 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
 ///
 /// Works with both thread reply objects and channel message objects.
 fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
+    let event_id = match obj
+        .get("id")
+        .or_else(|| obj.get("event_id"))
+        .and_then(|v| v.as_str())
+    {
+        None => String::new(),
+        Some(event_id)
+            if event_id.len() == 64 && event_id.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            event_id.to_ascii_lowercase()
+        }
+        Some(_) => return None,
+    };
     let content = obj.get("content").and_then(|v| v.as_str())?;
     let pubkey = obj
         .get("pubkey")
@@ -3785,12 +3865,6 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
             })
         })
         .unwrap_or_else(|| "unknown".to_string());
-
-    let event_id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
 
     Some(ContextMessage {
         event_id,
@@ -5049,14 +5123,14 @@ mod tests {
     fn test_parse_thread_response_basic() {
         let json = json!({
             "root": {
-                "event_id": "abc123",
+                "event_id": "a".repeat(64),
                 "pubkey": "pub1",
                 "content": "root message",
                 "created_at": 1710518400
             },
             "replies": [
                 {
-                    "event_id": "def456",
+                    "event_id": "b".repeat(64),
                     "pubkey": "pub2",
                     "content": "first reply",
                     "created_at": 1710518460
@@ -5086,14 +5160,14 @@ mod tests {
     fn test_parse_thread_response_truncated() {
         let json = json!({
             "root": {
-                "event_id": "abc",
+                "event_id": "a".repeat(64),
                 "pubkey": "pub1",
                 "content": "root",
                 "created_at": 1710518400
             },
             "replies": [
                 {
-                    "event_id": "def",
+                    "event_id": "b".repeat(64),
                     "pubkey": "pub2",
                     "content": "reply1",
                     "created_at": 1710518460
@@ -5139,13 +5213,13 @@ mod tests {
         let json = json!({
             "messages": [
                 {
-                    "event_id": "msg2",
+                    "event_id": "b".repeat(64),
                     "pubkey": "pub2",
                     "content": "newer message",
                     "created_at": 1710518500
                 },
                 {
-                    "event_id": "msg1",
+                    "event_id": "a".repeat(64),
                     "pubkey": "pub1",
                     "content": "older message",
                     "created_at": 1710518400
@@ -5178,7 +5252,7 @@ mod tests {
         let json = json!({
             "messages": [
                 {
-                    "event_id": "msg1",
+                    "event_id": "a".repeat(64),
                     "pubkey": "pub1",
                     "content": "message",
                     "created_at": 1710518400
@@ -5207,7 +5281,7 @@ mod tests {
         let json = json!({
             "messages": [
                 {
-                    "event_id": "msg1",
+                    "event_id": "a".repeat(64),
                     "pubkey": "pub1",
                     "content": "only message",
                     "created_at": 1710518400
@@ -5813,6 +5887,7 @@ mod tests {
     #[test]
     fn test_json_to_context_message_integer_timestamp() {
         let obj = json!({
+            "id": "a".repeat(64),
             "pubkey": "abc",
             "content": "hello",
             "created_at": 1710518400
@@ -5826,6 +5901,7 @@ mod tests {
     #[test]
     fn test_json_to_context_message_string_timestamp() {
         let obj = json!({
+            "id": "a".repeat(64),
             "pubkey": "abc",
             "content": "hello",
             "created_at": "2026-03-15T16:30:00+00:00"
@@ -5838,6 +5914,26 @@ mod tests {
     fn test_json_to_context_message_missing_content() {
         let obj = json!({ "pubkey": "abc" });
         assert!(json_to_context_message(&obj).is_none());
+    }
+
+    #[test]
+    fn test_json_to_context_message_legacy_missing_event_id() {
+        let obj = json!({ "pubkey": "abc", "content": "hello" });
+        let msg = json_to_context_message(&obj).expect("legacy REST fixture should parse");
+        assert!(msg.event_id.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_context_message_rejects_malformed_event_id() {
+        let obj = json!({ "id": "not-an-event-id", "content": "hello" });
+        assert!(json_to_context_message(&obj).is_none());
+    }
+
+    #[test]
+    fn test_json_to_context_message_normalizes_event_id() {
+        let obj = json!({ "id": "A".repeat(64), "content": "hello" });
+        let msg = json_to_context_message(&obj).expect("valid event ID should parse");
+        assert_eq!(msg.event_id, "a".repeat(64));
     }
 
     #[test]
@@ -5865,7 +5961,7 @@ mod tests {
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
-                event_id: String::new(),
+                event_id: "a".repeat(64),
                 pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
@@ -6584,7 +6680,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
     #[test]
     fn test_json_to_context_message_missing_pubkey_uses_default() {
-        let obj = json!({ "content": "hello" });
+        let obj = json!({ "id": "a".repeat(64), "content": "hello" });
         let msg = json_to_context_message(&obj).expect("should parse");
         assert_eq!(msg.pubkey, "unknown");
     }
