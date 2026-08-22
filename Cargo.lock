@@ -831,12 +831,15 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "buzz-core",
+ "buzz-git-identity",
  "buzz-persona",
  "buzz-sdk",
  "chrono",
  "clap",
  "evalexpr",
  "futures-util",
+ "git-credential-nostr",
+ "git-sign-nostr",
  "hex",
  "httparse",
  "nix 0.31.3",
@@ -846,6 +849,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -1097,6 +1101,7 @@ dependencies = [
  "base64 0.22.1",
  "buzz-cli",
  "buzz-core",
+ "buzz-git-identity",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",
@@ -1116,6 +1121,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-git-identity"
+version = "0.1.0"
+dependencies = [
+ "nostr 0.44.7",
+ "tempfile",
+ "wait-timeout",
  "zeroize",
 ]
 

@@ -46,13 +46,15 @@ created: 2026-01-15
 
 ## Git Commit Identity
 
-The human operator signs off for accountability.
+Your commit **author** identity is machine-managed. Every commit is automatically authored and cryptographically signed as your agent identity (`<pubkey>@<relay-host>`) — you do not, and cannot, set it. The managed `git` rejects `user.name`/`user.email` config, `-c user.*`, `--author`, and `--reset-author`. The human operator is credited in the commit message trailers, which the author identity does not replace.
 
-- **Human sign-off (required):** every commit MUST include a `Signed-off-by` trailer for the human operator who is responsible for the agent's work. Add via `git commit --trailer "Signed-off-by: Human Name <human@email>"`. One blank line must separate trailers from the commit body.
+> The operator can turn this off with `BUZZ_GIT_IDENTITY=user` (default `agent`, settable per-agent). In `user` mode your commits carry the operator's own git identity and signing config — no managed `git`, no signing enforcement — and the trailers below are redundant since the commit already *is* the operator's identity. The rest of this section describes the default `agent` mode.
+
+- **Human sign-off (required):** every commit MUST include a `Signed-off-by` trailer for the human operator responsible for the agent's work. Add via `git commit --trailer "Signed-off-by: Human Name <human@email>"`. One blank line must separate trailers from the commit body.
 - **Human credit (`Co-authored-by`):** every commit MUST also include a `Co-authored-by` trailer for the same human operator, with identical name and email to the `Signed-off-by` line. GitHub parses `Co-authored-by` for contribution-graph credit; `Signed-off-by` alone does not grant it. Add via `git commit --trailer "Co-authored-by: Human Name <human@email>"`. Place `Co-authored-by` before `Signed-off-by` in the trailer block.
-- **Discovering the human's identity:** read `git config user.name` and `git config user.email` from the working repository. These reflect the human operator's configured identity for that repo (which may differ from their global config). Use these exact values for both trailers. Do NOT hardcode, guess, or prompt for the email — the repo config is the source of truth. If `git config user.email` returns empty, STOP and ask the human operator for their name and email before committing.
-- **Signing:** if the agent has a registered signing key, sign commits. If not, commits will land unverified — this is acceptable until agent SSH keys are provisioned. Do NOT use the human's signing key.
-- **Verify before pushing:** `git log -1` should show the human's `Signed-off-by` trailer.
+- **Discovering the human's identity:** `git config user.name`/`user.email` now resolve to your machine-managed *agent* identity, NOT the operator's — do not use them for the trailers. Take the operator's name and email from the repository's `AGENTS.md` / contribution docs or from an explicit instruction. Do NOT hardcode or guess. If you cannot determine the operator's email, STOP and ask before committing.
+- **Signing:** commits are signed with your agent nostr key automatically (NIP-GS). Do not configure a separate signing key and do not use the human's signing key.
+- **Verify before pushing:** `git log -1 --format='%B' | git interpret-trailers --parse` should show the human's `Co-authored-by` and `Signed-off-by` trailers as a contiguous block.
 
 <!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->
 ## Active Agents

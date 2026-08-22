@@ -214,6 +214,12 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Session-scoped tempdir holding the agent's git identity keyfile and the
+    /// `git` enforcement-wrapper symlink prepended to the child's PATH. Present
+    /// only when `NOSTR_PRIVATE_KEY` was set at spawn. Deleted explicitly by
+    /// [`AcpClient::shutdown`] (the guaranteed-cleanup path); `Drop` is the
+    /// best-effort fallback for callers that never call `shutdown`.
+    _git_identity_dir: Option<tempfile::TempDir>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -413,6 +419,170 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Install deterministic agent git identity onto the about-to-be-spawned agent
+/// runtime child (L1b + the L2/L3 wrapper's PATH placement).
+///
+/// Builds a session-scoped 0700 tempdir that holds:
+/// - the agent's 0600 nostr keyfile (the signer/credential helper read it),
+/// - the 0600 identity manifest the wrapper reads as its authority, and
+/// - `git`, `git-sign-nostr`, `git-credential-nostr` symlinks back to this
+///   binary's own exe, whose multicall dispatch (see [`crate::run`]) makes each
+///   name resolve to the matching personality.
+///
+/// It then prepends that dir to the child's `PATH` (so the wrapper `git` shadows
+/// the real one and the nostr helpers are reachable) and applies the identity +
+/// signing `GIT_CONFIG_*` env, composed over any config the caller already set
+/// (the desktop's per-URL credential helper). The returned [`TempDir`] owns the
+/// keyfile's lifetime and must be held for the life of the child.
+///
+/// The agent secret is sourced from the canonical configured key with explicit
+/// precedence: `BUZZ_PRIVATE_KEY` (the documented required secret) then the
+/// `NOSTR_PRIVATE_KEY` the desktop stages. Eligibility does NOT depend on
+/// independent `git-credential-nostr` discovery — this multicall binary IS that
+/// helper — so a standard headless `BUZZ_PRIVATE_KEY=… buzz-acp …` launch gets
+/// deterministic identity, closing the ambient-Will leak. `NOSTR_PRIVATE_KEY`
+/// is also staged on the child (from the canonical key) so dev-mcp's shim, which
+/// reads that var, installs the same identity for its own subtree.
+///
+/// # Errors
+///
+/// `Err` when a key is present but identity cannot be installed (tempdir/chmod/
+/// symlink/keyfile/manifest/PATH failure) — the caller MUST fail the managed
+/// session closed rather than spawn an agent that commits as ambient Will.
+/// `Ok(None)` only when no key is configured at all (test spawns, genuinely
+/// unconfigured sessions): those legitimately spawn without injected identity,
+/// and the wrapper (finding no manifest) passes through.
+///
+/// Only wired on Unix. Windows agent hosting is not a supported harness surface;
+/// the symlink/exec model the wrapper relies on does not exist there.
+#[cfg(unix)]
+fn install_git_identity(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<Option<tempfile::TempDir>> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    // Operator's identity mode, read once here at spawn — never by the wrapper
+    // per-invocation, which would let any agent `export BUZZ_GIT_IDENTITY=user`
+    // mid-session and hollow out enforcement. A persona-staged value (on `cmd`)
+    // outranks the harness process env, so a per-agent `user` setting wins;
+    // absent both, the default is `agent`. An unrecognized value fails the
+    // spawn loudly rather than silently picking a mode.
+    let mode = buzz_git_identity::GitIdentityMode::from_value(
+        child_env(cmd, buzz_git_identity::GitIdentityMode::ENV_VAR)
+            .or_else(|| std::env::var_os(buzz_git_identity::GitIdentityMode::ENV_VAR))
+            .as_deref(),
+    )
+    .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+
+    // `user` mode: install NO attribution machinery — no wrapper on PATH, no
+    // manifest, no keyfile, no injected identity/signing config. This is the
+    // existing, review-hardened unconfigured-session path: the child's git is
+    // vanilla git resolving the operator's own repo/global identity and
+    // signing. But it must still stage the canonical key below so the shim's
+    // credential-helper-only branch can authenticate to relay git — auth ≠
+    // attribution holds on every launch path, not just desktop, and an operator
+    // who set `user` on a configured session has not unconfigured their auth.
+
+    // Canonical agent key. `BUZZ_PRIVATE_KEY` (the documented secret) always
+    // outranks `NOSTR_PRIVATE_KEY`, at BOTH layers, so a stale or conflicting
+    // child-staged `NOSTR_PRIVATE_KEY` can never split identity away from the
+    // canonical `BUZZ_PRIVATE_KEY`. Within a var name, an explicitly cmd-staged
+    // value (a persona) wins over the ambient process env. Absent entirely →
+    // unconfigured session, spawn without identity (Ok(None)) in either mode.
+    let Some(raw_key) = child_env(cmd, "BUZZ_PRIVATE_KEY")
+        .or_else(|| std::env::var_os("BUZZ_PRIVATE_KEY"))
+        .or_else(|| child_env(cmd, "NOSTR_PRIVATE_KEY"))
+        .or_else(|| std::env::var_os("NOSTR_PRIVATE_KEY"))
+    else {
+        return Ok(None);
+    };
+    let raw_key = raw_key
+        .into_string()
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "agent key is not valid UTF-8"))?;
+
+    // Stage the canonical key as the child's `NOSTR_PRIVATE_KEY` unconditionally
+    // — overwriting any pre-staged value — so dev-mcp's shim (which reads that
+    // var) installs the SAME identity for its own subtree. Staging only when
+    // absent would let a conflicting child `NOSTR_PRIVATE_KEY` drive the shim to
+    // a different identity than the one enforced here. Staged in BOTH modes:
+    // `agent` needs it for the shim's full identity install, `user` needs it for
+    // the shim's credential-helper-only branch (relay git auth).
+    cmd.env("NOSTR_PRIVATE_KEY", &raw_key);
+
+    // `user` mode stops here: the key is staged for the shim's credential
+    // helper, but no attribution machinery is installed — vanilla git resolves
+    // the operator's own identity. `Ok(None)` = no wrapper, manifest, or keyfile
+    // on the harness side.
+    if mode == buzz_git_identity::GitIdentityMode::User {
+        return Ok(None);
+    }
+
+    let self_exe = std::env::current_exe()?;
+
+    let dir = tempfile::Builder::new().prefix("buzz-acp-git-").tempdir()?;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+
+    // The wrapper `git` shadows the real one; the two nostr helpers back the
+    // signing + credential config. All resolve to this binary's multicall.
+    for name in ["git", "git-sign-nostr", "git-credential-nostr"] {
+        symlink(&self_exe, dir.path().join(name))?;
+    }
+
+    // Persist the keyfile and derive the identity. An invalid/empty key here is
+    // a fatal misconfiguration for a managed session — signing would fail every
+    // commit — so surface it rather than spawn unattributed.
+    let id = buzz_git_identity::write_keyfile(dir.path(), &raw_key).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "agent nostr key is empty or invalid",
+        )
+    })?;
+
+    // Write the authoritative identity manifest the enforcement wrapper reads.
+    let identity = buzz_git_identity::identity_signing_entries(&id);
+    buzz_git_identity::write_identity_manifest(dir.path(), &identity)?;
+
+    // Prepend the wrapper dir to the child's PATH. Prefer a cmd-staged PATH
+    // (a persona may set one), fall back to the process env, so we compose
+    // rather than clobber in both cases.
+    let base_path = child_env(cmd, "PATH")
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let mut entries = vec![dir.path().to_path_buf()];
+    entries.extend(std::env::split_paths(&base_path));
+    let joined =
+        std::env::join_paths(entries).map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+    cmd.env("PATH", joined);
+
+    // Identity + signing GIT_CONFIG_*, composed over any config already present
+    // (the desktop's per-URL credential helper at KEY_0/KEY_1). Our entries land
+    // at the next free indices so that helper is preserved.
+    for (key, value) in buzz_git_identity::to_git_config_env(&identity) {
+        cmd.env(key, value);
+    }
+
+    Ok(Some(dir))
+}
+
+#[cfg(not(unix))]
+fn install_git_identity(
+    _cmd: &mut tokio::process::Command,
+) -> std::io::Result<Option<tempfile::TempDir>> {
+    Ok(None)
+}
+
+/// Read a value previously staged on `cmd` via [`Command::env`], if any. Lets
+/// the git-identity installer compose over a `PATH` the spawn path already put
+/// on the child rather than clobbering it.
+#[cfg(unix)]
+fn child_env(cmd: &tokio::process::Command, key: &str) -> Option<std::ffi::OsString> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+        .and_then(|(_, v)| v.map(|v| v.to_owned()))
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -420,6 +590,19 @@ impl AcpClient {
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
+        // Delete the git-identity tempdir (0600 nostr keyfile) explicitly and
+        // first. `TempDir`'s own `Drop` swallows its `remove_dir_all` error, and
+        // when the client is dropped right before `std::process::exit` on an
+        // error/timeout path that removal races the teardown and leaves the
+        // keyfile on disk ~80% of the time (the leak Gurney found). Closing it
+        // here — on the guaranteed-cleanup path, before the process-group kill —
+        // makes removal deterministic and surfaces any failure.
+        if let Some(dir) = self._git_identity_dir.take() {
+            let path = dir.path().to_path_buf();
+            if let Err(e) = dir.close() {
+                tracing::warn!("git identity: keyfile cleanup failed for {path:?}: {e}");
+            }
+        }
         // Kill the entire process group when possible. The child was spawned
         // with process_group(0), so its PID == its PGID. Killing the group
         // ensures subprocesses (MCP servers, tool processes) are cleaned up
@@ -508,13 +691,37 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var_os(key).is_none() {
+            // `BUZZ_GIT_IDENTITY` is an operator-controlled per-agent exception to
+            // the parent-wins rule: a persona value must always reach the child so
+            // `install_git_identity`'s child-over-process lookup can honor a
+            // per-agent mode even when the harness process env sets a global one.
+            // Without this, a global `BUZZ_GIT_IDENTITY` silently defeats every
+            // per-agent override in both directions.
+            if key == buzz_git_identity::GitIdentityMode::ENV_VAR || std::env::var_os(key).is_none()
+            {
                 cmd.env(key, value);
             }
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
         }
+
+        // ── L1b: deterministic agent git identity for the whole runtime subtree ──
+        //
+        // buzz-dev-mcp's shim applies the identity+signing GIT_CONFIG_* only to
+        // its own shell-tool children. The native shells of claude-code / codex /
+        // goose never see it, so a bare `git commit` there resolves to whatever
+        // ambient identity the repo/global config carries (the leak that
+        // produced attribution gaps). Lift the same identity onto the agent
+        // runtime child so every native shell inherits it.
+        //
+        // Composed over the desktop's per-URL credential-helper GIT_CONFIG_*
+        // (base-offset preserved). NOSTR_PRIVATE_KEY is staged on the child so
+        // dev-mcp's shim installs the same identity for its subtree. When a key
+        // is configured but identity cannot be installed, fail the session
+        // closed (`?`) rather than spawn an agent that would commit as ambient
+        // Will; `Ok(None)` (no key at all) spawns unchanged.
+        let git_identity_dir = install_git_identity(&mut cmd)?;
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
@@ -563,6 +770,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            _git_identity_dir: git_identity_dir,
         })
     }
 
@@ -3125,6 +3333,53 @@ mod tests {
         );
     }
 
+    /// `BUZZ_GIT_IDENTITY` is an operator-controlled per-agent exception to the
+    /// parent-wins env merge: a persona value must always reach the child so the
+    /// child-over-process lookup in `install_git_identity` can honor a per-agent
+    /// mode even when the harness process env sets a conflicting global one.
+    /// Exercised through the real `AcpClient::spawn` merge loop (the unit tests
+    /// write directly to `Command` and bypass it). No agent key is set, so
+    /// `install_git_identity` returns early without installing anything — this
+    /// isolates the env-merge behavior.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_persona_git_identity_overrides_global_process_env() {
+        const VAR: &str = buzz_git_identity::GitIdentityMode::ENV_VAR;
+
+        /// Restore the process-global `VAR` to its prior state on drop, so this
+        /// test neither clobbers a caller-supplied value nor leaks its own.
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(prev) => std::env::set_var(VAR, prev),
+                    None => std::env::remove_var(VAR),
+                }
+            }
+        }
+        let _guard = EnvGuard(std::env::var_os(VAR));
+
+        // parent=agent, persona=user → child sees the persona value.
+        std::env::set_var(VAR, "agent");
+        let observed =
+            spawn_named_and_read_child_env("other-agent", VAR, &[(VAR.into(), "user".into())])
+                .await;
+        assert_eq!(
+            observed, "user",
+            "persona `user` must override a global `agent` in the parent env"
+        );
+
+        // parent=user, persona=agent → child sees the persona value.
+        std::env::set_var(VAR, "user");
+        let observed =
+            spawn_named_and_read_child_env("other-agent", VAR, &[(VAR.into(), "agent".into())])
+                .await;
+        assert_eq!(
+            observed, "agent",
+            "persona `agent` must override a global `user` in the parent env"
+        );
+    }
+
     #[tokio::test]
     async fn idle_timeout_fires_on_silent_process() {
         let mut client = spawn_script("sleep 10").await;
@@ -5025,6 +5280,137 @@ mod tests {
         assert!(
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
+        );
+    }
+
+    /// I5: `BUZZ_PRIVATE_KEY` (the documented secret) must win over a
+    /// conflicting `NOSTR_PRIVATE_KEY`, and the canonical key must be staged as
+    /// the child's `NOSTR_PRIVATE_KEY` — overwriting the conflicting value — so
+    /// the harness layer and dev-mcp's shim can never install split identities.
+    /// Both keys are staged on the command (which outranks the process env for
+    /// each name), so the test is deterministic regardless of ambient env.
+    #[cfg(unix)]
+    #[test]
+    fn install_git_identity_prefers_buzz_key_and_restages_nostr() {
+        use nostr::ToBech32;
+
+        let buzz_keys = nostr::Keys::generate();
+        let nostr_keys = nostr::Keys::generate();
+        let buzz_nsec = buzz_keys.secret_key().to_bech32().unwrap();
+        let nostr_nsec = nostr_keys.secret_key().to_bech32().unwrap();
+        assert_ne!(buzz_nsec, nostr_nsec, "distinct conflicting keys");
+        let buzz_hex = buzz_keys.public_key().to_hex();
+        let nostr_hex = nostr_keys.public_key().to_hex();
+
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("BUZZ_PRIVATE_KEY", &buzz_nsec);
+        cmd.env("NOSTR_PRIVATE_KEY", &nostr_nsec);
+
+        let dir = install_git_identity(&mut cmd)
+            .expect("install must succeed with a valid key")
+            .expect("a configured key must install identity");
+
+        // The manifest — the wrapper's authority — must name the BUZZ key. Assert
+        // on the pubkey (the stable identity), not the host, so the test does not
+        // depend on a process-global `BUZZ_RELAY_URL` other tests may mutate.
+        let entries =
+            buzz_git_identity::read_identity_manifest(dir.path()).expect("manifest written");
+        let email = entries
+            .iter()
+            .find(|(k, _)| k == "user.email")
+            .map(|(_, v)| v.clone())
+            .expect("manifest has user.email");
+        assert!(
+            email.starts_with(&format!("{buzz_hex}@")),
+            "BUZZ_PRIVATE_KEY must outrank the conflicting NOSTR_PRIVATE_KEY; got {email:?}"
+        );
+        assert!(
+            !email.contains(&nostr_hex),
+            "the conflicting NOSTR key must not have won; got {email:?}"
+        );
+
+        // The child's NOSTR_PRIVATE_KEY must have been overwritten to the
+        // canonical (BUZZ) key, not left at the conflicting staged value.
+        let staged = child_env(&cmd, "NOSTR_PRIVATE_KEY")
+            .and_then(|v| v.into_string().ok())
+            .expect("NOSTR_PRIVATE_KEY staged on child");
+        assert_eq!(
+            staged, buzz_nsec,
+            "child NOSTR_PRIVATE_KEY must be the canonical BUZZ key, so dev-mcp's shim \
+             installs the same identity"
+        );
+    }
+
+    /// `BUZZ_GIT_IDENTITY=user` (staged per-agent on the command) installs no
+    /// attribution machinery even with a valid key present, so the child's git
+    /// resolves the operator's own identity — but the canonical key is still
+    /// staged as the child's `NOSTR_PRIVATE_KEY` so the shim's credential helper
+    /// can authenticate to relay git (auth ≠ attribution on every launch path).
+    /// The staged mode value outranks the harness process env, proving
+    /// per-agent control.
+    #[cfg(unix)]
+    #[test]
+    fn install_git_identity_user_mode_installs_nothing_but_stages_key() {
+        use nostr::ToBech32;
+
+        let nsec = nostr::Keys::generate().secret_key().to_bech32().unwrap();
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("BUZZ_PRIVATE_KEY", &nsec);
+        cmd.env("BUZZ_GIT_IDENTITY", "user");
+
+        let dir = install_git_identity(&mut cmd).expect("user mode must not error");
+        assert!(
+            dir.is_none(),
+            "user mode must install no identity dir (unconfigured path)"
+        );
+        // No identity/signing config staged: the child git is vanilla git.
+        assert!(
+            child_env(&cmd, "GIT_CONFIG_COUNT").is_none(),
+            "user mode must not inject GIT_CONFIG_* identity/signing config"
+        );
+        // The canonical key IS staged so the shim's credential helper works.
+        let staged = child_env(&cmd, "NOSTR_PRIVATE_KEY")
+            .and_then(|v| v.into_string().ok())
+            .expect("user mode must stage NOSTR_PRIVATE_KEY for the credential helper");
+        assert_eq!(
+            staged, nsec,
+            "user mode must stage the canonical key so relay git auth still works"
+        );
+    }
+
+    /// `agent` (explicit) still enforces: a valid key installs the identity dir
+    /// and injects config, identical to the unset default.
+    #[cfg(unix)]
+    #[test]
+    fn install_git_identity_agent_mode_enforces() {
+        use nostr::ToBech32;
+
+        let nsec = nostr::Keys::generate().secret_key().to_bech32().unwrap();
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("BUZZ_PRIVATE_KEY", &nsec);
+        cmd.env("BUZZ_GIT_IDENTITY", "agent");
+
+        let dir = install_git_identity(&mut cmd)
+            .expect("agent mode must not error")
+            .expect("agent mode with a key must install identity");
+        assert!(
+            buzz_git_identity::read_identity_manifest(dir.path()).is_some(),
+            "agent mode must write the enforcement manifest"
+        );
+    }
+
+    /// An unrecognized value fails the spawn loudly rather than silently
+    /// picking a mode — the #3140 failure class.
+    #[cfg(unix)]
+    #[test]
+    fn install_git_identity_rejects_invalid_mode() {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("BUZZ_GIT_IDENTITY", "usr");
+        let err = install_git_identity(&mut cmd).expect_err("invalid mode must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("BUZZ_GIT_IDENTITY"),
+            "error must name the var; got {err}"
         );
     }
 }

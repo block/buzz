@@ -1,0 +1,19 @@
+[package]
+name = "buzz-git-identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic agent git identity: author/email/signing GIT_CONFIG_* construction shared by the harness and dev-mcp"
+
+[lib]
+name = "buzz_git_identity"
+path = "src/lib.rs"
+
+[dependencies]
+nostr = { workspace = true }
+zeroize = { workspace = true }
+wait-timeout = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
