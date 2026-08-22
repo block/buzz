@@ -755,9 +755,33 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
         s.busy = false;
-        // Clear run state so a late steer can't queue into a finished turn.
+        // Stop accepting new steers BEFORE the final drain. The steer handler
+        // rejects as soon as `steer_tx` goes `None`, so any value that remains
+        // in `steer_rx` afterward was accepted by us while still racing the run
+        // teardown — preserve it in history rather than dropping it silently,
+        // and surface it to the client so it can start a follow-up turn
+        // instead of believing the steer was folded into the completed turn.
         s.active_run_id = None;
         s.steer_tx = None;
+        let mut late_steers = 0u32;
+        while let Ok(blocks) = steer_rx.try_recv() {
+            match crate::agent::prompt_to_text(blocks) {
+                Ok(text) if !text.trim().is_empty() => {
+                    history.push(HistoryItem::User(text));
+                    late_steers = late_steers.saturating_add(1);
+                }
+                Ok(_) => tracing::debug!("dropping empty late steer message"),
+                Err(e) => tracing::warn!("dropping unrenderable late steer: {e}"),
+            }
+        }
+        if late_steers > 0 {
+            tracing::warn!(
+                session_id = %sid,
+                count = late_steers,
+                "steer(s) acknowledged after last drain folded into history; \
+                 they apply to the NEXT turn, not the one that just completed"
+            );
+        }
         s.history = history;
         s.original_task = original_task;
         s.handoff_count = handoff_count;
