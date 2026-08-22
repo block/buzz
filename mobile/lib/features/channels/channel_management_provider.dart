@@ -16,6 +16,7 @@ import 'channels_provider.dart';
 
 export 'channel_metadata_updates.dart';
 
+part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
 String _relayErrorMessage(Object error) =>

@@ -23,6 +23,7 @@
 //!    takes `stt_pipeline`/`tts_pipeline` out of the lock, then calls `shutdown()`
 //!    and drops them outside the lock (thread joins can block ~200ms).
 
+mod agent_tts_publisher;
 mod agent_tts_routing;
 pub mod agent_voice;
 pub mod agents;
@@ -85,7 +86,7 @@ pub use window::{close_huddle_companion, open_huddle_window};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 use tauri::State;
 use uuid::Uuid;
 
@@ -493,7 +494,7 @@ fn teardown_huddle(state: &AppState) -> Result<(), String> {
         // Increment generation first — this immediately invalidates any
         // in-flight transcription task, even before pipelines shut down.
         hs.session_generation.fetch_add(1, Ordering::Release);
-        let stt = hs.stt_pipeline.take();
+        let stt = hs.take_stt_pipeline();
         let tts = hs.tts_pipeline.take();
         let cancel = hs.audio_ws_cancel.take();
         // Cancel the relay token BEFORE dropping the sender. If we drop
@@ -877,7 +878,7 @@ pub async fn speak_agent_message(
         })?;
     }
 
-    let sender = {
+    let pipeline = {
         let hs = state.huddle()?;
         let agent_is_present = hs
             .agent_pubkeys
@@ -891,20 +892,27 @@ pub async fn speak_agent_message(
             );
             return Ok(());
         }
-        hs.tts_pipeline
-            .as_ref()
-            .map(|pipeline| pipeline.text_sender())
-            .map(|sender| {
-                let speaker_generation = sender.speaker_generation(&speaker_pubkey);
-                (sender, speaker_generation)
-            })
+        hs.tts_pipeline.as_ref().map(Arc::clone)
     };
-    let Some((sender, speaker_generation)) = sender else {
+    let Some(pipeline) = pipeline else {
         eprintln!(
             "buzz-desktop: tts stage=invoke status=failed reason=unavailable route_id={route_id}"
         );
         return Err("Agent text to speech is enabled but its audio pipeline is unavailable".into());
     };
+    match agent_tts_publisher::ensure(&app, &state, &pipeline, &speaker_pubkey).await {
+        Ok(true) => eprintln!(
+            "buzz-desktop: tts broadcast status=ready route_id={route_id}"
+        ),
+        Ok(false) => eprintln!(
+            "buzz-desktop: tts broadcast status=unavailable reason=agent_identity_not_local route_id={route_id}"
+        ),
+        Err(error) => eprintln!(
+            "buzz-desktop: tts broadcast status=unavailable reason=publisher_setup_failed route_id={route_id} error={error}"
+        ),
+    }
+    let sender = pipeline.text_sender();
+    let speaker_generation = sender.speaker_generation(&speaker_pubkey);
     enqueue_agent_tts_text(route_id, text, move |route_id, text| {
         sender
             .send(

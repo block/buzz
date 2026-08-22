@@ -12,6 +12,7 @@ import 'channel.dart';
 import 'channel_management_provider.dart'
     show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'huddle_channel_filter.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
@@ -229,6 +230,21 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     final hiddenDmIds = await _fetchHiddenDmIds(session, myPk);
+    // Fetch the authoritative membership snapshots before filtering Huddle
+    // backing channels. The relay-signed kind:39000 metadata identifies the
+    // relay, not the channel creator; the owner role in kind:39002 is the
+    // canonical creator identity used to reject forged Huddle links.
+    final memberEvents = await session.fetchHistory(
+      NostrFilter(
+        kinds: const [39002],
+        tags: {'#d': channelIds},
+        limit: channelIds.length,
+      ),
+    );
+    final huddleBackingIds = huddleBackingChannelIds(
+      await _fetchHuddleStarts(session, channelIds),
+      memberEvents,
+    );
 
     final channels = <Channel>[];
     for (final event in dedupedMetas) {
@@ -238,6 +254,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         displayNames: displayNames,
       );
       if (channel.isDm && hiddenDmIds.contains(channel.id)) continue;
+      if (huddleBackingIds.contains(channel.id) &&
+          channel.isStream &&
+          channel.isPrivate) {
+        continue;
+      }
       // Ephemeral (TTL) channels are surfaced in the list with an
       // `_EphemeralBadge` rendered in `channels_page.dart` — they shouldn't be
       // hidden. Desktop shows them too. Previously dropped here unconditionally,
@@ -245,14 +266,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       channels.add(channel);
     }
 
-    // Batch-fetch member counts via kind:39002 membership events.
-    final memberEvents = await session.fetchHistory(
-      NostrFilter(
-        kinds: const [39002],
-        tags: {'#d': channelIds},
-        limit: channelIds.length,
-      ),
-    );
+    // Use the membership snapshots already fetched above for both Huddle
+    // linkage validation and member-count hydration.
     if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
     final memberCounts = <String, int>{};
     for (final event in memberEvents) {
@@ -474,6 +489,29 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       };
     } catch (_) {
       return const {};
+    }
+  }
+
+  Future<List<NostrEvent>> _fetchHuddleStarts(
+    RelaySessionNotifier session,
+    List<String> parentChannelIds,
+  ) async {
+    if (parentChannelIds.isEmpty) return const [];
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return await session.fetchHistory(
+        NostrFilter(
+          kinds: const [EventKind.huddleStarted],
+          tags: {'#h': parentChannelIds},
+          since: now - const Duration(hours: 2).inSeconds,
+          limit: 500,
+        ),
+      );
+    } catch (error) {
+      debugPrint(
+        '[ChannelsNotifier] Huddle backing-channel query failed: $error',
+      );
+      return const [];
     }
   }
 

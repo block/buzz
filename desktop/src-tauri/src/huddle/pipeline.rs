@@ -55,7 +55,7 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         let mut hs = state.huddle()?;
         if let Some(ref p) = hs.stt_pipeline {
             if p.is_finished() {
-                hs.stt_pipeline = None;
+                hs.take_stt_pipeline();
             }
         }
         if let Some(ref p) = hs.tts_pipeline {
@@ -327,7 +327,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         if hs.stt_pipeline.is_some() {
             hs.session_generation.fetch_add(1, Ordering::Release);
         }
-        let old = hs.stt_pipeline.take();
+        let old = hs.take_stt_pipeline();
         if let Some(ref p) = old {
             p.shutdown();
         }
@@ -397,7 +397,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         {
             return Ok(false);
         }
-        hs.stt_pipeline = Some(Arc::clone(&pipeline));
+        hs.set_stt_pipeline(Arc::clone(&pipeline));
     }
 
     spawn_transcription_task(text_rx, channel_uuid, agent_pubkeys_arc, session_gen, state);

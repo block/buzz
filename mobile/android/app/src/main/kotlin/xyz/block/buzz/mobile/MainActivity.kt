@@ -79,9 +79,15 @@ internal object AndroidImageProcessor {
 
 class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var huddleMediaPlugin: HuddleMediaPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        huddleMediaPlugin = HuddleMediaPlugin(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
 
         mediaUploadChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -108,6 +114,21 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             }
         }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        huddleMediaPlugin?.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
+    override fun onDestroy() {
+        huddleMediaPlugin?.dispose()
+        huddleMediaPlugin = null
+        super.onDestroy()
     }
 
     private fun handleSanitizeImageForUpload(
