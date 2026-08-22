@@ -178,6 +178,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "gemini",
+        label: "Gemini CLI",
+        command: "gemini",
+        args: &["--acp"],
+        install_instructions_url: "https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/acp-mode.md",
+        install_hint: "Buzz talks to Gemini CLI through its native ACP mode (gemini --acp).",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
