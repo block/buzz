@@ -25,9 +25,7 @@ history reconstructs the visible card without silently reopening a microphone.
 3. Sign NIP-42 kind `22242` with `relay=<base relay WebSocket URL>` and the
    challenge. The `relay` tag is **not** the Huddle endpoint URL.
 4. Send an object envelope containing `type=auth`, the signed event,
-   `parent_channel_id`, and `protocol_version=3`. Protocol v2 remains available
-   for released clients with its one-byte relay peer prefix; v3 adds an
-   occupancy epoch and cannot share a pinned room with v2 clients.
+   `parent_channel_id`, and `protocol_version=2`.
 5. Treat the connection as usable only after a `joined` response. `error`,
    unexpected close, handshake timeout, and protocol failures are explicit
    states. An established session retries only its media socket with bounded
@@ -48,7 +46,7 @@ burst origin so authorship is spatially clear; minimized calls fall back to the
 available Huddle surface. Reaction events never enter the ordinary channel
 timeline.
 
-## Media plane: protocol v3
+## Media plane: protocol v2
 
 Audio is 48 kHz, mono Opus in 20 ms (960-sample) frames.
 
@@ -61,14 +59,13 @@ Client to relay:
 Relay to client:
 
 ```text
-peer_index u8 | epoch u8 | 8-byte header | Opus payload
+peer_index u8 | 8-byte header | Opus payload
 ```
 
 The header is network byte order: sequence `u16`, 48 kHz timestamp `u32`,
-level dBov `i8` in `-127...0`, and flags `u8` where bit 0 marks DTX. The
-occupancy epoch advances whenever a peer index is assigned again, allowing
-clients to fence delayed media from the previous occupant. Unknown flag bits
-are ignored. Frames are capped at 4096 bytes before the relay peer prefix.
+level dBov `i8` in `-127...0`, and flags `u8` where bit 0 marks DTX. Unknown
+flag bits are ignored. Frames are capped at 4096 bytes before the relay peer
+prefix.
 
 The dBov header also drives the participant speaking treatment. Values above
 the existing `-55 dBov` activity threshold are normalized for a 50 ms visual
