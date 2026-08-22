@@ -154,8 +154,13 @@ fn load_from_path(
     for row in rows {
         let (channel_id, events_json, saved_at, last_visited_at) =
             row.map_err(|error| format!("read channel-head cache row: {error}"))?;
-        let events = serde_json::from_str(&events_json)
-            .map_err(|error| format!("decode channel-head cache row {channel_id}: {error}"))?;
+        let events = match serde_json::from_str(&events_json) {
+            Ok(events) => events,
+            Err(error) => {
+                eprintln!("skipping corrupt channel-head cache row {channel_id}: {error}");
+                continue;
+            }
+        };
         entries.push(ChannelHeadEntry {
             channel_id,
             events,
@@ -369,6 +374,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn skips_corrupt_rows_without_blanketing_good_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("channel-head-cache.db");
+        store_at(
+            &path,
+            &scope(),
+            "good-channel",
+            &[serde_json::json!({"id":"good-event"})],
+            1_000,
+        )
+        .unwrap();
+        let conn = open_db(&path).unwrap();
+        conn.execute(
+            "INSERT INTO channel_head VALUES(?1, 'bad-channel', 'not-json', 1, 1001, 1001)",
+            [scope().key()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let entries = load_from_path(&path, &scope(), 12).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].channel_id, "good-channel");
+        assert_eq!(
+            entries[0].events,
+            vec![serde_json::json!({"id":"good-event"})]
+        );
     }
 
     #[test]
