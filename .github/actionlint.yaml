@@ -1,0 +1,8 @@
+self-hosted-runner:
+  labels:
+    - arc-buzz-database
+    - arc-database-operations
+
+config-variables: null
+
+paths:

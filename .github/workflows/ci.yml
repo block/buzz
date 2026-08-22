@@ -1135,3 +1135,66 @@ jobs:
           LLAMA_STAGE_BACKEND: metal
           LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
           SKIPPY_LLAMA_AUTO_BUILD: "0"
+
+  keycloak-setup:
+    name: Keycloak Client Setup (buzz)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - changes
+      - rust-lint
+      - unit-tests
+      - desktop-core
+      - desktop-smoke-e2e
+      - desktop
+      - desktop-e2e-relay
+      - desktop-e2e-integration-shard
+      - desktop-e2e-integration
+      - backend-integration
+      - relay-e2e
+      - web
+      - mobile
+      - security
+      - dead-token-guard
+      - server-cross-compile
+      - windows-rust
+      - desktop-build-macos
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/keycloak-setup.yml
+    with:
+      client_id: buzz
+
+  deploy:
+    name: Deploy to Prod (apps-prod-buzz)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [
+      changes,
+      rust-lint,
+      unit-tests,
+      desktop-core,
+      desktop-smoke-e2e,
+      desktop,
+      desktop-e2e-relay,
+      desktop-e2e-integration-shard,
+      desktop-e2e-integration,
+      backend-integration,
+      relay-e2e,
+      web,
+      mobile,
+      security,
+      dead-token-guard,
+      server-cross-compile,
+      windows-rust,
+      desktop-build-macos,
+      keycloak-setup
+    ]
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      image_tag: main
+      app_name: apps-prod-buzz
+      sync_enabled: true
+      wait: true

@@ -48,8 +48,8 @@ surface at template time regardless of which manifest helm renders first.
 
 {{/* Owner pubkey required when requireRelayMembership */}}
 {{- if .Values.relay.requireRelayMembership -}}
-  {{- if not .Values.ownerPubkey -}}
-    {{- fail "ownerPubkey is required when relay.requireRelayMembership=true. Set ownerPubkey to the 64-char lowercase hex Nostr pubkey of the relay operator, or set relay.requireRelayMembership=false for an open relay." -}}
+  {{- if not (or .Values.ownerPubkey (and .Values.secrets.existingSecret .Values.ownerPubkeySecretKey)) -}}
+    {{- fail "ownerPubkey or ownerPubkeySecretKey with secrets.existingSecret is required when relay.requireRelayMembership=true." -}}
   {{- end -}}
 {{- end -}}
 

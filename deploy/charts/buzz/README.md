@@ -46,7 +46,8 @@ See:
 | Key | What | When required |
 |---|---|---|
 | `relayUrl` | Public `wss://` URL clients connect to | Always |
-| `ownerPubkey` | 64-char lowercase hex Nostr pubkey of the relay operator | When `relay.requireRelayMembership=true` (default) |
+| `ownerPubkey` | 64-char lowercase hex Nostr pubkey of the relay operator | When `relay.requireRelayMembership=true` and not loaded from `secrets.existingSecret` |
+| `ownerPubkeySecretKey` | Key in `secrets.existingSecret` containing the relay owner pubkey | Alternative to inline `ownerPubkey` for ExternalSecrets/GitOps |
 | `secrets.existingSecret` | Name of pre-created Secret | Production / GitOps |
 | `externalPostgresql.url` / `externalRedis.url` / `s3.endpoint` | External service URLs | Production — when the matching bundled service is disabled (the default) |
 
