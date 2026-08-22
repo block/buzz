@@ -65,7 +65,14 @@ export function ChannelMembersBar({
   );
   const { startHuddle, isStarting: isStartingHuddle } = useHuddle();
   const queryClient = useQueryClient();
-  const membersQuery = useChannelMembersQuery(channel.id);
+  // The roster is only needed for DM huddle composition (agent detection and
+  // participant naming). Streams/forums render the count from the channel
+  // summary and gate huddle access on `channel.isMember`, so mounting this
+  // bar must not put a full-roster fetch on the channel-switch path.
+  const membersQuery = useChannelMembersQuery(
+    channel.id,
+    channel.channelType === "dm",
+  );
   const providersQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();

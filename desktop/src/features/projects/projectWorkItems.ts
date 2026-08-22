@@ -82,6 +82,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   fetchEvents: (
     filter: FetchEventsInput,
   ) => Promise<RelayEvent[]> = relayClient.fetchEvents.bind(relayClient),
+  signal?: AbortSignal,
 ): Promise<ProjectsWorkItemsResult<TProject>> {
   const repoAddresses = [
     ...new Set(
@@ -129,9 +130,16 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
             .filter((event) => event.kind === KIND_GIT_ISSUE)
             .map((event) => event.id),
           fetchEvents,
+          signal,
         ),
       ),
     ]);
+
+  // The five eager queries above are single bounded REQs the relay client
+  // cannot abort mid-flight; only the assignment pagination is abort-aware.
+  // What cancellation CAN save here is the reduce work below and caching a
+  // result for a surface the user already left.
+  signal?.throwIfAborted();
 
   if (rootResult.status === "rejected") {
     throw rootResult.reason instanceof Error

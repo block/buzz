@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import traceback
 from dataclasses import dataclass, field
@@ -49,8 +50,10 @@ FORWARDER = f"{REMOTE_BIN}/relay-forwarder"
 FORWARDER_LOG = f"{REMOTE_LOGS}/relay-forwarder.log"
 # How many done-poll iterations between in-container liveness probes.
 LIVENESS_EVERY = 10
-SCRIPTED_EVENT_IDLE_POLLS = 5
 TRANSCRIPT_LIMIT = 1000
+DELIVERY_RECEIPT_MARKER = "turn delivered Buzz events for channel"
+EVENT_ID_PATTERN = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 TURN_ENDED_MARKERS = (
     "turn complete for",
     "turn cancelled for",
@@ -206,9 +209,9 @@ class BuzzContainerRuntime:
                     trial,
                     agents + infra,
                     solo=agents[0] if len(agents) == 1 else None,
-                    minimum_agent_messages=fixture_for(
-                        trial.task_name
-                    ).minimum_agent_messages,
+                    scripted_event_ids={
+                        str(event["event_id"]) for event in scripted_events
+                    },
                 ),
                 timeout=manifest.trial_budget.timeout_seconds,
             )
@@ -506,16 +509,15 @@ class BuzzContainerRuntime:
         trial: TrialHandle,
         agents: list[_Agent],
         solo: _Agent | None = None,
-        minimum_agent_messages: int = 0,
+        scripted_event_ids: set[str] | frozenset[str] = frozenset(),
     ) -> dict[str, Any] | None:
-        """Observe until a team posts DONE or a solo agent finishes its one turn.
+        """Observe until a team posts DONE or a solo agent finishes its work.
 
         Observation only: the harness never speaks as any agent. If the team
         stalls, the trial times out and the stall is the measured result. A solo
-        agent cannot be woken by a teammate, so its logged turn end is final.
+        task without scripted events finishes at its first logged turn end.
         """
         polls = 0
-        idle_terminal_polls = 0
         while True:
             if polls % LIVENESS_EVERY == 0:
                 await self._raise_for_dead_agents(environment, agents)
@@ -531,25 +533,29 @@ class BuzzContainerRuntime:
                 "100",
             )
             for message in messages:
-                if message.get("pubkey") == orchestrator.nostr_pubkey and str(
-                    message.get("content", "")
-                ).startswith("DONE:"):
+                if (
+                    message.get("pubkey") == orchestrator.nostr_pubkey
+                    and str(message.get("content", "")).startswith("DONE:")
+                    and (solo is None or not scripted_event_ids)
+                ):
                     return message
             if solo is not None:
-                starts, ends = await self._turn_counts(environment, solo)
+                starts, ends, delivered_event_ids = await self._turn_status(
+                    environment, solo
+                )
                 authored = [
                     message
                     for message in messages
                     if message.get("pubkey") == orchestrator.nostr_pubkey
                 ]
-                if ends > 0 and len(authored) >= minimum_agent_messages:
+                if not scripted_event_ids and ends > 0:
                     return authored[-1] if authored else None
-                if starts > 0 and starts == ends:
-                    idle_terminal_polls += 1
-                    if idle_terminal_polls >= SCRIPTED_EVENT_IDLE_POLLS:
-                        return authored[-1] if authored else None
-                else:
-                    idle_terminal_polls = 0
+                if (
+                    starts > 0
+                    and starts == ends
+                    and scripted_event_ids <= delivered_event_ids
+                ):
+                    return authored[-1] if authored else None
             await asyncio.sleep(self.poll_seconds)
 
     @staticmethod
@@ -561,14 +567,36 @@ class BuzzContainerRuntime:
     async def _turn_counts(
         environment: BaseEnvironment, agent: _Agent
     ) -> tuple[int, int]:
+        starts, ends, _ = await BuzzContainerRuntime._turn_status(environment, agent)
+        return starts, ends
+
+    @staticmethod
+    async def _turn_status(
+        environment: BaseEnvironment, agent: _Agent
+    ) -> tuple[int, int, set[str]]:
         result = await environment.exec(
             f"cat {shlex.quote(agent.stdout_log)} "
             f"{shlex.quote(agent.stderr_log)} 2>/dev/null"
         )
-        output = result.stdout or ""
+        return BuzzContainerRuntime._parse_turn_status(result.stdout or "")
+
+    @staticmethod
+    def _parse_turn_status(output: str) -> tuple[int, int, set[str]]:
+        output = ANSI_ESCAPE_PATTERN.sub("", output)
+        delivered_event_ids: set[str] = set()
+        for line in output.splitlines():
+            if DELIVERY_RECEIPT_MARKER in line:
+                delivered_event_ids.update(EVENT_ID_PATTERN.findall(line))
+            elif (
+                "non-cancelling steer ack received" in line and "ack=Ok(Success" in line
+            ):
+                match = re.search(r"event_id=([0-9a-f]{64})", line)
+                if match is not None:
+                    delivered_event_ids.add(match.group(1))
         return (
             output.count("turn starting for"),
             sum(output.count(marker) for marker in TURN_ENDED_MARKERS),
+            delivered_event_ids,
         )
 
     async def _raise_for_dead_agents(
@@ -824,6 +852,10 @@ class BuzzContainerRuntime:
                 and isinstance(response.get("event_id"), str)
                 else None
             )
+            if event_id is None:
+                raise RuntimeLaunchError(
+                    f"scripted event {message.label!r} did not return an event ID"
+                )
             recorded.append(
                 {
                     "label": message.label,
