@@ -23,6 +23,7 @@ pub async fn set_managed_agent_start_on_app_launch(
     start_on_app_launch: bool,
     app: AppHandle,
 ) -> Result<ManagedAgentSummary, String> {
+    crate::managed_agents::reject_registered_reference_target(&app, &pubkey)?;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _store_guard = state
@@ -67,6 +68,7 @@ pub async fn set_managed_agent_auto_restart(
     auto_restart_on_config_change: bool,
     app: AppHandle,
 ) -> Result<ManagedAgentSummary, String> {
+    crate::managed_agents::reject_registered_reference_target(&app, &pubkey)?;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _store_guard = state

@@ -57,8 +57,7 @@ pub(crate) async fn flush_managed_agent_policy(
 /// Most runtime config changes take effect on the next agent spawn. Access
 /// policy changes stop active local pairs before saving and restart those exact
 /// pairs after the relay policy is flushed.
-#[tauri::command]
-pub async fn update_managed_agent(
+pub(super) async fn update_managed_agent_impl(
     input: UpdateManagedAgentRequest,
     app: AppHandle,
     state: State<'_, AppState>,

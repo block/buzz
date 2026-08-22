@@ -106,6 +106,7 @@ pub fn put_managed_agent_runtime_lifecycle(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let key = observer_lifecycle_key(&outer_pubkey, &payload)?;
+    super::reject_registered_reference_target(&app, &key.pubkey)?;
     let state = app.state::<AppState>();
     let records = load_managed_agents(&app)?;
     let record = records
@@ -243,6 +244,7 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    super::reject_registered_reference_target(&app, &pubkey)?;
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -315,6 +317,7 @@ pub fn stop_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    super::reject_registered_reference_target(&app, &pubkey)?;
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition

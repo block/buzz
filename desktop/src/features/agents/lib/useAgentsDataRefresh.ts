@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import {
   managedAgentsQueryKey,
   personasQueryKey,
+  registeredAgentsQueryKey,
   teamsQueryKey,
 } from "@/features/agents/hooks";
 import { managedAgentRuntimesQueryKey } from "@/features/agents/managedAgentRuntimeHooks";
@@ -13,13 +14,14 @@ export const LOCAL_AGENT_DATA_QUERY_KEYS = [
   personasQueryKey,
   teamsQueryKey,
   managedAgentsQueryKey,
+  registeredAgentsQueryKey,
 ] as const;
 
 // Trailing-coalesce local agent-store bursts into one cache refresh. The relay
 // directory is deliberately excluded: local persona/team/agent reconciliation
-// cannot change remote directory records, and rebuilding that directory is a
-// relay-wide operation. Remote data keeps its focused poll and is revalidated
-// directly before an agent mention is sent.
+// and registered-reference edits cannot change remote directory records, and
+// rebuilding that directory is a relay-wide operation. Remote data keeps its
+// focused poll and is revalidated directly before an agent mention is sent.
 const COALESCE_MS = 200;
 
 export function useAgentsDataRefresh(): void {
