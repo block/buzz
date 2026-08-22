@@ -98,6 +98,20 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
   assert.equal(canonicalRelayUrl("not a url"), null);
 });
 
+test("canonicalRelayUrl rejects credentials and fragments like buzz-core", () => {
+  // buzz-core's normalize_relay_url rejects these outright
+  // (crates/buzz-core/src/relay.rs, rejects_non_relay_and_ambiguous_urls);
+  // silently stripping userinfo/hash would canonicalize an ambiguous URL
+  // into a false exact match.
+  assert.equal(canonicalRelayUrl("wss://user@relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://user:pw@relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://:pw@relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://relay.example/#x"), null);
+  // An empty fragment is still a fragment to the backend, even though the
+  // URL API normalizes `hash` away.
+  assert.equal(canonicalRelayUrl("wss://relay.example/#"), null);
+});
+
 test("matches a stored community URL against canonical backend rows", () => {
   const runtimes = [
     runtime({ relayUrl: "ws://127.0.0.1:3000", lifecycle: "ready" }),
