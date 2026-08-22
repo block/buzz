@@ -683,7 +683,11 @@ async fn enforce_ws_admission(
         ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
         _ => None,
     };
-    if !send_admission_result(conn, ws_result, sub_id) {
+    let event_id = match msg {
+        ClientMessage::Event(event) => Some(event.id.to_hex()),
+        _ => None,
+    };
+    if !send_admission_result(conn, ws_result, sub_id, event_id.as_deref()) {
         return false;
     }
 
@@ -702,7 +706,7 @@ async fn enforce_ws_admission(
             message_limit,
         )
         .await;
-        if !send_admission_result(conn, message_result, None) {
+        if !send_admission_result(conn, message_result, None, event_id.as_deref()) {
             return false;
         }
     }
@@ -714,31 +718,55 @@ fn send_admission_result(
     conn: &ConnectionState,
     result: Result<(), crate::admission::AdmissionError>,
     sub_id: Option<&str>,
+    event_id: Option<&str>,
 ) -> bool {
-    match result {
-        Ok(()) => true,
+    let rejection = match result {
+        Ok(()) => return true,
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
-            conn.send(request_rejection_message(
-                sub_id,
-                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
-            ));
-            false
+            format!("rate-limited: quota exceeded; retry in {reset_in_secs}s")
         }
         Err(crate::admission::AdmissionError::Unavailable) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
-            conn.send(request_rejection_message(
-                sub_id,
-                "rate-limited: shared admission unavailable",
-            ));
-            false
+            "rate-limited: shared admission unavailable".to_string()
         }
+    };
+    conn.send(admission_rejection_frame(&rejection, sub_id, event_id));
+    false
+}
+
+/// Frame sent when admission rejects a client message. A rejected EVENT must
+/// answer with NIP-01 OK(accepted=false): publishers wait for the OK by event
+/// id, and a bare NOTICE leaves them waiting until their publish timeout even
+/// though the rejection is final.
+fn admission_rejection_frame(reason: &str, sub_id: Option<&str>, event_id: Option<&str>) -> String {
+    if let Some(event_id) = event_id {
+        RelayMessage::ok(event_id, false, reason)
+    } else {
+        request_rejection_message(sub_id, reason)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_rejection_of_event_returns_ok_frame() {
+        let frame = admission_rejection_frame("rate-limited: quota exceeded", None, Some("ab".repeat(32).as_str()));
+        let value: serde_json::Value = serde_json::from_str(&frame).expect("valid JSON");
+        assert_eq!(value[0], "OK");
+        assert_eq!(value[2], false);
+        assert!(value[3].as_str().expect("reason").contains("rate-limited"));
+    }
+
+    #[test]
+    fn admission_rejection_of_req_keeps_closed_frame() {
+        let frame = admission_rejection_frame("rate-limited", Some("sub-1"), None);
+        let value: serde_json::Value = serde_json::from_str(&frame).expect("valid JSON");
+        assert_eq!(value[0], "CLOSED");
+        assert_eq!(value[1], "sub-1");
+    }
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Default)]
