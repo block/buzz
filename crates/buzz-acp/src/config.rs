@@ -1453,6 +1453,17 @@ pub fn resolve_dynamic_channel_filter(
     }
 }
 
+/// Allow plain messages to reach the ACP harness in confirmed DM channels.
+///
+/// Mention filtering remains unchanged for streams and channels whose type
+/// could not be resolved. This only widens relay delivery; the harness still
+/// exempts only owner-authored DM events from its per-event mention check.
+pub(crate) fn exempt_confirmed_dm_from_mentions(filter: &mut ChannelFilter, is_confirmed_dm: bool) {
+    if is_confirmed_dm {
+        filter.require_mention = false;
+    }
+}
+
 fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
     use crate::filter::ChannelScope;
     match &rule.channels {
@@ -1576,6 +1587,30 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_confirmed_dm_exempts_relay_subscription_from_mentions() {
+        let mut filter = ChannelFilter {
+            kinds: Some(vec![buzz_core::kind::KIND_STREAM_MESSAGE]),
+            require_mention: true,
+        };
+
+        exempt_confirmed_dm_from_mentions(&mut filter, true);
+
+        assert!(!filter.require_mention);
+    }
+
+    #[test]
+    fn test_unconfirmed_channel_keeps_relay_mention_requirement() {
+        let mut filter = ChannelFilter {
+            kinds: Some(vec![buzz_core::kind::KIND_STREAM_MESSAGE]),
+            require_mention: true,
+        };
+
+        exempt_confirmed_dm_from_mentions(&mut filter, false);
+
+        assert!(filter.require_mention);
     }
 
     #[test]

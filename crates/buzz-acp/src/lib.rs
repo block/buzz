@@ -257,6 +257,20 @@ async fn author_allowed(
     }
 }
 
+/// Whether this event may bypass a subscription rule's mention requirement.
+///
+/// Relay subscriptions are widened for all confirmed DMs so plain owner
+/// messages reach the harness. Per-event triggering is narrower: only the
+/// configured owner is exempt. Same-owner sibling agents must still mention
+/// the target agent, preserving the anti-loop invariant.
+fn owner_dm_mention_exempt(
+    is_confirmed_dm: bool,
+    author: &str,
+    owner_pubkey: Option<&str>,
+) -> bool {
+    is_confirmed_dm && owner_pubkey == Some(author)
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -2119,7 +2133,13 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    for (channel_id, filter) in &mut channel_filters {
+        let is_confirmed_dm = channel_info_map
+            .get(channel_id)
+            .is_some_and(|info| info.channel_type == "dm");
+        config::exempt_confirmed_dm_from_mentions(filter, is_confirmed_dm);
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2675,7 +2695,16 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    } else if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        let is_confirmed_dm = ctx
+                                            .channel_info
+                                            .resolve(ch)
+                                            .await
+                                            .is_some_and(|info| info.channel_type == "dm");
+                                        config::exempt_confirmed_dm_from_mentions(
+                                            &mut filter,
+                                            is_confirmed_dm,
+                                        );
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -2851,13 +2880,26 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let resolved_channel_info =
+                                ctx.channel_info.resolve(buzz_event.channel_id).await;
+                            let is_confirmed_dm = resolved_channel_info
+                                .as_ref()
+                                .is_some_and(|info| info.channel_type == "dm");
+                            let author = buzz_event.event.pubkey.to_hex();
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
+                                let is_dm = resolved_channel_info
+                                    .as_ref()
+                                    .map(|info| info.channel_type == "dm")
+                                    .unwrap_or_else(|| {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            "channel type unresolved — treating as DM for author gate (fail closed)"
+                                        );
+                                        true
+                                    });
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2870,7 +2912,7 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %author,
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -2879,7 +2921,19 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let mention_exempt = owner_dm_mention_exempt(
+                                is_confirmed_dm,
+                                &author,
+                                owner_cache.get(),
+                            );
+                            let matched = filter::match_event(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                mention_exempt,
+                            )
+                            .await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -5316,6 +5370,14 @@ mod owner_cache_tests {
     fn get_returns_cached_value() {
         let cache = OwnerCache::new(Some("ab".repeat(32)));
         assert_eq!(cache.get(), Some("ab".repeat(32)).as_deref());
+    }
+
+    #[test]
+    fn mention_exemption_requires_confirmed_dm_from_owner() {
+        assert!(owner_dm_mention_exempt(true, "owner", Some("owner")));
+        assert!(!owner_dm_mention_exempt(true, "sibling", Some("owner")));
+        assert!(!owner_dm_mention_exempt(false, "owner", Some("owner")));
+        assert!(!owner_dm_mention_exempt(true, "owner", None));
     }
 }
 
