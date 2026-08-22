@@ -445,3 +445,42 @@ test("canceled fetch never claims the switch trace's window slot; the accepted o
     else globalThis.document = originalDocument;
   }
 });
+
+test("gap refresh refetches after an in-flight prefetch settles (no dedupe)", async () => {
+  const client = new QueryClient();
+  const channelId = "chan-prefetch-race";
+  const queryKey = channelMessagesKey(channelId);
+  let calls = 0;
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const options = {
+    queryKey,
+    queryFn: async () => {
+      calls += 1;
+      const n = calls;
+      if (n === 1) await firstGate;
+      return [event(`fetch-${n}`, 100 + n)];
+    },
+    staleTime: 300_000,
+  };
+
+  // Hover prefetch in flight; a mounted observer dedupes into it.
+  const prefetch = client.prefetchQuery(options);
+  const observer = new QueryObserver(client, options);
+  const unsubscribe = observer.subscribe(() => {});
+
+  // Live subscription established: the gap refresh MUST NOT adopt the
+  // prefetched snapshot (fetched before the subscription started).
+  const refresh = refreshChannelWindowMessages(client, channelId);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseFirst();
+  await Promise.allSettled([prefetch, refresh]);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(calls, 2, "gap refresh must issue a second fetch");
+  assert.equal(client.getQueryData(queryKey)[0].content, "fetch-2");
+  unsubscribe();
+  client.clear();
+});
