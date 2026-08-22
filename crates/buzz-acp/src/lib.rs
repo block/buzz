@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod directory;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -88,6 +89,64 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+/// Publish the kind:10100 relay-agent directory entry.
+///
+/// Best-effort: discoverability is not worth failing a startup or dropping a
+/// membership update over, so every failure is logged and swallowed.
+async fn publish_agent_directory(
+    publisher: &relay::RelayEventPublisher,
+    keys: &nostr::Keys,
+    config: &config::Config,
+    channels: &std::collections::HashMap<Uuid, relay::ChannelInfo>,
+    subscribed: &std::collections::HashSet<Uuid>,
+) {
+    if !config.publish_directory {
+        return;
+    }
+    let entry = directory::build_entry(
+        config.display_name.as_deref(),
+        channels,
+        subscribed,
+        &config.respond_to,
+        &config.respond_to_allowlist,
+    );
+    match directory::publish(publisher, keys, None, &entry).await {
+        Ok(()) => tracing::info!(
+            channels = subscribed.len(),
+            "published agent directory entry (kind 10100)"
+        ),
+        Err(e) => tracing::warn!("failed to publish agent directory entry: {e}"),
+    }
+}
+
+/// Re-read the channel set from the relay, then republish the directory entry.
+///
+/// Used after a membership change, where the startup map is both moved and
+/// potentially out of date. Rediscovery costs two queries and only happens when
+/// membership actually changed.
+async fn republish_agent_directory(
+    relay: &relay::HarnessRelay,
+    config: &config::Config,
+    subscribed: &std::collections::HashSet<Uuid>,
+) {
+    if !config.publish_directory {
+        return;
+    }
+    match relay.discover_channels().await {
+        Ok(channels) => {
+            publish_agent_directory(
+                &relay.event_publisher(),
+                &config.keys,
+                config,
+                &channels,
+                subscribed,
+            )
+            .await
+        }
+        Err(e) => tracing::warn!("directory refresh: channel discovery failed: {e}"),
+    }
 }
 
 fn emit_runtime_lifecycle(
@@ -2133,6 +2192,18 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    // Advertise which channels this agent can be mentioned in. Buzz Desktop
+    // reads this to decide whether to offer the agent in autocomplete; without
+    // it a harness-run agent is invisible there however healthy it is.
+    publish_agent_directory(
+        &relay.event_publisher(),
+        &config.keys,
+        &config,
+        &channel_info_map,
+        &subscribed_channel_ids,
+    )
+    .await;
+
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
         relay_observer_publisher.take()
     {
@@ -2681,6 +2752,14 @@ async fn tokio_main() -> Result<()> {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            // The channel set changed, so the
+                                            // advertised entry is now stale.
+                                            republish_agent_directory(
+                                                &relay,
+                                                &config,
+                                                &subscribed_channel_ids,
+                                            )
+                                            .await;
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
@@ -2688,6 +2767,12 @@ async fn tokio_main() -> Result<()> {
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
+                                    republish_agent_directory(
+                                        &relay,
+                                        &config,
+                                        &subscribed_channel_ids,
+                                    )
+                                    .await;
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
                                     }
@@ -6769,6 +6854,8 @@ mod build_mcp_servers_tests {
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
+            publish_directory: true,
+            display_name: None,
             typing_enabled: true,
             memory_enabled: false,
             model: None,
@@ -6993,6 +7080,8 @@ mod error_outcome_emission_tests {
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
+            publish_directory: true,
+            display_name: None,
             typing_enabled: true,
             memory_enabled: false,
             model: None,

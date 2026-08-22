@@ -383,6 +383,20 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_PRESENCE")]
     pub no_presence: bool,
 
+    /// Do not publish the kind:10100 relay-agent directory entry.
+    ///
+    /// The entry is what makes a harness-run agent appear in Buzz Desktop's
+    /// `@` autocomplete; without it the agent is reachable only by clients
+    /// that already manage it locally. Disable only if something else owns
+    /// publishing that entry for this agent.
+    #[arg(long, env = "BUZZ_ACP_NO_PUBLISH_DIRECTORY")]
+    pub no_publish_directory: bool,
+
+    /// Display name advertised in the directory entry. Defaults to the agent's
+    /// kind:0 profile name, and failing that its npub, as resolved by clients.
+    #[arg(long, env = "BUZZ_ACP_DISPLAY_NAME")]
+    pub display_name: Option<String>,
+
     /// Disable typing indicators while agent is processing.
     #[arg(long, env = "BUZZ_ACP_NO_TYPING")]
     pub no_typing: bool,
@@ -546,6 +560,10 @@ pub struct Config {
     /// Maximum turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
     pub presence_enabled: bool,
+    /// Publish the kind:10100 relay-agent directory entry.
+    pub publish_directory: bool,
+    /// Display name for the directory entry, if set.
+    pub display_name: Option<String>,
     pub typing_enabled: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the harness skips the per-session core engram fetch and renders no
@@ -1122,6 +1140,8 @@ impl Config {
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
+            publish_directory: !args.no_publish_directory,
+            display_name: args.display_name.clone(),
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
@@ -1498,6 +1518,8 @@ mod tests {
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
+            publish_directory: true,
+            display_name: None,
             typing_enabled: true,
             memory_enabled: true,
             model: None,
