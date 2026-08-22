@@ -445,14 +445,55 @@ function observerAgentPubkey(event: RelayEvent): string | null {
   return tag?.[1] ?? null;
 }
 
+function isRfc3339Timestamp(value: string): boolean {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(
+      value,
+    );
+  if (!match || !Number.isFinite(Date.parse(value))) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] =
+    match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const offsetHour = Number(match[7] ?? 0);
+  const offsetMinute = Number(match[8] ?? 0);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  return (
+    year >= 1 &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= (daysInMonth[month - 1] ?? 0) &&
+    Number(hourText) <= 23 &&
+    Number(minuteText) <= 59 &&
+    Number(secondText) <= 59 &&
+    offsetHour <= 23 &&
+    offsetMinute <= 59
+  );
+}
+
 function isObserverEvent(value: unknown): value is ObserverEvent {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<ObserverEvent>;
   return (
     Number.isFinite(candidate.seq) &&
     typeof candidate.timestamp === "string" &&
-    candidate.timestamp.length > 0 &&
-    Number.isFinite(Date.parse(candidate.timestamp)) &&
+    isRfc3339Timestamp(candidate.timestamp) &&
     typeof candidate.kind === "string" &&
     candidate.kind.length > 0 &&
     "payload" in candidate

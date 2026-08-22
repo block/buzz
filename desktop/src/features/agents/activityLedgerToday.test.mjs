@@ -187,7 +187,7 @@ test("Today reconstruction counts batch members with invalid timestamps", async 
           },
           {
             seq: 2,
-            timestamp: "not-a-date",
+            timestamp: "2026-02-30T14:00:00Z",
             kind: "turn_error",
             agentIndex: 0,
             channelId: "channel-1",
