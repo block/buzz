@@ -371,7 +371,7 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, Postgres, and Redis connectivity.
+/// Readiness probe — checks shutdown, dependencies, and cached serving catalogs.
 async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use std::time::Duration;
 
@@ -383,6 +383,7 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .into_response();
     }
 
+    let partition_catalog_ok = state.partition_serving_safe();
     let check = async {
         let (pg_ok, redis_ok, deletion_catalog_ok) = tokio::join!(
             state.db.ping(),
@@ -397,7 +398,7 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .await
             .unwrap_or((false, false, false));
 
-    if pg_ok && redis_ok && deletion_catalog_ok {
+    if readiness_checks_pass(pg_ok, redis_ok, deletion_catalog_ok, partition_catalog_ok) {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
     } else {
         (
@@ -406,11 +407,21 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 "status": "not_ready",
                 "postgres": pg_ok,
                 "redis": redis_ok,
-                "deletion_catalog": deletion_catalog_ok
+                "deletion_catalog": deletion_catalog_ok,
+                "partition_catalog": partition_catalog_ok
             })),
         )
             .into_response()
     }
+}
+
+fn readiness_checks_pass(
+    postgres: bool,
+    redis: bool,
+    deletion_catalog: bool,
+    partition_catalog: bool,
+) -> bool {
+    postgres && redis && deletion_catalog && partition_catalog
 }
 
 /// Status endpoint — service name, version, uptime.
@@ -475,6 +486,13 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn readiness_requires_a_successful_serving_safe_partition_audit() {
+        assert!(readiness_checks_pass(true, true, true, true));
+        assert!(!readiness_checks_pass(true, true, true, false));
+        assert!(!readiness_checks_pass(false, true, true, true));
+    }
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {
