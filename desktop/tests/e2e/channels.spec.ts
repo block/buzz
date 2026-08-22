@@ -4036,6 +4036,22 @@ test("members sidebar can invite relay-authorized agents", async ({ page }) => {
   await expect(
     page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
   ).toBeVisible();
+
+  await page
+    .getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "add_channel_members"),
+    )
+    .toBeGreaterThan(0);
+
+  await page.keyboard.press("Escape");
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  await expect(
+    page.getByTestId("mention-autocomplete").getByText("quinn"),
+  ).toBeVisible();
 });
 
 test("members sidebar hides relay agents that are not authorized", async ({
