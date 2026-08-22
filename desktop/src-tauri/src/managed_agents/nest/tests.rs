@@ -149,6 +149,51 @@ fn ensure_nest_creates_skill_file() {
 }
 
 #[test]
+fn ensure_nest_creates_wrapup_skill_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+
+    let skill = root.join(".agents/skills/buzz-wrapup/SKILL.md");
+    assert_eq!(fs::read_to_string(skill).unwrap(), WRAPUP_SKILL_MD);
+}
+
+#[test]
+fn wrapup_skill_has_explicit_triggers_and_safe_storage_contract() {
+    for trigger in ["`done`", "`wrap up`", "`end session`"] {
+        assert!(
+            WRAPUP_SKILL_MD.contains(trigger),
+            "missing trigger {trigger}"
+        );
+    }
+    assert!(WRAPUP_SKILL_MD.contains("Skip the wrap-up if the session was trivial"));
+    assert!(WRAPUP_SKILL_MD.contains("WORK_LOGS/"));
+    assert!(WRAPUP_SKILL_MD.contains("OUTBOX/session-digests/"));
+    assert!(WRAPUP_SKILL_MD.contains("never a runtime dependency"));
+    assert!(WRAPUP_SKILL_MD.contains("Ordinary agents must not write or sync the vault directly"));
+    assert!(AGENTS_MD.contains("run the bundled `buzz-wrapup` skill"));
+    assert!(!AGENTS_MD.contains("owner's `wrapup` skill"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_nest_creates_wrapup_skill_symlinks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+
+    for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
+        let link = root.join(dir).join("buzz-wrapup");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link.join("SKILL.md").exists());
+        assert_eq!(
+            fs::read_link(&link).unwrap().to_str().unwrap(),
+            format!("../../{CANONICAL_WRAPUP_SKILL_DIR}")
+        );
+    }
+}
+
+#[test]
 fn ensure_nest_does_not_overwrite_skill_file() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
@@ -174,6 +219,7 @@ fn ensure_nest_skill_dir_has_700_permissions() {
         ".agents",
         ".agents/skills",
         ".agents/skills/buzz-cli",
+        ".agents/skills/buzz-wrapup",
         ".goose",
         ".goose/skills",
         ".claude",
@@ -438,6 +484,94 @@ fn refresh_skill_md_writes_version_file() {
     ensure_nest_at(&root).unwrap();
     let version = fs::read_to_string(root.join(".agents/skills/buzz-cli/.skill-version")).unwrap();
     assert_eq!(version.trim(), NEST_SKILL_VERSION.to_string());
+}
+
+#[test]
+fn refresh_wrapup_skill_writes_version_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+    let version =
+        fs::read_to_string(root.join(".agents/skills/buzz-wrapup/.skill-version")).unwrap();
+    assert_eq!(version.trim(), WRAPUP_SKILL_VERSION.to_string());
+}
+
+#[test]
+fn refresh_wrapup_skill_preserves_user_content_at_current_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+    let skill_md = root.join(".agents/skills/buzz-wrapup/SKILL.md");
+    fs::write(&skill_md, "owner customization").unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    assert_eq!(fs::read_to_string(skill_md).unwrap(), "owner customization");
+}
+
+#[test]
+fn refresh_wrapup_skill_preserves_unmarked_owner_content_on_version_bump() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+    let skill_md = root.join(".agents/skills/buzz-wrapup/SKILL.md");
+    fs::write(&skill_md, "stale wrapup skill").unwrap();
+    fs::remove_file(root.join(".agents/skills/buzz-wrapup/.skill-version")).unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    assert_eq!(fs::read_to_string(skill_md).unwrap(), "stale wrapup skill");
+}
+
+#[test]
+fn refresh_wrapup_skill_updates_managed_content_and_preserves_owner_tail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+    let skill_md = root.join(".agents/skills/buzz-wrapup/SKILL.md");
+    fs::write(
+        &skill_md,
+        format!("{BEGIN_SKILL_MARKER}\nstale\n{END_SKILL_MARKER}\nowner notes\n"),
+    )
+    .unwrap();
+    fs::remove_file(root.join(".agents/skills/buzz-wrapup/.skill-version")).unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    let content = fs::read_to_string(skill_md).unwrap();
+    assert!(content.starts_with(WRAPUP_SKILL_MD.trim_end()));
+    assert!(content.ends_with("\nowner notes\n"));
+    assert!(!content.contains("stale"));
+}
+
+#[test]
+fn managed_skill_copy_is_cross_platform_and_preserves_unmarked_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_md = tmp.path().join("provider/skills/buzz-wrapup/SKILL.md");
+
+    install_managed_skill_copy(&skill_md, WRAPUP_SKILL_MD).unwrap();
+    assert_eq!(fs::read_to_string(&skill_md).unwrap(), WRAPUP_SKILL_MD);
+
+    fs::write(&skill_md, "owner file without managed markers").unwrap();
+    install_managed_skill_copy(&skill_md, WRAPUP_SKILL_MD).unwrap();
+    assert_eq!(
+        fs::read_to_string(&skill_md).unwrap(),
+        "owner file without managed markers"
+    );
+}
+
+#[test]
+fn ensure_nest_does_not_collide_with_owner_wrapup_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    let owner_skill = root.join(".agents/skills/wrapup/SKILL.md");
+    fs::create_dir_all(owner_skill.parent().unwrap()).unwrap();
+    fs::write(&owner_skill, "owner wrapup").unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    assert_eq!(fs::read_to_string(owner_skill).unwrap(), "owner wrapup");
+    assert!(root.join(".agents/skills/buzz-wrapup/SKILL.md").exists());
 }
 
 #[test]
