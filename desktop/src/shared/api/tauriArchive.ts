@@ -1,6 +1,7 @@
 import { KIND_AGENT_TURN_METRIC } from "@/shared/constants/kinds";
 
 import { invokeTauri } from "./tauri";
+import type { RelayEvent } from "./types";
 
 // ── Agent usage wire types (NIP-AM, `get_agent_usage_series`) ────────────────
 //
@@ -454,6 +455,415 @@ export async function readArchivedObserverEventsForChannel(
       }
     })
     .filter((e): e is import("@/shared/api/types").RelayEvent => e !== null);
+}
+
+export type ArchivedObserverRangeCursor = {
+  createdAt: number;
+  id: string;
+};
+
+export type ArchivedObserverRangePage = {
+  events: RelayEvent[];
+  backfillComplete: boolean;
+  /** Owner-scoped frames whose missing inner time prevents day attribution. */
+  unindexedObserverFrames: number;
+  archiveRevision: number;
+  restartRequired: boolean;
+  totalObserverFrames: number;
+  returnedObserverFrames: number;
+  rejectedArchiveRows: number;
+  hasMore: boolean;
+  nextBefore: ArchivedObserverRangeCursor | null;
+};
+
+function isArchivedRelayEvent(value: unknown): value is RelayEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.id === "string" &&
+    candidate.id.length > 0 &&
+    typeof candidate.pubkey === "string" &&
+    candidate.pubkey.length > 0 &&
+    typeof candidate.created_at === "number" &&
+    Number.isSafeInteger(candidate.created_at) &&
+    typeof candidate.kind === "number" &&
+    Number.isSafeInteger(candidate.kind) &&
+    Array.isArray(candidate.tags) &&
+    candidate.tags.every(
+      (tag) =>
+        Array.isArray(tag) && tag.every((part) => typeof part === "string"),
+    ) &&
+    typeof candidate.content === "string" &&
+    typeof candidate.sig === "string" &&
+    candidate.sig.length > 0
+  );
+}
+
+/**
+ * Read one durable, owner-scoped observer page whose decrypted inner event
+ * timestamps overlap a half-open time range.
+ */
+export async function readArchivedObserverEventsForRange(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  agentPubkey?: string | null;
+  channelId?: string | null;
+  before?: ArchivedObserverRangeCursor | null;
+  archiveRevision?: number | null;
+  limit?: number;
+}): Promise<ArchivedObserverRangePage> {
+  const limit = opts.limit ?? 200;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error(
+      "Archived observer range limit must be an integer from 1 to 500.",
+    );
+  }
+  const rawPage = await invokeTauri<{
+    events: string[];
+    backfillComplete: boolean;
+    unindexedObserverFrames: number;
+    archiveRevision: number;
+    restartRequired: boolean;
+    totalObserverFrames: number;
+    hasMore: boolean;
+    nextBeforeCreatedAt: number | null;
+    nextBeforeId: string | null;
+  }>("read_archived_observer_events_for_range", {
+    input: {
+      startCreatedAt: opts.startCreatedAt,
+      endCreatedAt: opts.endCreatedAt,
+      agentPubkey: opts.agentPubkey ?? null,
+      channelId: opts.channelId ?? null,
+      beforeCreatedAt: opts.before?.createdAt ?? null,
+      beforeId: opts.before?.id ?? null,
+      archiveRevision: opts.archiveRevision ?? null,
+      limit,
+    },
+  });
+  if (
+    !Array.isArray(rawPage.events) ||
+    !rawPage.events.every((raw) => typeof raw === "string")
+  ) {
+    throw new Error("Archived observer range returned invalid event rows.");
+  }
+  const events = rawPage.events
+    .map((raw) => {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (isArchivedRelayEvent(parsed)) return parsed;
+      } catch {
+        // Counted below with schema-invalid JSON; never let one corrupt row
+        // abort the owner's remaining durable Today history.
+      }
+      console.warn("[tauriArchive] rejected malformed ranged observer row");
+      return null;
+    })
+    .filter((event): event is RelayEvent => event !== null);
+  if (
+    !Number.isSafeInteger(rawPage.unindexedObserverFrames) ||
+    rawPage.unindexedObserverFrames < 0
+  ) {
+    throw new Error(
+      "Archived observer range returned an invalid exclusion count.",
+    );
+  }
+  if (
+    !Number.isSafeInteger(rawPage.archiveRevision) ||
+    rawPage.archiveRevision < 0 ||
+    typeof rawPage.restartRequired !== "boolean"
+  ) {
+    throw new Error("Archived observer range returned an invalid revision.");
+  }
+  if (
+    !Number.isSafeInteger(rawPage.totalObserverFrames) ||
+    rawPage.totalObserverFrames < rawPage.events.length ||
+    typeof rawPage.hasMore !== "boolean" ||
+    (rawPage.nextBeforeCreatedAt === null) !==
+      (rawPage.nextBeforeId === null) ||
+    (rawPage.nextBeforeCreatedAt !== null &&
+      !Number.isSafeInteger(rawPage.nextBeforeCreatedAt)) ||
+    (rawPage.nextBeforeId !== null && rawPage.nextBeforeId.length === 0)
+  ) {
+    throw new Error("Archived observer range returned invalid paging data.");
+  }
+  return {
+    events,
+    backfillComplete: rawPage.backfillComplete,
+    unindexedObserverFrames: rawPage.unindexedObserverFrames,
+    archiveRevision: rawPage.archiveRevision,
+    restartRequired: rawPage.restartRequired,
+    totalObserverFrames: rawPage.totalObserverFrames,
+    returnedObserverFrames: rawPage.events.length,
+    rejectedArchiveRows: rawPage.events.length - events.length,
+    hasMore: !rawPage.backfillComplete || rawPage.hasMore,
+    nextBefore:
+      rawPage.nextBeforeCreatedAt !== null && rawPage.nextBeforeId !== null
+        ? {
+            createdAt: rawPage.nextBeforeCreatedAt,
+            id: rawPage.nextBeforeId,
+          }
+        : null,
+  };
+}
+
+/** Exhaust the paginated range without silently truncating a busy Today view. */
+export async function readAllArchivedObserverEventsForRange(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  agentPubkey?: string | null;
+  channelId?: string | null;
+  pageSize?: number;
+}): Promise<import("@/shared/api/types").RelayEvent[]> {
+  const all: import("@/shared/api/types").RelayEvent[] = [];
+  let before: ArchivedObserverRangeCursor | null = null;
+  let archiveRevision: number | null = null;
+  let restarts = 0;
+  for (;;) {
+    const page = await readArchivedObserverEventsForRange({
+      ...opts,
+      before,
+      archiveRevision,
+      limit: opts.pageSize ?? 200,
+    });
+    if (!page.backfillComplete) continue;
+    if (page.restartRequired) {
+      restarts += 1;
+      if (restarts > 3) {
+        throw new Error(
+          "Archived observer range changed repeatedly during reconstruction.",
+        );
+      }
+      all.length = 0;
+      before = null;
+      archiveRevision = page.archiveRevision;
+      continue;
+    }
+    archiveRevision = page.archiveRevision;
+    all.push(...page.events);
+    if (!page.hasMore) return all;
+    if (!page.nextBefore) {
+      throw new Error(
+        "Archived observer range reported more rows without a cursor.",
+      );
+    }
+    before = page.nextBefore;
+  }
+}
+
+/** Stream durable observer pages so callers can decrypt without retaining the raw day. */
+export async function* iterateArchivedObserverEventPagesForRange(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  agentPubkey?: string | null;
+  channelId?: string | null;
+  pageSize?: number;
+}): AsyncGenerator<{
+  events: import("@/shared/api/types").RelayEvent[];
+  unindexedObserverFrames: number;
+  rejectedArchiveRows: number;
+  omittedObserverFrames: number;
+  archiveRevision: number;
+  reset: boolean;
+}> {
+  let before: ArchivedObserverRangeCursor | null = null;
+  let archiveRevision: number | null = null;
+  let disclosedUnindexedFrames = 0;
+  let restarts = 0;
+  const disclosureDelta = (observed: number) => {
+    const next = Math.max(disclosedUnindexedFrames, observed);
+    const delta = next - disclosedUnindexedFrames;
+    disclosedUnindexedFrames = next;
+    return delta;
+  };
+  for (;;) {
+    const page = await readArchivedObserverEventsForRange({
+      ...opts,
+      before,
+      archiveRevision,
+      limit: opts.pageSize ?? 200,
+    });
+    if (!page.backfillComplete) continue;
+    if (page.restartRequired) {
+      restarts += 1;
+      archiveRevision = page.archiveRevision;
+      before = null;
+      disclosedUnindexedFrames = 0;
+      yield {
+        events: [],
+        unindexedObserverFrames: 0,
+        rejectedArchiveRows: 0,
+        omittedObserverFrames: 0,
+        archiveRevision,
+        reset: true,
+      };
+      if (restarts > 3) {
+        yield {
+          events: page.events,
+          unindexedObserverFrames: disclosureDelta(
+            page.unindexedObserverFrames,
+          ),
+          rejectedArchiveRows: page.rejectedArchiveRows,
+          omittedObserverFrames: Math.max(
+            0,
+            page.totalObserverFrames - page.returnedObserverFrames,
+          ),
+          archiveRevision,
+          reset: false,
+        };
+        return;
+      }
+      continue;
+    }
+    archiveRevision = page.archiveRevision;
+    yield {
+      events: page.events,
+      unindexedObserverFrames: disclosureDelta(page.unindexedObserverFrames),
+      rejectedArchiveRows: page.rejectedArchiveRows,
+      omittedObserverFrames: 0,
+      archiveRevision,
+      reset: false,
+    };
+    if (!page.hasMore) return;
+    if (!page.nextBefore) {
+      throw new Error(
+        "Archived observer range reported more rows without a cursor.",
+      );
+    }
+    before = page.nextBefore;
+  }
+}
+
+export type JournalAuthorityArtifactType = "owner_override" | "verification";
+
+/** An artifact returned only after backend signature and evidence validation. */
+export type JournalAuthorityArtifact = {
+  ownerPubkey: string;
+  relayUrl: string;
+  agentPubkey: string;
+  eventId: string;
+  signature: string;
+  createdAt: number;
+  artifactType: JournalAuthorityArtifactType;
+  journalId: string;
+  correlationId: string;
+  revision: number;
+  summary: string | null;
+  note: string | null;
+  receiptRef: string | null;
+  sourceEventIds: string[];
+};
+
+export async function upsertOwnerJournalOverride(
+  relayUrl: string,
+  input: {
+    agentPubkey: string;
+    journalId: string;
+    correlationId: string;
+    summary: string;
+    note?: string | null;
+  },
+): Promise<JournalAuthorityArtifact> {
+  return invokeTauri<JournalAuthorityArtifact>(
+    "upsert_owner_journal_override",
+    { relayUrl, input },
+  );
+}
+
+/**
+ * Create an owner-signed verification artifact. The backend rejects missing,
+ * cross-owner, non-observer, or signature-invalid source event IDs.
+ */
+export async function upsertJournalVerification(
+  relayUrl: string,
+  input: {
+    agentPubkey: string;
+    journalId: string;
+    correlationId: string;
+    receiptRef: string;
+    sourceEventIds: string[];
+  },
+): Promise<JournalAuthorityArtifact> {
+  return invokeTauri<JournalAuthorityArtifact>("upsert_journal_verification", {
+    relayUrl,
+    input,
+  });
+}
+
+export async function getJournalAuthorityArtifacts(
+  relayUrl: string,
+  agentPubkey: string,
+  journalId: string,
+): Promise<JournalAuthorityArtifact[]> {
+  return invokeTauri<JournalAuthorityArtifact[]>(
+    "get_journal_authority_artifacts",
+    { relayUrl, agentPubkey, journalId },
+  );
+}
+
+export async function queryJournalAuthorityArtifacts(opts: {
+  relayUrl: string;
+  agentPubkey: string;
+  startCreatedAt: number;
+  endCreatedAt: number;
+  limit?: number;
+}): Promise<JournalAuthorityArtifact[]> {
+  return invokeTauri<JournalAuthorityArtifact[]>(
+    "query_journal_authority_artifacts",
+    {
+      startCreatedAt: opts.startCreatedAt,
+      relayUrl: opts.relayUrl,
+      agentPubkey: opts.agentPubkey,
+      endCreatedAt: opts.endCreatedAt,
+      limit: opts.limit ?? null,
+    },
+  );
+}
+
+export const OWNER_TODAY_SNAPSHOT_SCHEMA =
+  "buzz.activity-ledger.today/v1" as const;
+export const OWNER_TODAY_SNAPSHOT_CAPABILITY =
+  "buzz.activity-ledger.today.read/v1" as const;
+
+export type OwnerTodaySnapshotInput = {
+  schema: typeof OWNER_TODAY_SNAPSHOT_SCHEMA;
+  ownerPubkey: string;
+  relayUrl: string;
+  generatedAt: number;
+  expiresAt: number;
+  capability: typeof OWNER_TODAY_SNAPSHOT_CAPABILITY;
+  surface: Record<string, unknown>;
+  rawEvents: unknown[];
+};
+
+export type OwnerTodaySnapshot = OwnerTodaySnapshotInput & {
+  snapshotSha256: string;
+  eventId: string;
+  signature: string;
+};
+
+export type TodaySnapshotReceipt = {
+  path: string;
+  ownerPubkey: string;
+  relayUrl: string;
+  generatedAt: number;
+  expiresAt: number;
+  byteLength: number;
+  sha256: string;
+};
+
+/** Atomically write the current owner's canonical Today projection as 0600. */
+export async function writeOwnerTodaySnapshot(
+  snapshot: OwnerTodaySnapshotInput,
+): Promise<TodaySnapshotReceipt> {
+  return invokeTauri<TodaySnapshotReceipt>("write_owner_today_snapshot", {
+    snapshotJson: JSON.stringify(snapshot),
+  });
+}
+
+/** Read the current owner's snapshot after backend owner/expiry validation. */
+export async function readOwnerTodaySnapshot(): Promise<OwnerTodaySnapshot> {
+  const raw = await invokeTauri<string>("read_owner_today_snapshot");
+  return JSON.parse(raw) as OwnerTodaySnapshot;
 }
 
 /**

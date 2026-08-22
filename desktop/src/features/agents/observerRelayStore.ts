@@ -14,10 +14,11 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
-import type {
-  ConnectionState,
-  ObserverEvent,
-  TranscriptItem,
+import {
+  observerEventIdentity,
+  type ConnectionState,
+  type ObserverEvent,
+  type TranscriptItem,
 } from "./ui/agentSessionTypes";
 import {
   type TranscriptState,
@@ -223,6 +224,22 @@ function observerTag(event: RelayEvent, tagName: string) {
   return event.tags.find((tag) => tag[0] === tagName)?.[1] ?? null;
 }
 
+function withRelayProvenance(
+  parsed: ObserverEvent,
+  event: RelayEvent,
+  origin: "live_observer" | "historical_backfill",
+): ObserverEvent {
+  return {
+    ...parsed,
+    sourceEventId: event.id,
+    sourcePubkey: event.pubkey,
+    sourceKind: event.kind,
+    sourceCreatedAt: event.created_at,
+    sourceSignature: event.sig,
+    origin,
+  };
+}
+
 function appendAgentEvents(
   agentPubkey: string,
   events: readonly ObserverEvent[],
@@ -257,15 +274,10 @@ function appendAgentEvents(
 
   const seen = allAtEnd
     ? new Set<string>()
-    : new Set(
-        current.map(
-          (event) =>
-            `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
-        ),
-      );
+    : new Set(current.map(observerEventIdentity));
   const added: ObserverEvent[] = [];
   for (const event of admissible) {
-    const eventKey = `${event.timestamp.length}:${event.timestamp}:${event.seq}`;
+    const eventKey = observerEventIdentity(event);
     if (seen.has(eventKey)) continue;
     seen.add(eventKey);
     added.push(event);
@@ -312,15 +324,9 @@ function appendAgentEvents(
   invalidateSnapshot(key);
   if (!trimmed) return sortedAdded;
 
-  const retainedKeys = new Set(
-    final.map(
-      (event) => `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
-    ),
-  );
+  const retainedKeys = new Set(final.map(observerEventIdentity));
   return sortedAdded.filter((event) =>
-    retainedKeys.has(
-      `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
-    ),
+    retainedKeys.has(observerEventIdentity(event)),
   );
 }
 
@@ -346,7 +352,8 @@ function archiveChannelKey(agentPubkey: string, channelId: string): string {
  * the channel archive window grows only by explicit paged loads from SQLite,
  * so unbounded growth from live relay events is impossible.
  *
- * Deduplicates on `(seq, timestamp)` — identical to `appendAgentEvent` — so
+ * Deduplicates on signed source id (with `(seq, timestamp)` for legacy/E2E
+ * events) — identical to `appendAgentEvent` — so
  * events that arrive on the live relay before the archive page is loaded are
  * silently skipped. The archive window and the live transcript are kept
  * strictly separate: live events never write here.
@@ -362,11 +369,11 @@ function appendArchivedChannelEvent(
   const key = archiveChannelKey(agentPubkey, channelId);
   const current = archiveEventsByChannel.get(key) ?? [];
 
-  // Dedup: skip if (seq, timestamp) already present in the archive window.
+  // Dedup: prefer the signed envelope id; legacy/E2E events use seq+timestamp.
   if (
     current.some(
       (existing) =>
-        existing.seq === event.seq && existing.timestamp === event.timestamp,
+        observerEventIdentity(existing) === observerEventIdentity(event),
     )
   ) {
     return false;
@@ -563,7 +570,10 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
-    processLiveObserverEvents(agentPubkey, unwrapObserverBatch(parsed));
+    const events = unwrapObserverBatch(parsed).map((inner) =>
+      withRelayProvenance(inner, event, "live_observer"),
+    );
+    processLiveObserverEvents(agentPubkey, events);
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
@@ -810,7 +820,7 @@ export function useManagedAgentObserverBridge(
  * - The event sender (`pubkey`) must match the `agent` tag value.
  * - Event must decrypt successfully via `decryptObserverEvent`.
  *
- * Routes through `appendAgentEvent` so dedup on `(seq, timestamp)` and
+ * Routes through the shared stores so signed-id deduplication and
  * sort are reused — archived events that are already present (live-delivered)
  * are silently skipped. Failed decryptions are silently dropped (same as
  * live path error handling).
@@ -842,20 +852,25 @@ export async function ingestArchivedObserverEvents(
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
       for (const inner of unwrapObserverBatch(parsed)) {
+        const enriched = withRelayProvenance(
+          inner,
+          event,
+          "historical_backfill",
+        );
         // Route archived events to the channel-scoped archive window (no cap)
         // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
         // Events without a channelId fall through to the live store so they
         // remain visible in the agent's general transcript.
-        if (inner.channelId) {
+        if (enriched.channelId) {
           const added = appendArchivedChannelEvent(
             agentPubkey,
-            inner.channelId,
-            inner,
+            enriched.channelId,
+            enriched,
           );
           if (added) archiveChanged = true;
         } else {
           // Live path already calls notifyListeners() inside appendAgentEvent.
-          appendAgentEvent(agentPubkey, inner);
+          appendAgentEvent(agentPubkey, enriched);
         }
       }
     } catch {

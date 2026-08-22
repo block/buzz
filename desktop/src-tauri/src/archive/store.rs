@@ -13,6 +13,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::time::{Duration, Instant};
 
+pub(super) use super::observer_time::count_unindexed_observer_frames;
+#[cfg(test)]
+pub(super) use super::observer_time::read_archived_observer_events_for_range;
 use super::store_migrations::apply_schema_migrations;
 
 // ── Schema ─────────────────────────────────────────────────────────────────
@@ -29,7 +32,7 @@ CREATE TABLE IF NOT EXISTS archived_events (
     archived_at     INTEGER NOT NULL,
     PRIMARY KEY (identity_pubkey, relay_url, id)
 );
-
+CREATE INDEX IF NOT EXISTS idx_archived_events_identity_id ON archived_events (identity_pubkey, id);
 CREATE TABLE IF NOT EXISTS archived_event_scopes (
     identity_pubkey TEXT NOT NULL,
     relay_url       TEXT NOT NULL,
@@ -71,6 +74,22 @@ CREATE TABLE IF NOT EXISTS observer_channel_index (
 );
 CREATE INDEX IF NOT EXISTS idx_observer_channel
     ON observer_channel_index (identity_pubkey, relay_url, channel_id, created_at DESC, id DESC);
+
+-- Rebuildable index of the authoritative decrypted observer timestamps inside
+-- each signed envelope. A row with NULL bounds is a durable processed marker
+-- for malformed/undecryptable payloads. Range reads use these bounds instead
+-- of the later outer signing time, so queued frames cannot miss a local day.
+CREATE TABLE IF NOT EXISTS observer_time_index (
+    identity_pubkey  TEXT NOT NULL,
+    relay_url        TEXT NOT NULL,
+    id               TEXT NOT NULL,
+    observed_start_at INTEGER,
+    observed_end_at   INTEGER,
+    PRIMARY KEY (identity_pubkey, relay_url, id)
+);
+CREATE INDEX IF NOT EXISTS idx_observer_time
+    ON observer_time_index
+       (identity_pubkey, relay_url, observed_start_at, observed_end_at, id);
 
 -- One-row migration state table: tracks which idempotent migrations have run.
 CREATE TABLE IF NOT EXISTS archive_migrations (
@@ -138,6 +157,28 @@ CREATE INDEX IF NOT EXISTS idx_agent_metric_reported
 -- reported_at, so their window membership is judged by event_created_at).
 CREATE INDEX IF NOT EXISTS idx_agent_metric_created
     ON agent_metric_index (identity_pubkey, relay_url, event_created_at, parse_status);
+
+-- Owner-authorized Activity Ledger artifacts. Each row contains the complete
+-- signed Nostr event and is re-verified on every read. `revision` prevents an
+-- older but otherwise valid owner event from replaying over newer journal
+-- authority state.
+CREATE TABLE IF NOT EXISTS journal_authority_artifacts (
+    identity_pubkey TEXT NOT NULL,
+    relay_url       TEXT NOT NULL,
+    agent_pubkey    TEXT NOT NULL,
+    journal_id      TEXT NOT NULL,
+    artifact_type   TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    revision        INTEGER NOT NULL,
+    raw_json        TEXT NOT NULL,
+    stored_at       INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, relay_url, agent_pubkey, journal_id, artifact_type),
+    UNIQUE (identity_pubkey, relay_url, agent_pubkey, event_id),
+    CHECK (artifact_type IN ('owner_override', 'verification')),
+    CHECK (revision > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_journal_authority_created ON journal_authority_artifacts (identity_pubkey, created_at DESC, event_id DESC);
 ";
 
 // ── Open / init ─────────────────────────────────────────────────────────────
@@ -162,6 +203,7 @@ pub fn open_archive_db(path: &Path) -> Result<Connection, String> {
 
     conn.execute_batch(SCHEMA)
         .map_err(|e| format!("failed to initialize archive schema: {e}"))?;
+    super::observer_revision::ensure_schema(&conn)?;
 
     apply_schema_migrations(&conn)?;
 

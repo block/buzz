@@ -167,25 +167,28 @@ fn test_merge_owner_p_kinds_two_conn_wal_both_kinds_survive() {
     let init_conn = open_archive_db(&db_path).unwrap();
     drop(init_conn);
 
+    // Open both connections before spawning either worker. Schema setup is not
+    // part of this regression, and a setup failure in one worker would leave
+    // the other worker parked on the barrier forever instead of reporting the
+    // actual error.
+    let conn_a = open_archive_db(&db_path).unwrap();
+    let conn_b = open_archive_db(&db_path).unwrap();
+
     // Barrier ensures both threads are inside `merge_owner_p_kinds` before
     // either one issues `BEGIN IMMEDIATE`, maximising the race window.
     let barrier = Arc::new(Barrier::new(2));
 
-    let path_a = db_path.clone();
-    let path_b = db_path.clone();
     let bar_a = Arc::clone(&barrier);
     let bar_b = Arc::clone(&barrier);
 
     let handle_observer = thread::spawn(move || {
-        let conn = open_archive_db(&path_a).unwrap();
         bar_a.wait(); // sync: both threads ready
-        merge_owner_p_kinds(&conn, "pk", "wss://r", "mypk", 24200, 1)
+        merge_owner_p_kinds(&conn_a, "pk", "wss://r", "mypk", 24200, 1)
     });
 
     let handle_metric = thread::spawn(move || {
-        let conn = open_archive_db(&path_b).unwrap();
         bar_b.wait(); // sync: both threads ready
-        merge_owner_p_kinds(&conn, "pk", "wss://r", "mypk", 44200, 2)
+        merge_owner_p_kinds(&conn_b, "pk", "wss://r", "mypk", 44200, 2)
     });
 
     let res_observer = handle_observer.join().expect("observer thread panicked");
@@ -856,4 +859,125 @@ fn test_read_unindexed_observer_rows_excludes_processed_rows() {
         !unindexed2.iter().any(|(id, _, _)| id == "ev-old"),
         "ev-old must be excluded from unindexed rows after null-channel_id indexing"
     );
+}
+
+fn insert_owner_observer(
+    conn: &Connection,
+    id: &str,
+    agent: &str,
+    created_at: i64,
+    channel: Option<&str>,
+) {
+    upsert_archived_event(
+        conn,
+        "owner",
+        "wss://r",
+        id,
+        24200,
+        agent,
+        created_at,
+        &format!(r#"{{"id":"{id}","created_at":{created_at}}}"#),
+        created_at,
+    )
+    .unwrap();
+    upsert_event_scope(conn, "owner", "wss://r", id, "owner_p", "owner", created_at).unwrap();
+    if let Some(channel) = channel {
+        upsert_observer_channel_index(conn, "owner", "wss://r", id, Some(channel), created_at)
+            .unwrap();
+    }
+    super::super::observer_time::upsert(
+        conn,
+        "owner",
+        "wss://r",
+        id,
+        Some(created_at),
+        Some(created_at),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_read_archived_observer_events_for_range_pages_without_gaps() {
+    let conn = in_memory();
+    insert_owner_observer(&conn, "z", "agent-a", 1002, Some("ch-1"));
+    insert_owner_observer(&conn, "a", "agent-a", 1002, Some("ch-1"));
+    insert_owner_observer(&conn, "old", "agent-b", 1001, Some("ch-2"));
+    insert_owner_observer(&conn, "outside", "agent-a", 999, Some("ch-1"));
+
+    let page_one = read_archived_observer_events_for_range(
+        &conn, "owner", "wss://r", 1000, 1003, None, None, None, None, 1,
+    )
+    .unwrap();
+    assert_eq!(page_one.len(), 1);
+    assert!(page_one[0].contains(r#""id":"z""#));
+
+    let page_two = read_archived_observer_events_for_range(
+        &conn,
+        "owner",
+        "wss://r",
+        1000,
+        1003,
+        None,
+        None,
+        Some(1002),
+        Some("z"),
+        10,
+    )
+    .unwrap();
+    assert_eq!(page_two.len(), 2);
+    assert!(page_two[0].contains(r#""id":"a""#));
+    assert!(page_two[1].contains(r#""id":"old""#));
+
+    let filtered = read_archived_observer_events_for_range(
+        &conn,
+        "owner",
+        "wss://r",
+        1000,
+        1003,
+        Some("agent-a"),
+        Some("ch-1"),
+        None,
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(filtered.len(), 2);
+}
+
+#[test]
+fn test_archived_observer_range_survives_close_and_reopen() {
+    use tempfile::NamedTempFile;
+
+    let db_file = NamedTempFile::new().unwrap();
+    {
+        let conn = open_archive_db(db_file.path()).unwrap();
+        insert_owner_observer(&conn, "persisted", "agent-a", 1001, Some("ch-1"));
+    }
+    let reopened = open_archive_db(db_file.path()).unwrap();
+    let rows = read_archived_observer_events_for_range(
+        &reopened, "owner", "wss://r", 1000, 1002, None, None, None, None, 10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains(r#""id":"persisted""#));
+}
+
+#[test]
+fn test_observer_range_uses_inner_time_after_unbounded_publication_delay() {
+    let conn = in_memory();
+    insert_owner_observer(&conn, "delayed", "agent-a", 10_000, Some("ch-1"));
+    conn.execute(
+        "UPDATE observer_time_index
+            SET observed_start_at = 1001, observed_end_at = 1001
+          WHERE identity_pubkey = 'owner' AND relay_url = 'wss://r' AND id = 'delayed'",
+        [],
+    )
+    .unwrap();
+
+    let rows = read_archived_observer_events_for_range(
+        &conn, "owner", "wss://r", 1000, 1002, None, None, None, None, 10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains(r#""id":"delayed""#));
 }
