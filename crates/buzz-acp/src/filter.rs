@@ -861,4 +861,44 @@ mod tests {
         let result = match_event(&event, channel_id, &rules, "").await;
         assert!(result.is_none(), "disabled rule must return None");
     }
+
+    // ---- Phase B: match_event rule_index attribution (T4, matched/no-match
+    // only — fail-closed audit-payload specifics deferred; see the
+    // Phase 5A/5B test plan) ----------------------------------------------
+
+    #[tokio::test]
+    async fn match_event_skips_out_of_scope_rule_and_matches_next() {
+        // Not already covered by test_match_event_kind_filter (which skips
+        // via the kind guard) — this exercises the channel-scope `continue`
+        // branch specifically reaching a non-zero rule_index.
+        let event = make_event(9, "hello");
+        let channel_id = any_channel();
+        let other_channel = Uuid::new_v4();
+
+        let rules = vec![
+            make_rule(
+                "out-of-scope",
+                ChannelScope::List(vec![other_channel.to_string()]),
+                vec![],
+                false,
+                None,
+                Some("should-not-win"),
+            ),
+            make_rule(
+                "in-scope",
+                ChannelScope::All("all".into()),
+                vec![],
+                false,
+                None,
+                Some("should-win"),
+            ),
+        ];
+
+        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        assert_eq!(
+            matched.rule_index, 1,
+            "channel-scope skip (not kind-filter) must reach the second rule"
+        );
+        assert_eq!(matched.prompt_tag, "should-win");
+    }
 }

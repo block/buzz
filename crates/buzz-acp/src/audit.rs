@@ -477,3 +477,391 @@ pub fn record(event_type: EventType, fields: AuditFields, detail: EventDetail) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Env-var-touching tests must run serially — env vars are process-
+    /// global. Mirrors `lib.rs`'s `build_mcp_servers_tests::ENV_LOCK` idiom
+    /// exactly. No other file in this crate reads `BUZZ_ACP_AUDIT`,
+    /// `BUZZ_ACP_AUDIT_PATH`, or `HOME` (confirmed by grep before writing
+    /// these tests), so this lock only needs to protect tests within this
+    /// module from each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard: sets (or unsets) an env var for the duration of a test
+    /// and restores its exact prior value on drop — `Some(v)` restores `v`,
+    /// `None` removes the var entirely. Runs on the panic/unwind path too
+    /// (a failed `assert!` still drops locals), so a test failure can never
+    /// leak mutated env state to a later test in the same binary. Must be
+    /// held only while `ENV_LOCK` is also held.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// No test in this module ever calls [`init`]. `SINK` therefore stays
+    /// uninitialized for the entire test binary (nothing else in the crate
+    /// calls `audit::init()` either — it's only reached from
+    /// `lib.rs::run()`'s production entry point). This is deliberate: `SINK`
+    /// is a `OnceLock` and can only be populated once per process, so tests
+    /// must not race to be "the one" that initializes it. Every test below
+    /// instead calls the pure, stateless functions `build_sink()` /
+    /// `resolve_audit_path()` / `enabled_from_env()` directly, or exercises
+    /// `record()`/`is_enabled()` only in the (safe, permanent-for-this-
+    /// binary) uninitialized state.
+
+    // ---- T1: schema / envelope shape ----------------------------------
+
+    const EXPECTED_ENVELOPE_KEYS: &[&str] = &[
+        "schema_version",
+        "ts",
+        "seq",
+        "event_type",
+        "event_id",
+        "direct_parent_event_id",
+        "thread_root_event_id",
+        "correlation_id",
+        "workflow_id",
+        "sender_pubkey",
+        "target_pubkey",
+        "channel_id",
+        "agent_session_id",
+        "turn_id",
+        "attempt",
+        "detail",
+    ];
+
+    const OBSOLETE_FIELD_NAMES: &[&str] = &[
+        "handoff_id",
+        "source_event_id",
+        "runtime_id",
+        "pid",
+        "buzz_acp_version",
+        "stage",
+        "latency_ms",
+    ];
+
+    #[test]
+    fn schema_version_is_one() {
+        assert_eq!(SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn envelope_serializes_expected_keys_and_omits_obsolete_fields() {
+        let fields = AuditFields {
+            event_id: Some("deadbeef".into()),
+            ..Default::default()
+        };
+        let record = AuditRecord {
+            schema_version: SCHEMA_VERSION,
+            ts: "2026-01-01T00:00:00.000000000Z".into(),
+            seq: 0,
+            event_type: EventType::EventReceived,
+            fields: &fields,
+            detail: &EventDetail::Empty,
+        };
+        let value = serde_json::to_value(&record).expect("serialize");
+        let obj = value.as_object().expect("record must be a JSON object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected: Vec<&str> = EXPECTED_ENVELOPE_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "envelope key set changed unexpectedly");
+
+        for obsolete in OBSOLETE_FIELD_NAMES {
+            assert!(
+                !obj.contains_key(*obsolete),
+                "obsolete field {obsolete:?} must never reappear in the schema"
+            );
+        }
+
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["event_type"], "EVENT_RECEIVED");
+        assert_eq!(value["event_id"], "deadbeef");
+    }
+
+    #[test]
+    fn event_type_variants_serialize_screaming_snake_case() {
+        let cases = [
+            (EventType::TransportPublished, "TRANSPORT_PUBLISHED"),
+            (EventType::TransportAccepted, "TRANSPORT_ACCEPTED"),
+            (EventType::EventReceived, "EVENT_RECEIVED"),
+            (EventType::FilterDecision, "FILTER_DECISION"),
+            (EventType::QueueDecision, "QUEUE_DECISION"),
+            (EventType::WakeDecision, "WAKE_DECISION"),
+            (EventType::AcpSessionStarted, "ACP_SESSION_STARTED"),
+            (EventType::ResponsePublished, "RESPONSE_PUBLISHED"),
+            (
+                EventType::RecipientEvidenceObserved,
+                "RECIPIENT_EVIDENCE_OBSERVED",
+            ),
+        ];
+        for (variant, expected) in cases {
+            let value = serde_json::to_value(variant).expect("serialize");
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
+    fn filter_decision_detail_shape() {
+        let detail = EventDetail::FilterDecision {
+            rule_index: Some(2),
+            fail_closed: true,
+        };
+        let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["kind"], "FILTER_DECISION");
+        assert_eq!(value["rule_index"], 2);
+        assert_eq!(value["fail_closed"], true);
+    }
+
+    #[test]
+    fn queue_decision_detail_shape() {
+        let detail = EventDetail::QueueDecision {
+            outcome: QueueOutcome::CapEvicted,
+        };
+        let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["kind"], "QUEUE_DECISION");
+        assert_eq!(value["outcome"], "CAP_EVICTED");
+    }
+
+    #[test]
+    fn relay_ack_detail_has_no_message_field() {
+        let detail = EventDetail::RelayAck { accepted: false };
+        let value = serde_json::to_value(&detail).expect("serialize");
+        let obj = value.as_object().expect("must be an object");
+        assert_eq!(value["kind"], "RELAY_ACK");
+        assert_eq!(value["accepted"], false);
+        assert_eq!(
+            obj.len(),
+            2,
+            "RelayAck must carry only kind+accepted, never a relay message string"
+        );
+        assert!(!obj.contains_key("message"));
+    }
+
+    #[test]
+    fn wake_decision_detail_shape() {
+        let detail = EventDetail::WakeDecision {
+            triggering_event_ids: vec!["ev1".into(), "ev2".into()],
+            outcome: WakeOutcome::PoolExhausted,
+        };
+        let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["kind"], "WAKE_DECISION");
+        assert_eq!(value["outcome"], "POOL_EXHAUSTED");
+        assert_eq!(value["triggering_event_ids"], serde_json::json!(["ev1", "ev2"]));
+    }
+
+    #[test]
+    fn acp_session_detail_shape() {
+        let detail = EventDetail::AcpSession {
+            triggering_event_ids: vec!["ev1".into()],
+        };
+        let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["kind"], "ACP_SESSION");
+        assert_eq!(value["triggering_event_ids"], serde_json::json!(["ev1"]));
+    }
+
+    // ---- T2: metadata / redaction-by-construction ----------------------
+
+    #[test]
+    fn sentinel_populated_fields_serialize_as_plain_strings_no_extra_keys() {
+        // Synthetic, obviously-fake sentinel values only — never real
+        // secrets, keys, or content.
+        let fields = AuditFields {
+            event_id: Some("SENTINEL_EVENT_ID".into()),
+            direct_parent_event_id: Some("SENTINEL_PARENT_ID".into()),
+            thread_root_event_id: Some("SENTINEL_ROOT_ID".into()),
+            correlation_id: Some("SENTINEL_CORRELATION_ID".into()),
+            workflow_id: Some("SENTINEL_WORKFLOW_ID".into()),
+            sender_pubkey: Some("SENTINEL_SENDER_PUBKEY".into()),
+            target_pubkey: Some("SENTINEL_TARGET_PUBKEY".into()),
+            channel_id: Some("SENTINEL_CHANNEL_ID".into()),
+            agent_session_id: Some("SENTINEL_SESSION_ID".into()),
+            turn_id: Some("SENTINEL_TURN_ID".into()),
+            attempt: Some(9),
+        };
+        let record = AuditRecord {
+            schema_version: SCHEMA_VERSION,
+            ts: "2026-01-01T00:00:00.000000000Z".into(),
+            seq: 42,
+            event_type: EventType::FilterDecision,
+            fields: &fields,
+            detail: &EventDetail::FilterDecision {
+                rule_index: Some(0),
+                fail_closed: false,
+            },
+        };
+        let value = serde_json::to_value(&record).expect("serialize");
+        let obj = value.as_object().expect("must be an object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected: Vec<&str> = EXPECTED_ENVELOPE_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            keys, expected,
+            "fully-populated record must not gain or lose keys"
+        );
+
+        // Every sentinel must round-trip unchanged as a plain string — no
+        // hidden expansion, parsing, or restructuring of caller-supplied
+        // metadata values.
+        assert_eq!(value["event_id"], "SENTINEL_EVENT_ID");
+        assert_eq!(value["sender_pubkey"], "SENTINEL_SENDER_PUBKEY");
+        assert_eq!(value["target_pubkey"], "SENTINEL_TARGET_PUBKEY");
+        assert_eq!(value["turn_id"], "SENTINEL_TURN_ID");
+        assert_eq!(value["attempt"], 9);
+
+        // No field anywhere in this type is named/shaped for raw content —
+        // this is a structural guarantee, re-asserted here as a regression
+        // check on the field list itself.
+        for forbidden in ["content", "prompt", "body", "message", "text"] {
+            assert!(
+                !obj.contains_key(forbidden),
+                "AuditFields must never gain a field named {forbidden:?}"
+            );
+        }
+    }
+
+    // ---- T7: audit OFF ---------------------------------------------------
+
+    #[test]
+    fn enabled_from_env_true_variants() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for v in ["1", "true", "True", "TRUE"] {
+            let _env = EnvVarGuard::set(AUDIT_ENABLE_ENV, v);
+            assert!(enabled_from_env(), "expected enabled for {v:?}");
+        }
+    }
+
+    #[test]
+    fn enabled_from_env_false_for_unset_and_other_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        {
+            let _env = EnvVarGuard::unset(AUDIT_ENABLE_ENV);
+            assert!(!enabled_from_env(), "unset must be disabled");
+        }
+        for v in ["0", "false", "yes", "enabled", ""] {
+            let _env = EnvVarGuard::set(AUDIT_ENABLE_ENV, v);
+            assert!(!enabled_from_env(), "expected disabled for {v:?}");
+        }
+    }
+
+    #[test]
+    fn record_is_noop_and_does_not_panic_without_init() {
+        // Deliberately never calls audit::init() anywhere in this module —
+        // see the module-level doc comment above.
+        let fields = AuditFields {
+            event_id: Some("noop-test-event".into()),
+            ..Default::default()
+        };
+        record(EventType::EventReceived, fields, EventDetail::Empty);
+        // No panic = pass. There is no observable side channel from outside
+        // this module without touching the real filesystem sink, which this
+        // test deliberately avoids.
+    }
+
+    #[test]
+    fn is_enabled_false_without_init() {
+        assert!(!is_enabled());
+    }
+
+    // ---- T8: fail-open ---------------------------------------------------
+
+    #[test]
+    fn build_sink_returns_none_when_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::unset(AUDIT_ENABLE_ENV);
+        assert!(build_sink().is_none());
+    }
+
+    #[test]
+    fn resolve_audit_path_uses_explicit_override_verbatim() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(AUDIT_PATH_ENV, "/tmp/some-explicit-audit-path.jsonl");
+        let resolved = resolve_audit_path();
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("/tmp/some-explicit-audit-path.jsonl"))
+        );
+    }
+
+    /// Builds a fresh, unique temp directory containing a plain FILE named
+    /// `.buzz` (not a directory). Any attempt to `create_dir_all(".buzz/
+    /// audit")` underneath it must fail deterministically on every OS — no
+    /// chmod/permission trick required.
+    fn make_home_with_blocked_dot_buzz() -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "buzz-acp-audit-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).expect("create temp base dir");
+        std::fs::write(base.join(".buzz"), b"not a directory").expect("write blocking file");
+        base
+    }
+
+    #[test]
+    fn resolve_audit_path_fails_open_when_home_dot_buzz_is_a_regular_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = make_home_with_blocked_dot_buzz();
+
+        let _path_env = EnvVarGuard::unset(AUDIT_PATH_ENV);
+        let _home_env = EnvVarGuard::set("HOME", base.to_str().expect("temp path is valid UTF-8"));
+        let resolved = resolve_audit_path();
+
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            resolved.is_none(),
+            "resolve_audit_path must fail open (None) when $HOME/.buzz is a regular file"
+        );
+    }
+
+    #[test]
+    fn build_sink_fails_open_when_default_dir_blocked() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let base = make_home_with_blocked_dot_buzz();
+
+        let _enable_env = EnvVarGuard::set(AUDIT_ENABLE_ENV, "1");
+        let _path_env = EnvVarGuard::unset(AUDIT_PATH_ENV);
+        let _home_env = EnvVarGuard::set("HOME", base.to_str().expect("temp path is valid UTF-8"));
+        let sink = build_sink();
+
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            sink.is_none(),
+            "build_sink must fail open (None), never panic, when the default \
+             audit directory cannot be created"
+        );
+    }
+}
