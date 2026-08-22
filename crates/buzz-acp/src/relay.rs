@@ -551,6 +551,8 @@ enum RelayCommand {
     PublishEvent { event: Box<Event> },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
+    /// Re-offer a forwarded membership event after authoritative discovery failed.
+    RetryMembership { event_id: String, ts: u64 },
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -912,6 +914,19 @@ impl HarnessRelay {
             .map_err(|_| RelayError::ConnectionClosed)
     }
 
+    /// Make a forwarded membership notification replayable after its
+    /// authoritative REST reconciliation failed.
+    pub async fn retry_membership_notification(
+        &self,
+        event_id: String,
+        ts: u64,
+    ) -> Result<(), RelayError> {
+        self.cmd_tx
+            .send(RelayCommand::RetryMembership { event_id, ts })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)
+    }
+
     /// Reconnect after connection loss. Instructs the background task to
     /// re-authenticate and resubscribe to all previously active channels.
     pub async fn reconnect(&mut self) -> Result<(), RelayError> {
@@ -1263,6 +1278,16 @@ impl BgState {
     }
 }
 
+fn mark_membership_for_retry(state: &mut BgState, event_id: &str, ts: u64) {
+    state.seen_ids.remove(event_id);
+    state.membership_dropped_since = Some(
+        state
+            .membership_dropped_since
+            .map_or(ts, |floor| floor.min(ts)),
+    );
+    state.proactive_resubscribe_needed = true;
+}
+
 /// Record a command's intent in state while disconnected (no WebSocket).
 ///
 /// Subscribe/Unsubscribe/SubscribeMembership record intent so reconnect
@@ -1307,6 +1332,9 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
             if state.membership_last_seen.is_none() {
                 state.membership_last_seen = Some(ts);
             }
+        }
+        RelayCommand::RetryMembership { event_id, ts } => {
+            mark_membership_for_retry(state, &event_id, ts);
         }
         // Observer telemetry frames are durable: park them (bounded, visible
         // overflow) so they are delivered by the post-reconnect drain. Other
@@ -1544,6 +1572,10 @@ async fn execute_connected_command(
                 state.membership_last_seen = Some(ts);
             }
             debug!("startup watermark set to {ts}");
+            true
+        }
+        RelayCommand::RetryMembership { event_id, ts } => {
+            mark_membership_for_retry(state, &event_id, ts);
             true
         }
         // Control-flow commands — callers handle these before dispatching.
@@ -2106,6 +2138,13 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
+                        if !is_membership_event_for_agent(&event, agent_pubkey_hex) {
+                            warn!(
+                                event_id = %event.id,
+                                "membership notification has wrong kind or target — dropping"
+                            );
+                            return true;
+                        }
                         // Membership notification — extract channel UUID from h tag.
                         let channel_uuid = match extract_h_tag_uuid(&event) {
                             Some(uuid) => uuid,
@@ -3457,6 +3496,16 @@ fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
     })
 }
 
+fn is_membership_event_for_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
+    if !matches!(event.kind, nostr::Kind::Custom(44100 | 44101)) {
+        return false;
+    }
+    event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.len() >= 2 && values[0] == "p" && values[1].eq_ignore_ascii_case(agent_pubkey_hex)
+    })
+}
+
 /// Build and send a NIP-42 AUTH response event.
 ///
 /// If `auth_tag` is provided (NIP-OA owner attestation), it is included in the
@@ -4025,6 +4074,72 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_authoritative_reconciliation_rewinds_membership_replay() {
+        let mut state = BgState::new();
+        let event_id = "membership-event".to_string();
+        state.seen_ids.insert(event_id.clone());
+        state.membership_last_seen = Some(200);
+
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::RetryMembership {
+                event_id: event_id.clone(),
+                ts: 150,
+            },
+        );
+
+        assert!(!state.seen_ids.contains(&event_id));
+        assert_eq!(state.membership_dropped_since, Some(150));
+        assert!(state.proactive_resubscribe_needed);
+        assert_eq!(state.membership_last_seen, Some(200));
+    }
+
+    #[tokio::test]
+    async fn missing_and_wrong_membership_targets_do_not_mutate_replay_state() {
+        let agent_keys = Keys::generate();
+        let other_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key().to_hex();
+        let channel_id = Uuid::new_v4();
+        let h_tag = nostr::Tag::parse(["h", channel_id.to_string().as_str()]).unwrap();
+        let wrong_p = nostr::Tag::parse(["p", other_keys.public_key().to_hex().as_str()]).unwrap();
+        let missing_target = EventBuilder::new(nostr::Kind::Custom(44100), "")
+            .tags([h_tag.clone()])
+            .sign_with_keys(&other_keys)
+            .unwrap();
+        let wrong_target = EventBuilder::new(nostr::Kind::Custom(44101), "")
+            .tags([h_tag, wrong_p])
+            .sign_with_keys(&other_keys)
+            .unwrap();
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+
+        for event in [missing_target, wrong_target] {
+            let event_id = event.id.to_hex();
+            let frame =
+                serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, event])).unwrap();
+            assert!(
+                handle_ws_message(
+                    Message::Text(frame.into()),
+                    &mut ws,
+                    &event_tx,
+                    &control_tx,
+                    &mut state,
+                    &agent_keys,
+                    "ws://localhost",
+                    &agent_pubkey,
+                    None,
+                )
+                .await
+            );
+            assert!(!state.seen_ids.contains(&event_id));
+            assert_eq!(state.membership_last_seen, None);
+            assert!(event_rx.try_recv().is_err());
+        }
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

@@ -66,6 +66,52 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Resolve a membership notification against the current relay snapshot.
+///
+/// The notification kind is validated for callers, but deliberately does not
+/// choose the resulting state: equal-second add/remove delivery order is not
+/// an authority contract.
+pub(crate) fn authoritative_membership_state(
+    notification_kind: u32,
+    currently_joined: bool,
+) -> bool {
+    debug_assert!(
+        notification_kind == KIND_MEMBER_ADDED_NOTIFICATION
+            || notification_kind == KIND_MEMBER_REMOVED_NOTIFICATION
+    );
+    currently_joined
+}
+
+#[cfg(test)]
+mod membership_authority_tests {
+    use super::*;
+
+    #[test]
+    fn equal_second_notification_order_cannot_override_current_membership() {
+        let orders = [
+            [
+                KIND_MEMBER_ADDED_NOTIFICATION,
+                KIND_MEMBER_REMOVED_NOTIFICATION,
+            ],
+            [
+                KIND_MEMBER_REMOVED_NOTIFICATION,
+                KIND_MEMBER_ADDED_NOTIFICATION,
+            ],
+        ];
+
+        for order in orders {
+            let mut absent_state = true;
+            let mut present_state = false;
+            for kind in order {
+                absent_state = authoritative_membership_state(kind, false);
+                present_state = authoritative_membership_state(kind, true);
+            }
+            assert!(!absent_state);
+            assert!(present_state);
+        }
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -2123,12 +2169,10 @@ async fn tokio_main() -> Result<()> {
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
-    let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
-            subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
         }
     }
@@ -2648,12 +2692,6 @@ async fn tokio_main() -> Result<()> {
                                     );
                                     continue;
                                 }
-                                seen_membership_current.insert(eid);
-                                // Rotate at 1000: current → previous, no amnesia window.
-                                if seen_membership_current.len() >= 1000 {
-                                    seen_membership_previous =
-                                        std::mem::take(&mut seen_membership_current);
-                                }
                                 if let Some(&newest) = membership_newest_ts.get(&ch) {
                                     if ts < newest {
                                         tracing::debug!(
@@ -2666,27 +2704,67 @@ async fn tokio_main() -> Result<()> {
                                         continue;
                                     }
                                 }
+
+                                // Notification timestamps have one-second precision and the
+                                // relay does not promise causal delivery order for equal-second
+                                // add/remove pairs. Resolve the current relay membership rather
+                                // than treating delivery order as authority.
+                                let currently_joined = match relay.discover_channels().await {
+                                    Ok(channels) => authoritative_membership_state(
+                                        kind_u32,
+                                        channels.contains_key(&ch),
+                                    ),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            channel_id = %ch,
+                                            notification_kind = kind_u32,
+                                            "membership notification: authoritative channel discovery failed; queueing replay: {e}"
+                                        );
+                                        if let Err(retry_err) = relay
+                                            .retry_membership_notification(eid.clone(), ts)
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                channel_id = %ch,
+                                                "failed to queue membership notification replay: {retry_err}"
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                };
+
+                                seen_membership_current.insert(eid);
+                                // Rotate at 1000: current → previous, no amnesia window.
+                                if seen_membership_current.len() >= 1000 {
+                                    seen_membership_previous =
+                                        std::mem::take(&mut seen_membership_current);
+                                }
                                 membership_newest_ts.insert(ch, ts);
 
-                                if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
+                                if currently_joined {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if subscribed_channel_ids.contains(&ch) {
-                                        tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
+                                    if let Some(filter) = config::resolve_membership_channel_filter(
+                                        &config,
+                                        ch,
+                                        &rules,
+                                        &channel_ids,
+                                    ) {
+                                        tracing::info!(channel_id = %ch, "membership notification: reconciling channel subscription");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
-                                        } else {
-                                            subscribed_channel_ids.insert(ch);
                                         }
+                                    } else if !config.follow_memberships {
+                                        tracing::info!(
+                                            channel_id = %ch,
+                                            "membership notification: fixed --channels scope excludes channel"
+                                        );
                                     } else {
-                                        tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        tracing::debug!(channel_id = %ch, "membership notification: no matching config rule — skipping");
                                     }
                                 } else {
-                                    subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -6764,6 +6842,7 @@ mod build_mcp_servers_tests {
             ignore_self: true,
             kinds_override: None,
             channels_override: None,
+            follow_memberships: true,
             no_mention_filter: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
@@ -6988,6 +7067,7 @@ mod error_outcome_emission_tests {
             ignore_self: true,
             kinds_override: None,
             channels_override: None,
+            follow_memberships: true,
             no_mention_filter: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,

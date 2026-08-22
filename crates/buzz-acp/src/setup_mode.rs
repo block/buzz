@@ -565,23 +565,55 @@ async fn handle_setup_membership(
     buzz_event: &crate::relay::BuzzEvent,
     config: &Config,
     rules: &[filter::SubscriptionRule],
-    _initial_channel_ids: &[Uuid],
+    initial_channel_ids: &[Uuid],
 ) {
     let kind_u32 = buzz_event.event.kind.as_u16() as u32;
     let channel_id = buzz_event.channel_id;
 
-    if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
+    // Equal-second add/remove notifications have no causal delivery-order
+    // guarantee. Query the current relay membership before changing scope.
+    let currently_joined = match relay.discover_channels().await {
+        Ok(channels) => {
+            crate::authoritative_membership_state(kind_u32, channels.contains_key(&channel_id))
+        }
+        Err(e) => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                notification_kind = kind_u32,
+                "setup-mode: authoritative membership discovery failed; queueing replay: {e}"
+            );
+            if let Err(retry_err) = relay
+                .retry_membership_notification(
+                    buzz_event.event.id.to_hex(),
+                    buzz_event.event.created_at.as_secs(),
+                )
+                .await
+            {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    "setup-mode: failed to queue membership notification replay: {retry_err}"
+                );
+            }
+            return;
+        }
+    };
+
+    if currently_joined {
         // Subscribe to the newly-joined channel.
-        let ids = vec![channel_id];
-        let filters = crate::config::resolve_channel_filters(config, &ids, rules);
-        for (cid, filter) in filters {
+        if let Some(filter) = crate::config::resolve_membership_channel_filter(
+            config,
+            channel_id,
+            rules,
+            initial_channel_ids,
+        ) {
+            let cid = channel_id;
             if let Err(e) = relay.subscribe_channel(cid, filter).await {
                 tracing::warn!("setup-mode: failed to subscribe to new channel {cid}: {e}");
             } else {
                 tracing::info!("setup-mode: subscribed to new channel {cid}");
             }
         }
-    } else if kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION {
+    } else {
         if let Err(e) = relay.unsubscribe_channel(channel_id).await {
             tracing::warn!("setup-mode: failed to unsubscribe from channel {channel_id}: {e}");
         }

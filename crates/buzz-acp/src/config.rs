@@ -338,8 +338,16 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_KINDS", value_delimiter = ',')]
     pub kinds: Option<Vec<u32>>,
 
+    /// Comma-separated channels to seed explicitly. Relay membership remains
+    /// authoritative unless --no-follow-memberships is set.
     #[arg(long, env = "BUZZ_ACP_CHANNELS", value_delimiter = ',')]
     pub channels: Option<Vec<String>>,
+
+    /// Keep channel subscriptions fixed to --channels instead of following
+    /// relay membership. By default, adding or removing this agent through
+    /// channel membership changes its subscriptions immediately.
+    #[arg(long, env = "BUZZ_ACP_NO_FOLLOW_MEMBERSHIPS")]
+    pub no_follow_memberships: bool,
 
     #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
     pub no_mention_filter: bool,
@@ -540,6 +548,10 @@ pub struct Config {
     pub ignore_self: bool,
     pub kinds_override: Option<Vec<u32>>,
     pub channels_override: Option<Vec<String>>,
+    /// Whether relay membership is authoritative for startup and live channel
+    /// subscriptions. Enabled by default; --no-follow-memberships preserves a
+    /// fixed --channels scope.
+    pub follow_memberships: bool,
     pub no_mention_filter: bool,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
@@ -927,8 +939,10 @@ impl Config {
             if args.kinds.is_some() {
                 tracing::warn!("--kinds is ignored in config mode");
             }
-            if args.channels.is_some() {
-                tracing::warn!("--channels is ignored in config mode");
+            if args.channels.is_some() && !args.no_follow_memberships {
+                tracing::warn!(
+                    "--channels is ignored in config mode unless --no-follow-memberships is set"
+                );
             }
             if args.no_mention_filter {
                 tracing::warn!("--no-mention-filter is ignored in config mode");
@@ -1117,6 +1131,7 @@ impl Config {
             ignore_self: !args.no_ignore_self,
             kinds_override: args.kinds,
             channels_override: args.channels,
+            follow_memberships: !args.no_follow_memberships,
             no_mention_filter: args.no_mention_filter,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
@@ -1280,7 +1295,9 @@ pub fn resolve_channel_filters(
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
     };
 
-    let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
+    let target_channels: Vec<Uuid> = if config.follow_memberships {
+        discovered_channels.to_vec()
+    } else if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
             .filter_map(|s| s.parse::<Uuid>().ok())
@@ -1324,7 +1341,7 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::Config => {
-            for ch in discovered_channels {
+            for ch in &target_channels {
                 let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
                 let mut require_mention = true;
                 let mut has_rule = false;
@@ -1366,12 +1383,12 @@ pub fn resolve_channel_filters(
 
 /// Resolve the subscription filter for a single dynamically-discovered channel.
 ///
-/// In Mentions/All mode, `channels_override` (--channels) is enforced — the agent
-/// won't subscribe to channels outside the operator's allowlist. In Config mode,
-/// `--channels` is ignored (per CLI contract) and rule-matching determines scope.
+/// Relay membership is authoritative by default in every mode. The
+/// `channels_override` (--channels) allowlist is enforced in every mode only
+/// when `--no-follow-memberships` is set; Config rules then narrow that scope.
 ///
 /// Returns `None` when the channel is outside the agent's configured scope:
-/// - Mentions/All: channel not in `channels_override` (if set)
+/// - fixed scope: channel not in `channels_override` (if set)
 /// - Config: no subscription rules match the channel
 pub fn resolve_dynamic_channel_filter(
     config: &Config,
@@ -1382,21 +1399,22 @@ pub fn resolve_dynamic_channel_filter(
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
     };
 
-    // In Mentions/All mode, if the operator explicitly constrained channels
-    // with --channels, only allow dynamic subscription to channels in that
-    // allowlist. Config mode ignores --channels (per CLI contract) and uses
-    // rule-matching instead.
-    if config.subscribe_mode != SubscribeMode::Config {
-        if let Some(ref overrides) = config.channels_override {
-            let allowed = overrides
-                .iter()
-                .any(|s| s.parse::<Uuid>().ok() == Some(channel_id));
-            if !allowed {
-                return None;
-            }
+    // Fixed scope is an authority boundary in every mode. Config rules may
+    // narrow an allowed scope, but cannot expand beyond it.
+    if !config.follow_memberships {
+        let Some(ref overrides) = config.channels_override else {
+            // With no explicit list, --no-follow-memberships freezes the
+            // startup-discovered set. A later channel was not in that set.
+            return None;
+        };
+        let allowed = overrides
+            .iter()
+            .filter_map(|s| s.parse::<Uuid>().ok())
+            .any(|id| id == channel_id);
+        if !allowed {
+            return None;
         }
     }
-
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
             kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
@@ -1464,6 +1482,23 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
     }
 }
 
+/// Resolve a membership-triggered channel against both the dynamic policy and
+/// the immutable startup snapshot used by fixed-scope mode without --channels.
+pub fn resolve_membership_channel_filter(
+    config: &Config,
+    channel_id: Uuid,
+    rules: &[crate::filter::SubscriptionRule],
+    startup_channel_ids: &[Uuid],
+) -> Option<ChannelFilter> {
+    if !config.follow_memberships
+        && config.channels_override.is_none()
+        && startup_channel_ids.contains(&channel_id)
+    {
+        return resolve_channel_filters(config, &[channel_id], rules).remove(&channel_id);
+    }
+    resolve_dynamic_channel_filter(config, channel_id, rules)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,6 +1528,7 @@ mod tests {
             ignore_self: true,
             kinds_override: None,
             channels_override: None,
+            follow_memberships: true,
             no_mention_filter: false,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
@@ -1834,6 +1870,7 @@ mod tests {
     #[test]
     fn test_channels_override_filters_to_discovered() {
         let mut config = test_config(SubscribeMode::All);
+        config.follow_memberships = false;
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let ch_unknown = Uuid::new_v4();
@@ -1848,6 +1885,105 @@ mod tests {
         assert!(result.contains_key(&ch_a));
         assert!(!result.contains_key(&ch_b));
         assert!(!result.contains_key(&ch_unknown));
+    }
+
+    #[test]
+    fn test_membership_following_is_authoritative_by_default() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        let configured = Uuid::new_v4();
+        let joined_later = Uuid::new_v4();
+        config.channels_override = Some(vec![configured.to_string()]);
+
+        let startup = resolve_channel_filters(&config, &[configured, joined_later], &[]);
+        assert!(startup.contains_key(&configured));
+        assert!(startup.contains_key(&joined_later));
+        assert!(resolve_dynamic_channel_filter(&config, joined_later, &[]).is_some());
+    }
+
+    #[test]
+    fn test_static_scope_opt_out_rejects_later_membership() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        let configured = Uuid::new_v4();
+        let joined_later = Uuid::new_v4();
+        config.channels_override = Some(vec![configured.to_string()]);
+        config.follow_memberships = false;
+
+        let startup = resolve_channel_filters(&config, &[configured, joined_later], &[]);
+        assert!(startup.contains_key(&configured));
+        assert!(!startup.contains_key(&joined_later));
+        assert!(resolve_dynamic_channel_filter(&config, joined_later, &[]).is_none());
+    }
+
+    #[test]
+    fn test_static_scope_without_pins_freezes_startup_discovery() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        let joined_at_startup = Uuid::new_v4();
+        let joined_later = Uuid::new_v4();
+        config.follow_memberships = false;
+
+        let startup = resolve_channel_filters(&config, &[joined_at_startup], &[]);
+        assert!(startup.contains_key(&joined_at_startup));
+        assert!(resolve_dynamic_channel_filter(&config, joined_later, &[]).is_none());
+        assert!(resolve_membership_channel_filter(
+            &config,
+            joined_at_startup,
+            &[],
+            &[joined_at_startup],
+        )
+        .is_some());
+        assert!(resolve_membership_channel_filter(
+            &config,
+            joined_later,
+            &[],
+            &[joined_at_startup],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn config_mode_static_scope_cannot_be_expanded_by_catch_all_rule() {
+        let mut config = test_config(SubscribeMode::Config);
+        let joined_at_startup = Uuid::new_v4();
+        let joined_later = Uuid::new_v4();
+        config.follow_memberships = false;
+        let rules = vec![make_rule(
+            "catch-all",
+            ChannelScope::All("all".into()),
+            vec![9],
+            false,
+        )];
+
+        let startup = resolve_channel_filters(&config, &[joined_at_startup], &rules);
+        assert!(startup.contains_key(&joined_at_startup));
+        assert!(resolve_membership_channel_filter(
+            &config,
+            joined_at_startup,
+            &rules,
+            &[joined_at_startup],
+        )
+        .is_some());
+        assert!(resolve_membership_channel_filter(
+            &config,
+            joined_later,
+            &rules,
+            &[joined_at_startup],
+        )
+        .is_none());
+
+        config.channels_override = Some(vec![joined_at_startup.to_string()]);
+        assert!(resolve_dynamic_channel_filter(&config, joined_at_startup, &rules).is_some());
+        assert!(resolve_dynamic_channel_filter(&config, joined_later, &rules).is_none());
+    }
+
+    #[test]
+    fn membership_following_cli_defaults_on_with_explicit_opt_out() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!default.no_follow_memberships);
+
+        let fixed =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--no-follow-memberships"]);
+        assert!(fixed.no_follow_memberships);
     }
 
     #[test]
