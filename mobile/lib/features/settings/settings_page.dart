@@ -18,6 +18,7 @@ import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import 'accent_picker_page.dart';
 import 'theme_picker_page.dart';
@@ -59,19 +60,30 @@ class SettingsPage extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
         showBottomDivider: false,
-        leading: SizedBox(
-          width: Grid.xl,
-          height: Grid.xl,
-          child: IconButton(
-            tooltip: 'Close settings',
-            onPressed: () {
-              unawaited(HapticFeedback.lightImpact());
-              Navigator.of(context).pop();
-            },
-            color: navigationPrimaryForeground(context),
-            icon: const Icon(LucideIcons.x),
-          ),
-        ),
+        leading: Theme.of(context).platform == TargetPlatform.iOS
+            ? IosGlassNavigationButton(
+                key: const ValueKey('settings-ios-glass-close'),
+                icon: IosGlassNavigationIcon.close,
+                semanticLabel: 'Close settings',
+                onPressed: () {
+                  unawaited(HapticFeedback.lightImpact());
+                  Navigator.of(context).pop();
+                },
+                foregroundColor: navigationPrimaryForeground(context),
+              )
+            : SizedBox(
+                width: Grid.xl,
+                height: Grid.xl,
+                child: IconButton(
+                  tooltip: 'Close settings',
+                  onPressed: () {
+                    unawaited(HapticFeedback.lightImpact());
+                    Navigator.of(context).pop();
+                  },
+                  color: navigationPrimaryForeground(context),
+                  icon: const Icon(LucideIcons.x),
+                ),
+              ),
         bottomHeight: Grid.xxs,
         bottom: const SizedBox.expand(),
       ),

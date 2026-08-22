@@ -34,6 +34,11 @@ fn parse_entity_deep_link_accepts_every_share_link_shape() {
             "{raw}"
         );
     }
+    let commit_link = format!(
+        "buzz://repo?owner={owner}&d={dtag}&tab=commits&commit={}",
+        golden["eventId"].as_str().unwrap()
+    );
+    assert!(parse_entity_deep_link(&Url::parse(&commit_link).unwrap()).is_some());
     let expected_tabs = golden["tabs"]
         .as_array()
         .unwrap()
@@ -64,6 +69,8 @@ fn parse_entity_deep_link_rejects_malformed_and_non_canonical_links() {
         // Unknown tab value, duplicate tab, and tab on an event link.
         format!("buzz://repo?owner={owner}&d=buzz-world&tab=overview"),
         format!("buzz://repo?owner={owner}&d=buzz-world&tab=prs&tab=prs"),
+        format!("buzz://repo?owner={owner}&d=buzz-world&tab=files&commit={event_id}"),
+        format!("buzz://repo?owner={owner}&d=buzz-world&tab=commits&commit=short"),
         format!("buzz://pr?id={event_id}&owner={owner}&d=buzz-world&tab=prs"),
         format!("buzz://repo/extra?owner={owner}&d=buzz-world"),
         format!("buzz://repo?owner={owner}&d=buzz-world#top"),

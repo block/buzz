@@ -24,7 +24,9 @@ import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
 import {
   MentionHighlightExtension,
-  mentionHighlightKey,
+  reassertMentionCaretAfterFocus,
+  settleAutocompleteMentionInsert,
+  syncMentionHighlightFromProps,
 } from "./mentionHighlightExtension";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
@@ -510,7 +512,7 @@ export function useRichTextEditor({
         attributes: {
           autocapitalize: "none",
           autocorrect: "off",
-          class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
+          class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-message font-normal tracking-normal text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
           spellcheck: "true",
         },
@@ -688,24 +690,15 @@ export function useRichTextEditor({
   }, [editor, placeholder]);
 
   // Keep mention/channel-highlight decorations in sync with known names.
-  // NOTE: We use `editor.storage.mentionHighlight` (the mutable storage object
-  // shared with the ProseMirror plugin closure) rather than finding the
-  // extension instance via extensionManager — the instance's `.storage` getter
-  // returns a fresh spread-copy on every access, so mutations are silently lost.
+  // Mutate `editor.storage.mentionHighlight`; the extension getter copies storage.
   React.useEffect(() => {
     if (!editor) return;
-    // biome-ignore lint/suspicious/noExplicitAny: TipTap's Storage type doesn't include dynamic extension keys
-    const storage = (editor.storage as any).mentionHighlight as
-      | { names: string[]; agentNames: string[]; channelNames: string[] }
-      | undefined;
-    if (storage) {
-      storage.names = mentionNames ?? [];
-      storage.agentNames = agentMentionNames ?? [];
-      storage.channelNames = channelNames ?? [];
-      // Force the plugin to re-decorate by dispatching a metadata transaction.
-      const { tr } = editor.state;
-      editor.view.dispatch(tr.setMeta(mentionHighlightKey, true));
-    }
+    syncMentionHighlightFromProps(
+      editor,
+      mentionNames,
+      agentMentionNames,
+      channelNames,
+    );
   }, [editor, mentionNames, agentMentionNames, channelNames]);
 
   // Custom-emoji set changes: re-resolve the `src` attr on any existing
@@ -872,8 +865,10 @@ export function useRichTextEditor({
       // "Position N out of range".)
       const cursorPM = tr.mapping.map(toPM);
       tr.setSelection(TextSelection.create(tr.doc, cursorPM));
+      settleAutocompleteMentionInsert(editor, tr, text);
       editor.view.dispatch(tr);
       editor.view.focus();
+      reassertMentionCaretAfterFocus(editor.view);
     },
     [editor, customEmojiWiring.resolveUrl],
   );

@@ -57,7 +57,7 @@ export function CreateProjectIssueDialog({
   async function handleCreate(input: CreateProjectWorkItemDialogInput) {
     if (!project || !repository) throw new Error("Choose a repository.");
     const issueId = await createMutation.mutateAsync(input);
-    toast.success("Issue created.");
+    toast.success("Task created.");
     await onCreated(project, repository, issueId);
   }
 
@@ -66,8 +66,8 @@ export function CreateProjectIssueDialog({
       bodyPlaceholder="Add context, expected behavior, or reproduction steps"
       description={
         repository
-          ? `Create an issue in ${repository.name}`
-          : "Choose a repository for this issue."
+          ? `Create a task in ${repository.name}`
+          : "Choose a repository for this task."
       }
       isCreating={createMutation.isPending}
       itemName="issue"
@@ -75,8 +75,8 @@ export function CreateProjectIssueDialog({
       onOpenChange={onOpenChange}
       open={open}
       submitDisabled={!repository}
-      title="Create an issue"
-      titlePlaceholder="Describe the issue"
+      title="Create a task"
+      titlePlaceholder="Describe the task"
     >
       <label className="block space-y-1.5 text-sm font-medium">
         <span>Repository</span>

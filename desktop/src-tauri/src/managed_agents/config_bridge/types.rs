@@ -76,8 +76,21 @@ pub enum ConfigOrigin {
 }
 
 /// How a config field can be written back to the runtime.
+///
+/// `rename_all_fields` is load-bearing, not decoration: on an internally
+/// tagged enum `rename_all` renames the *variants*, never the variants'
+/// fields, so without it `RespawnWithEnvVar` serializes as
+/// `{"type":"respawnWithEnvVar","env_key":"…"}` while
+/// `desktop/src/shared/api/types.ts` declares `envKey`. `invokeTauri<T>` is an
+/// unchecked cast, so `tsc` cannot see the mismatch — the reader just gets
+/// `undefined`. `wire_format_matches_typescript_contract` below pins the exact
+/// bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ConfigWriteMechanism {
     /// Update record env vars, save, stop + restart agent.
     RespawnWithEnvVar { env_key: String },
@@ -262,4 +275,106 @@ pub struct AcpModelEntry {
     pub model_id: String,
     pub name: Option<String>,
     pub description: Option<String>,
+}
+
+#[cfg(test)]
+mod wire_format_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Every `ConfigWriteMechanism` variant, as `desktop/src/shared/api/types.ts`
+    /// declares it. Whole-value comparison, not a key-set check: a key-set
+    /// assertion still passes if the variant *name* regresses, and the `type`
+    /// discriminant is what every `switch (writeVia.type)` reads. Compared as
+    /// `serde_json::Value` rather than as text, because JSON object order is
+    /// not semantic and the contract is the keys and values, not the encoder's
+    /// field order.
+    #[test]
+    fn wire_format_matches_typescript_contract() {
+        let cases = [
+            (
+                ConfigWriteMechanism::RespawnWithEnvVar {
+                    env_key: "GOOSE_MODE".into(),
+                },
+                json!({"type": "respawnWithEnvVar", "envKey": "GOOSE_MODE"}),
+            ),
+            (
+                ConfigWriteMechanism::AcpSetConfigOption {
+                    config_id: "model".into(),
+                },
+                json!({"type": "acpSetConfigOption", "configId": "model"}),
+            ),
+            (
+                ConfigWriteMechanism::AcpSetSessionModel,
+                json!({"type": "acpSetSessionModel"}),
+            ),
+            (
+                ConfigWriteMechanism::GooseNativeConfigWrite {
+                    config_key: "goose.model".into(),
+                },
+                json!({"type": "gooseNativeConfigWrite", "configKey": "goose.model"}),
+            ),
+            (ConfigWriteMechanism::ReadOnly, json!({"type": "readOnly"})),
+        ];
+        for (mechanism, expected) in cases {
+            assert_eq!(
+                serde_json::to_value(&mechanism).expect("serialize"),
+                expected
+            );
+        }
+    }
+
+    /// The renderer never sees a bare mechanism — it arrives nested inside
+    /// `NormalizedField`, which is where the mismatch used to hide: the
+    /// enclosing struct's `writeVia` / `overriddenValue` / `isRequired` all
+    /// renamed correctly, so only the variant's own field was snake_case.
+    #[test]
+    fn nested_field_is_camel_case_all_the_way_down() {
+        let field = NormalizedField {
+            value: Some("v".into()),
+            origin: ConfigOrigin::EnvVar,
+            write_via: ConfigWriteMechanism::RespawnWithEnvVar {
+                env_key: "GOOSE_MODE".into(),
+            },
+            overridden_value: Some("o".into()),
+            overridden_origin: Some(ConfigOrigin::ConfigFile),
+            is_required: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&field).expect("serialize"),
+            json!({
+                "value": "v",
+                "origin": "envVar",
+                "writeVia": {"type": "respawnWithEnvVar", "envKey": "GOOSE_MODE"},
+                "overriddenValue": "o",
+                "overriddenOrigin": "configFile",
+                "isRequired": true,
+            })
+        );
+    }
+
+    /// The contract is singular: the shape the renderer sends back round-trips,
+    /// and the old snake_case spelling is no longer accepted. Without the
+    /// second half, a future revert would still deserialize and the read path
+    /// would look healthy.
+    #[test]
+    fn camel_case_round_trips_and_snake_case_is_rejected() {
+        let parsed: ConfigWriteMechanism =
+            serde_json::from_str(r#"{"type":"respawnWithEnvVar","envKey":"GOOSE_MODE"}"#)
+                .expect("the TypeScript shape must deserialize");
+        assert_eq!(
+            parsed,
+            ConfigWriteMechanism::RespawnWithEnvVar {
+                env_key: "GOOSE_MODE".into(),
+            }
+        );
+
+        assert!(
+            serde_json::from_str::<ConfigWriteMechanism>(
+                r#"{"type":"respawnWithEnvVar","env_key":"GOOSE_MODE"}"#
+            )
+            .is_err(),
+            "the pre-fix snake_case spelling must not be accepted"
+        );
+    }
 }

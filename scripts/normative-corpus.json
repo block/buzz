@@ -681,6 +681,202 @@
     }
   },
   {
+    "id": "dbv2-claude-fable-5-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-fable-5",
+    "_note": "Probes the canonical Databricks Fable 5 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Fable 5"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-fable-5-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-fable-5",
+    "_note": "Probes a prefixed alias of the Databricks Fable 5 endpoint.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-claude-opus-4-8-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-opus-4-8",
+    "_note": "Probes the canonical Databricks Opus 4.8 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 4.8"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-opus-4-8-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-opus-4-8",
+    "_note": "Probes a prefixed alias of the Databricks Opus 4.8 endpoint.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-claude-opus-5-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-opus-5",
+    "_note": "Probes the canonical Databricks Opus 5 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 5"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-opus-5-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-opus-5",
+    "_note": "Probes a prefixed alias of the Databricks Opus 5 endpoint.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-claude-sonnet-5-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-sonnet-5",
+    "_note": "Probes the canonical Databricks Sonnet 5 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Sonnet 5"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-sonnet-5-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-sonnet-5",
+    "_note": "Probes a prefixed alias of the Databricks Sonnet 5 endpoint.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-kimi-k3-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-kimi-k3",
+    "_note": "Probes the canonical Databricks Kimi K3 endpoint record.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Kimi K3"
+    }
+  },
+  {
+    "id": "dbv2-goose-kimi-k3-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-kimi-k3",
+    "_note": "Probes a prefixed alias of the Databricks Kimi K3 endpoint.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": null
+    }
+  },
+  {
     "id": "resolver-prefixed-alias-probe",
     "provider": "databricks_v2",
     "raw_model_id": "team-x-databricks-gpt-5-4-mini",

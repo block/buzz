@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
@@ -201,6 +203,28 @@ void main() {
   });
 
   group('build channel lifecycle tags', () {
+    test('channel edits match desktop kind 9002 tags', () {
+      expect(
+        buildUpdateChannelTags(
+          channelId: 'channel-id',
+          name: '  ###general  ',
+          description: ' Team updates ',
+        ),
+        [
+          ['h', 'channel-id'],
+          ['name', 'general'],
+          ['about', 'Team updates'],
+        ],
+      );
+    });
+
+    test('channel edits reject a hash-only name', () {
+      expect(
+        () => buildUpdateChannelTags(channelId: 'channel-id', name: ' ### '),
+        throwsArgumentError,
+      );
+    });
+
     test('archive matches kind 9002 tags', () {
       expect(buildSetChannelArchivedTags('channel-id', archived: true), [
         ['h', 'channel-id'],
@@ -221,6 +245,186 @@ void main() {
       ]);
     });
   });
+
+  group('Huddle channel lifecycle', () {
+    test(
+      'starts from accepted signed events without refreshing all channels',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _RecordingPublishRelaySession();
+        final actionsProvider = Provider<ChannelActions>((ref) {
+          return ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: keys.public,
+          );
+        });
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(keys.public),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final actions = container.read(actionsProvider);
+        final backingChannelId = await actions.createHuddleBackingChannel();
+        final started = await actions.announceHuddleStarted(
+          parentChannelId: _channelId,
+          ephemeralChannelId: backingChannelId,
+        );
+
+        expect(session.historyQueryCount, 0);
+        expect(session.publishedEvents, hasLength(2));
+        final create = session.publishedEvents.first;
+        expect(create.kind, 9007);
+        expect(create.tags, contains(equals(['h', backingChannelId])));
+        expect(create.tags, contains(equals(['visibility', 'private'])));
+        expect(create.tags, contains(equals(['channel_type', 'stream'])));
+        expect(create.tags, contains(equals(['ttl', '3600'])));
+
+        final start = session.publishedEvents.last;
+        expect(start.kind, EventKind.huddleStarted);
+        expect(start.tags, [
+          ['h', _channelId],
+        ]);
+        expect(start.content, '{"ephemeral_channel_id":"$backingChannelId"}');
+        expect(started.id, start.id);
+      },
+    );
+
+    test(
+      'publishes ephemeral Huddle reactions on the backing channel',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _RecordingPublishRelaySession();
+        final actionsProvider = Provider<ChannelActions>((ref) {
+          return ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: keys.public,
+          );
+        });
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(keys.public),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(actionsProvider)
+            .sendHuddleReaction(
+              channelId: _channelId,
+              emoji: ' 🎉 ',
+              senderName: 'Self',
+            );
+
+        expect(session.publishedEvents, hasLength(1));
+        final reaction = session.publishedEvents.single;
+        expect(reaction.kind, EventKind.huddleReaction);
+        expect(reaction.content, '🎉');
+        expect(reaction.tags, [
+          ['h', _channelId],
+          ['reaction', '🎉'],
+          ['sender_name', 'Self'],
+        ]);
+      },
+    );
+
+    test('last-human count ignores a stale cached roster', () async {
+      final session = _ConnectionAwareRelaySession();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          channelMembersProvider(_channelId).overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: _memberPubkey,
+                role: 'admin',
+                joinedAt: DateTime(2025),
+              ),
+              ChannelMember(
+                pubkey:
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.connect();
+      expect(
+        await container.read(channelMembersProvider(_channelId).future),
+        hasLength(2),
+      );
+
+      final humanCount = await container.read(huddleHumanCountProvider)(
+        _channelId,
+      );
+
+      expect(humanCount, 1);
+      expect(session.historyQueryCount, 1);
+    });
+  });
+
+  test(
+    'stale channel actions cannot publish after a community switch',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final staleActions = container.read(channelActionsProvider);
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other-community.example', nsec: null);
+
+      final operations = <Future<void> Function()>[
+        () =>
+            staleActions.updateChannel(channelId: _channelId, name: 'renamed'),
+        () => staleActions.archiveChannel(_channelId),
+        () => staleActions.unarchiveChannel(_channelId),
+        () => staleActions.deleteChannel(_channelId),
+        () => staleActions.setCanvas(channelId: _channelId, content: 'canvas'),
+        () => staleActions.changeMemberRole(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+          role: 'admin',
+        ),
+        () => staleActions.removeMember(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+        ),
+        () => staleActions.leaveChannel(_channelId),
+      ];
+
+      for (final operation in operations) {
+        await expectLater(operation(), throwsA(isA<StateError>()));
+      }
+    },
+  );
 
   group('channelMembersProvider', () {
     test('waits for the relay connection before fetching members', () async {
@@ -446,6 +650,43 @@ void main() {
 const _channelId = '11111111-1111-4111-8111-111111111111';
 const _memberPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+class _RecordingPublishRelaySession extends RelaySessionNotifier {
+  final publishedEvents = <NostrEvent>[];
+  int historyQueryCount = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    publishedEvents.add(event);
+    return event;
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    historyQueryCount++;
+    return const [];
+  }
+}
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://first-community.example', nsec: null);
+
+  @override
+  void update({required String baseUrl, String? nsec}) {
+    state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
+  }
+}
 
 class _ConnectionAwareRelaySession extends RelaySessionNotifier {
   int historyQueryCount = 0;

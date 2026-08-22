@@ -98,6 +98,8 @@ pub(crate) async fn reconcile_on_workspace_apply(
             &config,
             agent_json,
             cached_binary_path.as_deref(),
+            None,
+            None,
         )
         .await
         {
