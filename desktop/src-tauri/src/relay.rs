@@ -443,6 +443,15 @@ fn build_profile_event(
 ///
 /// The agent signs its own profile event and the NIP-98 HTTP-auth event, so no
 /// API token is required.
+///
+/// Retries once when the relay returns 403 with `relay_membership_required`:
+/// a closed-relay deployment grants the new agent's pubkey membership
+/// asynchronously (typically within ~1s of the first connection attempt), so
+/// the very first kind:0 publish for a brand-new pubkey can race the grant and
+/// crash the call-site with a 403 even though the same publish succeeds on a
+/// retry moments later. A single bounded retry — after a short delay — lets
+/// the desktop converge instead of surfacing a spurious error dialog on the
+/// happy path. See block/buzz#3888.
 pub async fn sync_managed_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -451,7 +460,6 @@ pub async fn sync_managed_agent_profile(
     avatar_url: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
-    crate::relay_admission::wait_for_rate_limit().await;
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
     let event_json = event.as_json();
@@ -461,28 +469,75 @@ pub async fn sync_managed_agent_profile(
     let url = format!("{}/events", relay_http_base_url(relay_url));
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
-    let mut request = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json");
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    for attempt in 0..2 {
+        crate::relay_admission::wait_for_rate_limit().await;
 
-    if !response.status().is_success() {
-        let msg = relay_error_message(response).await;
+        let mut request = state
+            .http_client
+            .post(&url)
+            .header("Authorization", auth.clone())
+            .header("Content-Type", "application/json");
+        if let Some(tag) = auth_tag {
+            request = request.header("x-auth-tag", tag);
+        }
+        let response = request
+            .body(body_bytes.clone())
+            .send()
+            .await
+            .map_err(|e| classify_request_error(&e))?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        // Read body once so the classifier and the error path see the same
+        // text without requiring the response twice.
+        let body_text = response.text().await.unwrap_or_default();
+        let is_membership_403 = status == reqwest::StatusCode::FORBIDDEN
+            && body_text.contains("relay_membership_required");
+
+        if is_membership_403 && attempt == 0 {
+            // The relay has not yet converged the async membership grant for
+            // this pubkey; give it a short beat before the one allowed retry.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
         return Err(format!(
-            "Could not sync the agent's profile metadata: {msg}"
+            "Could not sync the agent's profile metadata: {}",
+            summarize_relay_error(status, &body_text)
         ));
     }
 
-    Ok(())
+    unreachable!("loop always returns synchronously");
+}
+
+/// Compose the `{msg}` tail of a relay-failure string given a status and an
+/// already-read body. Mirrors the "real relay error" branch of
+/// `relay_error_message` (the only path `sync_managed_agent_profile` can hit
+/// after the body has been consumed once), so the caller-visible error is
+/// unchanged for non-membership 4xx/5xx.
+fn summarize_relay_error(status: reqwest::StatusCode, body: &str) -> String {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let hint = extract_retry_in_hint(body);
+        let capped_hint = hint.map(|s: u64| s.min(crate::relay_admission::MAX_HINT_SECONDS));
+        crate::relay_admission::activate_rate_limit(capped_hint);
+        if let Some(secs) = capped_hint {
+            return format!("relay rate-limited: retry suggested in {secs}s");
+        }
+        return "relay rate-limited: quota exceeded".to_string();
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+            return format!("relay returned {status}: {message}");
+        }
+        if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+            return format!("relay returned {status}: {error}");
+        }
+    }
+    format!("relay returned {status}")
 }
 
 // ── Agent profile query ─────────────────────────────────────────────────────
@@ -990,5 +1045,43 @@ mod tests {
             result.unwrap_err().contains("verification failed"),
             "error message should mention verification failure"
         );
+    }
+
+    // ── summarize_relay_error ────────────────────────────────────────────────
+
+    #[test]
+    fn summarize_relay_error_surfaces_membership_message() {
+        // Shape matches crates/buzz-relay/src/api/mod.rs's membership gate.
+        let body = r#"{"error":"relay_membership_required","message":"You must be a relay member to access this relay"}"#;
+        let msg = super::summarize_relay_error(reqwest::StatusCode::FORBIDDEN, body);
+        assert_eq!(
+            msg,
+            "relay returned 403 Forbidden: You must be a relay member to access this relay"
+        );
+    }
+
+    #[test]
+    fn summarize_relay_error_falls_back_to_error_key_when_no_message() {
+        let body = r#"{"error":"some error text without a message key"}"#;
+        let msg = super::summarize_relay_error(reqwest::StatusCode::FORBIDDEN, body);
+        assert_eq!(
+            msg,
+            "relay returned 403 Forbidden: some error text without a message key"
+        );
+    }
+
+    #[test]
+    fn summarize_relay_error_handles_non_json_body() {
+        let msg = super::summarize_relay_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "something went wrong upstream",
+        );
+        assert_eq!(msg, "relay returned 500 Internal Server Error");
+    }
+
+    #[test]
+    fn summarize_relay_error_handles_empty_body() {
+        let msg = super::summarize_relay_error(reqwest::StatusCode::BAD_GATEWAY, "");
+        assert_eq!(msg, "relay returned 502 Bad Gateway");
     }
 }
