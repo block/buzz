@@ -355,6 +355,31 @@ function normalizeOne(
     } satisfies ActivityProvenance,
   };
 
+  if (event.kind === "observer_telemetry_gap") {
+    const rawDropped = payload.droppedEvents;
+    const droppedEvents =
+      typeof rawDropped === "number" &&
+      Number.isSafeInteger(rawDropped) &&
+      rawDropped > 0
+        ? rawDropped
+        : null;
+    return {
+      ...base,
+      id: buildId(event, "status", "telemetry-gap"),
+      category: "status",
+      title: "Observer telemetry gap",
+      detail: `${droppedEvents ?? "Unknown number of"} source event${
+        droppedEvents === 1 ? "" : "s"
+      } dropped before archival.`,
+      status: "blocked",
+      proofState: "UNKNOWN",
+      tags: [
+        ...eventTagSet("status", "observer_telemetry_gap", null),
+        "evidence_gap",
+      ],
+    };
+  }
+
   if (event.kind === "turn_started") {
     return {
       ...base,
@@ -458,9 +483,6 @@ function normalizeOne(
   }
 
   if (event.kind === "journal_override") {
-    // Managed observer envelopes are signed by the agent, not the owner.
-    // Owner edits enter through applyOwnerJournalOverride after an authenticated
-    // owner action; agent-authored lookalikes are deliberately ignored.
     return null;
   }
 
@@ -474,9 +496,7 @@ function normalizeOne(
       title: failed ? "Proof verification failed" : "Verification claimed",
       detail: receiptRef,
       status: failed ? "failed" : "completed",
-      // Observer envelopes are signed by the managed agent. Fields naming a
-      // verifier are still self-reported until a separate trusted signature is
-      // validated, so this path must never mint VERIFIED.
+      // Agent-signed verifier fields are still self-reported claims.
       proofState: failed ? "FAILED" : "CLAIMED",
       tags: eventTagSet("status", event.kind, null),
     };
@@ -829,10 +849,8 @@ export function groupMissionJournals(
     return {
       id: key,
       journalKey: key,
-      // Journal authority needs a correlation that survives bounded paging,
-      // restarts, and midnight. The source-derived journal key (normally the
-      // observer turnId) is stable even when the turn_started envelope is not
-      // in today's window. Per-event tool/message correlations remain intact.
+      // The source-derived journal key survives paging, restarts, and midnight;
+      // per-event tool/message correlations remain intact.
       correlationId: key,
       channelId: bucket[0]?.channelId ?? null,
       sessionId: bucket.find((event) => event.sessionId)?.sessionId ?? null,

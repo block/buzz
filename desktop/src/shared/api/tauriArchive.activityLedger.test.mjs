@@ -189,6 +189,40 @@ test("observer range iterator counts malformed archived JSON rows", async (t) =>
   assert.equal(pages[0].rejectedArchiveRows, 1);
 });
 
+test("observer range iterator counts schema-invalid archived JSON rows", async (t) => {
+  const previousWindow = globalThis.window;
+  t.after(() => {
+    globalThis.window = previousWindow;
+  });
+  globalThis.window ??= {};
+  window.__TAURI_INTERNALS__ = {
+    invoke() {
+      return Promise.resolve({
+        events: ["{}"],
+        backfillComplete: true,
+        unindexedObserverFrames: 0,
+        archiveRevision: 10,
+        restartRequired: false,
+        totalObserverFrames: 1,
+        hasMore: false,
+        nextBeforeCreatedAt: 2,
+        nextBeforeId: "e".repeat(64),
+      });
+    },
+  };
+
+  const pages = [];
+  for await (const page of iterateArchivedObserverEventPagesForRange({
+    startCreatedAt: 1,
+    endCreatedAt: 3,
+  })) {
+    pages.push(page);
+  }
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].events.length, 0);
+  assert.equal(pages[0].rejectedArchiveRows, 1);
+});
+
 test("observer range iterator falls back to a bounded newest page under sustained ingest", async (t) => {
   const previousWindow = globalThis.window;
   t.after(() => {

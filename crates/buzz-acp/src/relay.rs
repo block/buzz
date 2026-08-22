@@ -105,13 +105,7 @@ const REQ_PACING_INTERVAL: Duration = Duration::from_millis(125);
 /// below the relay's 50-frames/5s budget, and ensures the select! loop is never
 /// blocked for more than one REQ's worth of I/O between drain ticks.
 const DRAIN_BUDGET_PER_ITER: usize = 1;
-/// Maximum observer telemetry frames parked while the rate-limit gate is armed
-/// (or the socket is down). The upstream publisher ships at most ONE batched
-/// frame per second GLOBALLY (one publish slot per tick, regardless of how
-/// many channels are active), so this covers ~4 minutes of gating; beyond that
-/// the oldest frames are dropped with visible accounting
-/// (`gated_observer_dropped`). Note each dropped frame may carry a whole batch
-/// of events, so event-level loss is larger than the frame count.
+/// About four minutes of one-frame-per-second observer backlog.
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 
 use std::time::Instant;
@@ -1064,19 +1058,14 @@ struct BgState {
     /// subscription. The main-loop drain re-sends the REQ once the gate clears,
     /// even when `rate_limited_pending` is empty.
     observer_resub_needed: bool,
-    /// Observer telemetry frames (kind 24200) parked while the rate-limit gate
-    /// is armed. Unlike typing indicators, these frames are durable telemetry:
-    /// dropping them silently loses turn history in the Desktop observer.
-    /// Bounded at `GATED_OBSERVER_QUEUE_CAP` (drop-oldest); drained by the
-    /// main loop one frame per pacing tick once the gate clears.
+    /// Observer telemetry parked during rate limiting or disconnects.
     gated_observer_pending: VecDeque<Box<Event>>,
-    /// Observer frames written to the socket but not yet acknowledged. The
-    /// relay's rate-limit NOTICE does not carry an event ID, so all unresolved
-    /// observer writes are moved back ahead of the parked FIFO when one arrives.
+    /// Written observer frames awaiting relay OK acknowledgment.
     observer_in_flight: VecDeque<Box<Event>>,
-    /// Frames evicted from the bounded pending/in-flight observer buffers since
-    /// summary log. Makes overflow loss visible instead of silent.
+    /// Evicted represented events waiting for a signed gap frame.
     gated_observer_dropped: u64,
+    gated_observer_gap_template: Option<Box<Event>>,
+    observer_keys: Option<Keys>,
     /// Channels whose REQ failed during `resubscribe_after_reconnect`.
     ///
     /// A single failed channel REQ is parked here instead of aborting the whole
@@ -1112,6 +1101,8 @@ impl BgState {
             gated_observer_pending: VecDeque::new(),
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
+            gated_observer_gap_template: None,
+            observer_keys: None,
             resubscribe_retry: HashSet::new(),
             backoff_step: 0,
         }
@@ -1211,14 +1202,12 @@ impl BgState {
         None
     }
 
-    /// Park an observer telemetry frame while the rate-limit gate is armed.
-    ///
-    /// Bounded drop-oldest queue: overflow evicts the oldest frame and counts
-    /// it in `gated_observer_dropped` so the loss is visible, never silent.
+    /// Park telemetry, retaining bounded newest history plus signed gap state.
     fn park_gated_observer_frame(&mut self, event: Box<Event>) {
         if self.gated_observer_pending.len() >= GATED_OBSERVER_QUEUE_CAP {
-            self.gated_observer_pending.pop_front();
-            self.gated_observer_dropped += 1;
+            if let Some(dropped) = self.gated_observer_pending.pop_front() {
+                self.record_gated_observer_drop(dropped);
+            }
             warn!(
                 dropped_total = self.gated_observer_dropped,
                 "gated observer queue full — dropped oldest frame"
@@ -1227,29 +1216,38 @@ impl BgState {
         self.gated_observer_pending.push_back(event);
     }
 
-    /// Restore unresolved observer writes ahead of frames parked after the
-    /// gate armed. NOTICE has no event ID, so conservatively retry every frame
-    /// without an OK; duplicate IDs are harmless at the relay.
+    /// Retry every unacknowledged frame after a rate-limit notice.
     fn requeue_observer_in_flight(&mut self) {
         while let Some(event) = self.observer_in_flight.pop_back() {
             self.gated_observer_pending.push_front(event);
         }
         while self.gated_observer_pending.len() > GATED_OBSERVER_QUEUE_CAP {
-            self.gated_observer_pending.pop_front();
-            self.gated_observer_dropped += 1;
+            if let Some(dropped) = self.gated_observer_pending.pop_front() {
+                self.record_gated_observer_drop(dropped);
+            }
         }
     }
 
     fn track_observer_in_flight(&mut self, event: Box<Event>) {
         if self.observer_in_flight.len() >= GATED_OBSERVER_QUEUE_CAP {
-            self.observer_in_flight.pop_front();
-            self.gated_observer_dropped += 1;
+            if let Some(dropped) = self.observer_in_flight.pop_front() {
+                self.record_gated_observer_drop(dropped);
+            }
             warn!(
                 dropped_total = self.gated_observer_dropped,
                 "observer acknowledgment window full — dropped oldest frame"
             );
         }
         self.observer_in_flight.push_back(event);
+    }
+
+    fn record_gated_observer_drop(&mut self, event: Box<Event>) {
+        let represented =
+            crate::observer_gap::represented_event_count(self.observer_keys.as_ref(), &event);
+        self.gated_observer_dropped = self.gated_observer_dropped.saturating_add(represented);
+        if self.gated_observer_gap_template.is_none() {
+            self.gated_observer_gap_template = Some(event);
+        }
     }
 
     fn acknowledge_observer_frame(&mut self, event_id: &str) {
@@ -1574,6 +1572,7 @@ async fn run_background_task(
     auth_tag: Option<nostr::Tag>,
 ) {
     let mut state = BgState::new();
+    state.observer_keys = Some(keys.clone());
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -1793,8 +1792,10 @@ async fn run_background_task(
                 }
             }
 
-            if budget > 0 && !state.gated_observer_pending.is_empty() {
-                let sent = drain_gated_observer_pending(&mut ws, &mut state, budget).await;
+            if budget > 0
+                && (!state.gated_observer_pending.is_empty() || state.gated_observer_dropped > 0)
+            {
+                let sent = drain_gated_observer_pending(&mut ws, &mut state, &keys, budget).await;
                 if sent > 0 {
                     any_sent = true;
                 }
@@ -2651,15 +2652,11 @@ async fn send_publish_event_frame(ws: &mut WsStream, event: &Event) -> bool {
     true
 }
 
-/// Drain parked observer telemetry frames once the rate-limit gate clears.
-///
-/// Called by the main loop pacing timer. Sends at most `budget` frames without
-/// sleeping — pacing is enforced by the caller via `drain_pacing_next`. Stops
-/// immediately if the gate re-arms mid-drain. When the queue empties, any
-/// overflow loss is summarized in one warning. Returns the number of frames sent.
+/// Drain parked telemetry and then its signed loss marker within `budget`.
 async fn drain_gated_observer_pending(
     ws: &mut WsStream,
     state: &mut BgState,
+    keys: &Keys,
     budget: usize,
 ) -> usize {
     let mut sent = 0;
@@ -2679,12 +2676,25 @@ async fn drain_gated_observer_pending(
         state.track_observer_in_flight(event);
         sent += 1;
     }
-    if state.gated_observer_pending.is_empty() && state.gated_observer_dropped > 0 {
-        warn!(
-            observer_frames_dropped = state.gated_observer_dropped,
-            "observer frames lost to gated-queue overflow"
-        );
-        state.gated_observer_dropped = 0;
+    if sent < budget && state.gated_observer_pending.is_empty() && state.gated_observer_dropped > 0
+    {
+        let result = state
+            .gated_observer_gap_template
+            .as_deref()
+            .ok_or_else(|| "observer gap template missing".to_string())
+            .and_then(|template| {
+                crate::observer_gap::signed_relay_gap(keys, template, state.gated_observer_dropped)
+            });
+        match result {
+            Ok(gap) if send_publish_event_frame(ws, &gap).await => {
+                state.gated_observer_dropped = 0;
+                state.gated_observer_gap_template = None;
+                state.track_observer_in_flight(Box::new(gap));
+                sent += 1;
+            }
+            Ok(_) => {}
+            Err(error) => warn!("failed to build signed observer gap frame: {error}"),
+        }
     }
     sent
 }
@@ -5855,7 +5865,6 @@ mod tests {
         );
     }
 
-    /// Build a signed observer telemetry frame (kind 24200) for gate tests.
     fn make_observer_frame(keys: &Keys) -> Event {
         let recipient = Keys::generate();
         let encrypted = buzz_core::observer::encrypt_observer_payload(
@@ -5875,9 +5884,6 @@ mod tests {
         .expect("sign test observer frame")
     }
 
-    /// While the rate-limit gate is armed, an observer frame (kind 24200) is
-    /// parked — not silently dropped — and delivered by the drain once the
-    /// gate clears. A typing indicator in the same window stays dropped.
     #[tokio::test]
     async fn gated_observer_frame_is_parked_then_drained_not_dropped() {
         let (mut client, mut server) = test_ws_pair().await;
@@ -5885,7 +5891,6 @@ mod tests {
         let keys = Keys::generate();
         state.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_millis(150));
 
-        // Observer frame while gated: parked, nothing on the wire.
         let observer_frame = make_observer_frame(&keys);
         let ok = execute_connected_command(
             &mut client,
@@ -5903,7 +5908,6 @@ mod tests {
             "observer frame must be parked while gated"
         );
 
-        // Typing indicator while gated: still dropped, not parked.
         let typing = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
             .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
             .sign_with_keys(&keys)
@@ -5930,10 +5934,9 @@ mod tests {
             "nothing may reach the wire while the gate is armed"
         );
 
-        // Gate expires — the drain delivers the parked frame.
         tokio::time::sleep(Duration::from_millis(160)).await;
         assert_eq!(
-            drain_gated_observer_pending(&mut client, &mut state, 1).await,
+            drain_gated_observer_pending(&mut client, &mut state, &keys, 1).await,
             1
         );
         assert!(state.gated_observer_pending.is_empty());
@@ -5947,9 +5950,6 @@ mod tests {
         );
     }
 
-    /// Observer frames arriving while earlier parked frames are still queued
-    /// are appended behind them (order preserved), even if the gate has
-    /// already expired.
     #[tokio::test]
     async fn observer_frames_queue_behind_parked_backlog_in_order() {
         let (mut client, mut server) = test_ws_pair().await;
@@ -5973,8 +5973,6 @@ mod tests {
         }
         assert_eq!(state.gated_observer_pending.len(), 2);
 
-        // Gate expires but the backlog is not drained yet — a third frame must
-        // queue behind it rather than jumping ahead on the wire.
         tokio::time::sleep(Duration::from_millis(60)).await;
         let third = make_observer_frame(&keys);
         let ok = execute_connected_command(
@@ -5995,7 +5993,7 @@ mod tests {
 
         for expected in [&first, &second, &third] {
             assert_eq!(
-                drain_gated_observer_pending(&mut client, &mut state, 1).await,
+                drain_gated_observer_pending(&mut client, &mut state, &keys, 1).await,
                 1
             );
             let frame = next_test_frame(&mut server).await;
@@ -6027,8 +6025,6 @@ mod tests {
         assert!(state.observer_in_flight.is_empty());
     }
 
-    /// The parked-frame queue is bounded: overflow evicts the oldest frame and
-    /// counts it; the drain resets the counter after logging the summary.
     #[tokio::test]
     async fn gated_observer_queue_drops_oldest_on_overflow() {
         let mut state = BgState::new();
@@ -6061,6 +6057,15 @@ mod tests {
             Some(overflow.id),
             "newest frame must be retained"
         );
+        state.gated_observer_pending.clear();
+        let (mut client, mut server) = test_ws_pair().await;
+        assert_eq!(
+            drain_gated_observer_pending(&mut client, &mut state, &keys, 1).await,
+            1
+        );
+        let wire = next_test_frame(&mut server).await;
+        assert_eq!(wire[1]["kind"], u64::from(KIND_AGENT_OBSERVER_FRAME));
+        assert_eq!(state.gated_observer_dropped, 0);
     }
 
     /// is_dns_error correctly classifies platform resolver strings, including
@@ -6069,22 +6074,16 @@ mod tests {
     fn is_dns_error_classification() {
         use tokio_tungstenite::tungstenite;
 
-        // macOS resolver (Http-wrapped, used in many existing tests)
         assert!(is_dns_error(&RelayError::Http(
             "nodename nor servname provided, or not known".into()
         )));
-        // Linux resolver
         assert!(is_dns_error(&RelayError::Http(
             "Name or service not known".into()
         )));
-        // BSD/Windows
         assert!(is_dns_error(&RelayError::Http("No such host".into())));
-        // Another common variant
         assert!(is_dns_error(&RelayError::Http(
             "failed to lookup address information".into()
         )));
-        // F15: production-shaped error — RelayError::WebSocket wrapping a
-        // tungstenite I/O error (the shape emitted by connect_async on macOS).
         let ws_io_err = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
             std::io::Error::other("nodename nor servname provided, or not known"),
         )));
@@ -6092,7 +6091,6 @@ mod tests {
             is_dns_error(&ws_io_err),
             "WebSocket-wrapped I/O DNS error must be classified as DNS"
         );
-        // Normal connection errors are NOT DNS errors.
         assert!(!is_dns_error(&RelayError::Timeout));
         assert!(!is_dns_error(&RelayError::ConnectionClosed));
         assert!(!is_dns_error(&RelayError::Http(

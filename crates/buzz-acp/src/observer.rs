@@ -40,6 +40,7 @@ struct ObserverInner {
     tx: broadcast::Sender<ObserverEvent>,
     buffer: Mutex<VecDeque<ObserverEvent>>,
     seq: AtomicU64,
+    replay_dropped: AtomicU64,
 }
 
 fn new_observer_handle() -> ObserverHandle {
@@ -49,6 +50,7 @@ fn new_observer_handle() -> ObserverHandle {
             tx,
             buffer: Mutex::new(VecDeque::with_capacity(OBSERVER_BUFFER_CAP)),
             seq: AtomicU64::new(1),
+            replay_dropped: AtomicU64::new(0),
         }),
     }
 }
@@ -85,11 +87,13 @@ impl ObserverHandle {
     }
 
     /// Subscribe to live observer events.
+    #[cfg(test)]
     pub fn subscribe(&self) -> broadcast::Receiver<ObserverEvent> {
         self.inner.tx.subscribe()
     }
 
     /// Return the current replay buffer.
+    #[cfg(test)]
     pub fn snapshot(&self) -> Vec<ObserverEvent> {
         match self.inner.buffer.lock() {
             Ok(buffer) => buffer.iter().cloned().collect(),
@@ -98,6 +102,23 @@ impl ObserverHandle {
                 Vec::new()
             }
         }
+    }
+
+    /// Atomically subscribe, snapshot, and take replay-buffer overflow count.
+    pub(crate) fn subscribe_with_snapshot(
+        &self,
+    ) -> (Vec<ObserverEvent>, broadcast::Receiver<ObserverEvent>, u64) {
+        let buffer = match self.inner.buffer.lock() {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                error.into_inner()
+            }
+        };
+        let receiver = self.inner.tx.subscribe();
+        let snapshot = buffer.iter().cloned().collect();
+        let dropped = self.inner.replay_dropped.swap(0, Ordering::AcqRel);
+        (snapshot, receiver, dropped)
     }
 
     /// Emit a local observer event.
@@ -124,6 +145,7 @@ impl ObserverHandle {
             Ok(mut buffer) => {
                 if buffer.len() >= OBSERVER_BUFFER_CAP {
                     buffer.pop_front();
+                    self.inner.replay_dropped.fetch_add(1, Ordering::Relaxed);
                 }
                 buffer.push_back(event.clone());
             }
@@ -162,5 +184,29 @@ pub fn context_for_turn(
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscribe_snapshot_reports_replay_overflow_in_source_units() {
+        let observer = ObserverHandle::in_process();
+        for seq in 0..OBSERVER_BUFFER_CAP + 3 {
+            observer.emit(
+                "test",
+                None,
+                &ObserverContext::default(),
+                serde_json::json!({ "seq": seq }),
+            );
+        }
+
+        let (snapshot, _receiver, dropped) = observer.subscribe_with_snapshot();
+        assert_eq!(snapshot.len(), OBSERVER_BUFFER_CAP);
+        assert_eq!(dropped, 3);
+        let (_, _, dropped_again) = observer.subscribe_with_snapshot();
+        assert_eq!(dropped_again, 0, "reported gaps are not double counted");
     }
 }

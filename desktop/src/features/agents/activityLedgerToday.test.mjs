@@ -130,6 +130,35 @@ test("Today reconstruction discloses malformed rows and sustained-ingest fallbac
   assert.equal(surface.snapshotProjection.bounded, true);
 });
 
+test("Today reconstruction is bounded by signed pre-archive source loss", async () => {
+  const gap = relayEvent({
+    id: "telemetry-gap",
+    decoded: {
+      seq: 10,
+      timestamp: "2026-08-21T14:00:00.000Z",
+      kind: "observer_telemetry_gap",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: null,
+      turnId: null,
+      payload: {
+        droppedEvents: 4,
+        reasonCounts: { publishQueueEviction: 4 },
+      },
+    },
+  });
+  const surface = await buildTodayActivityFromArchivedEvents({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [gap],
+    decrypt: async (event) => event.decoded,
+  });
+
+  assert.equal(surface.counts.journals, 0);
+  assert.equal(surface.snapshotProjection.sourceDroppedObserverEvents, 4);
+  assert.equal(surface.snapshotProjection.bounded, true);
+});
+
 test("Today reconstruction reports malformed or empty observer batches", async () => {
   const event = relayEvent({
     id: "empty-batch",

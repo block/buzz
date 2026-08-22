@@ -40,12 +40,14 @@ export type TodaySnapshotProjection = {
   omittedJournals: number;
   omittedEvents: number;
   excludedObserverFrames: number;
+  sourceDroppedObserverEvents: number;
   unindexedObserverFrames: number;
   malformedArchivedRows: number;
   omittedObserverFrames: number;
   archiveRevision: number;
   archiveRevisionAtPublish: number;
   archiveRevisionDrift: number;
+  truthInvalidatedByArchiveDrift: boolean;
   textFieldsTruncated: number;
 };
 
@@ -183,6 +185,7 @@ function snapshotSurfaceFromJournals(input: {
   originalJournalCount: number;
   originalEventCount: number;
   excludedObserverFrames: number;
+  sourceDroppedObserverEvents: number;
   unindexedObserverFrames: number;
   malformedArchivedRows: number;
   omittedObserverFrames: number;
@@ -254,6 +257,7 @@ function snapshotSurfaceFromJournals(input: {
         omittedJournals > 0 ||
         omittedEvents > 0 ||
         input.excludedObserverFrames > 0 ||
+        input.sourceDroppedObserverEvents > 0 ||
         input.textFieldsTruncated > 0,
       maxBytes: input.maxBytes,
       originalJournals: input.originalJournalCount,
@@ -261,12 +265,14 @@ function snapshotSurfaceFromJournals(input: {
       omittedJournals,
       omittedEvents,
       excludedObserverFrames: input.excludedObserverFrames,
+      sourceDroppedObserverEvents: input.sourceDroppedObserverEvents,
       unindexedObserverFrames: input.unindexedObserverFrames,
       malformedArchivedRows: input.malformedArchivedRows,
       omittedObserverFrames: input.omittedObserverFrames,
       archiveRevision: input.archiveRevision,
       archiveRevisionAtPublish: input.archiveRevision,
       archiveRevisionDrift: 0,
+      truthInvalidatedByArchiveDrift: false,
       textFieldsTruncated: input.textFieldsTruncated,
     },
   };
@@ -324,6 +330,8 @@ export function buildBoundedTodayActivitySurface(
       originalJournalCount,
       originalEventCount,
       excludedObserverFrames: previousProjection?.excludedObserverFrames ?? 0,
+      sourceDroppedObserverEvents:
+        previousProjection?.sourceDroppedObserverEvents ?? 0,
       unindexedObserverFrames: previousProjection?.unindexedObserverFrames ?? 0,
       malformedArchivedRows: previousProjection?.malformedArchivedRows ?? 0,
       omittedObserverFrames: previousProjection?.omittedObserverFrames ?? 0,
@@ -396,6 +404,7 @@ function buildArchiveReconstructionCheckpoint(input: {
   originalJournalCount: number;
   originalEventCount: number;
   excludedObserverFrames: number;
+  sourceDroppedObserverEvents: number;
   unindexedObserverFrames: number;
   malformedArchivedRows: number;
   omittedObserverFrames: number;
@@ -424,6 +433,7 @@ function buildArchiveReconstructionCheckpoint(input: {
       originalJournalCount: input.originalJournalCount,
       originalEventCount: input.originalEventCount,
       excludedObserverFrames: input.excludedObserverFrames,
+      sourceDroppedObserverEvents: input.sourceDroppedObserverEvents,
       unindexedObserverFrames: input.unindexedObserverFrames,
       malformedArchivedRows: input.malformedArchivedRows,
       omittedObserverFrames: input.omittedObserverFrames,
@@ -536,6 +546,18 @@ function unwrapObserverEvents(value: unknown): {
   };
 }
 
+function observerTelemetryGapCount(event: ObserverEvent): number | null {
+  if (event.kind !== "observer_telemetry_gap") return null;
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return 1;
+  }
+  const count = (payload as { droppedEvents?: unknown }).droppedEvents;
+  return typeof count === "number" && Number.isSafeInteger(count) && count > 0
+    ? count
+    : 1;
+}
+
 /** Return the local-time half-open Unix range used by the owner Today view. */
 export function activityLedgerDayRange(day: string): {
   startCreatedAt: number;
@@ -592,6 +614,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   const journalEventCounts = new Map<string, number>();
   let originalEventCount = 0;
   let excludedObserverFrames = 0;
+  let sourceDroppedObserverEvents = 0;
   let unindexedObserverFrames = 0;
   let malformedArchivedRows = 0;
   let omittedObserverFrames = 0;
@@ -607,6 +630,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
         journalEventCounts.clear();
         originalEventCount = 0;
         excludedObserverFrames = 0;
+        sourceDroppedObserverEvents = 0;
         unindexedObserverFrames = 0;
         malformedArchivedRows = 0;
         omittedObserverFrames = 0;
@@ -682,6 +706,14 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       if (!agentPubkey) continue;
       const bucket = pageObserverEvents.get(agentPubkey) ?? [];
       for (const decodedEvent of decodedEvents) {
+        const gapCount = observerTelemetryGapCount(decodedEvent);
+        if (gapCount !== null) {
+          sourceDroppedObserverEvents = Math.min(
+            Number.MAX_SAFE_INTEGER,
+            sourceDroppedObserverEvents + gapCount,
+          );
+          continue;
+        }
         bucket.push({
           ...decodedEvent,
           sourceEventId: relayEvent.id,
@@ -723,6 +755,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalJournalCount: journalEventCounts.size,
       originalEventCount,
       excludedObserverFrames,
+      sourceDroppedObserverEvents,
       unindexedObserverFrames,
       malformedArchivedRows,
       omittedObserverFrames,
@@ -751,6 +784,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalJournalCount: 0,
       originalEventCount: 0,
       excludedObserverFrames,
+      sourceDroppedObserverEvents,
       unindexedObserverFrames,
       malformedArchivedRows,
       omittedObserverFrames,

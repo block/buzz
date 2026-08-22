@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+mod observer_gap;
 mod pool;
 mod pool_lifecycle;
 mod queue;
@@ -36,6 +37,7 @@ use config::{
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
+use observer_gap::{ObserverGapCounts, ObserverGapReason, PendingObserverFrame};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -385,64 +387,32 @@ const OBSERVER_PUBLISH_TICK: Duration = Duration::from_secs(1);
 /// one ~64KB frame, gathered queue-wide for the front channel, so a single
 /// channel drains at ~64KB/s and 4 MiB buys roughly **64 seconds** of
 /// sustained over-production before the oldest items are dropped WITH
-/// accounting (a warn carrying the dropped-event count). With C channels
-/// producing concurrently the slots round-robin between them, so the
-/// per-channel drain is ~64KB/Cs and the budget shortens accordingly —
-/// still bytes-per-slot, never events-per-slot (see
-/// [`ObserverPublishQueue::next_frame`]). Beyond-budget floods therefore
-/// degrade to designed, visible loss — strictly better than the
-/// pre-batching pacer's silent 90/min drop.
+/// accounting in source-event units. The signed gap frame makes any loss
+/// visible to the Activity Ledger instead of permitting false completeness.
 const OBSERVER_PENDING_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Observer event kind for a batch envelope wrapping multiple events.
-///
-/// The payload is `{"events": [<ObserverEvent>, ...]}` with every inner event
-/// carrying its own `seq`/`timestamp`, so consumers process inner events
-/// exactly as they would unbatched ones. Single pending events are published
-/// unwrapped, so the envelope only appears when there is something to batch.
+/// Single pending events stay unwrapped for older consumers.
 const OBSERVER_BATCH_KIND: &str = "batch";
 
-/// Collects observer events awaiting a publish slot.
-///
-/// Chunk-type events ride the [`ObserverChunkCoalescer`]; everything else is
-/// appended in arrival order, force-flushing pending chunks first — the same
-/// ordering rule the pre-batching publisher enforced, so merged chunk text can
-/// never leapfrog a tool call that arrived mid-stream.
-///
-/// Events wait here as EVENTS, not pre-sealed frames: each publish slot packs
-/// one frame at publish time ([`Self::next_frame`]), so a backlog keeps
-/// compacting into full frames instead of freezing into a frame queue.
-///
-/// The queue is bounded by [`OBSERVER_PENDING_QUEUE_MAX_BYTES`]. When a
-/// sustained flood outruns the one-frame-per-tick drain for longer than the
-/// budget, the OLDEST events are dropped (the viewer wants recent state) with
-/// accounting: a warning carrying the dropped-event count, and
-/// `dropped_events` for tests.
+/// Bounded event queue feeding the one-frame-per-tick relay publisher.
+/// Chunks coalesce in order; overflow drops oldest work and records a gap.
 #[derive(Default)]
 struct ObserverPublishQueue {
     coalescer: ObserverChunkCoalescer,
-    /// `(serialized_len, source_events, event)`, oldest first. Length is
-    /// captured at enqueue (post-fit) so byte accounting never re-serializes
-    /// on eviction; `source_events` is how many GENERATED observer events the
-    /// entry represents (a merged chunk carries every chunk it absorbed), so
-    /// eviction accounting stays in source units after flush.
+    /// `(serialized_len, represented_source_events, event)`, oldest first.
     events: VecDeque<(usize, u64, observer::ObserverEvent)>,
     pending_bytes: usize,
-    /// SOURCE observer events lost to byte-budget eviction. Counted in
-    /// generated-event units, not retained entries: a coalesced entry that
-    /// merged N chunks accounts for N when evicted. A PUBLISHED merged entry
-    /// delivers all N sources' text in one event, so the invariant is
-    /// `ingested == dropped_events + Σ source_events over published events`.
+    /// Test counter in represented source-event units.
     dropped_events: u64,
+    /// Loss already observed before durable relay ingestion. It is removed
+    /// only while carried by an attempted signed frame and restored on error.
+    pending_gaps: ObserverGapCounts,
 }
 
 impl ObserverPublishQueue {
     fn ingest(&mut self, event: observer::ObserverEvent) {
-        // ObserverChunkCoalescer::ingest returns immediately-publishable events
-        // (force-flushed pending chunks + non-chunk passthrough, or a pending
-        // set displaced by the 60KB pre-flush); they join the queue in the
-        // order the coalescer emitted them, each carrying the count of source
-        // events it represents.
+        // Each ready item carries the number of source chunks it represents.
         for (source_events, ready) in self.coalescer.ingest(event) {
             self.enqueue(source_events, ready);
         }
@@ -450,30 +420,19 @@ impl ObserverPublishQueue {
     }
 
     fn enqueue(&mut self, source_events: u64, mut event: observer::ObserverEvent) {
-        // Pre-trim at enqueue so (a) byte accounting reflects what will ship
-        // and (b) one oversized leaf cannot force every frame it touches into
-        // whole-envelope elision downstream.
+        // Pre-trim so accounting matches the bytes that can actually ship.
         fit_observer_event_to_budget(&mut event);
         let bytes = serialized_len(&event);
         self.pending_bytes += bytes;
         self.events.push_back((bytes, source_events, event));
     }
 
-    /// Total bytes retained across BOTH stores — the event FIFO and the
-    /// coalescer's pending chunk buffer. The budget binds this sum; counting
-    /// only the FIFO would let a high-cardinality chunk flood (many distinct
-    /// coalescer keys, nothing ever flushing) grow unbounded outside the cap.
+    /// Bytes retained across the FIFO and pending chunk coalescer.
     fn total_pending_bytes(&self) -> usize {
         self.pending_bytes + self.coalescer.pending_bytes
     }
 
-    /// Enforce [`OBSERVER_PENDING_QUEUE_MAX_BYTES`] over the total, dropping
-    /// OLDEST items first with accounting in SOURCE-event units. Global age
-    /// order across the two stores is structural: every enqueue path flushes
-    /// the coalescer first, so every pending coalescer entry is strictly newer
-    /// than every queued event — eviction is queue front, then coalescer
-    /// front. The `> 1` guard never drops the sole remaining item (any single
-    /// fitted event or pre-flush-capped chunk entry is far under the budget).
+    /// Drop oldest items across both stores, preserving one fitted item.
     fn enforce_byte_budget(&mut self) {
         let mut dropped = 0u64;
         while self.total_pending_bytes() > OBSERVER_PENDING_QUEUE_MAX_BYTES
@@ -488,6 +447,7 @@ impl ObserverPublishQueue {
         }
         if dropped > 0 {
             self.dropped_events += dropped;
+            self.note_gap(ObserverGapReason::PublishQueueEviction, dropped);
             tracing::warn!(
                 dropped,
                 total_dropped = self.dropped_events,
@@ -497,46 +457,36 @@ impl ObserverPublishQueue {
         }
     }
 
-    /// True when nothing is waiting anywhere — the event queue AND the
-    /// coalescer's pending chunk buffer.
     fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.coalescer.pending.is_empty()
+        self.events.is_empty() && self.coalescer.pending.is_empty() && self.pending_gaps.is_empty()
     }
 
-    /// Pack and remove AT MOST ONE publishable frame: the front event's
-    /// channel, gathered queue-wide in FIFO order (packed greedily until
-    /// adding the next event would push the envelope over
-    /// `OBSERVER_MAX_PLAINTEXT_LEN`). Singletons ship unwrapped.
-    ///
-    /// Two invariants bound the gather:
-    /// - A frame never mixes channels (the desktop archive indexes a frame
-    ///   under its decrypted top-level `channelId`), and events keep their
-    ///   FIFO order *within* each channel. Cross-channel frame order MAY
-    ///   differ from arrival order — the desktop tolerates that everywhere:
-    ///   the transcript store sorts + rebuilds on out-of-order arrival, the
-    ///   archive is per-channel by construction, and the turn store's
-    ///   watermark is keyed per (agent, channel).
-    /// - A NULL-channel event is a BARRIER nothing gathers across: null-scope
-    ///   events (`agent_panic`-class) can causally couple to any channel, so
-    ///   their relative order against every channel is preserved exactly.
-    ///   Null-channel events themselves ship only as their contiguous front
-    ///   run.
-    ///
-    /// Gathering queue-wide (not just the front run) is what keeps the drain
-    /// rate in BYTES per slot rather than front-run-length events per slot:
-    /// with round-robin producers (channel A, B, A, B, ...) a front-run
-    /// packer degrades to ~1 event per slot regardless of size, silently
-    /// growing latency without ever tripping the byte budget.
-    ///
-    /// Pending coalesced chunks are flushed into the queue first, so a
-    /// publish slot never leaves merged chunk text stranded behind the tick.
-    fn next_frame(&mut self) -> Option<observer::ObserverEvent> {
+    fn note_gap(&mut self, reason: ObserverGapReason, count: u64) {
+        self.pending_gaps.record(reason, count);
+    }
+
+    fn restore_gaps(&mut self, gaps: ObserverGapCounts) {
+        self.pending_gaps.merge(gaps);
+    }
+
+    /// Pack one same-channel frame. Null-channel events remain ordering
+    /// barriers; a pending gap rides first and is restored if publishing fails.
+    fn next_frame(&mut self) -> Option<PendingObserverFrame> {
         for (source_events, ready) in self.coalescer.flush() {
             self.enqueue(source_events, ready);
         }
-        let channel = self.events.front()?.2.channel_id.clone();
+        if self.events.is_empty() && self.pending_gaps.is_empty() {
+            return None;
+        }
+        let template = self.events.front().map(|(_, _, event)| event.clone());
+        let channel = template.as_ref().and_then(|event| event.channel_id.clone());
+        let reported_gaps = std::mem::take(&mut self.pending_gaps);
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
+        if !reported_gaps.is_empty() {
+            picked.push(reported_gaps.clone().into_event(template.as_ref()));
+        }
+        let mut picked_source_events = 0u64;
         let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
@@ -553,6 +503,7 @@ impl ObserverPublishQueue {
                     gathering = false;
                 } else {
                     self.pending_bytes -= bytes;
+                    picked_source_events = picked_source_events.saturating_add(source_events);
                 }
             } else {
                 if gathering && (channel.is_none() || event.channel_id.is_none()) {
@@ -564,7 +515,11 @@ impl ObserverPublishQueue {
             }
         }
         self.events = kept;
-        Some(seal_batch(picked))
+        Some(PendingObserverFrame {
+            event: seal_batch(picked),
+            source_events: picked_source_events,
+            reported_gaps,
+        })
     }
 }
 
@@ -609,15 +564,9 @@ fn spawn_relay_observer_publisher(
     owner_pubkey: PublicKey,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Subscribe BEFORE snapshotting so an event emitted between the two
-        // calls is never lost: it lands in the snapshot, the live receiver, or
-        // both. The overlap is deduped in the run loop via the snapshot's
-        // high-water `seq` (monotonic, assigned at emit).
-        let rx = observer.subscribe();
-        let snapshot = observer.snapshot();
+        let subscription = observer.subscribe_with_snapshot();
         run_relay_observer_publisher(
-            snapshot,
-            rx,
+            subscription,
             publisher,
             keys,
             agent_pubkey_hex,
@@ -629,15 +578,20 @@ fn spawn_relay_observer_publisher(
 }
 
 async fn run_relay_observer_publisher(
-    snapshot: Vec<observer::ObserverEvent>,
-    mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
+    subscription: (
+        Vec<observer::ObserverEvent>,
+        tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
+        u64,
+    ),
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
     agent_pubkey_hex: String,
     owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
 ) {
+    let (snapshot, mut rx, replay_dropped) = subscription;
     let mut queue = ObserverPublishQueue::default();
+    queue.note_gap(ObserverGapReason::ReplayBufferOverflow, replay_dropped);
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
         queue.ingest(event);
@@ -667,6 +621,7 @@ async fn run_relay_observer_publisher(
                         queue.ingest(event);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        queue.note_gap(ObserverGapReason::BroadcastLag, count);
                         tracing::warn!(dropped = count, "relay observer publisher lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -680,10 +635,14 @@ async fn run_relay_observer_publisher(
             }
             _ = publish_tick.tick() => {
                 if let Some(frame) = queue.next_frame() {
-                    publish_relay_observer_event(
+                    let result = publish_relay_observer_event(
                         &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, frame,
+                        &owner_pubkey_hex, &owner_pubkey, frame.event,
                     ).await;
+                    if result.is_err() {
+                        queue.restore_gaps(frame.reported_gaps);
+                        queue.note_gap(ObserverGapReason::PublishFailure, frame.source_events);
+                    }
                 }
                 if closed && queue.is_empty() {
                     break;
@@ -1027,7 +986,7 @@ async fn publish_relay_observer_event(
     owner_pubkey_hex: &str,
     owner_pubkey: &PublicKey,
     mut event: observer::ObserverEvent,
-) {
+) -> Result<(), String> {
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
@@ -1035,7 +994,7 @@ async fn publish_relay_observer_event(
         Ok(encrypted) => encrypted,
         Err(error) => {
             tracing::warn!("failed to encrypt relay observer event: {error}");
-            return;
+            return Err(format!("encrypt observer event: {error}"));
         }
     };
     let builder = match buzz_sdk::build_agent_observer_frame(
@@ -1047,19 +1006,21 @@ async fn publish_relay_observer_event(
         Ok(builder) => builder,
         Err(error) => {
             tracing::warn!("failed to build relay observer event: {error}");
-            return;
+            return Err(format!("build observer event: {error}"));
         }
     };
     let signed = match builder.sign_with_keys(keys) {
         Ok(event) => event,
         Err(error) => {
             tracing::warn!("failed to sign relay observer event: {error}");
-            return;
+            return Err(format!("sign observer event: {error}"));
         }
     };
     if let Err(error) = publisher.publish_event(signed).await {
         tracing::warn!("relay observer event dropped: {error}");
+        return Err(format!("publish observer event: {error}"));
     }
+    Ok(())
 }
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
@@ -5732,8 +5693,7 @@ mod observer_snapshot_race_tests {
         drop(observer);
 
         run_relay_observer_publisher(
-            snapshot,
-            rx,
+            (snapshot, rx, 0),
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
@@ -5798,7 +5758,7 @@ mod observer_publish_queue_tests {
     fn drain_frames(queue: &mut ObserverPublishQueue) -> Vec<observer::ObserverEvent> {
         let mut frames = Vec::new();
         while !queue.is_empty() {
-            frames.push(queue.next_frame().expect("queue not empty"));
+            frames.push(queue.next_frame().expect("queue not empty").event);
         }
         frames
     }
@@ -5807,8 +5767,31 @@ mod observer_publish_queue_tests {
     /// singleton.
     fn frame_seqs(frame: &observer::ObserverEvent) -> Vec<u64> {
         match frame.payload.get("events").and_then(|v| v.as_array()) {
-            Some(inner) => inner.iter().map(|e| e["seq"].as_u64().unwrap()).collect(),
+            Some(inner) => inner
+                .iter()
+                .filter(|event| event["kind"] != observer_gap::OBSERVER_TELEMETRY_GAP_KIND)
+                .map(|event| event["seq"].as_u64().unwrap())
+                .collect(),
+            None if frame.kind == observer_gap::OBSERVER_TELEMETRY_GAP_KIND => Vec::new(),
             None => vec![frame.seq],
+        }
+    }
+
+    fn gap_total(frame: &observer::ObserverEvent) -> u64 {
+        match frame
+            .payload
+            .get("events")
+            .and_then(|value| value.as_array())
+        {
+            Some(inner) => inner
+                .iter()
+                .find(|event| event["kind"] == observer_gap::OBSERVER_TELEMETRY_GAP_KIND)
+                .and_then(|event| event["payload"]["droppedEvents"].as_u64())
+                .unwrap_or(0),
+            None if frame.kind == observer_gap::OBSERVER_TELEMETRY_GAP_KIND => {
+                frame.payload["droppedEvents"].as_u64().unwrap_or(0)
+            }
+            None => 0,
         }
     }
 
@@ -5898,7 +5881,7 @@ mod observer_publish_queue_tests {
             event(3, "acp_write", Some("chan-a")),
         ]);
 
-        let frame = queue.next_frame().expect("one frame");
+        let frame = queue.next_frame().expect("one frame").event;
         assert!(queue.is_empty(), "one channel, one publish slot");
         assert_eq!(frame.kind, OBSERVER_BATCH_KIND);
         assert_eq!(frame.seq, 3, "envelope mirrors the last inner event");
@@ -5912,7 +5895,7 @@ mod observer_publish_queue_tests {
     #[test]
     fn a_single_event_stays_unwrapped() {
         let mut queue = queue_of(vec![event(7, "turn_started", Some("chan-a"))]);
-        let frame = queue.next_frame().expect("one frame");
+        let frame = queue.next_frame().expect("one frame").event;
         assert!(queue.is_empty());
         assert_eq!(frame.kind, "turn_started");
         assert_eq!(frame.seq, 7);
@@ -6089,7 +6072,7 @@ mod observer_publish_queue_tests {
         queue.ingest(chunk(2, "world"));
         queue.ingest(event(3, "tool_call", Some("chan-a")));
 
-        let frame = queue.next_frame().expect("one frame");
+        let frame = queue.next_frame().expect("one frame").event;
         assert!(queue.is_empty());
         let inner = frame.payload["events"].as_array().expect("batch of 2");
         assert_eq!(inner.len(), 2, "two chunks coalesce into one event");
@@ -6117,7 +6100,7 @@ mod observer_publish_queue_tests {
         queue.ingest(e);
         assert!(!queue.is_empty(), "pending chunk counts as queued work");
 
-        let frame = queue.next_frame().expect("chunk must ship");
+        let frame = queue.next_frame().expect("chunk must ship").event;
         assert!(queue.is_empty());
         assert_eq!(
             frame.payload["params"]["update"]["content"]["text"],
@@ -6151,6 +6134,11 @@ mod observer_publish_queue_tests {
         );
 
         let frames = drain_frames(&mut queue);
+        assert_eq!(
+            gap_total(&frames[0]),
+            queue.dropped_events,
+            "the first signed frame discloses every source event evicted"
+        );
         let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
         let expected: Vec<u64> = (queue.dropped_events + 1..=total as u64).collect();
         assert_eq!(
@@ -6456,8 +6444,7 @@ mod observer_publish_cadence_tests {
         assert_eq!(snapshot.len(), 3, "all three preloaded in the snapshot");
 
         let task = tokio::spawn(run_relay_observer_publisher(
-            snapshot,
-            rx,
+            (snapshot, rx, 0),
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
@@ -6535,8 +6522,7 @@ mod observer_publish_cadence_tests {
         drop(observer);
 
         let task = tokio::spawn(run_relay_observer_publisher(
-            snapshot,
-            rx,
+            (snapshot, rx, 0),
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),
@@ -6601,8 +6587,7 @@ mod observer_publish_cadence_tests {
         let snapshot = observer.snapshot();
 
         let task = tokio::spawn(run_relay_observer_publisher(
-            snapshot,
-            rx,
+            (snapshot, rx, 0),
             publisher,
             agent_keys.clone(),
             agent_keys.public_key().to_hex(),

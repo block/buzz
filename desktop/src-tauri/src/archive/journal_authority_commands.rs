@@ -199,18 +199,26 @@ fn seal_snapshot_archive_fence(
         .and_then(serde_json::Value::as_i64)
         .filter(|value| *value >= declared)
         .ok_or("Today snapshot exclusions must cover unindexed observer frames")?;
-    if excluded > 0
+    let source_dropped = projection
+        .get("sourceDroppedObserverEvents")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or("Today snapshot must disclose source-dropped observer events")?;
+    if (excluded > 0 || source_dropped > 0)
         && projection
             .get("bounded")
             .and_then(serde_json::Value::as_bool)
             != Some(true)
     {
-        return Err("Today snapshot with excluded observer frames must be bounded".into());
+        return Err("Today snapshot with observer evidence gaps must be bounded".into());
     }
     if current_revision < declared_revision {
         return Err("Today snapshot archive revision moved backwards".into());
     }
     let revision_drift = current_revision - declared_revision;
+    if revision_drift > 0 {
+        invalidate_snapshot_journal_truth(&mut snapshot)?;
+    }
     let current_unindexed = current_unindexed.max(declared);
     let current_excluded = excluded
         .checked_add(current_unindexed - declared)
@@ -228,6 +236,10 @@ fn seal_snapshot_archive_fence(
         serde_json::Value::from(revision_drift),
     );
     projection.insert(
+        "truthInvalidatedByArchiveDrift".into(),
+        serde_json::Value::Bool(revision_drift > 0),
+    );
+    projection.insert(
         "unindexedObserverFrames".into(),
         serde_json::Value::from(current_unindexed),
     );
@@ -240,6 +252,76 @@ fn seal_snapshot_archive_fence(
     }
     serde_json::to_string(&snapshot)
         .map_err(|error| format!("serialize fenced Today snapshot: {error}"))
+}
+
+/// A forward archive revision means the reconstructed journal set is no
+/// longer current. Preserve the bounded historical rows, but never sign stale
+/// completion or verification as present truth.
+fn invalidate_snapshot_journal_truth(snapshot: &mut serde_json::Value) -> Result<(), String> {
+    let surface = snapshot
+        .get_mut("surface")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("Today snapshot surface must be an object")?;
+    let Some(journals) = surface
+        .get_mut("journals")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for journal in journals.iter_mut() {
+        let Some(journal) = journal.as_object_mut() else {
+            continue;
+        };
+        journal.insert(
+            "status".into(),
+            serde_json::Value::String("incomplete".into()),
+        );
+        journal.insert(
+            "proofState".into(),
+            serde_json::Value::String("UNKNOWN".into()),
+        );
+        journal.insert(
+            "summary".into(),
+            serde_json::Value::String(
+                "Archive changed during publication; refresh before relying on this journal."
+                    .into(),
+            ),
+        );
+        journal.insert(
+            "summarySource".into(),
+            serde_json::Value::String("auto".into()),
+        );
+        journal.insert(
+            "claimedCompletionWithoutEvidence".into(),
+            serde_json::Value::Bool(false),
+        );
+        journal.insert("archiveRevisionStale".into(), serde_json::Value::Bool(true));
+        if let Some(events) = journal
+            .get_mut("events")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for event in events {
+                let Some(event) = event.as_object_mut() else {
+                    continue;
+                };
+                if event.get("proofState").and_then(serde_json::Value::as_str) == Some("VERIFIED") {
+                    event.insert(
+                        "proofState".into(),
+                        serde_json::Value::String("UNKNOWN".into()),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(counts) = surface
+        .get_mut("counts")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        counts.insert("failed".into(), serde_json::Value::from(0));
+        counts.insert("inProgress".into(), serde_json::Value::from(0));
+        counts.insert("claimedWithoutEvidence".into(), serde_json::Value::from(0));
+    }
+    Ok(())
 }
 
 /// Publish under both the process-exclusive archive guard and a SQLite
@@ -300,7 +382,7 @@ mod snapshot_fence_tests {
 
     #[test]
     fn snapshot_fence_discloses_new_archive_activity() {
-        let snapshot = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":true,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
+        let snapshot = r#"{"surface":{"counts":{"journals":1,"failed":0,"inProgress":0,"claimedWithoutEvidence":0},"journals":[{"status":"completed","proofState":"VERIFIED","summary":"Verified complete","summarySource":"owner","claimedCompletionWithoutEvidence":false,"events":[{"proofState":"VERIFIED"}]}],"snapshotProjection":{"archiveRevision":7,"bounded":true,"excludedObserverFrames":2,"sourceDroppedObserverEvents":0,"unindexedObserverFrames":2}}}"#;
         let sealed = seal_snapshot_archive_fence(snapshot, 8, 3).unwrap();
         let sealed: serde_json::Value = serde_json::from_str(&sealed).unwrap();
         let projection = &sealed["surface"]["snapshotProjection"];
@@ -310,11 +392,22 @@ mod snapshot_fence_tests {
         assert_eq!(projection["unindexedObserverFrames"], 3);
         assert_eq!(projection["excludedObserverFrames"], 3);
         assert_eq!(projection["bounded"], true);
+        assert_eq!(projection["truthInvalidatedByArchiveDrift"], true);
+        let journal = &sealed["surface"]["journals"][0];
+        assert_eq!(journal["status"], "incomplete");
+        assert_eq!(journal["proofState"], "UNKNOWN");
+        assert_eq!(journal["summarySource"], "auto");
+        assert_eq!(journal["events"][0]["proofState"], "UNKNOWN");
+        assert_eq!(journal["archiveRevisionStale"], true);
         assert!(seal_snapshot_archive_fence(snapshot, 6, 2)
             .unwrap_err()
             .contains("moved backwards"));
-        let false_complete = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":false,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
+        let false_complete = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":false,"excludedObserverFrames":2,"sourceDroppedObserverEvents":0,"unindexedObserverFrames":2}}}"#;
         assert!(seal_snapshot_archive_fence(false_complete, 7, 2)
+            .unwrap_err()
+            .contains("must be bounded"));
+        let undisclosed_gap = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":false,"excludedObserverFrames":0,"sourceDroppedObserverEvents":1,"unindexedObserverFrames":0}}}"#;
+        assert!(seal_snapshot_archive_fence(undisclosed_gap, 7, 0)
             .unwrap_err()
             .contains("must be bounded"));
     }

@@ -1,6 +1,7 @@
 import { KIND_AGENT_TURN_METRIC } from "@/shared/constants/kinds";
 
 import { invokeTauri } from "./tauri";
+import type { RelayEvent } from "./types";
 
 // ── Agent usage wire types (NIP-AM, `get_agent_usage_series`) ────────────────
 //
@@ -462,7 +463,7 @@ export type ArchivedObserverRangeCursor = {
 };
 
 export type ArchivedObserverRangePage = {
-  events: import("@/shared/api/types").RelayEvent[];
+  events: RelayEvent[];
   backfillComplete: boolean;
   /** Owner-scoped frames whose missing inner time prevents day attribution. */
   unindexedObserverFrames: number;
@@ -474,6 +475,29 @@ export type ArchivedObserverRangePage = {
   hasMore: boolean;
   nextBefore: ArchivedObserverRangeCursor | null;
 };
+
+function isArchivedRelayEvent(value: unknown): value is RelayEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.id === "string" &&
+    candidate.id.length > 0 &&
+    typeof candidate.pubkey === "string" &&
+    candidate.pubkey.length > 0 &&
+    typeof candidate.created_at === "number" &&
+    Number.isSafeInteger(candidate.created_at) &&
+    typeof candidate.kind === "number" &&
+    Number.isSafeInteger(candidate.kind) &&
+    Array.isArray(candidate.tags) &&
+    candidate.tags.every(
+      (tag) =>
+        Array.isArray(tag) && tag.every((part) => typeof part === "string"),
+    ) &&
+    typeof candidate.content === "string" &&
+    typeof candidate.sig === "string" &&
+    candidate.sig.length > 0
+  );
+}
 
 /**
  * Read one durable, owner-scoped observer page whose decrypted inner event
@@ -516,22 +540,25 @@ export async function readArchivedObserverEventsForRange(opts: {
       limit,
     },
   });
+  if (
+    !Array.isArray(rawPage.events) ||
+    !rawPage.events.every((raw) => typeof raw === "string")
+  ) {
+    throw new Error("Archived observer range returned invalid event rows.");
+  }
   const events = rawPage.events
     .map((raw) => {
       try {
-        return JSON.parse(raw) as import("@/shared/api/types").RelayEvent;
+        const parsed: unknown = JSON.parse(raw);
+        if (isArchivedRelayEvent(parsed)) return parsed;
       } catch {
-        console.warn(
-          "[tauriArchive] failed to parse ranged observer raw_json:",
-          raw,
-        );
-        return null;
+        // Counted below with schema-invalid JSON; never let one corrupt row
+        // abort the owner's remaining durable Today history.
       }
+      console.warn("[tauriArchive] rejected malformed ranged observer row");
+      return null;
     })
-    .filter(
-      (event): event is import("@/shared/api/types").RelayEvent =>
-        event !== null,
-    );
+    .filter((event): event is RelayEvent => event !== null);
   if (
     !Number.isSafeInteger(rawPage.unindexedObserverFrames) ||
     rawPage.unindexedObserverFrames < 0

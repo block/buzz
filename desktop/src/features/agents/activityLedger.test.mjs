@@ -107,6 +107,24 @@ test("normalizeActivityEvents deduplicates duplicate observer frames", () => {
   assert.equal(events.length, 1);
 });
 
+test("normalizeActivityEvents exposes producer telemetry gaps as UNKNOWN", () => {
+  const [gap] = normalizeActivityEvents([
+    observerEvent({
+      kind: "observer_telemetry_gap",
+      payload: {
+        droppedEvents: 4,
+        reasonCounts: { publishQueueEviction: 4 },
+      },
+    }),
+  ]);
+
+  assert.equal(gap.title, "Observer telemetry gap");
+  assert.equal(gap.status, "blocked");
+  assert.equal(gap.proofState, "UNKNOWN");
+  assert.match(gap.detail, /4 source events dropped/i);
+  assert.ok(gap.tags.includes("evidence_gap"));
+});
+
 test("signed provenance keeps same seq and timestamp with different ids distinct", () => {
   const events = normalizeActivityEvents([
     observerEvent({ sourceEventId: "1".repeat(64) }),
