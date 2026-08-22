@@ -28,6 +28,24 @@ export function readMachineOnboardingCompletion(pubkey: string | null) {
   );
 }
 
+/**
+ * Return the already-loaded identity when persisted community state proves this
+ * is an upgrade/recovery onboarding pass rather than a blank first launch.
+ *
+ * This is deliberately presentation-only: an unstamped or mismatched community
+ * still cannot vouch for onboarding completion in
+ * `migrateMachineOnboardingCompletion`. It only prevents the landing action
+ * from claiming that it will create a key when the native layer has already
+ * recovered the user's current key.
+ */
+export function existingMachineIdentityPubkey(
+  currentPubkey: string | null,
+  activeCommunityPubkey: string | null | undefined,
+) {
+  if (!currentPubkey || activeCommunityPubkey === undefined) return null;
+  return currentPubkey;
+}
+
 function clearMachineOnboardingCompletion(pubkey: string | null) {
   if (typeof window === "undefined" || !pubkey) return;
   window.localStorage.removeItem(
@@ -250,6 +268,10 @@ export function useMachineOnboardingState({
     continueWithIdentity,
     continueWithRecoveredIdentity,
     currentPubkey,
+    existingIdentityPubkey: existingMachineIdentityPubkey(
+      currentPubkey,
+      activeCommunityPubkey,
+    ),
     identityLost,
     queryClient,
     reopen,

@@ -758,6 +758,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         complete={completeMachineOnboarding}
         continueWithIdentity={machine.continueWithIdentity}
         continueWithRecoveredIdentity={machine.continueWithRecoveredIdentity}
+        existingIdentityPubkey={machine.existingIdentityPubkey}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
         navigateAfterComplete={navigateAfterOnboarding}
