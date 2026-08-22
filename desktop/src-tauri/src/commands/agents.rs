@@ -713,9 +713,33 @@ pub async fn create_managed_agent(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
-            definition_respond_to: None,
-            definition_respond_to_allowlist: Vec::new(),
-            definition_parallelism: None,
+            // Stamp the definition mirror triple at mint, so an UNSET
+            // mirror unambiguously means "record predates the behavior
+            // cascade" -- the marker propagate_persona_behavior's desync heal
+            // relies on. Left None, every fresh mint matched the heal's
+            // pre-fix shape, and once the instance-gate dialog (#4270) can
+            // pin a fresh instance to owner-only, the next persona edit
+            // silently un-pinned it (review on #4270).
+            //
+            // INVARIANT for anyone adding another way to link a record to a
+            // persona: stamp these three fields there too. The heal is safe
+            // only while no path links a record to a definition carrying an
+            // explicit non-default respond_to WITHOUT stamping the mirrors.
+            // Today the only other linker is migration/backfill.rs, which
+            // manufactures the definition from the record's own config, so
+            // the definition's mode always equals the instance's gate and the
+            // dangerous shape cannot arise. A future linker that skips the
+            // stamp reopens the un-pinning bug silently (@georgerous, #4270).
+            definition_respond_to: linked_persona
+                .as_ref()
+                .and_then(|persona| persona.respond_to.clone()),
+            definition_respond_to_allowlist: linked_persona
+                .as_ref()
+                .map(|persona| persona.respond_to_allowlist.clone())
+                .unwrap_or_default(),
+            definition_parallelism: linked_persona
+                .as_ref()
+                .and_then(|persona| persona.parallelism),
             relay_mesh: if effective_provider.as_deref()
                 == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
             {
