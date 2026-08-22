@@ -43,6 +43,7 @@ import { SpoilerMark } from "./spoilerMark";
 import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
 import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
 import { useComposerMessageLinks } from "./useComposerMessageLinks";
+import { ComposerText } from "./composerTextNode";
 
 function hardBreakLineBounds($from: ResolvedPos) {
   const parentStart = $from.start();
@@ -246,6 +247,7 @@ export function useRichTextEditor({
     {
       extensions: [
         StarterKit.configure({
+          text: false,
           // Use hard breaks (Shift+Enter) — Enter submits the message.
           hardBreak: {
             keepMarks: true,
@@ -272,6 +274,7 @@ export function useRichTextEditor({
           // below with custom options (autolink, openOnClick, etc.).
           link: false,
         }),
+        ComposerText,
         // macOS text fields traditionally support a small set of Emacs-style
         // Control shortcuts. Keep movement and kill-line scoped to the current
         // hard-break-delimited line rather than the whole ProseMirror block.
