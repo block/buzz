@@ -1428,12 +1428,13 @@ async fn steer_rejected_on_empty_prompt() {
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
-    let p_id = h
-        .send(
-            "session/prompt",
-            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
-        )
-        .await;
+    // The prompt response is no longer inspected, but the request still has to
+    // be sent to start the run the steer targets.
+    h.send(
+        "session/prompt",
+        json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+    )
+    .await;
     let run_id = recv_active_run_id(&mut h).await;
     let s_id = h
         .send(
@@ -1444,10 +1445,14 @@ async fn steer_rejected_on_empty_prompt() {
     let mut saw_reject = false;
     for _ in 0..40 {
         let v = h.recv().await;
+        // Wait specifically for the steer rejection response, independent of
+        // whether the session/prompt response has been read yet. Breaking on
+        // the prompt response (the prior shape) made this racy: if the prompt
+        // reply was read first the loop exited before the steer rejection
+        // arrived, intermittently failing the assertion.
         if v["id"] == json!(s_id) {
             assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
             saw_reject = true;
-        } else if v["id"] == json!(p_id) {
             break;
         }
     }
