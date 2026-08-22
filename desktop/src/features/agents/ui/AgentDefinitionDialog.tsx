@@ -36,7 +36,6 @@ import {
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   buildPersonaRuntimeDropdownOptions,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
-  computeLocalModeGate,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
@@ -76,12 +75,12 @@ import {
   type AgentAiConfigurationMode,
 } from "./AgentAiConfigurationMode";
 import {
-  agentAiConfigurationModeSatisfied,
   agentAiConfigurationPairForMode,
   initialAgentAiConfigurationMode,
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
+import { useAgentDefinitionExecutionReadiness } from "./useAgentDefinitionExecutionReadiness";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AgentDefinitionDialogShell } from "./AgentDefinitionDialogShell";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
@@ -329,9 +328,9 @@ export function AgentDefinitionDialog({
   }
 
   async function handleSubmit() {
-    // D1: the same localModeSatisfied gate as canSubmit prevents form-submit
-    // (Enter) from bypassing a missing credential.
-    if (!initialValues || !localModeSatisfied || !canSubmit) return;
+    // Use the same readiness policy as canSubmit so Enter cannot bypass an
+    // execution-config validation failure.
+    if (!initialValues || !executionReadinessSatisfied || !canSubmit) return;
 
     const {
       runtime: runtimeForSubmit,
@@ -426,36 +425,25 @@ export function AgentDefinitionDialog({
     setModel(nextPair.model);
   }
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
-  const localModeGate = React.useMemo(
-    () =>
-      computeLocalModeGate({
-        bakedEnvKeys,
-        envVars,
-        globalEnvVars: globalConfig.env_vars,
-        globalProvider: inheritedProviderDefault.value,
-        globalModel: inheritedModelDefault.value,
-        isProviderMode: false,
-        model,
-        provider: trimmedProvider,
-        runtimeId: runtime,
-        runtimeFileConfig,
-      }),
-    [
+  const { executionReadinessSatisfied, localModeGate } =
+    useAgentDefinitionExecutionReadiness({
+      aiConfigurationMode,
       bakedEnvKeys,
       envVars,
-      globalConfig.env_vars,
-      inheritedModelDefault.value,
-      inheritedProviderDefault.value,
+      globalEnvVars: globalConfig.env_vars,
+      globalModel: inheritedModelDefault.value,
+      globalProvider: inheritedProviderDefault.value,
+      initialValues,
+      isRuntimeAutoSeeded: isRuntimeAutoSeededRef.current,
       model,
-      trimmedProvider,
-      runtime,
+      provider: trimmedProvider,
+      runtimeCanChooseLlmProvider,
       runtimeFileConfig,
-    ],
-  );
+      runtimeId: runtime,
+    });
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
   // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
-  const localModeSatisfied = localModeGate.satisfied;
   // Effective provider: agent value → global fallback → file fallback.
   // Mirrors the chain inside computeLocalModeGate so model-option scoping and
   // model requiredness are consistent with the readiness gate.
@@ -484,11 +472,6 @@ export function AgentDefinitionDialog({
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
-    aiConfigurationMode,
-    { provider, model },
-    runtimeCanChooseLlmProvider,
-  );
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
@@ -502,10 +485,10 @@ export function AgentDefinitionDialog({
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
-    // D1: localModeSatisfied covers both missingNormalizedFields AND
-    // missingEnvKeys — credential env keys now block submit, not just display.
-    localModeSatisfied &&
-    customAiPairSatisfied &&
+    // Creates and execution-config edits must be ready. Existing definitions
+    // may save unrelated profile/behavior changes while preserving a stale or
+    // remotely-owned execution configuration.
+    executionReadinessSatisfied &&
     !isAvatarUploadPending;
 
   // Merge global env as the base layer so credential keys satisfied via global

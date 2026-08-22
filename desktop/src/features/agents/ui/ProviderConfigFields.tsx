@@ -1,4 +1,8 @@
 import { Input } from "@/shared/ui/input";
+import {
+  ProviderConfigSchemaFields,
+  providerSchemaUsesExtendedPresentation,
+} from "./ProviderConfigSchemaFields";
 
 /// Coerce string config values to their schema-declared types (number, boolean).
 /// Providers receive JSON — sending "3" instead of 3 for an integer field breaks
@@ -48,6 +52,16 @@ export function ProviderConfigFields({
 
   if (entries.length === 0) {
     return null;
+  }
+
+  if (providerSchemaUsesExtendedPresentation(schema)) {
+    return (
+      <ProviderConfigSchemaFields
+        config={config}
+        onChange={onChange}
+        schema={schema}
+      />
+    );
   }
 
   return (
