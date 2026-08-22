@@ -229,6 +229,7 @@ pub struct AuditFields {
     ///   A `p` tag records who the event's author addressed; it is NOT a
     ///   confirmation that any particular process received or claimed the
     ///   role of recipient.
+    ///
     /// Consumers MUST NOT interpret `target_pubkey` generically as proof of
     /// process-recipient identity — its evidentiary weight depends entirely
     /// on which boundary (`event_type`) produced the record.
