@@ -173,11 +173,14 @@ async fn resolve_content_mentions(
         "#d": [channel_id],
         "limit": 1,
     });
-    let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
-        .await
-        .ok_or_else(|| {
-            CliError::Other("could not load channel membership for mention preflight".into())
-        })?;
+    let member_pubkeys = match fetch_member_pubkeys(client, &members_filter).await? {
+        Some(pubkeys) => pubkeys,
+        None => {
+            return Err(CliError::NotFound(format!(
+                "channel {channel_id} has no membership event for mention preflight"
+            )));
+        }
+    };
 
     if !stripped.contains('@') {
         return Ok((member_pubkeys, vec![]));
@@ -188,11 +191,9 @@ async fn resolve_content_mentions(
         "authors": member_pubkeys,
         "limit": member_pubkeys.len(),
     });
-    let profile_events = fetch_events(client, &profiles_filter)
-        .await
-        .ok_or_else(|| {
-            CliError::Other("could not load member profiles for mention resolution".into())
-        })?;
+    // Propagate transport/parse failures as-is so unreachable relays stay
+    // network_error/retryable instead of being rewritten as membership faults.
+    let profile_events = fetch_events(client, &profiles_filter).await?;
 
     let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
@@ -292,23 +293,32 @@ fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
-/// Returns `None` on any I/O or parse failure.
+///
+/// Transport and parse failures propagate as `CliError` so callers can preserve
+/// retryable network classification. A well-formed empty array is success.
 async fn fetch_events(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<serde_json::Value>> {
-    let raw = client.query(filter).await.ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    parsed.as_array().cloned()
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let raw = client.query(filter).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        CliError::Other(format!("failed to parse query response for mention preflight: {e}"))
+    })?;
+    parsed.as_array().cloned().ok_or_else(|| {
+        CliError::Other("mention preflight query response was not a JSON array".into())
+    })
 }
 
 /// Extract member pubkeys (the `p` tag values) from a single 39002 event.
+///
+/// `Ok(None)` means the relay answered and the channel has no kind 39002
+/// membership event. Transport failures are `Err`.
 async fn fetch_member_pubkeys(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>, CliError> {
     let events = fetch_events(client, filter).await?;
-    Some(parse_member_pubkeys(events.first()?))
+    Ok(events.first().map(parse_member_pubkeys))
 }
 
 /// Parse member pubkeys from a kind 39002 event JSON value.
@@ -1058,10 +1068,11 @@ mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
         match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_content_mentions,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
+    use crate::error::{exit_code, is_retryable_error};
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1096,6 +1107,48 @@ mod tests {
 
         assert!(matches!(error, CliError::Usage(_)));
         assert!(error.to_string().contains("invalid UUID"));
+    }
+
+    /// Regression for #6555: an unreachable relay during mention preflight must
+    /// keep the original network_error/retryable=true classification instead of
+    /// being rewritten as a permanent membership fault.
+    #[tokio::test]
+    async fn mention_preflight_preserves_network_error_when_relay_unreachable() {
+        let client =
+            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+
+        let with_at = resolve_content_mentions(&client, channel, "probe with an @sign in it", false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(with_at, CliError::Network(_)),
+            "expected Network, got {with_at:?}"
+        );
+        assert!(is_retryable_error(&with_at));
+        assert_eq!(exit_code(&with_at), 2);
+        assert!(
+            !with_at
+                .to_string()
+                .contains("could not load channel membership for mention preflight"),
+            "must not launder transport failure as membership: {with_at}"
+        );
+
+        let with_explicit = resolve_content_mentions(&client, channel, "no at sign here", true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(with_explicit, CliError::Network(_)),
+            "explicit --mention path expected Network, got {with_explicit:?}"
+        );
+        assert!(is_retryable_error(&with_explicit));
+        assert_eq!(exit_code(&with_explicit), 2);
+
+        // Bodies without mention processing still skip the preflight entirely.
+        let skipped = resolve_content_mentions(&client, channel, "probe without at sign", false)
+            .await
+            .unwrap();
+        assert_eq!(skipped, (vec![], vec![]));
     }
 
     #[test]
