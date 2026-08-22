@@ -212,7 +212,26 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     // Avatar-only edits are excluded — the avatar is not in the
                     // projection, so retaining would be a guaranteed no-op.
                     for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
-                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                        // Item 2: `private_payload_from_record` serializes EVERY
+                        // config field, so retaining the raw disk record here
+                        // republishes system_prompt/parallelism/env_vars from
+                        // stale disk over a newer relay head. Fold the overlay
+                        // on first, then re-apply the rename — the overlay's
+                        // `apply` clobbers `name`, and resolving before the
+                        // `name != old_display_name` gate above would instead
+                        // make the rename skip records whose relay name already
+                        // diverged. Disk stays untouched: it is the fallback,
+                        // the relay is primary.
+                        let mut resolved =
+                            crate::managed_agents::private_config_overlay::resolved_local_record(
+                                &state, record,
+                            )
+                            .unwrap_or_else(|_| record.clone());
+                        resolved.name.clone_from(&record.name);
+                        resolved.display_name.clone_from(&record.display_name);
+                        crate::commands::agents::retain_managed_agent_pending(
+                            &app, &state, &resolved,
+                        );
                     }
                 }
 

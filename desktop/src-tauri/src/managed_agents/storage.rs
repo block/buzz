@@ -15,7 +15,7 @@ use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
-fn agent_keyring_name(pubkey: &str) -> String {
+pub(super) fn agent_keyring_name(pubkey: &str) -> String {
     format!("agent:{pubkey}")
 }
 
@@ -24,7 +24,7 @@ fn agent_keyring_name(pubkey: &str) -> String {
 /// `SecretStore::shared` so identity and agent callers share one instance —
 /// and therefore one in-memory cache and one mutex — preventing last-writer-wins
 /// races on concurrent blob writes.
-fn agent_secret_store() -> Option<&'static SecretStore> {
+pub(super) fn agent_secret_store() -> Option<&'static SecretStore> {
     if cfg!(feature = "system-keyring") {
         Some(SecretStore::shared(keyring_service()))
     } else {
@@ -131,7 +131,7 @@ fn newest_agent_log_in_dir(dir: &Path, pubkey: &str) -> Option<PathBuf> {
 /// The keyring operations the migration chokepoint needs. Abstracted so the
 /// migrate-and-strip decision logic ([`migrate_inline_key`]) can be unit-tested
 /// against a fake without touching the live OS keyring.
-trait KeyStore {
+pub(super) trait KeyStore {
     fn probe(&self, name: &str) -> KeyringProbe;
     /// Read a key. `Ok(None)` is "no such entry" (absent); `Err` is a backend
     /// failure (keyring unreachable) — the caller MUST NOT collapse the two.
@@ -302,7 +302,7 @@ pub(crate) fn backup_invalid_store(path: &Path) {
 ///   writes clean JSON and plaintext stops lingering on disk; if still
 ///   unreachable, leave it inline. This makes the strip deterministic on the
 ///   next reachable boot rather than waiting for a non-deterministic save.
-fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
+pub(crate) fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };
@@ -317,7 +317,7 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
 /// to spawn an agent whose key could not be read (see the empty-key bail in
 /// `spawn_agent_child`). Empty here never means "fine" — it means "no usable
 /// key this boot."
-fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
+pub(super) fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
         // A key-less definition (no pubkey yet — unified agent model) has no
         // keyring entry by construction; keys are minted on first start.
@@ -906,4 +906,4 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
 
 #[cfg(test)]
 #[path = "storage_tests.rs"]
-mod tests;
+pub(super) mod tests;

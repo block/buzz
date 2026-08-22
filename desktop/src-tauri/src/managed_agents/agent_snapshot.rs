@@ -201,6 +201,23 @@ pub fn build_snapshot(
     // Use definition-level fields (respond_to, allowlist, parallelism) for
     // portability — instance-level equivalents are spawn-time snapshots and
     // would be stale.
+    //
+    // respond_to falls back to the instance fields when the definition-level
+    // mode is unset — same rationale as the parallelism fallback below. A
+    // record materialized from a kind:30179 relay head carries its effective
+    // respond_to/allowlist ONLY on the instance fields (the overlay patch
+    // never populates the definition ones), so without this fallback a
+    // relay-hosted agent would export `respond_to: None` while actually
+    // enforcing an allowlist. Mode and list travel together: a definition
+    // mode uses the definition list, the instance fallback uses the instance
+    // list — never a mix.
+    let (respond_to, respond_to_allowlist) = match record.definition_respond_to.clone() {
+        Some(mode) => (Some(mode), record.definition_respond_to_allowlist.clone()),
+        None => (
+            Some(record.respond_to.as_str().to_string()),
+            record.respond_to_allowlist.clone(),
+        ),
+    };
     let definition = AgentSnapshotDefinition {
         name: record
             .display_name
@@ -212,8 +229,8 @@ pub fn build_snapshot(
         model: record.model.clone(),
         provider: record.provider.clone(),
         parallelism: record.definition_parallelism.or(Some(record.parallelism)),
-        respond_to: record.definition_respond_to.clone(),
-        respond_to_allowlist: record.definition_respond_to_allowlist.clone(),
+        respond_to,
+        respond_to_allowlist,
         name_pool: record.name_pool.clone(),
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,

@@ -160,3 +160,82 @@ fn test_rename_renames_all_matching_instances_in_one_pass() {
     assert_eq!(records[1].name, "Duncan Idaho");
     assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
 }
+
+/// SAMI PROBE (fidelity pin for `sami_probe_rename_republishes_nonname_fields_from_stale_disk`
+/// in `managed_agents/reconcile/tests.rs`): that probe hand-mutates `name` and
+/// `display_name` to stand in for this helper. If the helper ever touched a
+/// third field, the probe's fixture would silently stop modelling production.
+/// Assert the mutation surface is EXACTLY those two fields, by diffing a
+/// serialized before/after.
+#[test]
+fn rename_helper_mutates_only_name_and_display_name() {
+    let mut records = vec![agent("persona-1", "Paul", Some("Paul"))];
+    records[0].system_prompt = Some("disk prompt".into());
+    records[0].parallelism = 7;
+    let before = serde_json::to_value(&records[0]).unwrap();
+
+    propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Paul Atreides");
+
+    let after = serde_json::to_value(&records[0]).unwrap();
+    let changed: Vec<String> = before
+        .as_object()
+        .unwrap()
+        .keys()
+        .chain(after.as_object().unwrap().keys())
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        changed,
+        vec!["display_name".to_string(), "name".to_string()],
+        "rename must mutate exactly name + display_name; a wider surface \
+         invalidates the stale-disk republish probe's fixture"
+    );
+}
+
+/// SAMI PROBE (hazard in the PROPOSED fix, not in the current code): the fix
+/// for the stale-disk republish is "resolve the overlay before the write". At
+/// this site the write is gated on `record.name == old_display_name`, and the
+/// overlay REPLACES `record.name` with the relay's name. So resolving before
+/// the gate can change which records the rename reaches.
+///
+/// Models a following device whose relay head carries a name that no longer
+/// equals the persona's old display_name (device A already renamed, or the
+/// instance is pool-named on the relay). Resolve-first makes the rename SKIP
+/// the record entirely — the intended write is lost, which is the same
+/// silent-data-loss class as the centralized-resolve probe.
+#[test]
+fn sami_probe_resolve_before_rename_can_skip_the_intended_rename() {
+    // Disk name matches the old persona display_name, so production renames it.
+    let mut disk_only = vec![agent("persona-1", "Paul", Some("Paul"))];
+    let renamed =
+        propagate_persona_name_rename(&mut disk_only, "persona-1", "Paul", "Paul Atreides");
+    assert_eq!(
+        renamed.len(),
+        1,
+        "control: against the DISK name the rename fires"
+    );
+    assert_eq!(disk_only[0].name, "Paul Atreides");
+
+    // Same record after the overlay resolves a relay head whose name differs
+    // (device A already applied the rename). `apply()` clobbers `record.name`.
+    let mut overlay_resolved = vec![agent("persona-1", "Paul", Some("Paul"))];
+    overlay_resolved[0].name = "Paul Atreides".to_string(); // what the overlay wrote
+
+    let renamed_after_resolve =
+        propagate_persona_name_rename(&mut overlay_resolved, "persona-1", "Paul", "Paul Atreides");
+
+    assert!(
+        renamed_after_resolve.is_empty(),
+        "resolve-before-rename makes the gate miss: the record is NOT reported \
+         as renamed, so update.rs never retains it and never syncs its relay \
+         profile"
+    );
+    // Benign here (the names already agree), but the gate is now driven by
+    // relay state rather than disk state — so the fix must resolve for the
+    // PAYLOAD without moving the `name != old_display_name` decision onto the
+    // resolved name.
+}

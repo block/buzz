@@ -151,8 +151,91 @@ pub fn managed_agent_content_from_event(
 /// event-id deletion path, leaving the parameterized-replaceable coordinate
 /// live. The coordinate delete removes the agent for every client and across
 /// reboots.
+pub(crate) fn tombstone_managed_agent_pending(
+    app: &tauri::AppHandle,
+    state: &crate::app_state::AppState,
+    agent_pubkey: &str,
+) {
+    use crate::managed_agents::retention::{
+        delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
+        RetainedEvent,
+    };
+    use buzz_core_pkg::kind::{KIND_MANAGED_AGENT, KIND_PRIVATE_MANAGED_AGENT};
+    use nostr::JsonUtil;
+
+    const KIND_DELETE: u32 = 5;
+    let result = (|| -> Result<(), String> {
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let owner_pubkey = scope.owner_keys.public_key().to_hex();
+        let public_delete = build_agent_delete(agent_pubkey, &owner_pubkey)?
+            .sign_with_keys(&scope.owner_keys)
+            .map_err(|e| format!("failed to sign managed-agent tombstone: {e}"))?;
+        let private_delete = build_private_agent_delete(agent_pubkey, &owner_pubkey)?
+            .sign_with_keys(&scope.owner_keys)
+            .map_err(|e| format!("failed to sign private managed-agent tombstone: {e}"))?;
+        let conn = open_retention_db(&scope.db_path)?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| format!("failed to begin agent deletion transaction: {error}"))?;
+        delete_retained_event(
+            &transaction,
+            KIND_MANAGED_AGENT,
+            &owner_pubkey,
+            agent_pubkey,
+        )?;
+        delete_retained_event(
+            &transaction,
+            KIND_PRIVATE_MANAGED_AGENT,
+            &owner_pubkey,
+            agent_pubkey,
+        )?;
+        for (target_kind, event) in [
+            (KIND_MANAGED_AGENT, public_delete),
+            (KIND_PRIVATE_MANAGED_AGENT, private_delete),
+        ] {
+            retain_event(
+                &transaction,
+                &RetainedEvent {
+                    kind: KIND_DELETE,
+                    pubkey: owner_pubkey.clone(),
+                    d_tag: tombstone_retention_d_tag(target_kind, agent_pubkey),
+                    content: event.content.to_string(),
+                    created_at: event.created_at.as_secs() as i64,
+                    raw_event: event.as_json(),
+                    pending_sync: true,
+                },
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("failed to commit agent deletion transaction: {error}"))
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: agent-tombstone: {e}");
+    }
+}
+
 pub fn build_agent_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<EventBuilder, String> {
-    let coord = format!("{KIND_MANAGED_AGENT}:{owner_pubkey_hex}:{d_tag}");
+    build_agent_delete_for_kind(KIND_MANAGED_AGENT, d_tag, owner_pubkey_hex)
+}
+
+pub fn build_private_agent_delete(
+    d_tag: &str,
+    owner_pubkey_hex: &str,
+) -> Result<EventBuilder, String> {
+    build_agent_delete_for_kind(
+        buzz_core_pkg::kind::KIND_PRIVATE_MANAGED_AGENT,
+        d_tag,
+        owner_pubkey_hex,
+    )
+}
+
+fn build_agent_delete_for_kind(
+    target_kind: u32,
+    d_tag: &str,
+    owner_pubkey_hex: &str,
+) -> Result<EventBuilder, String> {
+    let coord = format!("{target_kind}:{owner_pubkey_hex}:{d_tag}");
     let tag = Tag::parse(["a", coord.as_str()]).map_err(|e| format!("invalid a-tag: {e}"))?;
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }

@@ -19,7 +19,11 @@ use super::{
 /// In-memory [`KeyStore`] for testing the migrate decision without the OS
 /// keyring. `reachable=false` simulates a backend outage; `fail_verify`
 /// simulates a write whose read-back does not confirm.
-struct FakeKeyStore {
+///
+/// `pub(in crate::managed_agents)` so sibling test modules (e.g.
+/// `reconcile::tests`) can inject it through the same seam instead of
+/// touching the live keyring.
+pub(in crate::managed_agents) struct FakeKeyStore {
     reachable: bool,
     fail_verify: bool,
     stored: RefCell<HashMap<String, String>>,
@@ -28,7 +32,7 @@ struct FakeKeyStore {
 }
 
 impl FakeKeyStore {
-    fn reachable() -> Self {
+    pub(in crate::managed_agents) fn reachable() -> Self {
         Self {
             reachable: true,
             fail_verify: false,
@@ -56,7 +60,7 @@ impl FakeKeyStore {
         }
     }
     /// Seed a key as already present in the keyring.
-    fn with_key(self, name: &str, value: &str) -> Self {
+    pub(in crate::managed_agents) fn with_key(self, name: &str, value: &str) -> Self {
         self.stored
             .borrow_mut()
             .insert(name.to_string(), value.to_string());

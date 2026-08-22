@@ -1,5 +1,6 @@
 use super::*;
 use crate::managed_agents::retention::{get_pending_sync, get_retained_event, mark_synced};
+use nostr::ToBech32;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 
@@ -35,10 +36,226 @@ fn write_store(dir: &TempDir, records: &[ManagedAgentRecord]) {
 }
 
 #[test]
+fn private_config_conversion_encrypts_secrets_and_is_idempotent() {
+    let dir = TempDir::new().unwrap();
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+    let pubkey = agent_keys.public_key().to_hex();
+    let mut record = sample_record(&pubkey, "private-agent");
+    record.private_key_nsec = agent_keys.secret_key().to_bech32().unwrap();
+    record.env_vars = BTreeMap::from([("API_TOKEN".to_string(), "very-secret".to_string())]);
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+
+    assert!(retain_agent_record(&conn, &owner_keys, &record).unwrap());
+    let row = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!row.raw_event.contains("very-secret"));
+    assert!(!row.raw_event.contains("nsec1"));
+
+    let event = nostr::Event::from_json(&row.raw_event).unwrap();
+    let (_, payload) = private_managed_agent::validate_and_decrypt(&event, &owner_keys).unwrap();
+    assert_eq!(payload.config.name, "private-agent");
+    assert_eq!(payload.config.env_vars["API_TOKEN"], "very-secret");
+    assert_eq!(payload.generation, 1);
+    assert_eq!(payload.previous_event_id, None);
+
+    mark_synced(
+        &conn,
+        row.kind,
+        &row.pubkey,
+        &row.d_tag,
+        row.created_at,
+        &row.content,
+    )
+    .unwrap();
+    assert!(!retain_agent_record(&conn, &owner_keys, &record).unwrap());
+    assert!(get_pending_sync(&conn)
+        .unwrap()
+        .iter()
+        .all(|pending| pending.kind != KIND_PRIVATE_MANAGED_AGENT));
+}
+
+#[test]
+fn private_config_preserves_unknown_fields_without_generation_churn() {
+    let dir = TempDir::new().unwrap();
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+    let pubkey = agent_keys.public_key().to_hex();
+    let mut record = sample_record(&pubkey, "private-agent");
+    record.private_key_nsec = agent_keys.secret_key().to_bech32().unwrap();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+
+    let mut newer_payload =
+        private_payload_from_record(&record, &owner_keys.public_key().to_hex(), 1, None).unwrap();
+    newer_payload.extensions.insert(
+        "future.example:feature".into(),
+        serde_json::json!({"enabled": true}),
+    );
+    newer_payload
+        .extra
+        .insert("future_top_level".into(), serde_json::json!([1, 2, 3]));
+    newer_payload
+        .config
+        .extra
+        .insert("future_config".into(), serde_json::json!({"mode": "new"}));
+    let first_event = private_managed_agent::build_event(&owner_keys, &newer_payload, 1).unwrap();
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_PRIVATE_MANAGED_AGENT,
+            pubkey: owner_keys.public_key().to_hex(),
+            d_tag: pubkey.clone(),
+            content: first_event.content.clone(),
+            created_at: first_event.created_at.as_secs() as i64,
+            raw_event: first_event.as_json(),
+            pending_sync: false,
+        },
+    )
+    .unwrap();
+
+    record.system_prompt = Some("edited by an older client".into());
+    assert!(retain_agent_record(&conn, &owner_keys, &record).unwrap());
+    let row = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    let rebuilt_event = nostr::Event::from_json(&row.raw_event).unwrap();
+    let (_, rebuilt) =
+        private_managed_agent::validate_and_decrypt(&rebuilt_event, &owner_keys).unwrap();
+    assert_eq!(rebuilt.generation, 2);
+    assert_eq!(rebuilt.previous_event_id, Some(first_event.id.to_hex()));
+    assert_eq!(rebuilt.extensions, newer_payload.extensions);
+    assert_eq!(rebuilt.extra, newer_payload.extra);
+    assert_eq!(rebuilt.config.extra, newer_payload.config.extra);
+
+    assert!(!retain_agent_record(&conn, &owner_keys, &record).unwrap());
+    let unchanged = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(unchanged.raw_event, row.raw_event);
+}
+
+#[test]
+fn private_config_change_advances_generation_and_links_previous_event() {
+    let dir = TempDir::new().unwrap();
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+    let pubkey = agent_keys.public_key().to_hex();
+    let mut record = sample_record(&pubkey, "private-agent");
+    record.private_key_nsec = agent_keys.secret_key().to_bech32().unwrap();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+
+    retain_agent_record(&conn, &owner_keys, &record).unwrap();
+    let first = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    let first_event = nostr::Event::from_json(&first.raw_event).unwrap();
+
+    record.env_vars.insert("TOKEN".into(), "rotated".into());
+    retain_agent_record(&conn, &owner_keys, &record).unwrap();
+    let second = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    let second_event = nostr::Event::from_json(&second.raw_event).unwrap();
+    let (_, payload) =
+        private_managed_agent::validate_and_decrypt(&second_event, &owner_keys).unwrap();
+    assert_eq!(payload.generation, 2);
+    assert_eq!(payload.previous_event_id, Some(first_event.id.to_hex()));
+}
+
+#[test]
 fn missing_store_is_noop() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
     assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+}
+
+/// Boot reconcile on a default `system-keyring` build reads the agent nsec
+/// from the keyring, not the JSON. Hydration through the [`KeyStore`] seam
+/// must fill it in so the first 30179 gets published; without it, the
+/// empty-nsec skip fires and only the 30177 lands. The `None`-store control
+/// pins the other side: no store, no 30179 — which is also why the plain
+/// [`reconcile_agents_in_dir`] test helper can never hit the live OS keyring
+/// (a macOS Keychain ACL prompt blocks a headless test binary forever).
+#[test]
+fn keyring_resident_nsec_is_hydrated_for_private_config() {
+    use crate::managed_agents::storage::{agent_keyring_name, tests::FakeKeyStore};
+    use nostr::ToBech32;
+
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+    let pubkey = agent_keys.public_key().to_hex();
+    let nsec = agent_keys.secret_key().to_bech32().unwrap();
+    // JSON carries an empty nsec — keyring-resident, as on a default build.
+    let record = sample_record(&pubkey, "keyring-agent");
+    assert!(record.private_key_nsec.is_empty());
+
+    // Control: no key store → empty-nsec skip → no 30179 head.
+    let dir = TempDir::new().unwrap();
+    write_store(&dir, std::slice::from_ref(&record));
+    let db_path = dir.path().join("retention.db");
+    reconcile_agents_in_dir_with(
+        dir.path(),
+        &owner_keys,
+        &db_path,
+        None::<&crate::secret_store::SecretStore>,
+    )
+    .unwrap();
+    let conn = open_retention_db(&db_path).unwrap();
+    assert!(get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .is_none());
+    drop(conn);
+
+    // With the key in the (fake) keyring, hydration fills the nsec and the
+    // first 30179 is retained — and decrypts back to that exact key.
+    let dir = TempDir::new().unwrap();
+    write_store(&dir, &[record]);
+    let db_path = dir.path().join("retention.db");
+    let store = FakeKeyStore::reachable().with_key(&agent_keyring_name(&pubkey), &nsec);
+    reconcile_agents_in_dir_with(dir.path(), &owner_keys, &db_path, Some(&store)).unwrap();
+    let conn = open_retention_db(&db_path).unwrap();
+    let row = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .expect("hydrated nsec must publish the first 30179");
+    let event = nostr::Event::from_json(&row.raw_event).unwrap();
+    let (_, payload) = private_managed_agent::validate_and_decrypt(&event, &owner_keys).unwrap();
+    assert_eq!(payload.identity.private_key_nsec, nsec);
 }
 
 #[test]
@@ -400,3 +617,6 @@ fn retain_agent_record_is_noop_when_unchanged() {
         "no pending_sync churn for an unchanged record"
     );
 }
+
+mod self_authored_overlay_tests;
+mod stale_republish_tests;

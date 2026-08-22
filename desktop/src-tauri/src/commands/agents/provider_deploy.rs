@@ -56,27 +56,34 @@ pub(crate) async fn deploy_to_provider(
     };
     let _deploy_guard = deploy_lock.lock().await;
     // The payload may have waited behind another deployment. Rebuild it from
-    // the current record so the final provider invocation always carries the
-    // newest saved policy rather than the stale snapshot captured by its caller.
+    // the current record — resolved through the relay-primary overlay, since
+    // this is the final-use boundary the provider actually executes — so the
+    // invocation always carries the newest authoritative policy rather than
+    // the stale snapshot captured by its caller, and never raw disk bytes a
+    // newer relay head has superseded (stale prompt/model/env/credentials/
+    // access, or a raw backend that no longer matches the resolved one).
     let (provider_id, config, cached_binary_path, agent_json) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
         let records = load_managed_agents(app)?;
-        let record = records
+        let disk_record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        let (provider_id, config) = match &record.backend {
-            BackendKind::Provider { id, config } => (id.clone(), config.clone()),
-            BackendKind::Local => return Err(format!("agent {pubkey} is not provider-backed")),
-        };
+        let record = crate::managed_agents::private_config_overlay::resolved_local_record(
+            state,
+            disk_record,
+        )?;
+        let (provider_id, config) = resolved_provider_backend(&record)?;
         (
             provider_id,
             config,
+            // Device-local field: the overlay never patches it, so the
+            // resolved record carries the disk value unchanged.
             record.provider_binary_path.clone(),
-            build_deploy_payload(app, state, record)?,
+            build_deploy_payload(app, state, &record)?,
         )
     };
     // The rebuild above re-read the live workspace relay and owner identity.
@@ -119,6 +126,20 @@ pub(crate) async fn deploy_to_provider(
     let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json);
     save_managed_agents(app, &records)?;
     result
+}
+
+/// Extract the provider backend from the record REBUILT after the deploy
+/// lock — the exact value invoked. Pure over the resolved record so the
+/// post-lock final-use boundary is testable without a live `AppHandle`: a
+/// relay head that migrated the agent back to the local backend must refuse
+/// the deploy by name instead of deploying leftover raw-disk provider bytes.
+fn resolved_provider_backend(
+    record: &crate::managed_agents::ManagedAgentRecord,
+) -> Result<(String, serde_json::Value), String> {
+    match &record.backend {
+        BackendKind::Provider { id, config } => Ok((id.clone(), config.clone())),
+        BackendKind::Local => Err(format!("agent {} is not provider-backed", record.pubkey)),
+    }
 }
 
 /// Assert a caller-captured tenant scope against the payload that will
@@ -328,5 +349,75 @@ mod tests {
         assert_eq!(error, "provider unavailable");
         assert!(record.provider_policy_pending);
         assert_eq!(record.last_error.as_deref(), Some("provider unavailable"));
+    }
+
+    // ── Post-lock rebuild: relay-overlay resolve at the final-use boundary ──
+    //
+    // The production wiring (`deploy_to_provider` resolving the reloaded disk
+    // row through `resolved_local_record` after taking the deploy lock) needs
+    // a live `AppHandle`, so its presence is pinned by
+    // `write_site_resolve_guard` in `private_config_overlay.rs`. These tests
+    // prove the fold itself at the same overlay + backend-extraction seam the
+    // post-lock rebuild composes.
+
+    use crate::managed_agents::private_config_overlay::{test_relay_payload, PrivateConfigOverlay};
+
+    /// A stale disk row as the post-lock rebuild reloads it.
+    fn stale_disk_provider_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
+        let mut record = record();
+        record.pubkey = pubkey.into();
+        record.name = "stale disk name".into();
+        record.system_prompt = Some("stale disk prompt".into());
+        record.backend = BackendKind::Provider {
+            id: "stale-provider".into(),
+            config: serde_json::json!({"region": "stale"}),
+        };
+        record
+    }
+
+    /// Carl round-9 P1 regression (stale-disk A / overlay B at the post-lock
+    /// provider rebuild): the payload actually invoked must carry the relay
+    /// head's backend and config, not the raw disk bytes the rebuild reloads.
+    #[test]
+    fn post_lock_rebuild_deploys_relay_config_not_stale_disk() {
+        let pubkey = "aa".repeat(32);
+        let mut payload = test_relay_payload(&pubkey);
+        payload.config.backend = serde_json::json!({"type":"provider","id":"relay-provider","config":{"region":"relay"}});
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(payload).unwrap();
+
+        let disk = stale_disk_provider_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+        let (provider_id, config) = resolved_provider_backend(&resolved).unwrap();
+
+        assert_eq!(provider_id, "relay-provider");
+        assert_eq!(config["region"], "relay");
+        // Relay-owned payload inputs follow the head too.
+        assert_eq!(resolved.name, "relay name");
+        assert_eq!(resolved.system_prompt.as_deref(), Some("relay prompt"));
+
+        // NEGATIVE CONTROL: an empty overlay leaves the raw disk backend —
+        // the assertions above prove the patch, not the fixture.
+        let (stale_id, stale_config) =
+            resolved_provider_backend(&PrivateConfigOverlay::default().resolve_local_record(&disk))
+                .unwrap();
+        assert_eq!(stale_id, "stale-provider");
+        assert_eq!(stale_config["region"], "stale");
+    }
+
+    /// A relay head that migrated the agent back to the LOCAL backend must
+    /// refuse the deploy by name — the raw disk row still says "provider",
+    /// and deploying it would execute configuration this device displays as
+    /// retired.
+    #[test]
+    fn relay_head_migrated_to_local_refuses_post_lock_deploy() {
+        let pubkey = "bb".repeat(32);
+        let mut overlay = PrivateConfigOverlay::default();
+        overlay.insert(test_relay_payload(&pubkey)).unwrap(); // backend: local
+
+        let disk = stale_disk_provider_record(&pubkey);
+        let resolved = overlay.resolve_local_record(&disk);
+        let error = resolved_provider_backend(&resolved).unwrap_err();
+        assert!(error.contains("not provider-backed"), "{error}");
     }
 }

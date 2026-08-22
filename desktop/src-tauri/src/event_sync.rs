@@ -28,7 +28,46 @@ pub fn run_event_sync(
     migrate_personas_to_events(app, owner_keys, db_path);
     migrate_teams_to_events(app, owner_keys, db_path)?;
     crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
+    hydrate_private_config_overlay(app, owner_keys, db_path);
     Ok(())
+}
+
+/// Rebuild the relay-config overlay from the retained kind:30179 rows.
+///
+/// Runs on the same boot seam as the disk→event reconcile but in the other
+/// direction (retention→memory). Without it the overlay is empty on every
+/// second-and-later launch, because the backfill's re-delivered events dedupe
+/// against their own retained rows and never reach `insert_patch`. Best-effort:
+/// a failure leaves the overlay empty, which is exactly today's behavior.
+fn hydrate_private_config_overlay(
+    app: &tauri::AppHandle,
+    owner_keys: &nostr::Keys,
+    db_path: &Path,
+) {
+    use tauri::Manager;
+
+    let result = (|| -> Result<usize, String> {
+        let conn = crate::managed_agents::retention::open_retention_db(db_path)?;
+        let hydrated = crate::managed_agents::private_config_overlay::hydrate_from_retention(
+            &conn, owner_keys,
+        )?;
+        let count = hydrated.len();
+        let state = app.state::<crate::app_state::AppState>();
+        *state
+            .private_managed_agent_overlay
+            .lock()
+            .map_err(|error| error.to_string())? = hydrated;
+        Ok(count)
+    })();
+    match result {
+        Ok(0) => {}
+        Ok(count) => {
+            eprintln!(
+                "buzz-desktop: private-config-overlay: hydrated {count} agents from retention"
+            )
+        }
+        Err(error) => eprintln!("buzz-desktop: private-config-overlay: {error}"),
+    }
 }
 
 /// Run the scoped event reconcile to completion on the blocking pool.

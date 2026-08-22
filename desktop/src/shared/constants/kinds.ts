@@ -57,6 +57,8 @@ export const KIND_COMMUNITY_THEME = 30078;
 export const KIND_PERSONA = 30175;
 export const KIND_TEAM = 30176;
 export const KIND_MANAGED_AGENT = 30177;
+// Owner-authored, owner-readable encrypted runnable configuration.
+export const KIND_PRIVATE_MANAGED_AGENT = 30179;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;

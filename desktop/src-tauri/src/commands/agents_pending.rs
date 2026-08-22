@@ -22,6 +22,16 @@ use crate::{app_state::AppState, managed_agents::ManagedAgentRecord};
 /// only runtime fields produces an identical row and never re-enqueues a
 /// publish. Best-effort: a failure here is logged and swallowed so a retention
 /// hiccup never blocks the disk-authoritative write.
+///
+/// Also writes the just-retained kind:30179 head back through to the in-memory
+/// overlay. This is the ONLY path by which the overlay learns config this
+/// device authored — inbound `insert_patch` never fires for our own event
+/// (the relay echo dedupes to `Skipped`) and boot hydration runs once per
+/// launch — so without it a second edit in the same session resolves the
+/// stale patch onto the fresher disk record and publishes a silent revert of
+/// the first edit. Overlay lock is taken UNDER `managed_agents_store_lock`,
+/// which every caller already holds: the established order, same as
+/// `resolved_local_record`.
 pub(crate) fn retain_managed_agent_pending(
     app: &AppHandle,
     state: &AppState,
@@ -35,7 +45,12 @@ pub(crate) fn retain_managed_agent_pending(
         // Shared engine with the boot-time reconcile: projection content diff
         // (no republish for runtime-only churn) + monotonic created_at bump
         // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        retain_agent_record(&conn, &scope.owner_keys, record)?;
+        state
+            .private_managed_agent_overlay
+            .lock()
+            .map_err(|error| error.to_string())?
+            .absorb_retained_head(&conn, &scope.owner_keys, &record.pubkey)
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
@@ -52,50 +67,16 @@ pub(crate) fn retain_managed_agent_pending(
 /// is retained at its own `(5, owner, agent_pubkey)` coordinate with
 /// `pending_sync = 1`. The `d_tag` is the agent's pubkey. Best-effort: a
 /// failure is logged and swallowed so a retention hiccup never blocks the
-/// disk-authoritative delete.
+/// disk-authoritative delete. Delegates to
+/// `managed_agents::agent_events::tombstone_managed_agent_pending`, which
+/// removes BOTH the public (30177) and private (30179) retained heads and
+/// enqueues both tombstones in one transaction.
 pub(crate) fn tombstone_managed_agent_pending(
     app: &AppHandle,
     state: &AppState,
     agent_pubkey: &str,
 ) {
-    use crate::managed_agents::{
-        agent_events::build_agent_delete,
-        retention::{
-            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
-            RetainedEvent,
-        },
-    };
-    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
-    use nostr::JsonUtil;
-
-    const KIND_DELETE: u32 = 5;
-
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let owner_pubkey = scope.owner_keys.public_key().to_hex();
-        let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
-            .sign_with_keys(&scope.owner_keys)
-            .map_err(|e| format!("failed to sign managed-agent tombstone: {e}"))?;
-        let conn = open_retention_db(&scope.db_path)?;
-        delete_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, agent_pubkey)?;
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_DELETE,
-                pubkey: owner_pubkey,
-                // Key by the target coordinate so cross-kind d-tag tombstones
-                // occupy distinct rows (F2c).
-                d_tag: tombstone_retention_d_tag(KIND_MANAGED_AGENT, agent_pubkey),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: agent-tombstone: {e}");
-    }
+    crate::managed_agents::agent_events::tombstone_managed_agent_pending(app, state, agent_pubkey);
 }
 
 /// Build an owner-authenticated NIP-IA `kind:9035` archive request for a deleted agent.

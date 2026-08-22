@@ -6,6 +6,7 @@ import {
   KIND_DELETION,
   KIND_MANAGED_AGENT,
   KIND_PERSONA,
+  KIND_PRIVATE_MANAGED_AGENT,
   KIND_TEAM,
 } from "@/shared/constants/kinds";
 import {
@@ -17,6 +18,7 @@ const EXPECTED_KINDS = [
   KIND_PERSONA,
   KIND_TEAM,
   KIND_MANAGED_AGENT,
+  KIND_PRIVATE_MANAGED_AGENT,
   KIND_DELETION,
 ];
 

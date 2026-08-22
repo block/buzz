@@ -38,22 +38,21 @@ pub struct AppState {
     pub managed_agent_restore_pending: AtomicBool,
     /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
-    /// Shared shutdown signal checked by launch-time agent restoration.
+    /// Shared shutdown signal for launch-time agent restoration.
     pub shutdown_started: AtomicBool,
     /// Serializes every managed-runtime transition that changes the protected
     /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
+    pub(crate) private_managed_agent_overlay:
+        Mutex<crate::managed_agents::private_config_overlay::PrivateConfigOverlay>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub provider_deploy_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
-    /// Tauri app handle — stored after setup so huddle commands can emit
-    /// `huddle-state-changed` events without needing the handle threaded
-    /// through every call site.
-    ///
+    /// Tauri handle for emitting huddle events.
     /// Set once during `setup()` in `lib.rs`; never cleared.
     pub app_handle: Mutex<Option<AppHandle>>,
     /// Port of the localhost media streaming proxy (set during setup).
@@ -212,6 +211,7 @@ pub fn build_app_state() -> AppState {
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
+        private_managed_agent_overlay: Mutex::new(Default::default()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
         provider_deploy_locks: Mutex::new(HashMap::new()),

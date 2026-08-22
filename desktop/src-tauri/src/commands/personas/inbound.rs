@@ -155,7 +155,9 @@ fn reconcile_inbound_persona_event_blocking(
         save_managed_agents, save_teams,
         team_events::team_content_from_event,
     };
-    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use buzz_core_pkg::kind::{
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+    };
     use nostr::JsonUtil;
 
     let state = app.state::<AppState>();
@@ -175,7 +177,15 @@ fn reconcile_inbound_persona_event_blocking(
         return Ok(None);
     }
 
-    if !matches!(kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
+    if !matches!(
+        kind,
+        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT
+    ) {
+        return Ok(None);
+    }
+
+    if kind == KIND_PRIVATE_MANAGED_AGENT {
+        reconcile_inbound_private_managed_agent(&event, &arrival_relay_url, &app, &state)?;
         return Ok(None);
     }
 
@@ -342,6 +352,80 @@ fn reconcile_inbound_persona_event_blocking(
     Ok(runtime_refresh)
 }
 
+fn apply_inbound_private_managed_agent_event(
+    event: &nostr::Event,
+    owner_keys: &nostr::Keys,
+    conn: &rusqlite::Connection,
+    overlay: &mut crate::managed_agents::private_config_overlay::PrivateConfigOverlay,
+) -> Result<crate::managed_agents::retention::InboundOutcome, String> {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigPatch,
+        retention::{retain_inbound_event, InboundOutcome, RetainedEvent},
+    };
+    use buzz_core_pkg::{kind::KIND_PRIVATE_MANAGED_AGENT, private_managed_agent};
+    use nostr::JsonUtil;
+
+    // The codec verifies signature/owner, decrypts, validates the nsec binding,
+    // and rejects malformed portable config before any local state changes.
+    let (_, payload) = private_managed_agent::validate_and_decrypt(event, owner_keys)
+        .map_err(|error| format!("invalid private managed-agent event: {error}"))?;
+    let d_tag = payload.agent_pubkey.clone();
+    // Constructing the Desktop patch validates backend-specific fields without
+    // mutating the live overlay or retained head.
+    let patch = PrivateConfigPatch::from_payload(payload)?;
+    let outcome = retain_inbound_event(
+        conn,
+        &RetainedEvent {
+            kind: KIND_PRIVATE_MANAGED_AGENT,
+            pubkey: event.pubkey.to_hex(),
+            d_tag,
+            content: event.content.clone(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: false,
+        },
+    )?;
+    if outcome == InboundOutcome::Applied {
+        overlay.insert_patch(patch);
+    }
+    Ok(outcome)
+}
+
+fn reconcile_inbound_private_managed_agent(
+    event: &nostr::Event,
+    arrival_relay_url: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    use crate::managed_agents::retention::{open_retention_db, InboundOutcome};
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let Some(scope) =
+        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
+    else {
+        return Ok(());
+    };
+
+    let mut overlay = state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let conn = open_retention_db(&scope.db_path)?;
+    let outcome =
+        apply_inbound_private_managed_agent_event(event, &scope.owner_keys, &conn, &mut overlay)?;
+    if outcome == InboundOutcome::Skipped {
+        return Ok(());
+    }
+
+    drop(overlay);
+    try_regenerate_nest(app);
+    let _ = app.emit("agents-data-changed", ());
+    Ok(())
+}
+
 fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), String> {
     crate::managed_agents::validate_agent_definition_text(
         &persona.display_name,
@@ -403,54 +487,61 @@ fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
     })
 }
 
-/// Apply an inbound kind:5 NIP-09 deletion: remove the local record at the
-/// tombstone's target coordinate, scoped per-kind. Mirrors the upsert spine —
-/// arrival-scoped retention resolution under the store lock, then a per-kind
-/// store mutation — but removes rather than patches. Unknown/malformed
-/// coordinates no-op, as does a tombstone whose arrival community is no longer
-/// active.
-fn reconcile_inbound_tombstone(
+/// Resolve an inbound kind:5 tombstone against the scope owner and the
+/// retention store: authorize it, retain it, and return the
+/// `(target_kind, target_d_tag)` the caller must delete locally — or `None`
+/// when the tombstone must no-op.
+///
+/// Authorization is TWO bindings, both enforced in Rust because the frontend
+/// owner filter reads attacker-controlled fields and callable IPC bypasses it
+/// anyway: `parse_deletion_coordinate` proves the signer owns the coordinate
+/// it NAMES, and the check here proves that signer is the active workspace
+/// owner. The local stores match by d-tag alone, so without the second
+/// binding a validly signed foreign-owner tombstone naming its OWN coordinate
+/// with a colliding d-tag would delete this owner's record.
+///
+/// The covered retained upsert head is deleted in the SAME transaction as the
+/// kind:5 retain, mirroring the local delete path
+/// (`tombstone_managed_agent_pending`). Without this the retained kind:30179
+/// head survives the tombstone and the next boot's `hydrate_from_retention`
+/// rematerializes the deleted secret-bearing config into the overlay
+/// (head → tombstone → restart resurrection).
+fn resolve_inbound_tombstone(
     event: &nostr::Event,
-    arrival_relay_url: &str,
-    app: &AppHandle,
-    state: &AppState,
-) -> Result<(), String> {
-    use crate::managed_agents::{
-        load_managed_agents, load_teams,
-        retention::{
-            open_retention_db, retain_inbound_event, tombstone_retention_d_tag, InboundOutcome,
-            RetainedEvent,
-        },
-        save_managed_agents, save_teams,
+    scope_owner: &nostr::PublicKey,
+    conn: &rusqlite::Connection,
+) -> Result<Option<(u32, String)>, String> {
+    use crate::managed_agents::retention::{
+        delete_retained_event, get_retained_event, retain_inbound_event, tombstone_retention_d_tag,
+        InboundOutcome, RetainedEvent,
     };
-    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use buzz_core_pkg::kind::{
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+    };
     use nostr::JsonUtil;
 
-    let Some((target_kind, target_d_tag)) = parse_deletion_coordinate(event) else {
-        return Ok(()); // no routable coordinate — nothing to delete
-    };
-    if !matches!(target_kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
-        return Ok(()); // deletion for a kind we don't track locally
+    if event.pubkey != *scope_owner {
+        return Ok(None); // foreign-owner tombstone: not authorized in this scope
     }
-
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let Some((target_kind, target_d_tag)) = parse_deletion_coordinate(event) else {
+        return Ok(None); // no routable coordinate — nothing to delete
+    };
+    if !matches!(
+        target_kind,
+        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT
+    ) {
+        return Ok(None); // deletion for a kind we don't track locally
+    }
 
     // Resolve against the retained tombstone row (keyed by the target
     // coordinate, F2c) so a re-received tombstone or one older than a pending
-    // local edit is a no-op. Scoped to the arrival community, so a workspace
-    // switch since arrival drops the tombstone instead of retaining it — and
-    // deleting a record — in the wrong community's store.
-    let Some(scope) =
-        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
-    else {
-        return Ok(());
-    };
-    let conn = open_retention_db(&scope.db_path)?;
+    // local edit is a no-op. Retain + head delete commit atomically so a crash
+    // between them cannot leave a consumed tombstone with a live head.
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("failed to begin inbound tombstone transaction: {error}"))?;
     let outcome = retain_inbound_event(
-        &conn,
+        &transaction,
         &RetainedEvent {
             kind: KIND_DELETION,
             pubkey: event.pubkey.to_hex(),
@@ -462,8 +553,85 @@ fn reconcile_inbound_tombstone(
         },
     )?;
     if outcome == InboundOutcome::Skipped {
-        return Ok(());
+        return Ok(None);
     }
+    // The two agent kinds are one record locally (the match arm below removes
+    // the disk record AND the overlay entry for either), so both retained
+    // heads are covered — the local delete path tombstones both coordinates,
+    // but the sibling kind:5 may be lost or unsent, and a surviving 30179 head
+    // would rematerialize the agent at the next boot hydration.
+    let covered_kinds: &[u32] =
+        if matches!(target_kind, KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT) {
+            &[KIND_MANAGED_AGENT, KIND_PRIVATE_MANAGED_AGENT]
+        } else {
+            std::slice::from_ref(&target_kind)
+        };
+    // NIP-09: a deletion covers events up to its own `created_at`. A retained
+    // head NEWER than the tombstone means the record was recreated after the
+    // deletion (or the tombstone is a late replay) — keep the record and its
+    // heads. The kind:5 row retained above still dedupes future replays.
+    let owner_hex = event.pubkey.to_hex();
+    let tombstone_created_at = event.created_at.as_secs() as i64;
+    for covered_kind in covered_kinds {
+        if let Some(head) =
+            get_retained_event(&transaction, *covered_kind, &owner_hex, &target_d_tag)?
+        {
+            if head.created_at > tombstone_created_at {
+                transaction.commit().map_err(|error| {
+                    format!("failed to commit inbound tombstone transaction: {error}")
+                })?;
+                return Ok(None);
+            }
+        }
+    }
+    for covered_kind in covered_kinds {
+        delete_retained_event(&transaction, *covered_kind, &owner_hex, &target_d_tag)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit inbound tombstone transaction: {error}"))?;
+    Ok(Some((target_kind, target_d_tag)))
+}
+
+/// Apply an inbound kind:5 NIP-09 deletion: remove the local record at the
+/// tombstone's target coordinate, scoped per-kind. Mirrors the upsert spine —
+/// arrival-scoped retention resolution under the store lock, then a per-kind
+/// store mutation — but removes rather than patches. Unknown/malformed
+/// coordinates no-op, as does a tombstone whose arrival community is no longer
+/// active or whose signer is not the scope owner.
+fn reconcile_inbound_tombstone(
+    event: &nostr::Event,
+    arrival_relay_url: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    use crate::managed_agents::{
+        load_managed_agents, load_teams, retention::open_retention_db, save_managed_agents,
+        save_teams,
+    };
+    use buzz_core_pkg::kind::{
+        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+    };
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    // Scoped to the arrival community, so a workspace switch since arrival
+    // drops the tombstone instead of retaining it — and deleting a record —
+    // in the wrong community's store.
+    let Some(scope) =
+        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
+    else {
+        return Ok(());
+    };
+    let conn = open_retention_db(&scope.db_path)?;
+    let Some((target_kind, target_d_tag)) =
+        resolve_inbound_tombstone(event, &scope.owner_keys.public_key(), &conn)?
+    else {
+        return Ok(());
+    };
 
     // Remove the local record using the SAME per-kind match rule the apply fns
     // use: persona by `persona_d_tag`, team by `id`, managed-agent by `pubkey`.
@@ -478,7 +646,12 @@ fn reconcile_inbound_tombstone(
             teams.retain(|record| record.id != target_d_tag);
             save_teams(app, &teams)?;
         }
-        KIND_MANAGED_AGENT => {
+        KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT => {
+            state
+                .private_managed_agent_overlay
+                .lock()
+                .map_err(|error| error.to_string())?
+                .remove(&target_d_tag);
             let mut agents = load_managed_agents(app)?;
             agents.retain(|record| record.pubkey != target_d_tag);
             save_managed_agents(app, &agents)?;
