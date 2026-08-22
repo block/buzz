@@ -5,8 +5,8 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
-    validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
+    infer_language, parse_event_id, parse_uuid, read_markdown_or_stdin, read_or_stdin,
+    truncate_diff, validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
@@ -612,11 +612,10 @@ pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
 ) -> Result<(), CliError> {
-    // Allow '-' to read content from stdin. This keeps callers from having to
-    // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
-    // quoting — the source of countless self-inflicted command-substitution
-    // bugs for agent and human users alike.
-    p.content = read_or_stdin(&p.content)?;
+    // Allow '-' to read content from stdin so callers skip argv quoting.
+    // Argv `--content` still decodes JSON-style `\n` at Markdown
+    // paragraph/list boundaries (Codex/shell quoting); stdin stays raw.
+    p.content = read_markdown_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -855,13 +854,14 @@ pub async fn cmd_edit_message(
     content: &str,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
-    validate_content_size(content)?;
+    let content = read_markdown_or_stdin(content)?;
+    validate_content_size(&content)?;
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
 
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
+    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, &content)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
