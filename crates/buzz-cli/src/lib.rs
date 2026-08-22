@@ -91,7 +91,7 @@ struct Cli {
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
-    #[arg(long, value_enum, default_value = "json")]
+    #[arg(long, value_enum, default_value = "json", global = true)]
     format: OutputFormat,
 
     #[command(subcommand)]
@@ -161,7 +161,7 @@ impl std::fmt::Display for PresenceStatus {
 }
 
 /// Output format for read commands.
-#[derive(Clone, clap::ValueEnum, Default)]
+#[derive(Clone, Debug, PartialEq, clap::ValueEnum, Default)]
 pub enum OutputFormat {
     /// Full normalized JSON (default)
     #[default]
@@ -2124,6 +2124,45 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn format_after_subcommand_parses() {
+        let uuid = "123e4567-e89b-12d3-a456-426614174000";
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "get",
+            "--format",
+            "compact",
+            "--channel",
+            uuid,
+        ])
+        .unwrap();
+        assert_eq!(cli.format, OutputFormat::Compact);
+    }
+
+    #[test]
+    fn format_before_subcommand_parses() {
+        let uuid = "123e4567-e89b-12d3-a456-426614174000";
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "--format",
+            "compact",
+            "messages",
+            "get",
+            "--channel",
+            uuid,
+        ])
+        .unwrap();
+        assert_eq!(cli.format, OutputFormat::Compact);
+    }
+
+    #[test]
+    fn format_defaults_to_json() {
+        let uuid = "123e4567-e89b-12d3-a456-426614174000";
+        let cli = Cli::try_parse_from(["buzz", "messages", "get", "--channel", uuid]).unwrap();
+        assert_eq!(cli.format, OutputFormat::Json);
     }
 
     #[test]
