@@ -227,6 +227,32 @@ type E2eConfig = {
       normalized_host?: string;
       archived_at?: string | null;
     }>;
+    /**
+     * Effective per-owner community limit the relay reports through Builderlab
+     * as `max_communities_per_owner`. Omitted = a relay (or hop) that doesn't
+     * report one, so the desktop falls back to its own default (#4160).
+     */
+    builderlabCommunityLimit?: number;
+    /**
+     * Rejection returned by hosted community creation. `limit` rides alongside
+     * the error as the relay's `max_communities_per_owner`, matching the 409
+     * body shape.
+     */
+    builderlabCreateError?: {
+      code?: string;
+      message?: string;
+      limit?: number;
+    };
+    /**
+     * Rejection returned by hosted community transfer. `limit` rides alongside
+     * the error as the relay's `max_communities_per_owner` — the relay rejects
+     * a transfer on the *transferee's* quota.
+     */
+    builderlabTransferError?: {
+      code?: string;
+      message?: string;
+      limit?: number;
+    };
     /** Override the community returned after hosted creation. */
     builderlabCreatedCommunity?: {
       id?: string;
@@ -11645,16 +11671,31 @@ export function maybeInstallE2eTauriMocks() {
       case "delete_builderlab_nostr_identity":
         if (activeConfig?.mock) activeConfig.mock.builderlabIdentity = null;
         return {};
-      case "list_builderlab_communities":
+      case "list_builderlab_communities": {
+        const limit = activeConfig?.mock?.builderlabCommunityLimit;
         return {
           communities: activeConfig?.mock?.builderlabCommunities ?? [],
+          ...(typeof limit === "number"
+            ? { max_communities_per_owner: limit }
+            : {}),
         };
+      }
       case "check_builderlab_community_name":
         return {
           available: true,
           normalized_host: `${(payload as { name?: string })?.name ?? "community"}.communities.buzz.xyz`,
         };
       case "create_builderlab_community": {
+        const rejection = activeConfig?.mock?.builderlabCreateError;
+        if (rejection) {
+          const { limit, ...error } = rejection;
+          return {
+            error,
+            ...(typeof limit === "number"
+              ? { max_communities_per_owner: limit }
+              : {}),
+          };
+        }
         const name = (payload as { name?: string })?.name ?? "community";
         return {
           community: activeConfig?.mock?.builderlabCreatedCommunity ?? {
@@ -11663,6 +11704,19 @@ export function maybeInstallE2eTauriMocks() {
             normalized_host: `${name}.communities.buzz.xyz`,
           },
         };
+      }
+      case "transfer_builderlab_community": {
+        const rejection = activeConfig?.mock?.builderlabTransferError;
+        if (rejection) {
+          const { limit, ...error } = rejection;
+          return {
+            error,
+            ...(typeof limit === "number"
+              ? { max_communities_per_owner: limit }
+              : {}),
+          };
+        }
+        return {};
       }
       case "mesh_installed_models":
         return mockMeshState.models;

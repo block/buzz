@@ -321,6 +321,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_AUDIT_ENABLED`            | `true`                      | Tamper-evident event/media audit log. Set `false`/`0`/`off` to skip its DB pool and writes. Does not disable the separate moderation audit trail. |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |
+| `BUZZ_MAX_COMMUNITIES_PER_OWNER` | `5`                         | Communities one pubkey may own. Positive integer; invalid values fall back to the default. The effective value is reported as `max_communities_per_owner` on operator list/provision responses and `limit_reached` 409s, so clients gate on the deployment's value instead of a hardcoded 5 |
 | `BUZZ_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |
 | `BUZZ_WEB_DIR`                  | unset (source), `/srv/buzz/web` (container) | Directory containing the invite landing bundle; the production container enables it so `/invite/{code}` always works |
 | `BUZZ_SERVE_GIT_WEB_GUI`        | `false`                     | Set to `true` or `1` to expose the bundled Git repository browser at `/` and `/repos/...`; invite routes do not depend on this flag |

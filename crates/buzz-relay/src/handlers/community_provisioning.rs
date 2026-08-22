@@ -66,6 +66,24 @@ pub struct ProvisionCommunityResponse {
     /// Echoes the validated owner pubkey when an owner bootstrap/rotation ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_pubkey: Option<String>,
+    /// Effective per-owner community limit for this deployment
+    /// ([`buzz_db::relay_members::max_communities_per_owner`]). Clients render
+    /// limit gates and copy from this value instead of hardcoding the stock
+    /// default (#4160).
+    pub max_communities_per_owner: i64,
+}
+
+/// Builds a `limit_reached:` rejection message, e.g.
+/// `limit_reached: <detail>`.
+///
+/// The `limit_reached:` prefix is load-bearing: the operator API routes it to
+/// HTTP 409 via `starts_with` (see `crate::api::operator`), and intermediaries
+/// map the message onto a `limit_reached` error code for clients. The message
+/// is therefore a stable contract — the effective limit rides alongside it as
+/// the structured `max_communities_per_owner` field on the 409 body instead of
+/// being spliced into this string.
+pub(crate) fn limit_reached_error(detail: &str) -> String {
+    format!("limit_reached: {detail}")
 }
 
 pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
@@ -292,10 +310,9 @@ pub async fn provision_community(
                 return Err("community already exists".to_string());
             }
             buzz_db::CreateCommunityWithOwnerResult::LimitReached => {
-                return Err(
-                    "limit_reached: owner already owns the maximum number of communities"
-                        .to_string(),
-                );
+                return Err(limit_reached_error(
+                    "owner already owns the maximum number of communities",
+                ));
             }
         };
 
@@ -312,6 +329,7 @@ pub async fn provision_community(
             host: record.host,
             status: "created",
             owner_pubkey: initial_owner,
+            max_communities_per_owner: buzz_db::relay_members::max_communities_per_owner(),
         });
     }
 
@@ -347,12 +365,54 @@ pub async fn provision_community(
         host: record.host,
         status: if record.created { "created" } else { "existed" },
         owner_pubkey: initial_owner,
+        max_communities_per_owner: buzz_db::relay_members::max_communities_per_owner(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The provisioning response must carry the effective per-owner limit so
+    /// clients can stop hardcoding it (#4160). Asserted against the env-aware
+    /// function, never a literal — the whole point is that the value is
+    /// deployment-configurable.
+    #[test]
+    fn provision_response_serializes_effective_owner_limit() {
+        let response = ProvisionCommunityResponse {
+            community_id: "b8f7f4a0-0000-0000-0000-000000000000".to_string(),
+            host: "acme.communities.buzz.xyz".to_string(),
+            status: "created",
+            owner_pubkey: None,
+            max_communities_per_owner: buzz_db::relay_members::max_communities_per_owner(),
+        };
+        let json = serde_json::to_value(&response).expect("serialize response");
+        assert_eq!(
+            json.get("max_communities_per_owner")
+                .and_then(serde_json::Value::as_i64),
+            Some(buzz_db::relay_members::max_communities_per_owner())
+        );
+    }
+
+    /// The rejection message is a stable wire contract: the `limit_reached:`
+    /// routing prefix plus the detail, and nothing deployment-specific. The
+    /// effective limit travels as a structured field on the 409 body (see
+    /// `crate::api::operator`), so intermediaries that map this message onto a
+    /// `limit_reached` error code keep matching whatever the deployment's
+    /// configured limit is (#4160).
+    #[test]
+    fn limit_reached_error_is_a_stable_message_without_the_limit() {
+        let message = limit_reached_error("owner already owns the maximum number of communities");
+        assert_eq!(
+            message,
+            "limit_reached: owner already owns the maximum number of communities"
+        );
+        assert!(message.starts_with("limit_reached:"), "message: {message}");
+        assert!(
+            !message.contains(&buzz_db::relay_members::max_communities_per_owner().to_string()),
+            "message must not embed the effective limit: {message}"
+        );
+    }
 
     #[test]
     fn host_valid_bare_domain() {

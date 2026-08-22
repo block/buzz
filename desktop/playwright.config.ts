@@ -35,6 +35,7 @@ export default defineConfig({
         "**/channel-add-screenshots.spec.ts",
         "**/add-community-screenshots.spec.ts",
         "**/hosted-communities-settings-screenshots.spec.ts",
+        "**/hosted-community-limit-screenshots.spec.ts",
         "**/invites-settings-screenshots.spec.ts",
         "**/messaging.spec.ts",
         "**/message-feedback-snapshots.spec.ts",
