@@ -239,6 +239,18 @@ class RedisSubscriber(threading.Thread):
                         frame = read_resp(stream)
                     except socket.timeout:
                         continue
+                    except OSError as exc:
+                        # gh-77716: after the first idle socket.timeout, a
+                        # socket.makefile() buffered reader is permanently
+                        # wedged and raises OSError('cannot read from timed out
+                        # object') on every subsequent read. Treat it as an
+                        # idle signal and rebuild the stream on the same
+                        # socket (which has no unread data while idle).
+                        if "cannot read from timed out object" not in str(exc):
+                            raise
+                        stream.close()
+                        stream = sock.makefile("rwb")
+                        continue
                     if not (isinstance(frame, list) and len(frame) >= 3 and frame[0] == "message"):
                         continue
                     payload = str(frame[2])

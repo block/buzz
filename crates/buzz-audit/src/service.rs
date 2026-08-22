@@ -156,6 +156,127 @@ impl AuditService {
         Ok(audit_entry)
     }
 
+    /// Append several entries to the calling community's chain in one write.
+    ///
+    /// All `entries` must belong to the same community — the caller (the
+    /// relay's audit worker) groups by `community_id` before calling. The
+    /// per-community `pg_advisory_lock`, head read, transaction, and commit
+    /// are amortized across the whole batch, so N entries cost the same
+    /// round-trips as one: the hash chain is computed in-process in arrival
+    /// order, producing byte-identical results to N sequential [`AuditService::log`]
+    /// calls. This is the ingest hot path — every accepted event enqueues an
+    /// audit entry, and the previous one-entry-at-a-time write serialized all
+    /// of them behind six round-trips each.
+    #[instrument(skip(self, entries), fields(n = entries.len()))]
+    pub async fn log_batch(
+        &self,
+        entries: Vec<NewAuditEntry>,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let community_id = *entries[0].community_id.as_uuid();
+        debug_assert!(
+            entries
+                .iter()
+                .all(|e| *e.community_id.as_uuid() == community_id),
+            "log_batch requires a single community per call"
+        );
+
+        let mut conn = self.pool.acquire().await?;
+
+        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{community_id}");
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *conn)
+            .await?;
+
+        let result = std::panic::AssertUnwindSafe(
+            self.log_batch_inner(&mut conn, community_id, entries),
+        )
+        .catch_unwind()
+        .await;
+
+        let _ = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *conn)
+            .await;
+
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+        }
+    }
+
+    async fn log_batch_inner(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        community_id: Uuid,
+        entries: Vec<NewAuditEntry>,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
+        let mut tx = conn.begin().await?;
+
+        let head = sqlx::query(
+            "SELECT seq, hash FROM audit_log
+             WHERE community_id = $1
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(community_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (mut seq, mut prev_hash): (i64, Option<Vec<u8>>) = match head {
+            Some(row) => (
+                row.get::<i64, _>("seq"),
+                Some(row.get::<Vec<u8>, _>("hash")),
+            ),
+            None => (0, None),
+        };
+
+        // Stamp one `created_at` for the batch (same precision handling as
+        // `log_inner`), then build the chain in arrival order.
+        let created_at: DateTime<Utc> = log_timestamp();
+        let mut chain = Vec::with_capacity(entries.len());
+        for entry in entries {
+            seq += 1;
+            let mut audit_entry = AuditEntry {
+                community_id,
+                seq,
+                hash: Vec::new(),
+                prev_hash: prev_hash.clone(),
+                action: entry.action,
+                actor_pubkey: entry.actor_pubkey,
+                object_id: entry.object_id,
+                detail: entry.detail,
+                created_at,
+            };
+            audit_entry.hash = compute_hash(&audit_entry)?.to_vec();
+            prev_hash = Some(audit_entry.hash.clone());
+            chain.push(audit_entry);
+        }
+
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO audit_log \
+             (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at) ",
+        );
+        qb.push_values(chain.iter(), |mut b, e| {
+            b.push_bind(e.community_id)
+                .push_bind(e.seq)
+                .push_bind(&e.hash)
+                .push_bind(e.prev_hash.as_deref())
+                .push_bind(e.action.as_str())
+                .push_bind(e.actor_pubkey.as_deref())
+                .push_bind(e.object_id.as_deref())
+                .push_bind(&e.detail)
+                .push_bind(e.created_at);
+        });
+        qb.build().execute(&mut *tx).await?;
+
+        tx.commit().await?;
+
+        Ok(chain)
+    }
+
     /// Verify the hash chain for one community over `[from_seq, to_seq]`.
     ///
     /// Reads exactly that community's chain — it can never observe another
@@ -379,6 +500,89 @@ mod tests {
         assert_eq!(e3.prev_hash.as_deref(), Some(e2.hash.as_slice()));
         assert!(svc
             .verify_chain(CommunityId::from_uuid(c), 1, 3)
+            .await
+            .unwrap());
+    }
+
+    /// The batched write must produce a chain byte-identical to N sequential
+    /// `log` calls: seqs contiguous, prev_hash links intact, hashes verifiable.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn log_batch_links_chain_like_sequential_logs() {
+        let _g = db_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool.clone());
+        let c = make_community(&pool).await;
+
+        let entries = vec![
+            new_entry(c, AuditAction::EventCreated),
+            new_entry(c, AuditAction::ChannelCreated),
+            new_entry(c, AuditAction::MemberAdded),
+            new_entry(c, AuditAction::MemberRemoved),
+        ];
+        let written = svc.log_batch(entries).await.unwrap();
+
+        assert_eq!(written.len(), 4);
+        assert_eq!(written[0].seq, 1);
+        assert!(written[0].prev_hash.is_none(), "genesis entry has NULL prev_hash");
+        for (i, e) in written.iter().enumerate() {
+            assert_eq!(e.seq, i as i64 + 1);
+            assert_eq!(e.community_id, c);
+            assert_eq!(e.hash.len(), 32);
+            if i > 0 {
+                assert_eq!(
+                    e.prev_hash.as_deref(),
+                    Some(written[i - 1].hash.as_slice()),
+                    "batch entries must chain in order"
+                );
+            }
+        }
+        assert!(svc
+            .verify_chain(CommunityId::from_uuid(c), 1, 4)
+            .await
+            .unwrap(),
+            "batched chain must verify like sequential logs");
+    }
+
+    /// A batch appended after a sequential entry must chain onto it, and a
+    /// subsequent sequential entry must chain onto the batch tail.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn log_batch_chains_onto_existing_and_continues() {
+        let _g = db_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool.clone());
+        let c = make_community(&pool).await;
+
+        let first = svc
+            .log(new_entry(c, AuditAction::EventCreated))
+            .await
+            .unwrap();
+        let batch = svc
+            .log_batch(vec![
+                new_entry(c, AuditAction::ChannelCreated),
+                new_entry(c, AuditAction::MemberAdded),
+            ])
+            .await
+            .unwrap();
+        let last = svc
+            .log(new_entry(c, AuditAction::MemberRemoved))
+            .await
+            .unwrap();
+
+        assert_eq!(first.seq, 1);
+        assert_eq!(batch[0].seq, 2);
+        assert_eq!(batch[0].prev_hash.as_deref(), Some(first.hash.as_slice()));
+        assert_eq!(batch[1].seq, 3);
+        assert_eq!(batch[1].prev_hash.as_deref(), Some(batch[0].hash.as_slice()));
+        assert_eq!(last.seq, 4);
+        assert_eq!(last.prev_hash.as_deref(), Some(batch[1].hash.as_slice()));
+        assert!(svc
+            .verify_chain(CommunityId::from_uuid(c), 1, 4)
             .await
             .unwrap());
     }

@@ -802,12 +802,30 @@ impl AppState {
                 audit_cancel_worker.cancelled().await;
                 return;
             };
-            // Normal operation: process entries as they arrive.
+            // Normal operation: process entries as they arrive, batching the
+            // drain. Every accepted event enqueues an audit entry, and the
+            // per-community advisory lock serializes writes, so writing one
+            // entry per lock acquisition makes ingest latency equal audit
+            // write latency. Draining the buffer and writing each community's
+            // entries as one chain append amortizes the lock/head/commit
+            // round-trips across the whole batch (buzz-audit::AuditService
+            // ::log_batch) — identical chain bytes, one write instead of N.
             loop {
                 tokio::select! {
                     entry = audit_rx.recv() => {
                         match entry {
-                            Some(entry) => log_audit_entry(&audit_for_worker, entry).await,
+                            Some(entry) => {
+                                let mut batch: Vec<buzz_audit::NewAuditEntry> =
+                                    Vec::with_capacity(AUDIT_BATCH_MAX);
+                                batch.push(entry);
+                                while batch.len() < AUDIT_BATCH_MAX {
+                                    match audit_rx.try_recv() {
+                                        Ok(e) => batch.push(e),
+                                        Err(_) => break, // Empty or Closed
+                                    }
+                                }
+                                log_audit_batch(&audit_for_worker, batch).await;
+                            }
                             None => break, // channel closed
                         }
                     }
@@ -1339,12 +1357,54 @@ impl AuditShutdownHandle {
 
 /// Log a single audit entry with metrics. Extracted so the normal loop
 /// and the post-cancel drain share the same logic.
+/// Maximum audit entries drained into one batched chain append.
+///
+/// The channel capacity is 1000; capping the drain keeps each advisory-lock
+/// hold short while still amortizing the per-batch round-trips (lock, head
+/// read, commit, unlock) across many entries.
+const AUDIT_BATCH_MAX: usize = 256;
+
 async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::NewAuditEntry) {
     let t = std::time::Instant::now();
     if let Err(e) = audit.log(entry).await {
         metrics::counter!("buzz_audit_log_errors_total").increment(1);
         tracing::error!("Audit log failed: {e}");
     } else {
+        metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
+    }
+}
+
+/// Write a drained audit batch, grouping by community so each community's
+/// chain append holds only its own advisory lock. Falls back to the per-entry
+/// path implicitly — [`buzz_audit::AuditService::log_batch`] returns the same
+/// `AuditEntry`s and the same chain bytes as N sequential `log` calls.
+async fn log_audit_batch(
+    audit: &buzz_audit::AuditService,
+    entries: Vec<buzz_audit::NewAuditEntry>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let mut by_community: std::collections::HashMap<Uuid, Vec<buzz_audit::NewAuditEntry>> =
+        std::collections::HashMap::new();
+    for entry in entries {
+        by_community
+            .entry(*entry.community_id.as_uuid())
+            .or_default()
+            .push(entry);
+    }
+    let t = std::time::Instant::now();
+    let mut written = 0usize;
+    for (_, group) in by_community {
+        match audit.log_batch(group).await {
+            Ok(entries) => written += entries.len(),
+            Err(e) => {
+                metrics::counter!("buzz_audit_log_errors_total").increment(1);
+                tracing::error!("Audit log batch failed: {e}");
+            }
+        }
+    }
+    if written > 0 {
         metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
     }
 }
