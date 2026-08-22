@@ -256,6 +256,58 @@ pub struct RestClient {
     pub auth_tag_json: Option<String>,
 }
 
+async fn discover_channels_with_rest(
+    rest: &RestClient,
+) -> Result<HashMap<Uuid, ChannelInfo>, RelayError> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let pk_hex = rest.keys.public_key().to_hex();
+    let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+    let member_filter = nostr::Filter::new()
+        .kind(Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(p_tag, [pk_hex.as_str()]);
+    let member_events = rest.query(&[member_filter]).await?;
+    let member_arr = member_events
+        .as_array()
+        .ok_or_else(|| RelayError::Http("expected JSON array from /query (members)".into()))?;
+
+    let mut channel_uuids = Vec::new();
+    for event in member_arr {
+        if let Some(tags) = event.get("tags").and_then(|tags| tags.as_array()) {
+            for tag in tags {
+                if let Some(parts) = tag.as_array() {
+                    if parts.first().and_then(|value| value.as_str()) == Some("d") {
+                        if let Some(value) = parts.get(1).and_then(|value| value.as_str()) {
+                            if let Ok(channel_id) = value.parse::<Uuid>() {
+                                channel_uuids.push(channel_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if channel_uuids.is_empty() {
+        debug!("discovered 0 channel(s)");
+        return Ok(HashMap::new());
+    }
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let d_values: Vec<String> = channel_uuids.iter().map(ToString::to_string).collect();
+    let meta_filter = nostr::Filter::new()
+        .kind(Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16,
+        ))
+        .custom_tags(d_tag, d_values);
+    let meta_events = rest.query(&[meta_filter]).await?;
+    let map = merge_discovered_channels(channel_uuids, &meta_events);
+    debug!("discovered {} channel(s)", map.len());
+    Ok(map)
+}
+
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
 fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
@@ -277,6 +329,11 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Discover channels this identity is currently a member of.
+    pub async fn discover_channels(&self) -> Result<HashMap<Uuid, ChannelInfo>, RelayError> {
+        discover_channels_with_rest(self).await
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -685,62 +742,7 @@ impl HarnessRelay {
     /// the agent pubkey to find channel memberships, then queries kind:39000
     /// (group metadata) for channel names and types.
     pub async fn discover_channels(&self) -> Result<HashMap<Uuid, ChannelInfo>, RelayError> {
-        use nostr::{Alphabet, SingleLetterTag};
-
-        let rest = self.rest_client();
-        let pk_hex = self.keys.public_key().to_hex();
-
-        // Step 1: Find all channels where agent is a member (kind:39002 with #p tag).
-        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
-        let member_filter = nostr::Filter::new()
-            .kind(Kind::Custom(
-                buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
-            ))
-            .custom_tags(p_tag, [pk_hex.as_str()]);
-        let member_events = rest.query(&[member_filter]).await?;
-
-        let member_arr = member_events
-            .as_array()
-            .ok_or_else(|| RelayError::Http("expected JSON array from /query (members)".into()))?;
-
-        // Extract channel UUIDs from #d tags.
-        let mut channel_uuids: Vec<Uuid> = Vec::new();
-        for ev in member_arr {
-            if let Some(tags) = ev.get("tags").and_then(|t| t.as_array()) {
-                for tag in tags {
-                    if let Some(arr) = tag.as_array() {
-                        if arr.first().and_then(|v| v.as_str()) == Some("d") {
-                            if let Some(d_val) = arr.get(1).and_then(|v| v.as_str()) {
-                                if let Ok(uuid) = d_val.parse::<Uuid>() {
-                                    channel_uuids.push(uuid);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if channel_uuids.is_empty() {
-            debug!("discovered 0 channel(s)");
-            return Ok(HashMap::new());
-        }
-
-        // Step 2: Fetch metadata (kind:39000) for discovered channels.
-        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
-        let d_values: Vec<String> = channel_uuids.iter().map(|u| u.to_string()).collect();
-        let meta_filter = nostr::Filter::new()
-            .kind(Kind::Custom(
-                buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16,
-            ))
-            .custom_tags(d_tag, d_values);
-        let meta_events = rest.query(&[meta_filter]).await?;
-
-        // Step 3: Build the final subscribe set, skipping archived channels.
-        let map = merge_discovered_channels(channel_uuids, &meta_events);
-
-        debug!("discovered {} channel(s)", map.len());
-        Ok(map)
+        self.rest_client().discover_channels().await
     }
 
     /// Build a [`RestClient`] that shares this relay's HTTP credentials.

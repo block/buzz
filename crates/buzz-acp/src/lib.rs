@@ -66,6 +66,64 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Return memberships discovered by the REST bridge that are not yet covered
+/// by a live relay subscription.
+///
+/// Reconciliation is intentionally additive. A temporarily stale or partial
+/// REST response must never revoke an existing channel subscription; removals
+/// continue to be driven by signed membership notifications.
+fn channel_memberships_to_reconcile(
+    discovered: &HashMap<Uuid, relay::ChannelInfo>,
+    subscribed: &HashSet<Uuid>,
+) -> Vec<Uuid> {
+    let mut missing: Vec<_> = discovered
+        .keys()
+        .filter(|channel_id| !subscribed.contains(channel_id))
+        .copied()
+        .collect();
+    missing.sort_unstable();
+    missing
+}
+
+#[cfg(test)]
+mod membership_reconciliation_tests {
+    use super::*;
+
+    fn channel(name: &str) -> relay::ChannelInfo {
+        relay::ChannelInfo {
+            name: name.to_string(),
+            channel_type: "dm".to_string(),
+        }
+    }
+
+    #[test]
+    fn returns_only_unsubscribed_memberships_in_stable_order() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let third = Uuid::from_u128(3);
+        let discovered = HashMap::from([
+            (third, channel("third")),
+            (first, channel("first")),
+            (second, channel("second")),
+        ]);
+        let subscribed = HashSet::from([second]);
+
+        assert_eq!(
+            channel_memberships_to_reconcile(&discovered, &subscribed),
+            vec![first, third]
+        );
+    }
+
+    #[test]
+    fn an_incomplete_snapshot_never_requests_unsubscription() {
+        let subscribed_only = Uuid::from_u128(1);
+        let subscribed = HashSet::from([subscribed_only]);
+
+        assert!(channel_memberships_to_reconcile(&HashMap::new(), &subscribed).is_empty());
+        assert!(subscribed.contains(&subscribed_only));
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -2363,6 +2421,22 @@ async fn tokio_main() -> Result<()> {
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
 
+    // Membership notifications are the primary source of truth, but a client
+    // can miss one while reconnecting. Periodically compare the authenticated
+    // REST membership view with active subscriptions so newly created DMs and
+    // groups become usable without restarting the harness.
+    let reconcile_period_secs = std::env::var("BUZZ_ACP_CHANNEL_RECONCILE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30)
+        .max(5);
+    let mut channel_reconcile = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(reconcile_period_secs),
+        Duration::from_secs(reconcile_period_secs),
+    );
+    channel_reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let membership_rest = relay.rest_client();
+
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
     // CIRCUIT_BREAKER_WINDOW on each respawn attempt. The Vec is indexed by
@@ -2385,6 +2459,7 @@ async fn tokio_main() -> Result<()> {
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
+        MembershipSnapshot(Result<HashMap<Uuid, relay::ChannelInfo>, relay::RelayError>),
     }
 
     loop {
@@ -2608,6 +2683,12 @@ async fn tokio_main() -> Result<()> {
                         }
                     }
                     None
+                }
+                _ = channel_reconcile.tick() => {
+                    let _ = result_rx;
+                    Some(PoolEvent::MembershipSnapshot(
+                        membership_rest.discover_channels().await,
+                    ))
                 }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
                 buzz_event = relay.next_event() => {
@@ -3391,6 +3472,40 @@ async fn tokio_main() -> Result<()> {
                         );
                     }
                 }
+            }
+            Some(PoolEvent::MembershipSnapshot(Ok(discovered))) => {
+                for channel_id in
+                    channel_memberships_to_reconcile(&discovered, &subscribed_channel_ids)
+                {
+                    let Some(filter) =
+                        config::resolve_dynamic_channel_filter(&config, channel_id, &rules)
+                    else {
+                        tracing::debug!(
+                            %channel_id,
+                            "membership reconciliation: no matching rules — skipping"
+                        );
+                        continue;
+                    };
+
+                    tracing::info!(
+                        %channel_id,
+                        "membership reconciliation: subscribing to discovered channel"
+                    );
+                    match relay.subscribe_channel(channel_id, filter).await {
+                        Ok(()) => {
+                            subscribed_channel_ids.insert(channel_id);
+                            removed_channels.remove(&channel_id);
+                        }
+                        Err(error) => tracing::warn!(
+                            %channel_id,
+                            %error,
+                            "membership reconciliation: subscription failed"
+                        ),
+                    }
+                }
+            }
+            Some(PoolEvent::MembershipSnapshot(Err(error))) => {
+                tracing::warn!(%error, "membership reconciliation failed");
             }
             None => {} // relay/heartbeat/shutdown branches handled inline above
         }
