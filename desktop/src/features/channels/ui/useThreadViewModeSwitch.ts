@@ -48,19 +48,47 @@ export function getScopedLayoutScrollTargetId({
     : null;
 }
 
+/** Scroll region whose top-visible row is preserved across a mode switch. */
+export const THREAD_BODY_SELECTOR = '[data-testid="message-thread-body"]';
+
 type ThreadViewModeSwitchOptions = {
+  /**
+   * Identity of the surface the captured anchor belongs to.
+   *
+   * A row id only means something inside the surface it was read from, so the
+   * anchor is dropped when this changes. Threads pass the open thread head;
+   * surfaces that do not preserve a reading position pass `null`.
+   */
   activeThreadHeadId: string | null;
-  externalScrollTargetId: string | null;
-  onExternalTargetResolved: () => void;
+  /**
+   * Scroll region to read the anchor from, and to focus when the switch was not
+   * keyboard-driven. Defaults to the channel thread body.
+   */
+  bodySelector?: string;
+  externalScrollTargetId?: string | null;
+  onExternalTargetResolved?: () => void;
   onModeChange?: (mode: ThreadViewMode) => void;
+  /**
+   * Whether the reader's row is restored after the switch.
+   *
+   * Threads restore it. The agent work viewer deliberately does not: its
+   * transcript rows use `content-visibility: auto` with an over-reserved
+   * `contain-intrinsic-size`, so the scroll height shrinks as rows paint after
+   * the layout change and a restored position slides out from under the reader.
+   * Snapping to the latest activity is the honest behaviour until transcript
+   * rows reserve their real heights.
+   */
+  preserveReadingPosition?: boolean;
 };
 
-/** Preserves the reply being read while the thread changes presentation. */
+/** Preserves the row being read while a surface changes presentation. */
 export function useThreadViewModeSwitch({
   activeThreadHeadId,
-  externalScrollTargetId,
+  bodySelector = THREAD_BODY_SELECTOR,
+  externalScrollTargetId = null,
   onExternalTargetResolved,
   onModeChange,
+  preserveReadingPosition = true,
 }: ThreadViewModeSwitchOptions) {
   const [layoutScrollTarget, setLayoutScrollTarget] =
     React.useState<LayoutScrollTarget | null>(null);
@@ -77,10 +105,10 @@ export function useThreadViewModeSwitch({
 
   const changeThreadViewMode = React.useCallback(
     (mode: ThreadViewMode, restoreFocus: boolean) => {
-      const body = document.querySelector<HTMLElement>(
-        '[data-testid="message-thread-body"]',
-      );
-      const anchorId = findTopVisibleThreadMessageId(body);
+      const body = document.querySelector<HTMLElement>(bodySelector);
+      const anchorId = preserveReadingPosition
+        ? findTopVisibleThreadMessageId(body)
+        : null;
 
       setLayoutScrollTarget(
         anchorId && activeThreadHeadId
@@ -95,13 +123,13 @@ export function useThreadViewModeSwitch({
             .querySelector<HTMLElement>(
               restoreFocus
                 ? '[data-testid="thread-view-mode-toggle"]'
-                : '[data-testid="message-thread-body"]',
+                : bodySelector,
             )
             ?.focus({ preventScroll: true });
         });
       });
     },
-    [activeThreadHeadId, onModeChange],
+    [activeThreadHeadId, bodySelector, onModeChange, preserveReadingPosition],
   );
 
   const resolveScrollTarget = React.useCallback(
@@ -110,7 +138,7 @@ export function useThreadViewModeSwitch({
         externalTargetId: externalScrollTargetId,
         layoutTargetId: layoutScrollTargetId,
       });
-      if (resolution.resolveExternal) onExternalTargetResolved();
+      if (resolution.resolveExternal) onExternalTargetResolved?.();
       if (settledMessageId) {
         setLayoutScrollTarget((current) =>
           current?.threadHeadId === activeThreadHeadId &&

@@ -28,43 +28,43 @@ const THREAD_VIEW_MODE_TOGGLE = {
   focus: {
     // Viewing the drawer → offer the pane.
     icon: Columns2,
-    label: "Show thread beside channel",
+    label: (surface: string) => `Show ${surface} beside channel`,
     target: "split",
   },
   split: {
     // Viewing the pane → offer the drawer.
     icon: PanelRightOpen,
-    label: "Expand thread",
+    label: (surface: string) => `Expand ${surface}`,
     target: "focus",
   },
 } as const;
 
+type ThreadViewModeToggleProps = {
+  /** Accessible noun for the surface sharing the thread layout preference. */
+  surfaceLabel?: string;
+  onChange: (mode: ThreadViewMode, restoreFocus: boolean) => void;
+};
+
 /**
- * Switches an open thread between the focus drawer and the split pane.
+ * Switches an open auxiliary surface between the focus drawer and split pane.
  *
- * Writes straight to the persisted preference, so the control doubles as the
- * setting: choosing a layout here is choosing how threads open from now on. That
- * is the intended behaviour — the place you form the opinion is the place you are
- * looking at the thread, not a settings page — and it is why the label names an
- * action rather than a state.
- *
- * A tooltip is mandatory, not decoration. A lone toggle showing its target is the
- * conventional pattern and still routinely misread as showing the current state;
- * the glyph cannot disambiguate itself, so the label has to.
+ * Threads and the agent work viewer intentionally share this control and its
+ * persisted preference. `surfaceLabel` keeps the action truthful when the
+ * current occupant is not a thread.
  */
 export function ThreadViewModeToggle({
   onChange,
-}: {
-  onChange: (mode: ThreadViewMode, restoreFocus: boolean) => void;
-}) {
+  surfaceLabel = "thread",
+}: ThreadViewModeToggleProps) {
   const viewMode = useThreadViewMode();
   const { icon: Icon, label, target } = THREAD_VIEW_MODE_TOGGLE[viewMode];
+  const accessibleLabel = label(surfaceLabel);
 
   return (
     <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
         <Button
-          aria-label={label}
+          aria-label={accessibleLabel}
           className="shrink-0"
           data-testid="thread-view-mode-toggle"
           onClick={(event) =>
@@ -77,7 +77,7 @@ export function ThreadViewModeToggle({
           <Icon />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
+      <TooltipContent>{accessibleLabel}</TooltipContent>
     </Tooltip>
   );
 }
