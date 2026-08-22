@@ -97,6 +97,31 @@ final threadLocalRepliesProvider =
       ThreadRepliesArgs
     >(ThreadLocalRepliesNotifier.new);
 
+class ThreadLiveRepliesNotifier extends Notifier<List<NostrEvent>> {
+  final ThreadRepliesArgs args;
+
+  ThreadLiveRepliesNotifier(this.args);
+
+  @override
+  List<NostrEvent> build() => const [];
+
+  void add(NostrEvent event) {
+    state = _mergeReplies(state, [event]);
+  }
+}
+
+/// Replies received by the channel's live subscription.
+///
+/// Keep these independently from optimistic local replies. A thread query is
+/// still the authoritative history source, but an open thread must not hide a
+/// relay-delivered reply while that one-shot query is refreshing or failing.
+final threadLiveRepliesProvider =
+    NotifierProvider.family<
+      ThreadLiveRepliesNotifier,
+      List<NostrEvent>,
+      ThreadRepliesArgs
+    >(ThreadLiveRepliesNotifier.new);
+
 /// Relay-backed replies merged with signed local replies that are still
 /// waiting for acknowledgement.
 final threadRepliesWithLocalProvider =
@@ -105,6 +130,7 @@ final threadRepliesWithLocalProvider =
       args,
     ) {
       final relayReplies = ref.watch(threadRepliesProvider(args));
+      final liveReplies = ref.watch(threadLiveRepliesProvider(args));
       final localReplies = ref.watch(threadLocalRepliesProvider(args));
       final authoritative = relayReplies.value;
       if (authoritative != null && localReplies.isNotEmpty) {
@@ -120,11 +146,12 @@ final threadRepliesWithLocalProvider =
           });
         }
       }
-      if (localReplies.isEmpty) return relayReplies;
+      final overlays = _mergeReplies(liveReplies, localReplies);
+      if (overlays.isEmpty) return relayReplies;
       return relayReplies.when(
-        data: (events) => AsyncData(_mergeReplies(events, localReplies)),
-        loading: () => AsyncData(localReplies),
-        error: (error, stackTrace) => AsyncData(localReplies),
+        data: (events) => AsyncData(_mergeReplies(events, overlays)),
+        loading: () => AsyncData(overlays),
+        error: (error, stackTrace) => AsyncData(overlays),
       );
     });
 
