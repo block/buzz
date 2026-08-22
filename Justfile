@@ -340,6 +340,13 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # buzz-sdk builders/mentions: pure event-construction unit tests (no
+        # infra) that pin the signed wire shape — tag order, NIP-10 markers, and
+        # the mention `p`-tag validation from #6291. Enumerated explicitly for
+        # the same reason as the packages above: the crate is a workspace member
+        # and gets clippy/check, but no CI job executed a single one of its
+        # tests, so a builder regression shipped green.
+        cargo nextest run -p buzz-sdk
     else
         ./scripts/run-tests.sh unit
     fi
