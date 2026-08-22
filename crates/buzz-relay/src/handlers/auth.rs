@@ -387,8 +387,19 @@ mod tests {
     }
 
     async fn ws_test_state() -> Option<(Arc<AppState>, sqlx::PgPool)> {
+        ws_test_state_with(|_| {}).await
+    }
+
+    /// `ws_test_state`, but lets a test adjust the config before the relay is
+    /// built — `allow_nip_oa_auth` defaults to **false**, so a test that needs
+    /// the delegated-admission branch must turn it on or it will pass for the
+    /// wrong reason.
+    async fn ws_test_state_with(
+        adjust: impl FnOnce(&mut crate::config::Config),
+    ) -> Option<(Arc<AppState>, sqlx::PgPool)> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.require_relay_membership = true;
+        adjust(&mut config);
         let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -635,19 +646,30 @@ mod tests {
     /// materialization.
     ///
     /// The sibling expiry test enrols the agent directly, so admission never
-    /// consults the tag and it cannot observe this: it only proves an expired
-    /// credential confers no ownership. Here the agent is **not** a relay member
-    /// and reaches the relay solely through its member owner, so the tag is the
-    /// whole basis for access. NIP-AA Step 4 requires the `created_at` clauses to
-    /// be evaluated against the AUTH event's signed `created_at`; without that,
-    /// a once-valid capability reconnects forever while the owner stays enrolled.
+    /// consults the tag and it can only prove an expired credential confers no
+    /// ownership. Here the agent is **not** a relay member and reaches the relay
+    /// solely through its member owner, so the tag is the whole basis for
+    /// access. NIP-AA Step 4 requires the `created_at` clauses to be evaluated
+    /// against the AUTH event's signed `created_at`; without that, a once-valid
+    /// capability reconnects forever while the owner stays enrolled.
+    ///
+    /// The unbounded case is a **positive control, not decoration**: it proves
+    /// the delegated branch is actually reached under this config. Without it
+    /// the two denials also pass when delegation is disabled outright — which is
+    /// exactly how an earlier draft of this test passed against the unfixed
+    /// code.
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_delegated_admission_refuses_credentials_outside_their_window() {
         // Bounds are strict, so an AUTH event stamped exactly at the boundary
         // satisfies neither clause.
-        for (label, op) in [("expired", '<'), ("not yet valid", '>')] {
-            let (state, pool) = require_infra(ws_test_state().await);
+        for (label, conditions, admits) in [
+            ("unbounded (positive control)", String::new(), true),
+            ("expired", "created_at<{now}".to_string(), false),
+            ("not yet valid", "created_at>{now}".to_string(), false),
+        ] {
+            let (state, pool) =
+                require_infra(ws_test_state_with(|config| config.allow_nip_oa_auth = true).await);
             let tenant = ws_seed_community(&pool).await;
             let agent = Keys::generate();
             let owner = Keys::generate();
@@ -665,21 +687,20 @@ mod tests {
                 .expect("add relay member");
 
             let now = now_secs();
-            let tag = buzz_sdk::nip_oa::compute_auth_tag(
-                &owner,
-                &agent.public_key(),
-                &format!("created_at{op}{now}"),
-            )
-            .expect("compute auth tag");
+            let conditions = conditions.replace("{now}", &now.to_string());
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), &conditions)
+                .expect("compute auth tag");
             let (conn, challenge) = pending_conn(&tenant);
             let event = auth_event(&state, &tenant, &agent, &challenge, Some(&tag), now);
 
             super::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
 
             let auth_state = conn.auth_state.read().await;
-            assert!(
-                !matches!(&*auth_state, AuthState::Authenticated(_)),
-                "a {label} credential must not admit a non-member agent to a closed relay",
+            let authenticated = matches!(&*auth_state, AuthState::Authenticated(_));
+            assert_eq!(
+                authenticated, admits,
+                "{label}: a non-member agent reaching a closed relay through its \
+                 member owner must be admitted only inside the attested window",
             );
         }
     }
