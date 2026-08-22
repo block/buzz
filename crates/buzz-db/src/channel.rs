@@ -82,6 +82,58 @@ pub struct MemberRecord {
     pub removed_at: Option<DateTime<Utc>>,
 }
 
+/// Bootstrap channel ownership for the creator and, when the creator is a
+/// managed agent, the agent's registered human owner.
+///
+/// Both memberships are written inside the channel-creation transaction so a
+/// managed agent cannot create a private channel that its owner cannot discover
+/// or recover. Human creators have no `agent_owner_pubkey`, so this inserts only
+/// their own membership.
+async fn bootstrap_channel_owners(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    created_by: &[u8],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+        VALUES ($1, $2, $3, 'owner', $3)
+        ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            removed_at = NULL,
+            removed_by = NULL,
+            role = EXCLUDED.role
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(created_by)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+        SELECT $1, $2, agent_owner_pubkey, 'owner', $3
+        FROM users
+        WHERE community_id = $1
+          AND pubkey = $3
+          AND agent_owner_pubkey IS NOT NULL
+        ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            removed_at = NULL,
+            removed_by = NULL,
+            role = EXCLUDED.role
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(created_by)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 /// Creates a new channel, bootstraps the creator as owner, and returns the record.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_channel(
@@ -128,22 +180,7 @@ pub async fn create_channel(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-        VALUES ($1, $2, $3, 'owner', $4)
-        ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
-            removed_at = NULL,
-            removed_by = NULL,
-            role = EXCLUDED.role
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(id)
-    .bind(created_by)
-    .bind(created_by)
-    .execute(&mut *tx)
-    .await?;
+    bootstrap_channel_owners(&mut tx, community_id, id, created_by).await?;
 
     let row = sqlx::query(
         r#"
@@ -226,23 +263,7 @@ pub async fn create_channel_with_id(
     let was_created = rows_affected > 0;
 
     if was_created {
-        // Bootstrap the creator as owner.
-        sqlx::query(
-            r#"
-            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, $3, 'owner', $4)
-            ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
-                removed_at = NULL,
-                removed_by = NULL,
-                role = EXCLUDED.role
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .bind(created_by)
-        .bind(created_by)
-        .execute(&mut *tx)
-        .await?;
+        bootstrap_channel_owners(&mut tx, community_id, channel_id, created_by).await?;
     }
 
     let row = sqlx::query(
@@ -2005,6 +2026,93 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert channel with fixed id");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn managed_agent_channel_includes_human_owner() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let human_owner = random_pubkey();
+        let agent = random_pubkey();
+
+        for pubkey in [&human_owner, &agent] {
+            ensure_user(&pool, community, pubkey)
+                .await
+                .expect("ensure user");
+        }
+        set_agent_owner(&pool, community, &agent, &human_owner)
+            .await
+            .expect("set agent owner");
+
+        let channel = create_channel(
+            &pool,
+            community,
+            "agent-private-channel",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &agent,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("get members");
+        assert_eq!(members.len(), 2);
+        assert!(members
+            .iter()
+            .any(|member| member.pubkey == agent && member.role == "owner"));
+        assert!(members
+            .iter()
+            .any(|member| member.pubkey == human_owner && member.role == "owner"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn managed_agent_channel_with_client_id_includes_human_owner() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let human_owner = random_pubkey();
+        let agent = random_pubkey();
+
+        for pubkey in [&human_owner, &agent] {
+            ensure_user(&pool, community, pubkey)
+                .await
+                .expect("ensure user");
+        }
+        set_agent_owner(&pool, community, &agent, &human_owner)
+            .await
+            .expect("set agent owner");
+
+        let channel_id = Uuid::new_v4();
+        let (_, was_created) = create_channel_with_id(
+            &pool,
+            community,
+            channel_id,
+            "agent-client-id-channel",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &agent,
+            None,
+        )
+        .await
+        .expect("create channel with id");
+        assert!(was_created);
+
+        let members = get_members(&pool, community, channel_id)
+            .await
+            .expect("get members");
+        assert_eq!(members.len(), 2);
+        assert!(members
+            .iter()
+            .any(|member| member.pubkey == agent && member.role == "owner"));
+        assert!(members
+            .iter()
+            .any(|member| member.pubkey == human_owner && member.role == "owner"));
     }
 
     #[tokio::test]
