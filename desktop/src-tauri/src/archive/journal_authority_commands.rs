@@ -6,7 +6,7 @@ use super::journal_authority::{
     self, JournalAuthorityArtifact, JournalVerificationInput, OwnerJournalOverrideInput,
 };
 use super::today_snapshot::{self, TodaySnapshotReceipt};
-use super::{identity_pubkey, now_secs};
+use super::{identity_pubkey, now_secs, observer_time, store};
 use crate::app_state::AppState;
 use crate::managed_agents::nest_dir;
 use crate::relay::relay_ws_url_with_override;
@@ -173,11 +173,43 @@ pub async fn query_journal_authority_artifacts(
         .await
 }
 
-/// Atomically publish the frontend's canonical Today projection to a private,
-/// owner-scoped local JSON snapshot. The envelope is validated against the
-/// active identity and no identity secret is accepted or serialized.
+fn validate_snapshot_unindexed_fence(snapshot_json: &str, current: i64) -> Result<(), String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|error| format!("invalid Today snapshot JSON: {error}"))?;
+    let projection = snapshot
+        .pointer("/surface/snapshotProjection")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("Today snapshot must include snapshotProjection")?;
+    let declared = projection
+        .get("unindexedObserverFrames")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or("Today snapshot must disclose unindexedObserverFrames")?;
+    let excluded = projection
+        .get("excludedObserverFrames")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= declared)
+        .ok_or("Today snapshot exclusions must cover unindexed observer frames")?;
+    if excluded > 0
+        && projection
+            .get("bounded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Err("Today snapshot with excluded observer frames must be bounded".into());
+    }
+    if current > declared {
+        return Err(format!(
+            "Today snapshot archive fence changed: declared {declared}, current {current}"
+        ));
+    }
+    Ok(())
+}
+
+/// Publish while holding the archive actor so accepted observer evidence
+/// cannot overtake the signed unindexed-frame disclosure.
 #[tauri::command]
-pub fn write_owner_today_snapshot(
+pub async fn write_owner_today_snapshot(
     state: State<'_, AppState>,
     snapshot_json: String,
 ) -> Result<TodaySnapshotReceipt, String> {
@@ -185,14 +217,24 @@ pub fn write_owner_today_snapshot(
     let identity_pk = keys.public_key().to_hex();
     let relay_url = relay_ws_url_with_override(&state);
     let nest = nest_dir().ok_or("cannot resolve nest directory for Today snapshot")?;
-    today_snapshot::write_owner_today_snapshot(
-        &nest,
-        &keys,
-        &identity_pk,
-        &relay_url,
-        &snapshot_json,
-        now_secs(),
-    )
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            if !observer_time::backfill_missing(conn, &identity_pk, &relay_url, &keys)? {
+                return Err("Today snapshot archive fence requires completed backfill".into());
+            }
+            let current = store::count_unindexed_observer_frames(conn, &identity_pk, &relay_url)?;
+            validate_snapshot_unindexed_fence(&snapshot_json, current)?;
+            today_snapshot::write_owner_today_snapshot(
+                &nest,
+                &keys,
+                &identity_pk,
+                &relay_url,
+                &snapshot_json,
+                now_secs(),
+            )
+        })
+        .await
 }
 
 /// Read and revalidate the current owner's unexpired Today snapshot.
@@ -202,4 +244,23 @@ pub fn read_owner_today_snapshot(state: State<'_, AppState>) -> Result<String, S
     let relay_url = relay_ws_url_with_override(&state);
     let nest = nest_dir().ok_or("cannot resolve nest directory for Today snapshot")?;
     today_snapshot::read_owner_today_snapshot(&nest, &identity_pk, &relay_url, now_secs())
+}
+
+#[cfg(test)]
+mod snapshot_fence_tests {
+    use super::validate_snapshot_unindexed_fence;
+
+    #[test]
+    fn snapshot_fence_rejects_a_newly_hidden_observer_frame() {
+        let snapshot = r#"{"surface":{"snapshotProjection":{"bounded":true,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
+        assert!(validate_snapshot_unindexed_fence(snapshot, 2).is_ok());
+        assert!(validate_snapshot_unindexed_fence(snapshot, 1).is_ok());
+        assert!(validate_snapshot_unindexed_fence(snapshot, 3)
+            .unwrap_err()
+            .contains("declared 2, current 3"));
+        let false_complete = r#"{"surface":{"snapshotProjection":{"bounded":false,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
+        assert!(validate_snapshot_unindexed_fence(false_complete, 2)
+            .unwrap_err()
+            .contains("must be bounded"));
+    }
 }

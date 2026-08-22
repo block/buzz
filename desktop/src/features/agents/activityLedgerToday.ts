@@ -19,7 +19,7 @@ export type ActivityLedgerAgentIdentity = {
 export type ArchivedObserverEventPage = {
   events: readonly RelayEvent[];
   /** Frames already excluded because no trustworthy inner time was indexable. */
-  excludedObserverFrames: number;
+  unindexedObserverFrames: number;
 };
 
 export const TODAY_SNAPSHOT_SURFACE_MAX_BYTES = 6 * 1024 * 1024;
@@ -36,6 +36,7 @@ export type TodaySnapshotProjection = {
   omittedJournals: number;
   omittedEvents: number;
   excludedObserverFrames: number;
+  unindexedObserverFrames: number;
   textFieldsTruncated: number;
 };
 
@@ -173,6 +174,7 @@ function snapshotSurfaceFromJournals(input: {
   originalJournalCount: number;
   originalEventCount: number;
   excludedObserverFrames: number;
+  unindexedObserverFrames: number;
   textFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
   const channels = new Map<
@@ -247,6 +249,7 @@ function snapshotSurfaceFromJournals(input: {
       omittedJournals,
       omittedEvents,
       excludedObserverFrames: input.excludedObserverFrames,
+      unindexedObserverFrames: input.unindexedObserverFrames,
       textFieldsTruncated: input.textFieldsTruncated,
     },
   };
@@ -304,6 +307,7 @@ export function buildBoundedTodayActivitySurface(
       originalJournalCount,
       originalEventCount,
       excludedObserverFrames: previousProjection?.excludedObserverFrames ?? 0,
+      unindexedObserverFrames: previousProjection?.unindexedObserverFrames ?? 0,
       textFieldsTruncated,
     });
   const compactedTextCount =
@@ -372,6 +376,7 @@ function buildArchiveReconstructionCheckpoint(input: {
   originalJournalCount: number;
   originalEventCount: number;
   excludedObserverFrames: number;
+  unindexedObserverFrames: number;
   previousTextFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
   const ordered = [...input.surface.journals].sort(
@@ -396,6 +401,7 @@ function buildArchiveReconstructionCheckpoint(input: {
       originalJournalCount: input.originalJournalCount,
       originalEventCount: input.originalEventCount,
       excludedObserverFrames: input.excludedObserverFrames,
+      unindexedObserverFrames: input.unindexedObserverFrames,
       textFieldsTruncated,
     });
   const all = compacted.map((item) => item.journal);
@@ -444,13 +450,22 @@ function isObserverEvent(value: unknown): value is ObserverEvent {
   );
 }
 
-function unwrapObserverEvents(value: unknown): ObserverEvent[] {
-  if (!isObserverEvent(value)) return [];
-  if (value.kind !== "batch") return [value];
-  if (!value.payload || typeof value.payload !== "object") return [];
+function unwrapObserverEvents(value: unknown): {
+  events: ObserverEvent[];
+  rejectedEvents: number;
+} {
+  if (!isObserverEvent(value)) return { events: [], rejectedEvents: 1 };
+  if (value.kind !== "batch") return { events: [value], rejectedEvents: 0 };
+  if (!value.payload || typeof value.payload !== "object") {
+    return { events: [], rejectedEvents: 1 };
+  }
   const events = (value.payload as { events?: unknown }).events;
-  if (!Array.isArray(events)) return [];
-  return events.filter(isObserverEvent);
+  if (!Array.isArray(events)) return { events: [], rejectedEvents: 1 };
+  const decodedEvents = events.filter(isObserverEvent);
+  return {
+    events: decodedEvents,
+    rejectedEvents: events.length - decodedEvents.length,
+  };
 }
 
 /** Return the local-time half-open Unix range used by the owner Today view. */
@@ -509,13 +524,15 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   const journalEventCounts = new Map<string, number>();
   let originalEventCount = 0;
   let excludedObserverFrames = 0;
+  let unindexedObserverFrames = 0;
   let textFieldsTruncated = 0;
   let checkpoint: BoundedTodayActivitySurface | null = null;
 
   for await (const archivedPage of input.pages) {
     const page = "events" in archivedPage ? archivedPage.events : archivedPage;
     if ("events" in archivedPage) {
-      excludedObserverFrames += archivedPage.excludedObserverFrames;
+      unindexedObserverFrames += archivedPage.unindexedObserverFrames;
+      excludedObserverFrames += archivedPage.unindexedObserverFrames;
     }
     const decodedPage: (ObserverEvent[] | null)[] = Array.from(
       { length: page.length },
@@ -541,9 +558,11 @@ async function buildTodayActivityFromArchivedEventPages(input: {
 
         try {
           const decoded = await decrypt(relayEvent);
-          const decodedEvents = unwrapObserverEvents(decoded);
+          const { events: decodedEvents, rejectedEvents } =
+            unwrapObserverEvents(decoded);
+          excludedObserverFrames += rejectedEvents;
           if (decodedEvents.length === 0) {
-            excludedObserverFrames += 1;
+            if (rejectedEvents === 0) excludedObserverFrames += 1;
             continue;
           }
           decodedPage[index] = decodedEvents;
@@ -614,6 +633,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalJournalCount: journalEventCounts.size,
       originalEventCount,
       excludedObserverFrames,
+      unindexedObserverFrames,
       previousTextFieldsTruncated: textFieldsTruncated,
     });
     textFieldsTruncated = checkpoint.snapshotProjection.textFieldsTruncated;
@@ -638,6 +658,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalJournalCount: 0,
       originalEventCount: 0,
       excludedObserverFrames,
+      unindexedObserverFrames,
       textFieldsTruncated: 0,
     })
   );

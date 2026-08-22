@@ -99,11 +99,12 @@ test("Today reconstruction discloses frames excluded before range paging", async
   const surface = await buildTodayActivityFromArchivedPages({
     day: "2026-08-21",
     agents: [{ pubkey: "agent-a", name: "Honey" }],
-    pages: [{ events: [], excludedObserverFrames: 2 }],
+    pages: [{ events: [], unindexedObserverFrames: 2 }],
   });
 
   assert.equal(surface.counts.journals, 0);
   assert.equal(surface.snapshotProjection.excludedObserverFrames, 2);
+  assert.equal(surface.snapshotProjection.unindexedObserverFrames, 2);
   assert.equal(surface.snapshotProjection.bounded, true);
 });
 
@@ -125,6 +126,43 @@ test("Today reconstruction reports malformed or empty observer batches", async (
   });
   assert.equal(surface.counts.journals, 0);
   assert.equal(surface.snapshotProjection.excludedObserverFrames, 1);
+});
+
+test("Today reconstruction counts malformed members of a partially valid batch", async () => {
+  const timestamp = "2026-08-21T14:00:00.000Z";
+  const event = relayEvent({
+    id: "partial-batch",
+    decoded: {
+      seq: 2,
+      timestamp,
+      kind: "batch",
+      payload: {
+        events: [
+          {
+            seq: 1,
+            timestamp,
+            kind: "turn_started",
+            agentIndex: 0,
+            channelId: "channel-1",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            payload: { triggeringEventIds: ["message-1"] },
+          },
+          { kind: "turn_error", malformed: true },
+        ],
+      },
+    },
+  });
+  const surface = await buildTodayActivityFromArchivedEvents({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [event],
+    decrypt: async (candidate) => candidate.decoded,
+  });
+
+  assert.equal(surface.counts.journals, 1);
+  assert.equal(surface.snapshotProjection.excludedObserverFrames, 1);
+  assert.equal(surface.snapshotProjection.bounded, true);
 });
 
 test("Today reconstruction expands every inner event from one signed batch", async () => {

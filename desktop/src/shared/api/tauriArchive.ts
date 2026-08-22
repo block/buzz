@@ -574,10 +574,16 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
   pageSize?: number;
 }): AsyncGenerator<{
   events: import("@/shared/api/types").RelayEvent[];
-  excludedObserverFrames: number;
+  unindexedObserverFrames: number;
 }> {
   let before: ArchivedObserverRangeCursor | null = null;
-  let disclosedUnindexedFrames = false;
+  let disclosedUnindexedFrames = 0;
+  const disclosureDelta = (observed: number) => {
+    const next = Math.max(disclosedUnindexedFrames, observed);
+    const delta = next - disclosedUnindexedFrames;
+    disclosedUnindexedFrames = next;
+    return delta;
+  };
   for (;;) {
     const page = await readArchivedObserverEventsForRange({
       ...opts,
@@ -587,12 +593,26 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
     if (!page.backfillComplete) continue;
     yield {
       events: page.events,
-      excludedObserverFrames: disclosedUnindexedFrames
-        ? 0
-        : page.unindexedObserverFrames,
+      unindexedObserverFrames: disclosureDelta(page.unindexedObserverFrames),
     };
-    disclosedUnindexedFrames = true;
-    if (!page.hasMore) return;
+    if (!page.hasMore) {
+      // Fence concurrent ingest after the final event page. The count is
+      // monotonic for this reconstruction: retention may lower the archive
+      // total, but it must never retract an omission already disclosed.
+      for (;;) {
+        const finalPage = await readArchivedObserverEventsForRange({
+          ...opts,
+          before: null,
+          limit: 1,
+        });
+        if (!finalPage.backfillComplete) continue;
+        const finalDelta = disclosureDelta(finalPage.unindexedObserverFrames);
+        if (finalDelta > 0) {
+          yield { events: [], unindexedObserverFrames: finalDelta };
+        }
+        return;
+      }
+    }
     if (!page.nextBefore) {
       throw new Error(
         "Archived observer range reported more rows without a cursor.",
