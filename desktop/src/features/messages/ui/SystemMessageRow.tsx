@@ -85,6 +85,9 @@ function buildGroupedMembershipPayload(
   const joinedThenLeft = buildJoinedThenLeftPayload(payloads);
   if (joinedThenLeft) return joinedThenLeft;
 
+  const removals = buildGroupedRemovalPayload(payloads);
+  if (removals) return removals;
+
   const arrivals = payloads.map((payload) => {
     const payloadActor = payload?.actor ? normalizePubkey(payload.actor) : null;
     const payloadTarget = payload?.target
@@ -129,6 +132,35 @@ function buildGroupedMembershipPayload(
     target: targets[0],
     targets,
   };
+}
+
+/**
+ * Collapses a run of `member_removed` events performed by one administrator
+ * into a single summary, mirroring `members_added`. Bulk removals are ordinary
+ * — cleaning up after an import, or offboarding a team — and without this each
+ * one takes its own timeline row.
+ */
+function buildGroupedRemovalPayload(
+  payloads: readonly (SystemMessagePayload | null)[],
+): SystemMessagePayload | null {
+  const first = payloads[0];
+  if (first?.type !== "member_removed" || !first.actor) return null;
+
+  const actor = normalizePubkey(first.actor);
+  const targets: string[] = [];
+  for (const payload of payloads) {
+    if (
+      payload?.type !== "member_removed" ||
+      !payload.actor ||
+      !payload.target ||
+      normalizePubkey(payload.actor) !== actor
+    ) {
+      return null;
+    }
+    targets.push(payload.target);
+  }
+
+  return { type: "members_removed", actor: first.actor, targets };
 }
 
 function buildJoinedThenLeftPayload(
@@ -316,11 +348,11 @@ function ProfileName({
 
 function membershipActivityPubkeys(payload: SystemMessagePayload): string[] {
   const pubkeys =
-    payload.type === "members_added" || payload.type === "members_joined"
+    payload.type === "members_added" ||
+    payload.type === "members_joined" ||
+    payload.type === "members_removed"
       ? (payload.targets ?? [])
-      : payload.type === "member_removed"
-        ? [payload.target ?? payload.actor]
-        : [payload.target ?? payload.actor];
+      : [payload.target ?? payload.actor];
 
   return [
     ...new Set(pubkeys.filter((pubkey): pubkey is string => Boolean(pubkey))),
@@ -572,6 +604,24 @@ function describeSystemEvent(
         title: actorName,
         action: <>removed {targetName} from the channel</>,
       };
+    case "members_removed":
+      if (!payload.actor || !payload.targets?.length) return null;
+      return {
+        title: actorName,
+        action: (
+          <>
+            removed{" "}
+            <MemberNamesInlineList
+              agentPubkeys={agentPubkeys}
+              currentPubkey={currentPubkey}
+              personaLookup={personaLookup}
+              profiles={profiles}
+              targets={payload.targets}
+            />{" "}
+            from the channel
+          </>
+        ),
+      };
     case "topic_changed":
       return {
         title: actorName,
@@ -718,7 +768,8 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     isMembershipArrival ||
     payload.type === "member_joined_then_left" ||
     payload.type === "member_left" ||
-    payload.type === "member_removed";
+    payload.type === "member_removed" ||
+    payload.type === "members_removed";
   const membershipPubkeys = isMembershipActivity
     ? membershipActivityPubkeys(payload)
     : [];

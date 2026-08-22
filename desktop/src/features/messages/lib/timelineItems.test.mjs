@@ -48,6 +48,15 @@ function memberJoinedEntry({ createdAt, id, target }) {
   return memberAddedEntry({ actor: target, createdAt, id, target });
 }
 
+function memberRemovedEntry({ actor = "actor-a", createdAt, id, target }) {
+  return entry({
+    id,
+    createdAt,
+    kind: KIND_SYSTEM_MESSAGE,
+    body: JSON.stringify({ type: "member_removed", actor, target }),
+  });
+}
+
 function memberLeftEntry({ createdAt, id, target }) {
   return entry({
     id,
@@ -128,6 +137,59 @@ test("buildTimelineItems: contiguous member additions by one actor group", () =>
     ["a", "b", "c"],
   );
   assert.equal(group?.key, "c");
+});
+
+test("buildTimelineItems: contiguous member removals by one actor group", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberRemovedEntry({ id: "a", target: "target-a", createdAt: start }),
+    memberRemovedEntry({ id: "b", target: "target-b", createdAt: start + 60 }),
+    memberRemovedEntry({
+      id: "c",
+      target: "target-c",
+      createdAt: start + 3_600,
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["a", "b", "c"],
+  );
+  assert.equal(group?.key, "c");
+});
+
+test("buildTimelineItems: removals by different actors do not group together", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberRemovedEntry({ id: "a", target: "target-a", createdAt: start }),
+    memberRemovedEntry({
+      id: "b",
+      actor: "actor-b",
+      target: "target-b",
+      createdAt: start + 60,
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system", "system"]);
+});
+
+test("buildTimelineItems: removals do not group with additions", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberAddedEntry({ id: "added", target: "target-a", createdAt: start }),
+    memberRemovedEntry({
+      id: "removed",
+      target: "target-b",
+      createdAt: start + 60,
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system", "system"]);
 });
 
 test("buildTimelineItems: contiguous self-joins group across different members", () => {
