@@ -258,8 +258,14 @@
   }
 
   .buzz-onboarding-step-frame {
+    /* min-height is the comfort floor: on a tall viewport we reserve exactly
+       what we need so the setup cards don't bounce mid-transition. On a short
+       viewport (e.g. MacBook Pro with the window docked/scaled, or with one
+       harness card wrapped to a second row after an install failure) the
+       content can exceed that floor. This frame must GROW to fit the content
+       so the outer `.buzz-startup-shell` (overflow-y-auto) can scroll; a
+       max-height here silently clips content on those screens. (#1946) */
     min-height: min(1000px, max(0px, calc(100dvh - 106px - 7rem)));
-    max-height: 1000px;
   }
 
   .buzz-onboarding-step-frame > .buzz-onboarding-slide,
