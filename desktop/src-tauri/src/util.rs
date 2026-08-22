@@ -77,6 +77,93 @@ pub(crate) fn symlink_points_to(link: &std::path::Path, target: &std::path::Path
             .unwrap_or(false)
 }
 
+/// Link a directory at `link` so it resolves to `target`.
+///
+/// Unix uses a plain symlink. Windows prefers a directory symlink and falls
+/// back to a junction, which needs neither Developer Mode nor elevation —
+/// without the fallback this fails for most users. Junctions only address
+/// local volumes, so the symlink attempt comes first to keep UNC targets
+/// working.
+#[cfg(unix)]
+pub(crate) fn create_dir_link(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_dir_link(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let symlink_error = match std::os::windows::fs::symlink_dir(target, link) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // `raw_arg` because cmd.exe re-parses its command line with rules the
+    // standard argument escaping does not match; paths cannot contain `"`,
+    // so quoting them here is sufficient.
+    let output = std::process::Command::new("cmd")
+        .arg("/C")
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            link.display(),
+            target.display()
+        ))
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "symlink failed ({symlink_error}) and junction fallback failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+/// Remove a directory link created by [`create_dir_link`].
+///
+/// Windows directory symlinks and junctions are directory entries, so
+/// `remove_file` refuses them; `remove_dir` unlinks without following.
+#[cfg(unix)]
+pub(crate) fn remove_dir_link(link: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_file(link)
+}
+
+#[cfg(windows)]
+pub(crate) fn remove_dir_link(link: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_dir(link)
+}
+
+/// Returns `true` when `link` is a directory link already resolving to `target`.
+///
+/// Unlike [`symlink_points_to`] this canonicalizes both sides: Windows stores
+/// junction and symlink targets in verbatim (`\\?\C:\…`) form, which never
+/// compares equal to the path the caller passed in.
+pub(crate) fn dir_link_points_to(link: &std::path::Path, target: &std::path::Path) -> bool {
+    let Ok(metadata) = link.symlink_metadata() else {
+        return false;
+    };
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(stored) = std::fs::read_link(link) else {
+        return false;
+    };
+    if stored == target {
+        return true;
+    }
+    match (stored.canonicalize(), target.canonicalize()) {
+        (Ok(stored), Ok(target)) => stored == target,
+        _ => false,
+    }
+}
+
 /// Compute a collision-safe backup path for `dst`.
 ///
 /// The candidate is `<parent>/<full-filename>.bak.<ms-timestamp>`. If that
