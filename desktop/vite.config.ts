@@ -32,6 +32,13 @@ export default defineConfig(async () => ({
     },
   },
 
+  // Target Safari 15 so the bundle parses on macOS 12's system WebKit (613),
+  // which lacks Safari 16.4 syntax (e.g. RegExp lookbehind in literals,
+  // class static blocks). See https://github.com/block/buzz/issues/3295
+  build: {
+    target: ["es2020", "safari15"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
