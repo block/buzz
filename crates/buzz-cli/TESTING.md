@@ -428,7 +428,7 @@ buzz workflows delete --workflow "$WF_ID" | jq .
 ```bash
 buzz feed get | jq .
 buzz feed get --limit 5 | jq .
-# Expected: [{id,pubkey,kind,content,created_at,tags}] — sig-stripped, sorted newest-first
+# Expected: [{id,pubkey,kind,content,created_at,tags,sig}] — normalized, sorted newest-first
 ```
 
 ### 6.11 Forum & Voting
