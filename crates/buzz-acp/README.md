@@ -114,10 +114,18 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
+| `BUZZ_ACP_EVENT_SINK_SOCKET` | no | — | Absolute Unix socket path for the optional local accepted-event sink. Unset disables it. |
+| `BUZZ_ACP_EVENT_SINK_TIMEOUT_MS` | no | `250` | Shared connect/write/ack deadline for the local event sink. Must be 1–5000ms. |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
+
+The local event sink emits a versioned, length-prefixed frame containing only
+the relay origin, channel UUID, and exact signed Nostr event JSON. It is invoked
+after the inbound author gate and waits for one acknowledgement byte. Failures
+are bounded and logged without changing ordinary agent dispatch. Private keys,
+API tokens, owner attestations, and other credentials are never included.
 
 ### Parallel Agents & Heartbeat
 
