@@ -189,7 +189,63 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
     Ok(())
 }
 
-/// Deduplicate and cap mentions, emitting p-tags.
+/// Marker on a `p` tag naming the author this reply answers.
+///
+/// Mirrors `P_TAG_ADDRESSING_MARKER` in
+/// `desktop/src/features/messages/lib/threading.ts`.
+pub const P_TAG_ADDRESSING_MARKER: &str = "reply";
+
+/// Marker on a `p` tag naming someone the author typed as `@name`.
+///
+/// Mirrors `P_TAG_MENTION_MARKER` in the same TypeScript module.
+pub const P_TAG_MENTION_MARKER: &str = "mention";
+
+/// `p` tags for a reply, each marked with the role it plays.
+///
+/// NIP-10 addressing and a typed `@mention` are byte-identical as bare `p`
+/// tags, so a receiver has to fetch the parent and check who wrote it just to
+/// tell them apart. These markers record what the sender already knows.
+///
+/// A pubkey that is both typed and the parent's author is emitted once as a
+/// mention: that is the one case fetching the parent cannot decide, and mention
+/// is the role that keeps the stronger signal. Relay tag filters match only the
+/// second element, so no marker affects `#p` delivery to an agent.
+fn reply_mention_tags(
+    mentions: &[&str],
+    parent_author: Option<&str>,
+    tags: &mut Vec<Tag>,
+) -> Result<(), SdkError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut lowered = Vec::new();
+    for &hex in mentions {
+        let lower = hex.to_ascii_lowercase();
+        if seen.insert(lower.clone()) {
+            lowered.push(lower);
+        }
+    }
+    let addressing = parent_author
+        .map(|hex| hex.to_ascii_lowercase())
+        .filter(|lower| !seen.contains(lower));
+
+    // The addressing tag must survive the cap: without it the agent being
+    // answered never receives the reply, while a dropped body mention costs one
+    // notification.
+    if lowered.len() > crate::mentions::MENTION_CAP - usize::from(addressing.is_some()) {
+        return Err(SdkError::TooManyMentions);
+    }
+    for lower in &lowered {
+        tags.push(tag(&["p", lower, "", P_TAG_MENTION_MARKER])?);
+    }
+    if let Some(lower) = &addressing {
+        tags.push(tag(&["p", lower, "", P_TAG_ADDRESSING_MARKER])?);
+    }
+    Ok(())
+}
+
+/// Deduplicate and cap mentions, emitting bare `p` tags.
+///
+/// Bare because a top-level message has no parent to answer: every `p` tag on
+/// it was typed by the author, so there is no second role to distinguish.
 fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
     if mentions.len() > crate::mentions::MENTION_CAP {
         return Err(SdkError::TooManyMentions);
@@ -234,7 +290,15 @@ pub fn build_message(
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
     }
-    mention_tags(mentions, &mut tags)?;
+    match thread_ref {
+        Some(tr) => reply_mention_tags(
+            mentions,
+            tr.parent_author.map(|pk| pk.to_hex()).as_deref(),
+            &mut tags,
+        )?,
+        // Top-level: a `p` tag can only be a mention, so nothing to mark.
+        None => mention_tags(mentions, &mut tags)?,
+    }
     if broadcast {
         tags.push(tag(&["broadcast", "1"])?);
     }
@@ -308,7 +372,11 @@ pub fn build_forum_comment(
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     thread_tags(thread_ref, &mut tags)?;
-    mention_tags(mentions, &mut tags)?;
+    reply_mention_tags(
+        mentions,
+        thread_ref.parent_author.map(|pk| pk.to_hex()).as_deref(),
+        &mut tags,
+    )?;
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content)
         .tags(tags)
@@ -321,6 +389,7 @@ pub fn build_diff_message(
     content: &str,
     diff_meta: &DiffMeta,
     thread_ref: Option<&ThreadRef>,
+    mention_pubkeys: &[&str],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 60 * 1024)?;
 
@@ -381,6 +450,14 @@ pub fn build_diff_message(
     }
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
+    }
+    match thread_ref {
+        Some(tr) => reply_mention_tags(
+            mention_pubkeys,
+            tr.parent_author.map(|pk| pk.to_hex()).as_deref(),
+            &mut tags,
+        )?,
+        None => mention_tags(mention_pubkeys, &mut tags)?,
     }
     Ok(EventBuilder::new(Kind::Custom(40008), content).tags(tags))
 }
@@ -2424,6 +2501,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: root,
             parent_event_id: root,
+            parent_author: None,
         };
         let builder = build_forum_comment(cid, "self-canary", &tr, &[&self_pk], &[]).unwrap();
         let ev = builder.sign_with_keys(&sender).expect("sign");
@@ -2484,6 +2562,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: eid,
             parent_event_id: eid,
+            parent_author: None,
         };
         let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
         // Direct reply: only one e-tag with "reply" marker
@@ -2507,6 +2586,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: root,
             parent_event_id: parent,
+            parent_author: None,
         };
         let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[]).unwrap());
         let e_tags: Vec<_> = ev
@@ -2599,6 +2679,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: eid,
             parent_event_id: eid,
+            parent_author: None,
         };
         let ev = sign(build_forum_comment(cid, "comment", &tr, &[], &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 45003);
@@ -2623,7 +2704,8 @@ mod tests {
     #[test]
     fn diff_message_happy_path() {
         let cid = uuid();
-        let ev = sign(build_diff_message(cid, "diff content", &good_diff_meta(), None).unwrap());
+        let ev =
+            sign(build_diff_message(cid, "diff content", &good_diff_meta(), None, &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 40008);
         assert!(has_tag(&ev, "repo", "https://github.com/example/repo"));
         assert!(has_tag(&ev, "commit", "abc1234"));
@@ -2636,7 +2718,7 @@ mod tests {
         let mut meta = good_diff_meta();
         meta.repo_url = "ftp://bad.url".into();
         assert!(matches!(
-            build_diff_message(cid, "x", &meta, None),
+            build_diff_message(cid, "x", &meta, None, &[]),
             Err(SdkError::InvalidDiffMeta(_))
         ));
     }
@@ -2647,7 +2729,7 @@ mod tests {
         let mut meta = good_diff_meta();
         meta.commit_sha = "abc12".into(); // only 5 chars
         assert!(matches!(
-            build_diff_message(cid, "x", &meta, None),
+            build_diff_message(cid, "x", &meta, None, &[]),
             Err(SdkError::InvalidDiffMeta(_))
         ));
     }
@@ -2658,7 +2740,7 @@ mod tests {
         let mut meta = good_diff_meta();
         meta.commit_sha = "xyz1234".into(); // 'x', 'y', 'z' not hex
         assert!(matches!(
-            build_diff_message(cid, "x", &meta, None),
+            build_diff_message(cid, "x", &meta, None, &[]),
             Err(SdkError::InvalidDiffMeta(_))
         ));
     }
@@ -2669,7 +2751,7 @@ mod tests {
         let mut meta = good_diff_meta();
         meta.branch = Some(("main".into(), "".into())); // target empty
         assert!(matches!(
-            build_diff_message(cid, "x", &meta, None),
+            build_diff_message(cid, "x", &meta, None, &[]),
             Err(SdkError::InvalidDiffMeta(_))
         ));
     }
@@ -2680,7 +2762,7 @@ mod tests {
         let mut meta = good_diff_meta();
         meta.pr_number = Some(0);
         assert!(matches!(
-            build_diff_message(cid, "x", &meta, None),
+            build_diff_message(cid, "x", &meta, None, &[]),
             Err(SdkError::InvalidDiffMeta(_))
         ));
     }
@@ -2690,7 +2772,7 @@ mod tests {
         let cid = uuid();
         let big = "x".repeat(60 * 1024 + 1);
         assert!(matches!(
-            build_diff_message(cid, &big, &good_diff_meta(), None),
+            build_diff_message(cid, &big, &good_diff_meta(), None, &[]),
             Err(SdkError::ContentTooLarge { .. })
         ));
     }
@@ -2710,7 +2792,7 @@ mod tests {
             truncated: true,
             alt_text: Some("patch for bug fix".into()),
         };
-        let ev = sign(build_diff_message(cid, "diff", &meta, None).unwrap());
+        let ev = sign(build_diff_message(cid, "diff", &meta, None, &[]).unwrap());
         assert!(has_tag(&ev, "file", "src/lib.rs"));
         assert!(has_tag(&ev, "parent-commit", "1234567"));
         assert!(has_tag(&ev, "pr", "42"));

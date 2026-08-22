@@ -961,6 +961,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                               mentionPubkeys: mentionPubkeys,
                               channel: channel,
                               parentEventId: threadHead.id,
+                              parentAuthorPubkey: threadHead.pubkey,
                               rootEventId: effectiveRootId,
                               mediaTags: mediaTags,
                             ),

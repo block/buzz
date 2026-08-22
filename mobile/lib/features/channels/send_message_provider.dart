@@ -1,13 +1,14 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
 import 'channel_messages_provider.dart';
-import 'message_mention_pubkeys.dart';
 import 'local_message_send_animation_provider.dart';
+import 'message_recipients.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
@@ -56,6 +57,7 @@ class SendMessage {
     required String content,
     String? parentEventId,
     String? rootEventId,
+    String? parentAuthorPubkey,
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
@@ -69,28 +71,67 @@ class SendMessage {
     final dmRecipientPubkeys = channel?.isDm == true
         ? await _fetchDmRecipientPubkeys(channelId, channel!, authorPubkey)
         : null;
-    final resolvedMentions = dmRecipientPubkeys != null
-        ? messageMentionPubkeys(
+    // Split by role, not merged: a DM addresses its other participants whether
+    // or not anyone typed their names, and a reply marks each `p` tag with the
+    // role it plays. One list cannot say which is which.
+    final recipients = dmRecipientPubkeys != null
+        ? messageRecipients(
             channel: channel!,
             senderPubkey: authorPubkey,
             explicitMentions: explicitMentions,
             dmRecipientPubkeys: dmRecipientPubkeys,
           )
-        : explicitMentions;
+        : MessageRecipients(
+            mentions: [for (final pk in explicitMentions) pk.toLowerCase()],
+            addressed: const [],
+          );
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
-    final seenMentions = <String>{?selfLower};
+    final seen = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
+      for (final pk in recipients.mentions)
+        if (seen.add(pk.toLowerCase())) pk.toLowerCase(),
+    ];
+
+    // A reply also addresses the author it answers (NIP-10). Agent harnesses
+    // subscribe with `#p`, so without this tag the relay never delivers the
+    // reply and the agent cannot see that it was answered.
+    //
+    // Kept out of the mention list and marked instead: as a bare `p` tag it is
+    // byte-identical to a typed @mention, which forces every receiver to fetch
+    // the parent just to tell them apart. `seen` already holds self, so one
+    // lookup covers "answering myself" and "already typed in the body" — and in
+    // the latter case mention is the role that survives.
+    final isReply = parentEventId != null;
+    final parentLower = isPubkeyShaped(parentAuthorPubkey)
+        ? parentAuthorPubkey!.toLowerCase()
+        : null;
+    final addressingPubkey =
+        isReply && parentLower != null && seen.add(parentLower)
+        ? parentLower
+        : null;
+
+    // Whatever is left is addressed by the channel alone. Resolved after the
+    // addressing tag so a DM counterpart who wrote the parent keeps the `reply`
+    // marker instead of falling back to a bare tag — the same precedence the
+    // desktop and CLI builders apply.
+    final normalizedRecipients = <String>[
+      for (final pk in recipients.addressed)
+        if (seen.add(pk.toLowerCase())) pk.toLowerCase(),
     ];
 
     final tags = <List<String>>[
       ['h', channelId],
       if (parentEventId != null) ..._buildReplyTags(parentEventId, rootEventId),
-      for (final pk in normalizedMentions) ['p', pk],
+      for (final pk in normalizedMentions)
+        if (isReply) ['p', pk, '', 'mention'] else ['p', pk],
+      // Addressed by the channel, so bare in either case: neither marker is
+      // true of them, and a bare tag means "ask the parent" — the answer they
+      // had before markers existed.
+      for (final pk in normalizedRecipients) ['p', pk],
+      if (addressingPubkey != null) ['p', addressingPubkey, '', 'reply'],
       ...mediaTags,
     ];
 

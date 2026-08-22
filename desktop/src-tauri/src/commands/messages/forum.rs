@@ -9,7 +9,7 @@ use crate::{
     relay::query_relay,
 };
 
-pub(super) async fn fetch_agent_owner_pubkeys(
+pub(in crate::commands) async fn fetch_agent_owner_pubkeys(
     state: &AppState,
     events: &[nostr::Event],
 ) -> std::collections::HashMap<String, String> {
@@ -106,7 +106,7 @@ pub(super) fn forum_reply_from_event(
     }
 }
 
-pub(super) fn link_preview_suppression_targets(
+pub(in crate::commands) fn link_preview_suppression_targets(
     originals: &[nostr::Event],
     edits: &[nostr::Event],
     owner_pubkeys: &std::collections::HashMap<String, String>,
@@ -140,7 +140,7 @@ pub(super) fn link_preview_suppression_targets(
         .collect()
 }
 
-pub(super) fn apply_link_preview_suppression(
+pub(in crate::commands) fn apply_link_preview_suppression(
     tags: &mut Vec<Vec<String>>,
     event_id: &str,
     suppressed: &std::collections::HashSet<String>,

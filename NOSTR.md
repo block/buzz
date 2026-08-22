@@ -67,7 +67,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
 | **Blossom media** | ✅ | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
 | **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. |
-| **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
+| **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. A reply should also mark why each `p` tag is there: `["p","<pubkey>","","reply"]` for the author being answered and `["p","<pubkey>","","mention"]` for someone typed as `@name`. Both are accepted bare, but an unmarked `p` tag is byte-identical to a typed mention, so the recipient has to fetch the parent to tell them apart — and where that lookup cannot answer, the tag reads as a mention, piercing their mute. |
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
@@ -180,8 +180,11 @@ nak req -k 9 --tag "h=<channel-uuid>" --search "search query" -l 20 \
   --auth --sec <privkey> ws://localhost:3000
 
 # Reply to a message (NIP-10 threading)
+# The `p` tag marked `reply` names the author being answered — omit the marker
+# and the recipient must fetch the parent to tell it from a typed @mention.
 nak event -k 9 -c "Reply text" --tag "h=<channel-uuid>" \
   --tag "e=<parent-event-id>;;reply" \
+  --tag "p=<parent-author-pubkey>;;reply" \
   --auth --sec <privkey> ws://localhost:3000
 
 # Fetch gift-wrapped DMs (NIP-17)

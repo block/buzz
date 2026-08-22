@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getForumPosts, getForumThread } from "@/shared/api/forum";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
+import { useProfileQuery } from "@/features/profile/hooks";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type {
   Channel,
@@ -10,6 +11,7 @@ import type {
   ForumThreadResponse,
 } from "@/shared/api/types";
 import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
+import { replyRecipientPubkeys } from "@/features/messages/lib/threading";
 
 /** Keeps focused polling for forum posts at the established 15-second cadence. */
 export const FORUM_POSTS_REFETCH_INTERVAL_MS = 15_000;
@@ -165,18 +167,29 @@ export function useDeleteForumReplyMutation(
   });
 }
 
-export function useCreateForumReplyMutation(channel: Channel | null) {
+export function useCreateForumReplyMutation(
+  channel: Channel | null,
+  currentPubkey?: string | null,
+) {
   const queryClient = useQueryClient();
+  const profileQuery = useProfileQuery();
 
   return useMutation({
     mutationFn: async ({
       content,
       parentEventId,
+      parentAuthorPubkey,
       mentionPubkeys,
       mediaTags,
     }: {
       content: string;
       parentEventId: string;
+      /**
+       * Author of the post being answered. Forum channels are mention-eligible
+       * for agents, and an agent's `require_mention` subscription is a `#p`
+       * REQ filter — an untagged comment never reaches it.
+       */
+      parentAuthorPubkey?: string | null;
       mentionPubkeys?: string[];
       mediaTags?: string[][];
     }) => {
@@ -184,12 +197,28 @@ export function useCreateForumReplyMutation(channel: Channel | null) {
         throw new Error("No channel selected.");
       }
 
+      // Self must be dropped here, not by the caller: `ForumView` compares
+      // against a `currentPubkey` that is `undefined` until identity resolves,
+      // so replying to your own post early would self-`p`-tag. Falling back to
+      // the profile query matters for the same reason — passing `""` would
+      // seed the dedupe set with the empty string and drop nobody.
+      // If identity is somehow still unknown, keep the tag: losing it costs
+      // the agent the comment entirely, which is worse than a stray self-tag.
+      const selfPubkey = currentPubkey ?? profileQuery.data?.pubkey ?? "";
+      const recipientPubkeys = parentAuthorPubkey
+        ? replyRecipientPubkeys({
+            currentPubkey: selfPubkey,
+            mentionPubkeys: mentionPubkeys ?? [],
+            parentAuthorPubkey,
+          })
+        : mentionPubkeys;
+
       return sendChannelMessage(
         channel.id,
         content,
         parentEventId,
         mediaTags,
-        mentionPubkeys,
+        recipientPubkeys,
         KIND_FORUM_COMMENT,
       );
     },

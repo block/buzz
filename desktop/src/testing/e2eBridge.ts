@@ -4301,9 +4301,16 @@ function buildTopLevelMessageTags(
   channelId: string,
   mentionPubkeys: string[] | undefined,
   selfPubkey: string,
+  recipientPubkeys?: string[],
 ) {
   const tags: string[][] = [["h", channelId]];
-  appendMentionTags(tags, mentionPubkeys, selfPubkey);
+  // Typed mentions and channel-addressed recipients (DM participants) are both
+  // bare `p` tags on a top-level message, exactly as the backend emits them.
+  appendMentionTags(
+    tags,
+    [...(mentionPubkeys ?? []), ...(recipientPubkeys ?? [])],
+    selfPubkey,
+  );
   return tags;
 }
 
@@ -4313,14 +4320,24 @@ function buildReplyMessageTags(
   parentEventId: string,
   rootEventId: string,
   mentionPubkeys: string[] | undefined,
+  recipientPubkeys?: string[],
 ) {
   // Preserve the reply tag ordering that the desktop message hooks already
   // expect locally: author p, h, mention ps, then thread e-tags.
+  //
+  // The mock does not add the real backend's role markers, so every `p` tag here
+  // reads as `unknown` — which is the pre-marker fallback path, not a wrong
+  // answer. Channel recipients are included so a DM reply keeps tagging its
+  // counterpart.
   const tags: string[][] = [
     ["p", authorPubkey],
     ["h", channelId],
   ];
-  appendMentionTags(tags, mentionPubkeys, authorPubkey);
+  appendMentionTags(
+    tags,
+    [...(mentionPubkeys ?? []), ...(recipientPubkeys ?? [])],
+    authorPubkey,
+  );
 
   if (parentEventId === rootEventId) {
     tags.push(["e", rootEventId, "", "reply"]);
@@ -9579,6 +9596,7 @@ async function handleSendChannelMessage(
     parentEventId?: string | null;
     kind?: number | null;
     mentionPubkeys?: string[];
+    recipientPubkeys?: string[] | null;
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
     mentionTags?: string[][] | null;
@@ -9674,6 +9692,7 @@ async function handleSendChannelMessage(
           args.channelId,
           args.mentionPubkeys,
           mockPubkey,
+          args.recipientPubkeys ?? undefined,
         ),
         ...extraTags,
       ]);
@@ -9733,6 +9752,7 @@ async function handleSendChannelMessage(
           args.parentEventId,
           rootEventId,
           args.mentionPubkeys,
+          args.recipientPubkeys ?? undefined,
         ),
         ...extraTags,
       ],
@@ -9760,11 +9780,13 @@ async function handleSendChannelMessage(
         args.parentEventId,
         args.parentEventId,
         args.mentionPubkeys,
+        args.recipientPubkeys ?? undefined,
       )
     : buildTopLevelMessageTags(
         args.channelId,
         args.mentionPubkeys,
         relayIdentity.pubkey,
+        args.recipientPubkeys ?? undefined,
       );
 
   const result = await submitSignedEvent(config, {

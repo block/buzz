@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -118,6 +119,7 @@ class ForumEventDelivery {
     required String channelId,
     required String parentEventId,
     required String content,
+    String? parentAuthorPubkey,
     List<String> mentionPubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
@@ -125,6 +127,7 @@ class ForumEventDelivery {
       kind: EventKind.forumComment,
       channelId: channelId,
       parentEventId: parentEventId,
+      parentAuthorPubkey: parentAuthorPubkey,
       content: content,
       mentionPubkeys: mentionPubkeys,
       mediaTags: mediaTags,
@@ -140,6 +143,7 @@ class ForumEventDelivery {
     required String channelId,
     required String content,
     String? parentEventId,
+    String? parentAuthorPubkey,
     required List<String> mentionPubkeys,
     required List<List<String>> mediaTags,
   }) async {
@@ -154,8 +158,28 @@ class ForumEventDelivery {
     final seen = <String>{?selfPubkey};
     final normalizedMentions = [
       for (final pk in mentionPubkeys)
-        if (seen.add(pk.toLowerCase())) pk,
+        if (seen.add(pk.toLowerCase())) pk.toLowerCase(),
     ];
+
+    // A comment also addresses the author it answers (NIP-10). Forum channels
+    // are mention-eligible for agents, and an agent's `require_mention`
+    // subscription is a `#p` filter — without this tag the relay never
+    // delivers the comment to the agent being replied to.
+    //
+    // Marked rather than folded into the mentions: as a bare `p` tag it cannot
+    // be told from a typed @mention without fetching the parent. `seen` already
+    // holds self, so one check covers both "answering myself" and "already
+    // typed in the body", where mention is the role that survives.
+    final parentLower = isPubkeyShaped(parentAuthorPubkey)
+        ? parentAuthorPubkey!.toLowerCase()
+        : null;
+    final addressingPubkey =
+        parentEventId != null &&
+            parentLower != null &&
+            !seen.contains(parentLower)
+        ? parentLower
+        : null;
+    final isReply = parentEventId != null;
 
     await _relay.submit(
       kind: kind,
@@ -163,7 +187,9 @@ class ForumEventDelivery {
       tags: [
         ['h', channelId],
         if (parentEventId != null) ['e', parentEventId, '', 'reply'],
-        for (final pk in normalizedMentions) ['p', pk],
+        for (final pk in normalizedMentions)
+          if (isReply) ['p', pk, '', 'mention'] else ['p', pk],
+        if (addressingPubkey != null) ['p', addressingPubkey, '', 'reply'],
         ...mediaTags,
         ...buildCustomEmojiTags(content, _customEmoji),
       ],

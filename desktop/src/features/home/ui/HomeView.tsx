@@ -12,7 +12,6 @@ import {
   type InboxReply,
   buildInboxItems,
   findInboxItemByEventId,
-  formatInboxFullTimestamp,
   getInboxItemConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
@@ -52,13 +51,15 @@ import {
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
-import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
+import {
+  buildOptimisticInboxReply,
+  inboxReplyRecipientPubkeys,
+} from "@/features/home/lib/inboxReplyRecipients";
+import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
-import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, HomeFeedResponse } from "@/shared/api/types";
@@ -105,6 +106,8 @@ export function HomeView({
   onRefresh,
 }: HomeViewProps) {
   const relaySelfPubkey = useRelaySelfQuery().data;
+  // Identity fallback for the reply path — see its call site below.
+  const selfProfileQuery = useProfileQuery();
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
@@ -834,6 +837,7 @@ export function HomeView({
                 content,
                 mediaTags,
                 mentionPubkeys,
+                parentAuthorPubkey,
                 parentEventId,
               }) => {
                 const channelId = selectedItem?.item.channelId;
@@ -849,43 +853,36 @@ export function HomeView({
                     emojiTags,
                     mentionTags,
                   } = splitOutgoingTags(mediaTags);
+                  const recipientPubkeys = inboxReplyRecipientPubkeys({
+                    // Falls back to the profile query: `currentPubkey` is
+                    // undefined until the identity query settles, and an empty
+                    // self pubkey makes `normalizeMentionPubkeys` drop nobody
+                    // — so replying to your own Inbox message in that window
+                    // would self-`p`-tag it into your own mention feed.
+                    currentPubkey:
+                      currentPubkey ?? selfProfileQuery.data?.pubkey,
+                    mentionPubkeys,
+                    parentAuthorPubkey,
+                    parentEventId,
+                  });
                   const result = await sendChannelMessage(
                     channelId,
                     content,
                     parentEventId,
                     imetaTags,
-                    mentionPubkeys,
+                    recipientPubkeys,
                     undefined,
                     emojiTags,
                     mentionTags,
                   );
-                  const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
-                  const reply: InboxReply = {
-                    authorLabel: currentPubkey
-                      ? resolveUserLabel({
-                          currentPubkey,
-                          profiles: feedProfiles,
-                          pubkey: authorPubkey,
-                        })
-                      : "You",
-                    authorPubkey,
-                    avatarUrl:
-                      currentPubkey && feedProfiles
-                        ? (feedProfiles[currentPubkey.trim().toLowerCase()]
-                            ?.avatarUrl ?? null)
-                        : null,
+                  const reply = buildOptimisticInboxReply({
                     content,
-                    createdAt: result.createdAt,
-                    depth: result.depth,
-                    fullTimestampLabel: formatInboxFullTimestamp(
-                      result.createdAt,
-                    ),
-                    id: result.eventId,
-                    parentId: result.parentEventId,
-                    rootId: result.rootEventId,
+                    currentPubkey,
+                    fallbackAuthorPubkey: itemToReply.item.pubkey,
+                    profiles: feedProfiles,
+                    result,
                     tags: [...imetaTags, ...emojiTags, ...mentionTags],
-                    timeLabel: formatTime(result.createdAt),
-                  };
+                  });
                   setLocalRepliesByItemId((current) => ({
                     ...current,
                     [itemToReply.conversationId]: [

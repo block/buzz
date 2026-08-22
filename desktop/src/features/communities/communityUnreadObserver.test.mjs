@@ -18,6 +18,7 @@ const EMPTY_RELATIONSHIPS = {
   participatedRootIds: new Set(),
   followedRootIds: new Set(),
   authoredRootIds: new Set(),
+  mentionedRootIds: new Set(),
   mutedRootIds: new Set(),
 };
 
@@ -918,4 +919,58 @@ test("fetchCommunityUnread forced-unread with null baseline + synced marker pres
   });
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("a DM reply answering the user still counts toward the community badge", async () => {
+  // Every DM message p-tags both participants, so the "is this a real mention
+  // or just an addressing tag?" test would throw away exactly the messages the
+  // badge exists for. In a DM the addressing tag is the point.
+  const DM_CHANNEL = "dm-channel-1";
+  const MY_MESSAGE = "mine".padEnd(64, "0");
+  const relay = relayFor([
+    // 1. member events
+    () => [event({ tags: [["d", DM_CHANNEL]] })],
+    // 2. metadata events
+    () => [
+      event({
+        tags: [
+          ["d", DM_CHANNEL],
+          ["t", "dm"],
+        ],
+      }),
+    ],
+    // 3. visibility events
+    () => [],
+    // 4. read-state events
+    () => [],
+    // 5. mutes events
+    () => [],
+    // 6. unread events
+    () => [],
+    // 7. mention events — a reply to one of the user's own DM messages
+    () => [
+      event({
+        id: "dmreply".padEnd(64, "0"),
+        created_at: 30,
+        tags: [
+          ["h", DM_CHANNEL],
+          ["p", PUBKEY],
+          ["e", MY_MESSAGE, "", "reply"],
+        ],
+      }),
+    ],
+    // 8. reply-parent lookup — the parent is the user's own message
+    () => [event({ id: MY_MESSAGE, pubkey: PUBKEY })],
+  ]);
+
+  const result = await fetchCommunityUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 1 });
 });

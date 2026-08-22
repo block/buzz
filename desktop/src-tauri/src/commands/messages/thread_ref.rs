@@ -14,11 +14,18 @@ use crate::{
 /// pinned a signer snapshot pass it as `keys` so this read's NIP-98 auth is
 /// minted by the same identity that signs the eventual event; `None`
 /// preserves the active-identity read for unpinned callers.
+///
+/// `signer` is the key that will sign the *reply*, used only to suppress the
+/// addressing tag on a self-reply. It is deliberately separate from `keys`: a
+/// managed agent reads as the active identity but signs as itself, so the two
+/// differ on that path and comparing against the wrong one strips the tag off a
+/// reply to whoever the other key belongs to.
 pub(super) async fn resolve_thread_ref(
     parent_event_id: &str,
     state: &AppState,
     api_base_url: &str,
     keys: Option<&nostr::Keys>,
+    signer: Option<nostr::PublicKey>,
 ) -> Result<events::ThreadRef, String> {
     let parent_eid =
         EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
@@ -58,8 +65,23 @@ pub(super) async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
-    Ok(events::ThreadRef {
+    let mut thread_ref = events::ThreadRef {
         root_event_id: root_eid,
         parent_event_id: parent_eid,
-    })
+        // Free: the parent event is already in hand from the root walk above,
+        // and unlike the frontend's cache it never misses.
+        parent_author: Some(parent.pubkey),
+    };
+
+    // Answering ourselves needs no addressing tag: it exists so the parent's
+    // author is notified, and we are not notified about our own writes. Applied
+    // here rather than at the call sites because a caller that forgets still
+    // reserves a slot against the mention cap, so an identical message succeeds
+    // as a stream reply and fails as a forum comment. `Some(author) == None` is
+    // false, so an unknown signer leaves the tag alone.
+    if thread_ref.parent_author == signer {
+        thread_ref.parent_author = None;
+    }
+
+    Ok(thread_ref)
 }

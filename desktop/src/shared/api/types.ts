@@ -203,48 +203,14 @@ export type SendChannelMessageResult = {
   createdAt: number;
 };
 
-export type FeedItemCategory =
-  | "mention"
-  | "needs_action"
-  | "activity"
-  | "agent_activity";
-
-export type FeedItem = {
-  id: string;
-  kind: number;
-  pubkey: string;
-  content: string;
-  createdAt: number;
-  channelId: string | null;
-  channelName: string;
-  channelType?: string;
-  tags: string[][];
-  category: FeedItemCategory;
-};
-
-export type HomeFeed = {
-  mentions: FeedItem[];
-  needsAction: FeedItem[];
-  activity: FeedItem[];
-  agentActivity: FeedItem[];
-};
-
-export type HomeFeedMeta = {
-  since: number;
-  total: number;
-  generatedAt: number;
-};
-
-export type HomeFeedResponse = {
-  feed: HomeFeed;
-  meta: HomeFeedMeta;
-};
-
-export type GetHomeFeedInput = {
-  since?: number;
-  limit?: number;
-  types?: string;
-};
+export type {
+  FeedItem,
+  FeedItemCategory,
+  GetHomeFeedInput,
+  HomeFeed,
+  HomeFeedMeta,
+  HomeFeedResponse,
+} from "./feedTypes";
 
 export type {
   SearchHit,

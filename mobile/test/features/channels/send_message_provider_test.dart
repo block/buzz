@@ -239,9 +239,235 @@ void main() {
       ),
     );
   });
+
+  test('a thread reply p-tags the author it answers', () async {
+    // Agent harnesses subscribe with `#p`, so a reply without this tag is
+    // never delivered to the agent being replied to.
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'thanks',
+      parentEventId: _parentEventId,
+      parentAuthorPubkey: _agentPubkey,
+    );
+    await session.published;
+    session.accept();
+    await result;
+
+    // `containsAll` with matchers: Dart lists compare by identity, so a bare
+    // `contains(['p', ...])` never matches an equal-but-distinct list.
+    expect(
+      session.event.tags,
+      containsAll([
+        // Marked, not bare: a bare `p` tag here is byte-identical to a typed
+        // @mention, which forces the receiver to fetch the parent just to tell
+        // them apart. Relay tag filters match only the second element, so the
+        // marker cannot affect the agent's `#p` delivery.
+        equals(['p', _agentPubkey, '', 'reply']),
+        equals(['e', _parentEventId, '', 'reply']),
+      ]),
+    );
+  });
+
+  test(
+    'a DM reply marks the counterpart as addressing, not as a mention',
+    () async {
+      // The counterpart is both the DM's other participant and the author being
+      // answered. One tag, marked `reply` — marking it `mention` would claim they
+      // had been typed as `@name`, which pierces a mute and outranks a real
+      // `@you` in the mention feed.
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final counterpart = 'c' * 64;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async => [_member(sender), _member(counterpart)],
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'thanks',
+        channel: _dmChannel([sender, counterpart]),
+        parentEventId: _parentEventId,
+        parentAuthorPubkey: counterpart,
+        mentionPubkeys: const [],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', counterpart, '', 'reply'],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
+
+  test('a DM reply to your own message leaves the counterpart bare', () async {
+    // Nobody typed the counterpart's name and they did not write the parent, so
+    // neither marker is true of them. Bare means "ask the parent", which is the
+    // answer they had before markers existed.
+    final session = _PendingPublishRelaySession();
+    final signingKey = nostr.Keys.generate().nsec;
+    final sender = nostr.Keys(
+      nostr.Nip19.decode(payload: signingKey).data,
+    ).public;
+    final counterpart = 'c' * 64;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+      fetchMembers: (_) async => [_member(sender), _member(counterpart)],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'following up on my own note',
+      channel: _dmChannel([sender, counterpart]),
+      parentEventId: _parentEventId,
+      parentAuthorPubkey: sender,
+      mentionPubkeys: const [],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+      ['p', counterpart],
+    ]);
+
+    session.accept();
+    await result;
+  });
+
+  test('a reply marks a typed mention apart from the author it answers', () async {
+    // The two roles are byte-identical as bare `p` tags, and this is the case
+    // the receiver cannot resolve by fetching the parent: one of these pubkeys
+    // was typed in the body and the other wrote the message being answered.
+    final session = _PendingPublishRelaySession();
+    final typed = 'd' * 64;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'thanks @typed',
+      parentEventId: _parentEventId,
+      parentAuthorPubkey: _agentPubkey,
+      mentionPubkeys: [typed],
+    );
+    await session.published;
+
+    // Mentions first, addressing last — the order the Rust builder emits, so an
+    // optimistic copy of this event is tag-identical to what the relay stores.
+    expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+      ['p', typed, '', 'mention'],
+      ['p', _agentPubkey, '', 'reply'],
+    ]);
+
+    session.accept();
+    await result;
+  });
+
+  test('a typed parent author is tagged once, as a mention', () async {
+    // Mention outranks addressing: typing someone's name is a stronger claim
+    // than answering them, and two tags for one pubkey would let the reply
+    // count twice.
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'thanks @agent',
+      parentEventId: _parentEventId,
+      parentAuthorPubkey: _agentPubkey,
+      mentionPubkeys: const [_agentPubkey],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+      ['p', _agentPubkey, '', 'mention'],
+    ]);
+
+    session.accept();
+    await result;
+  });
+
+  test('a malformed parent author adds no addressing tag', () async {
+    // A `p` tag is what delivers the reply to the agent being answered, so a
+    // malformed value there would be published as a tag naming nobody.
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'thanks',
+      parentEventId: _parentEventId,
+      parentAuthorPubkey: 'not-a-pubkey',
+      mentionPubkeys: const [],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p'), isEmpty);
+
+    session.accept();
+    await result;
+  });
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
+const _parentEventId =
+    'fdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfd';
+const _agentPubkey =
+    'aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae';
 
 Channel _dmChannel(List<String> participantPubkeys) => Channel(
   id: _channelId,

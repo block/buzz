@@ -39,6 +39,27 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
         .map(|(root, _)| root)
 }
 
+/// Drop the parent author when it is this identity: a reply to one's own
+/// message must not carry a self `p` tag, which would put it in the author's
+/// own `#p` mention feed.
+fn parent_author_excluding_self(client: &BuzzClient, author: Option<String>) -> Option<String> {
+    let self_hex = client.keys().public_key().to_hex();
+    author.filter(|pubkey| !pubkey.eq_ignore_ascii_case(&self_hex))
+}
+
+/// The pubkey of the event a reply answers.
+///
+/// A reply must `p`-tag it: agent `require_mention` subscriptions are `#p` REQ
+/// filters, so an untagged reply is never transmitted to the agent being
+/// answered.
+fn parent_author_from_event(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("pubkey")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pubkey| pubkey.len() == 64)
+        .map(str::to_string)
+}
+
 fn thread_ref_from_parent_tags(
     parent_eid: nostr::EventId,
     parent_event_id: &str,
@@ -52,6 +73,8 @@ fn thread_ref_from_parent_tags(
     Ok(ThreadRef {
         root_event_id: root_eid,
         parent_event_id: parent_eid,
+        // Filled in by the callers, which drop self first.
+        parent_author: None,
     })
 }
 
@@ -75,12 +98,14 @@ async fn fetch_event(client: &BuzzClient, event_id: &str) -> Result<serde_json::
         .ok_or_else(|| CliError::NotFound(format!("event {event_id} not found")))
 }
 
+/// Resolve a reply's thread position and the pubkey of the event it answers.
 async fn resolve_thread_ref(
     client: &BuzzClient,
     parent_event_id: &str,
-) -> Result<ThreadRef, CliError> {
+) -> Result<(ThreadRef, Option<String>), CliError> {
     let event = fetch_event(client, parent_event_id).await?;
-    thread_ref_from_event(parent_event_id, &event)
+    let thread_ref = thread_ref_from_event(parent_event_id, &event)?;
+    Ok((thread_ref, parent_author_from_event(&event)))
 }
 
 fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<ThreadRef, CliError> {
@@ -672,11 +697,41 @@ pub async fn cmd_send_message(
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
     // thread root is derived from the parent's NIP-10 tags via the relay.
-    let thread_ref = if let Some(ref r) = p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
-    } else {
-        None
+    let (thread_ref, parent_author) = match p.reply_to {
+        Some(ref r) => {
+            let (tr, author) = resolve_thread_ref(client, r).await?;
+            (Some(tr), author)
+        }
+        None => (None, None),
     };
+
+    // A reply addresses the author it answers (NIP-10). Resolved after the
+    // membership check above so answering someone who has since left the
+    // channel still works, and carried on the thread ref rather than folded
+    // into the mentions: as a bare `p` tag the two roles are indistinguishable,
+    // and the receiver has to fetch the parent to guess which one this is. Self
+    // is dropped — our own reply must not land in our own mention feed.
+    let mut mention_pubkeys = mention_pubkeys;
+    let mut thread_ref = thread_ref;
+    if let (Some(tr), Some(author)) = (
+        thread_ref.as_mut(),
+        parent_author_excluding_self(client, parent_author),
+    ) {
+        let already_typed = mention_pubkeys
+            .iter()
+            .any(|pk| pk.eq_ignore_ascii_case(&author));
+        if !already_typed {
+            // `merge_message_mentions` has already truncated to MENTION_CAP, so
+            // the addressing tag would put the list one over and the builder
+            // rejects the whole send. That tag is the one that must survive —
+            // without it the agent being answered never receives the reply — so
+            // drop a body mention to make room rather than failing.
+            if mention_pubkeys.len() >= buzz_sdk::mentions::MENTION_CAP {
+                mention_pubkeys.truncate(buzz_sdk::mentions::MENTION_CAP - 1);
+            }
+            tr.parent_author = nostr::PublicKey::from_hex(&author).ok();
+        }
+    }
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
@@ -782,10 +837,14 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     // `--reply-to` is the immediate parent; the thread root is derived from
     // the parent's NIP-10 tags via the relay.
-    let thread_ref = if let Some(r) = &p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
-    } else {
-        None
+    // A diff reply addresses the author it answers, same as any other reply:
+    // an agent's `require_mention` subscription is a `#p` REQ filter.
+    let (thread_ref, parent_author) = match &p.reply_to {
+        Some(r) => {
+            let (tr, author) = resolve_thread_ref(client, r).await?;
+            (Some(tr), author)
+        }
+        None => (None, None),
     };
 
     let branch = match (&p.source_branch, &p.target_branch) {
@@ -806,8 +865,17 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
         alt_text: Some(alt),
     };
 
+    // Carried on the thread ref, and marked, so the receiver does not have to
+    // fetch the parent to learn this `p` tag is addressing and not a mention.
+    let mut thread_ref = thread_ref;
+    if let (Some(tr), Some(author)) = (
+        thread_ref.as_mut(),
+        parent_author_excluding_self(client, parent_author),
+    ) {
+        tr.parent_author = nostr::PublicKey::from_hex(&author).ok();
+    }
     let builder =
-        buzz_sdk::build_diff_message(channel_uuid, &diff, &diff_meta, thread_ref.as_ref())
+        buzz_sdk::build_diff_message(channel_uuid, &diff, &diff_meta, thread_ref.as_ref(), &[])
             .map_err(|e| CliError::Other(format!("build_diff_message failed: {e}")))?;
 
     let event = client.sign_event(builder)?;

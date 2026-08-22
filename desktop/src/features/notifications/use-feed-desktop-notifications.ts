@@ -168,6 +168,9 @@ export function useFeedDesktopNotifications(
             (item) =>
               !item.channelId ||
               !mutedChannelIds?.has(item.channelId) ||
+              // Mentions pierce a channel mute. Replies that only reach this
+              // feed via their addressing p-tag are already filtered out by
+              // `eligibleFeedNotificationItems`.
               item.category === "mention",
           )
       : [];
