@@ -41,6 +41,7 @@ void main() {
     ) async {
       await _pumpPicker(tester, const ThemePickerPage());
 
+      expect(find.text('Color style'), findsOneWidget);
       await _search(tester, 'github');
 
       // Paired labels drop the brightness token — one row stands for both halves.
@@ -56,7 +57,7 @@ void main() {
       // 'snazzy-light' is light but unpaired, so it cannot follow the OS.
       await _search(tester, 'snazzy');
 
-      expect(find.text('No themes found'), findsOneWidget);
+      expect(find.text('No color styles found'), findsOneWidget);
     });
 
     testWidgets('system mode normalizes a stored unpaired theme', (
@@ -169,6 +170,21 @@ void main() {
   });
 
   group('Buzz accent behavior', () {
+    testWidgets('settings uses scoped theme terminology', (tester) async {
+      await _pumpPicker(
+        tester,
+        SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          invitePageBuilder: (_) => const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+        ),
+      );
+
+      expect(find.text('Style · This community'), findsOneWidget);
+      expect(find.text('Color mode'), findsOneWidget);
+      expect(find.text('Color style'), findsOneWidget);
+    });
+
     testWidgets('settings hides accent navigation for Buzz', (tester) async {
       await _pumpPicker(
         tester,

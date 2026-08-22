@@ -49,6 +49,7 @@ class CommunityThemeSyncManager {
 
   Timer? _publishTimer;
   Timer? _subscriptionRetryTimer;
+  Timer? _hydrationRecoveryTimer;
   void Function()? _unsubscribe;
   CommunityThemePreference? _pending;
   CommunityThemePreference? _lastPublished;
@@ -57,9 +58,15 @@ class CommunityThemeSyncManager {
   RemoteCommunityTheme? _lastRemote;
   int _subscriptionEpoch = 0;
   int _subscriptionRetryAttempt = 0;
+  int _hydrationRecoveryAttempt = 0;
   int _publishRetryAttempt = 0;
   bool _publishInFlight = false;
   bool _publishRequestedWhileInFlight = false;
+  int? _activePublishCreatedAt;
+  String? _activePublishEventId;
+  int? _activePublishRemoteRevision;
+  int _remoteRevision = 0;
+  bool _hydrationObserved = false;
   bool _disposed = false;
 
   CommunityThemeSyncManager({
@@ -124,6 +131,11 @@ class CommunityThemeSyncManager {
         CommunityThemeRemoteStatus.unavailable,
       );
     }
+    if (result.status == CommunityThemeRemoteStatus.absent) {
+      // A confirmed absence means the coordinate has been observed: there is no
+      // desktop record to preserve, so a gated incomplete edit may publish.
+      _observeHydration();
+    }
     return result;
   }
 
@@ -173,6 +185,48 @@ class CommunityThemeSyncManager {
     });
   }
 
+  /// Retry the history query while an edit is held by the pre-hydration gate
+  /// and the coordinate is still unobserved. Without this, an initial
+  /// `fetchRemote` that returns `unavailable` (a transient history failure)
+  /// while the live subscription stays quiet would strand the edit forever:
+  /// neither `initialize`'s absence path nor `_accept` ever runs, so
+  /// `_hydrationObserved` never flips and every later [flush] returns early.
+  void _scheduleHydrationRecovery() {
+    if (_disposed ||
+        _hydrationObserved ||
+        _hydrationRecoveryTimer != null ||
+        _pending == null) {
+      return;
+    }
+    final multiplier = 1 << min(_hydrationRecoveryAttempt, 5);
+    _hydrationRecoveryAttempt++;
+    _hydrationRecoveryTimer = Timer(subscriptionRetryBase * multiplier, () {
+      _hydrationRecoveryTimer = null;
+      unawaited(_recoverHydration());
+    });
+  }
+
+  Future<void> _recoverHydration() async {
+    if (_disposed || _hydrationObserved || _pending == null) return;
+    final result = await fetchRemote();
+    if (_disposed || _hydrationObserved) return;
+    if (result.status == CommunityThemeRemoteStatus.valid) {
+      _accept(result.remote!);
+    } else if (result.status == CommunityThemeRemoteStatus.absent) {
+      _observeHydration();
+    } else {
+      // Still invalid or unavailable: keep retrying with backoff until the
+      // coordinate is observed or the edit is superseded/cancelled.
+      _scheduleHydrationRecovery();
+    }
+  }
+
+  void _cancelHydrationRecovery() {
+    _hydrationRecoveryTimer?.cancel();
+    _hydrationRecoveryTimer = null;
+    _hydrationRecoveryAttempt = 0;
+  }
+
   Future<void> _recoverLiveSubscription() async {
     if (_disposed) return;
     if (!await _startLiveSubscription()) return;
@@ -184,6 +238,10 @@ class CommunityThemeSyncManager {
     if (_disposed) return;
     if (result.status == CommunityThemeRemoteStatus.valid) {
       _accept(result.remote!);
+    } else if (result.status == CommunityThemeRemoteStatus.absent) {
+      // A confirmed absence here observes the coordinate too, releasing a gated
+      // incomplete edit if the initial fetch had been unavailable.
+      _observeHydration();
     }
   }
 
@@ -202,6 +260,24 @@ class CommunityThemeSyncManager {
     _publishRetryAttempt = 0;
     _publishTimer?.cancel();
     _publishTimer = null;
+  }
+
+  /// Record that the relay coordinate has been observed at least once (a valid
+  /// record or a confirmed absence) and release an edit held by the
+  /// pre-hydration gate in [flush]. Mobile authors no desktop-only fields, so
+  /// every edit is gated until the coordinate is known and cannot be merged
+  /// before then.
+  void _observeHydration() {
+    if (_hydrationObserved) return;
+    _hydrationObserved = true;
+    _cancelHydrationRecovery();
+    final pending = _pending;
+    if (!_disposed && pending != null && !_publishInFlight) {
+      // Accelerate the held edit now that the coordinate is known. Any pending
+      // debounce timer is cancelled by _schedulePublish. A publish in flight is
+      // left to its own finally-block, which reschedules the pending edit.
+      _schedulePublish(Duration.zero);
+    }
   }
 
   void publish(CommunityThemePreference preference) {
@@ -226,6 +302,7 @@ class CommunityThemeSyncManager {
   void cancelPending() {
     _publishTimer?.cancel();
     _publishTimer = null;
+    _cancelHydrationRecovery();
     _pending = null;
   }
 
@@ -238,6 +315,16 @@ class CommunityThemeSyncManager {
     }
     final preference = _pending;
     if (_disposed || preference == null) return;
+    // Hold every edit until the relay coordinate has been observed, so a
+    // pre-hydration edit cannot replace a desktop-authored record before we
+    // have seen it. Mobile never authors the desktop-only fields, so even an
+    // edit that carries them (inherited from a stale full cache) must wait:
+    // without an observed coordinate there is nothing to merge the current
+    // desktop values from. _observeHydration releases it.
+    if (!_hydrationObserved) {
+      _scheduleHydrationRecovery();
+      return;
+    }
     if (preference == _lastPublished) {
       _pending = null;
       onPublished(preference);
@@ -245,13 +332,23 @@ class CommunityThemeSyncManager {
     }
     _publishInFlight = true;
     try {
-      final content = crypto.encrypt(jsonEncode(preference.toJson()));
+      // Preserve the desktop-only fields the relay already holds when the local
+      // edit omits them, so publishing the replaceable coordinate does not strip
+      // a desktop client's glass and prominent-tab choices. Bookkeeping stays on
+      // the local `preference` so the outbox ack contract is unaffected.
+      final remote = _lastRemote?.preference;
+      final remoteRevision = _remoteRevision;
+      final outgoing = remote == null
+          ? preference
+          : preference.mergeDesktopAppearanceFrom(remote);
+      final content = crypto.encrypt(jsonEncode(outgoing.toJson()));
       if (_disposed) return;
       final createdAt = max(
         DateTime.now().millisecondsSinceEpoch ~/ 1000,
         _lastCreatedAt + 1,
       );
       NostrEvent? signed;
+      _activePublishRemoteRevision = remoteRevision;
       await signedEventRelay.submit(
         kind: EventKind.readState,
         content: content,
@@ -260,12 +357,22 @@ class CommunityThemeSyncManager {
           ['t', communityThemeDTag],
         ],
         createdAt: createdAt,
-        onSigned: (event) => signed = event,
+        onSigned: (event) {
+          signed = event;
+          _activePublishCreatedAt = event.createdAt;
+          _activePublishEventId = event.id;
+        },
       );
       if (_disposed) return;
       final published = signed;
       if (published == null) {
         throw StateError('Signed event coordinate unavailable');
+      }
+      if (_remoteRevision != remoteRevision) {
+        _lastPublished = null;
+        _publishRetryAttempt = 0;
+        if (_pending == preference) _schedulePublish(Duration.zero);
+        return;
       }
       final publishedCoordinateIsStale =
           _lastCreatedAt > published.createdAt ||
@@ -296,6 +403,9 @@ class CommunityThemeSyncManager {
       _schedulePublish(Duration(milliseconds: retryMs));
     } finally {
       _publishInFlight = false;
+      _activePublishCreatedAt = null;
+      _activePublishEventId = null;
+      _activePublishRemoteRevision = null;
       if (!_disposed &&
           _pending != null &&
           (_publishRequestedWhileInFlight || _pending != preference) &&
@@ -333,9 +443,22 @@ class CommunityThemeSyncManager {
             remote.eventId.compareTo(_lastEventId) >= 0)) {
       return;
     }
+    final isActivePublishEcho =
+        _publishInFlight &&
+        remote.createdAt == _activePublishCreatedAt &&
+        remote.eventId == _activePublishEventId;
+    final competingRemoteSeen =
+        _activePublishRemoteRevision != null &&
+        _remoteRevision != _activePublishRemoteRevision;
     _lastCreatedAt = remote.createdAt;
     _lastEventId = remote.eventId;
-    _lastRemote = remote;
+    if (!isActivePublishEcho || !competingRemoteSeen) {
+      _lastRemote = remote;
+    }
+    if (!isActivePublishEcho) {
+      _remoteRevision++;
+    }
+    _observeHydration();
     if (_pending != null) {
       _lastPublished = null;
       return;

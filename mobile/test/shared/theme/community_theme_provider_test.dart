@@ -4,12 +4,125 @@ import 'dart:convert';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  test(
+    'mobile edit preserves omitted desktop-only fields from a legacy cache',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final storage = CommunityThemeStorage(prefs);
+      await prefs.setString(
+        storage.key(keys.public, 'https://relay.example'),
+        jsonEncode({
+          'version': 1,
+          'theme': 'buzz',
+          'accent': '#3b82f6',
+          'followSystem': true,
+        }),
+      );
+      final session = _ThemeRelaySession(
+        keys.nsec,
+        keys.public,
+        initialStatus: SessionStatus.reconnecting,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          communityThemeStorageProvider.overrideWithValue(storage),
+          relayConfigProvider.overrideWith(() => _RelayConfig(keys.nsec)),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.listen(
+        communityThemeProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      container
+          .read(communityThemeProvider.notifier)
+          .setAccent(accentIndexForWireValue('#ef4444')!);
+
+      await _waitUntil(() {
+        final raw = prefs.getString(
+          storage.key(keys.public, 'https://relay.example'),
+        );
+        if (raw == null) return false;
+        return (jsonDecode(raw) as Map<String, dynamic>)['accent'] == '#ef4444';
+      });
+      final persisted =
+          jsonDecode(
+                prefs.getString(
+                  storage.key(keys.public, 'https://relay.example'),
+                )!,
+              )
+              as Map<String, dynamic>;
+      expect(persisted, isNot(contains('glassBackground')));
+      expect(persisted, isNot(contains('glassOpacity')));
+      expect(persisted, isNot(contains('prominentActiveTab')));
+    },
+  );
+
+  test('mobile edits retain desktop-only appearance preferences', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final storage = CommunityThemeStorage(prefs);
+    const desktopPreference = CommunityThemePreference(
+      theme: 'buzz',
+      accent: '#3b82f6',
+      followSystem: true,
+      glassBackground: true,
+      glassOpacity: 42,
+      prominentActiveTab: false,
+    );
+    await storage.write(
+      keys.public,
+      'https://relay.example',
+      desktopPreference,
+    );
+    final session = _ThemeRelaySession(
+      keys.nsec,
+      keys.public,
+      initialStatus: SessionStatus.reconnecting,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        communityThemeStorageProvider.overrideWithValue(storage),
+        relayConfigProvider.overrideWith(() => _RelayConfig(keys.nsec)),
+        relaySessionProvider.overrideWith(() => session),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(communityThemeProvider, (_, _) {}, fireImmediately: true);
+
+    final notifier = container.read(communityThemeProvider.notifier);
+    notifier.setTheme('dracula');
+    notifier.setMode(ThemeMode.dark);
+    notifier.setAccent(accentIndexForWireValue('#ef4444')!);
+
+    final current = container.read(communityThemeProvider);
+    expect(current.glassBackground, isTrue);
+    expect(current.glassOpacity, 42);
+    expect(current.prominentActiveTab, isFalse);
+    await _waitUntil(
+      () =>
+          storage.read(keys.public, 'https://relay.example')?.accent ==
+          '#ef4444',
+    );
+    final persisted = storage.read(keys.public, 'https://relay.example')!;
+    expect(persisted.glassBackground, isTrue);
+    expect(persisted.glassOpacity, 42);
+    expect(persisted.prominentActiveTab, isFalse);
+  });
+
   test('delayed absence seeds the intervening local edit', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -114,8 +227,14 @@ void main() {
         theme: 'dracula',
         accent: '#3b82f6',
         followSystem: true,
+        // A fresh-community edit carries no desktop appearance opinion, so it
+        // must not serialize desktop-only fields over a real desktop record.
+        includesGlassBackground: false,
+        includesGlassOpacity: false,
+        includesProminentActiveTab: false,
       );
       expect(container.read(communityThemeProvider), local);
+      expect(local.toJson(), isNot(contains('glassBackground')));
 
       session.emit(session.remoteEvent(theme: 'houston', id: 'remote-z'));
       expect(container.read(communityThemeProvider), local);
@@ -228,18 +347,24 @@ class _RelayConfig extends RelayConfigNotifier {
 }
 
 class _ThemeRelaySession extends RelaySessionNotifier {
-  _ThemeRelaySession(this.nsec, this.pubkey, {this.historyFuture});
+  _ThemeRelaySession(
+    this.nsec,
+    this.pubkey, {
+    this.historyFuture,
+    this.initialStatus = SessionStatus.connected,
+  });
 
   final String nsec;
   final String pubkey;
   final Future<List<NostrEvent>>? historyFuture;
+  final SessionStatus initialStatus;
   final subscribed = Completer<void>();
   int subscribeCalls = 0;
   void Function(NostrEvent)? _listener;
   NostrEvent? published;
 
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => SessionState(status: initialStatus);
 
   @override
   Future<List<NostrEvent>> fetchHistory(

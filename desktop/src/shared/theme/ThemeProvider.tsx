@@ -31,6 +31,7 @@ export const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
 export const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
 export const GLASS_OPACITY_MIN = 30;
 export const GLASS_OPACITY_MAX = 90;
+export const DEFAULT_GLASS_BACKGROUND = false;
 export const DEFAULT_GLASS_OPACITY = 65;
 export const DEFAULT_PROMINENT_ACTIVE_TAB = false;
 export const NEUTRAL_ACCENT = "neutral";
@@ -76,6 +77,9 @@ type ThemeContextValue = {
     theme: SyntaxThemeName;
     accent: string;
     followSystem: boolean;
+    glassBackground: boolean;
+    glassOpacity: number;
+    prominentActiveTab: boolean;
   }) => void;
   setGlassBackground: (enabled: boolean) => void;
   setGlassOpacity: (opacity: number) => void;
@@ -504,10 +508,12 @@ export function ThemeProvider({
   const [glassBackground, setGlassBackgroundState] = useState<boolean>(() => {
     const stored = getStorageItem(GLASS_BACKGROUND_STORAGE_KEY);
     // Glass is opt-in. Explicitly saved preferences remain intact, while a
-    // fresh profile starts with the normal opaque window treatment. Keep an
-    // unsupported platform opaque without erasing a preference saved on Mac.
-    const enabled = glassBackgroundSupported && stored === "true";
-    glassBackgroundPreferenceEnabled = enabled;
+    // fresh profile starts with the normal opaque window treatment. The state
+    // represents the preference, not platform capability, so a machine
+    // that cannot render glass must retain and sync a Mac's enabled setting.
+    const enabled =
+      stored === null ? DEFAULT_GLASS_BACKGROUND : stored === "true";
+    glassBackgroundPreferenceEnabled = glassBackgroundSupported && enabled;
     return enabled;
   });
   const [glassOpacity, setGlassOpacityState] = useState<number>(() => {
@@ -654,6 +660,9 @@ export function ThemeProvider({
       theme: SyntaxThemeName;
       accent: string;
       followSystem: boolean;
+      glassBackground: boolean;
+      glassOpacity: number;
+      prominentActiveTab: boolean;
     }) => {
       // Write the complete preference before updating state so applyTheme reads
       // the target community's accent in the same batch, never the previous one.
@@ -664,14 +673,36 @@ export function ThemeProvider({
           FOLLOW_SYSTEM_KEY,
           appearance.followSystem ? "true" : "false",
         );
+        window.localStorage.setItem(
+          GLASS_BACKGROUND_STORAGE_KEY,
+          appearance.glassBackground ? "true" : "false",
+        );
+        window.localStorage.setItem(
+          GLASS_OPACITY_STORAGE_KEY,
+          String(clampGlassOpacity(appearance.glassOpacity)),
+        );
+        window.localStorage.setItem(
+          PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+          appearance.prominentActiveTab ? "true" : "false",
+        );
       } catch {
         // Keep the active appearance responsive even if the local cache is full.
       }
       setSelectedTheme(appearance.theme);
       setAccentColorState(appearance.accent);
       setFollowSystemState(appearance.followSystem);
+      const nextGlassOpacity = clampGlassOpacity(appearance.glassOpacity);
+      applyGlassOpacity(nextGlassOpacity);
+      glassBackgroundPreferenceEnabled =
+        glassBackgroundSupported && appearance.glassBackground;
+      if (!glassBackgroundPreferenceEnabled) {
+        setGlassBackgroundActive(false);
+      }
+      setGlassBackgroundState(appearance.glassBackground);
+      setGlassOpacityState(nextGlassOpacity);
+      setProminentActiveTabState(appearance.prominentActiveTab);
     },
-    [],
+    [glassBackgroundSupported],
   );
 
   const setGlassBackground = useCallback(

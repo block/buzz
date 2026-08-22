@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/block/buzz/schema/community-theme-v1.json",
+  "title": "Buzz community theme preference v1",
+  "description": "Canonical completed payload. Clients also accept the original three-field v1 form during migration.",
+  "type": "object",
+  "required": [
+    "version",
+    "theme",
+    "accent",
+    "followSystem",
+    "glassBackground",
+    "glassOpacity",
+    "prominentActiveTab"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "theme": {
+      "type": "string",
+      "enum": [
+        "buzz",
+        "buzz-dark",
+        "andromeeda",
+        "aurora-x",
+        "ayu-dark",
+        "catppuccin-frappe",
+        "catppuccin-latte",
+        "catppuccin-macchiato",
+        "catppuccin-mocha",
+        "dark-plus",
+        "dracula",
+        "dracula-soft",
+        "everforest-dark",
+        "everforest-light",
+        "github-dark",
+        "github-dark-default",
+        "github-dark-dimmed",
+        "github-dark-high-contrast",
+        "github-light",
+        "github-light-default",
+        "github-light-high-contrast",
+        "gruvbox-dark-hard",
+        "gruvbox-dark-medium",
+        "gruvbox-dark-soft",
+        "gruvbox-light-hard",
+        "gruvbox-light-medium",
+        "gruvbox-light-soft",
+        "houston",
+        "kanagawa-dragon",
+        "kanagawa-lotus",
+        "kanagawa-wave",
+        "laserwave",
+        "light-plus",
+        "material-theme",
+        "material-theme-darker",
+        "material-theme-lighter",
+        "material-theme-ocean",
+        "material-theme-palenight",
+        "min-dark",
+        "min-light",
+        "monokai",
+        "night-owl",
+        "nord",
+        "one-dark-pro",
+        "one-light",
+        "plastic",
+        "poimandres",
+        "red",
+        "rose-pine",
+        "rose-pine-dawn",
+        "rose-pine-moon",
+        "slack-dark",
+        "slack-ochin",
+        "snazzy-light",
+        "solarized-dark",
+        "solarized-light",
+        "synthwave-84",
+        "tokyo-night",
+        "vesper",
+        "vitesse-black",
+        "vitesse-dark",
+        "vitesse-light"
+      ]
+    },
+    "accent": {
+      "type": "string",
+      "enum": [
+        "neutral",
+        "#3b82f6",
+        "#06b6d4",
+        "#22c55e",
+        "#f97316",
+        "#ef4444",
+        "#ec4899",
+        "#c0a2f1",
+        "#a855f7",
+        "#6366f1"
+      ]
+    },
+    "followSystem": {
+      "type": "boolean"
+    },
+    "glassBackground": {
+      "type": "boolean",
+      "default": false
+    },
+    "glassOpacity": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 90,
+      "default": 65
+    },
+    "prominentActiveTab": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
