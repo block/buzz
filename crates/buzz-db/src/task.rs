@@ -589,7 +589,7 @@ mod tests {
     //
     //     cargo test -p buzz-db --lib task::tests -- --ignored
     //
-    // against a database that has migration 0032 applied.
+    // against a database that has migration 0033 applied.
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 

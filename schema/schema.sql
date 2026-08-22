@@ -1186,7 +1186,7 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('push_gateway_delivery_auth_replays', 'public gateway signed-event replay admission spans relay communities'),
     ('push_gateway_delivery_request_replays', 'public gateway stable request-id admission spans relay communities');
 
--- ── Task system (migration 0032) ─────────────────────────────────────────────
+-- ── Task system (migration 0033) ─────────────────────────────────────────────
 -- Durable work items owned by humans or harness agents (Claude Code, Codex,
 -- the ACP mesh). Deliberately NOT workflows: `workflows`/`workflow_runs` are
 -- the scheduled execution engine, a task is a unit of work someone owns.
