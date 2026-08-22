@@ -242,19 +242,20 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     state: &AppState,
     community_id: CommunityId,
     stored: &StoredEvent,
-) {
+) -> usize {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     let matches = filter_fanout_by_access(state, community_id, stored, matches, None).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
-        return;
+        return 0;
     }
 
+    let recipient_count = matches.len();
     let event_json = match serde_json::to_string(&stored.event) {
         Ok(json) => json,
         Err(e) => {
             error!(event_id = %stored.event.id.to_hex(), "Failed to serialize event for fan-out: {e}");
-            return;
+            return recipient_count;
         }
     };
     let frames = fanout_frame_cache(
@@ -275,6 +276,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
             "fan-out: {drop_count} connection(s) cancelled due to full/closed buffers"
         );
     }
+    recipient_count
 }
 
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
@@ -871,7 +873,7 @@ async fn handle_ephemeral_event(
         // receive this private-channel ephemeral event.
         // Pass the channel_id so fan_out() uses the channel-kind index.
         let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        let _ = fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     } else {
         // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
         //
@@ -899,7 +901,7 @@ async fn handle_ephemeral_event(
         // filter_fanout_by_access no-ops for channel-less events except the
         // author-only-kind gate.
         let stored_event = StoredEvent::new(event.clone(), None);
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        let _ = fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     }
 
     Ok(())
@@ -1095,9 +1097,23 @@ async fn handle_agent_observer_event(
         direction = ?route.direction,
         "Agent observer fan-out"
     );
-    fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+    let delivered_to_local =
+        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    // Control frames (owner → agent/agent-management) are the ones a publisher
+    // actively waits on — e.g. `buzz agents draft-create` (#3791), where the
+    // draft is ephemeral and never stored, so "accepted" previously meant only
+    // "fanned out," not "received." Surface the local recipient count as an
+    // advisory so a CLI can tell the owner a draft landed nowhere. Advisory
+    // only: on a multi-node relay the intended subscriber may be attached to a
+    // different pod and still receive the frame via pubsub. Telemetry frames
+    // keep the empty-message fast path.
+    let message = if matches!(route.direction, AgentObserverDirection::Control) {
+        format!("delivered_to_local={delivered_to_local}")
+    } else {
+        String::new()
+    };
+    conn.send(RelayMessage::ok(event_id_hex, true, &message));
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
@@ -2466,6 +2482,27 @@ mod tests {
         ///
         /// Turning this test green is the definition of "Attack 4 is
         /// closed" for the global-event seam.
+        ///
+        /// #3791: the fan-out helper now returns the recipient count. With no
+        /// subscribers it must be 0 — the value the observer control frame
+        /// surfaces as `delivered_to_local=0` so `buzz agents draft-create`
+        /// can warn the owner instead of reporting a silent drop.
+        #[tokio::test]
+        async fn fan_out_recipient_count_is_zero_with_no_subscribers() {
+            let state = test_state().await;
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+
+            let presence = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), "online")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign presence");
+            let stored = buzz_core::StoredEvent::new(presence, None);
+
+            let count =
+                crate::handlers::event::fan_out_event_to_local_subscribers(&state, community, &stored)
+                    .await;
+            assert_eq!(count, 0, "no registered subscribers → zero recipients");
+        }
+
         #[tokio::test]
         async fn channel_less_event_must_drop_recipient_in_different_community() {
             let state = test_state().await;
