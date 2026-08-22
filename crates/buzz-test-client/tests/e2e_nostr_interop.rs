@@ -1,0 +1,1987 @@
+//! End-to-end integration tests for Nostr interop features:
+//! NIP-50 search, NIP-10 threads, NIP-17 gift wraps, and DM discovery.
+//!
+//! These tests require a running relay instance.  By default they are marked
+//! `#[ignore]` so that `cargo test` does not fail in CI when the relay is not
+//! available.
+//!
+//! # Running
+//!
+//! Start the relay, then run:
+//!
+//! ```text
+//! cargo test --test e2e_nostr_interop -- --ignored
+//! ```
+//!
+//! Override the relay URL with the `RELAY_URL` environment variable:
+//!
+//! ```text
+//! RELAY_URL=ws://relay.example.com cargo test --test e2e_nostr_interop -- --ignored
+//! ```
+
+use std::time::Duration;
+
+use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
+use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
+
+fn relay_url() -> String {
+    std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
+}
+
+fn relay_http_url() -> String {
+    relay_url()
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn sub_id(name: &str) -> String {
+    format!("e2e-{name}-{}", uuid::Uuid::new_v4())
+}
+
+/// Create a real channel in the DB via REST so the relay accepts events for it.
+async fn create_test_channel(keys: &Keys) -> String {
+    let client = reqwest::Client::new();
+    let pubkey_hex = keys.public_key().to_hex();
+    let channel_uuid = uuid::Uuid::new_v4();
+    let channel_name = format!("interop-e2e-{}", channel_uuid);
+
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
+            Tag::parse(["name", &channel_name]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit create-channel event");
+    assert!(
+        resp.status().is_success(),
+        "channel creation event failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse event response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "channel creation not accepted: {}",
+        body
+    );
+
+    channel_uuid.to_string()
+}
+
+/// Send a message via a signed kind:9 event and return the event_id hex.
+async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> String {
+    let client = reqwest::Client::new();
+    let pubkey_hex = keys.public_key().to_hex();
+    let event = EventBuilder::new(Kind::Custom(9), content)
+        .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
+        .sign_with_keys(keys)
+        .unwrap();
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit send-message event");
+    assert!(
+        resp.status().is_success(),
+        "send message failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse event response");
+    body["event_id"].as_str().expect("event_id").to_string()
+}
+
+/// Create a DM via a signed kind:41010 (DM open) command event and return the
+/// channel_id UUID string parsed from the relay's `response:{...}` message.
+async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
+    let client = reqwest::Client::new();
+    let pubkey_hex = requester_keys.public_key().to_hex();
+    // Backdate the initial open so a later re-open kind:41010 with identical
+    // tags in the same wall-clock second does not produce an identical event id
+    // (which the relay would dedupe as "duplicate: already processed").
+    let backdated = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 10);
+    let event = EventBuilder::new(Kind::Custom(41010), "")
+        .tags(vec![Tag::parse(["p", other_pubkey_hex]).unwrap()])
+        .custom_created_at(backdated)
+        .sign_with_keys(requester_keys)
+        .unwrap();
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("create DM request");
+    assert!(
+        resp.status().is_success(),
+        "create DM failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse DM response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "DM open not accepted: {body}"
+    );
+    let msg = body["message"].as_str().expect("message");
+    let payload = msg.strip_prefix("response:").expect("response: prefix");
+    let parsed: serde_json::Value = serde_json::from_str(payload).expect("response JSON");
+    parsed["channel_id"]
+        .as_str()
+        .expect("channel_id")
+        .to_string()
+}
+
+/// Submit a signed command event via REST and assert it was accepted.
+async fn post_signed_event(keys: &Keys, kind: u16, tags: Vec<Tag>) {
+    let client = reqwest::Client::new();
+    let pubkey_hex = keys.public_key().to_hex();
+    let event = EventBuilder::new(Kind::Custom(kind), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .unwrap();
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit signed event");
+    assert!(
+        resp.status().is_success(),
+        "event kind:{kind} failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse event response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "event kind:{kind} not accepted: {body}"
+    );
+}
+
+/// Query the relay for the thread replies recorded under `root_event_id`.
+///
+/// Uses `POST /query` with the `depth_limit` extension field, which the relay's
+/// bridge handler routes to `get_thread_replies` (reads `thread_metadata` keyed
+/// on `root_event_id`). Returns the matching stored events as JSON. This is the
+/// relay's real read surface for threads — there is no `/channels/.../threads`
+/// REST route.
+async fn query_thread_replies(
+    keys: &Keys,
+    channel_id: &str,
+    root_event_id: &str,
+) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel_id],
+        "#e": [root_event_id],
+        "depth_limit": 10,
+        "limit": 50,
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit thread query");
+    assert!(
+        resp.status().is_success(),
+        "thread query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse thread query response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// True if a queried event JSON carries the `["broadcast", "1"]` tag.
+///
+/// The relay sets `thread_metadata.broadcast` from exactly this tag
+/// (`ingest.rs`), and `get_channel_window` surfaces a depth-1 reply
+/// at top level only when `broadcast = true`. The bridge returns raw events, so
+/// this tag is the faithful, test-observable proxy for the `broadcast` column.
+fn has_broadcast_tag(event: &serde_json::Value) -> bool {
+    event["tags"].as_array().is_some_and(|tags| {
+        tags.iter().any(|t| {
+            t.as_array().is_some_and(|p| {
+                p.first().and_then(|v| v.as_str()) == Some("broadcast")
+                    && p.get(1).and_then(|v| v.as_str()) == Some("1")
+            })
+        })
+    })
+}
+
+/// Query the channel's stored kind:9 messages via `POST /query` (`#h`, no
+/// `depth_limit`), exercising the relay's standard NIP-01 query path.
+async fn query_channel_messages(keys: &Keys, channel_id: &str) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel_id],
+        "limit": 50,
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit channel query");
+    assert!(
+        resp.status().is_success(),
+        "channel query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse channel query response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// Send a message with unique content, then search for it.
+/// Verify: events returned before EOSE, content matches, EOSE received.
+/// Verify: no live events delivered after EOSE (search is one-shot).
+#[tokio::test]
+#[ignore]
+async fn test_nip50_search_returns_results_and_eose() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // Send a message with a unique search token.
+    let unique_token = format!("searchtoken_{}", uuid::Uuid::new_v4().simple());
+    let content = format!("Hello world {unique_token}");
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let ok = client
+        .send_text_message(&keys, &channel, &content, 9)
+        .await
+        .expect("send message");
+    assert!(ok.accepted, "relay rejected message: {}", ok.message);
+
+    // Small delay to allow indexing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Subscribe with NIP-50 search filter.
+    let sid = sub_id("nip50-search");
+    let filter = Filter::new()
+        .kind(Kind::Custom(9))
+        .search(&unique_token)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    // Collect until EOSE — should find our message.
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+
+    assert!(
+        !events.is_empty(),
+        "expected at least one search result, got none"
+    );
+    assert!(
+        events.iter().any(|e| e.content.contains(&unique_token)),
+        "search result content does not contain unique token. events: {:?}",
+        events.iter().map(|e| &e.content).collect::<Vec<_>>()
+    );
+
+    // Search is one-shot: send another message and verify it does NOT arrive.
+    let ok2 = client
+        .send_text_message(&keys, &channel, "post-eose message", 9)
+        .await
+        .expect("send post-eose message");
+    assert!(ok2.accepted, "relay rejected post-eose message");
+
+    let result = client.recv_event(Duration::from_secs(2)).await;
+    match result {
+        Err(TestClientError::Timeout) => { /* expected — search is one-shot */ }
+        Ok(RelayMessage::Event { event, .. }) => {
+            panic!(
+                "search subscription delivered live event after EOSE (kind={}): {}",
+                event.kind.as_u16(),
+                event.content
+            );
+        }
+        Ok(_other) => {
+            // NOTICE or other non-event messages are acceptable.
+        }
+        Err(_) => {
+            // Any other error (e.g. connection closed) is also acceptable here.
+        }
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Subscribe with mixed search + non-search filters.
+/// Verify: relay sends CLOSED with error message containing "mixed".
+#[tokio::test]
+#[ignore]
+async fn test_nip50_search_mixed_filters_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("nip50-mixed");
+
+    // Filter 1: has search
+    let filter_search = Filter::new()
+        .kind(Kind::Custom(9))
+        .search("hello")
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    // Filter 2: no search
+    let filter_plain = Filter::new()
+        .kind(Kind::Custom(9))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter_search, filter_plain])
+        .await
+        .expect("send REQ");
+
+    // Drain until CLOSED.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv message");
+        match &m {
+            RelayMessage::Eose { .. } | RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            assert!(
+                message.to_lowercase().contains("mixed"),
+                "expected 'mixed' in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Subscribe with a search filter that matches nothing.
+/// Verify: EOSE received with no events.
+#[tokio::test]
+#[ignore]
+async fn test_nip50_search_empty_results() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("nip50-empty");
+    // Must include kinds to avoid triggering P_GATED_KINDS check (wildcard
+    // kinds match gift-wrap/membership kinds which require #p filter).
+    let filter = Filter::new()
+        .search("nonexistent_gibberish_xyz123_zzzzzz")
+        .kind(Kind::Custom(9));
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+
+    assert!(
+        events.is_empty(),
+        "expected no results for gibberish search, got {} events",
+        events.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Send a root message via REST, then send a WS reply with NIP-10 e-tags.
+/// Verify: relay accepts the reply. Query thread via REST and verify reply appears.
+#[tokio::test]
+#[ignore]
+async fn test_nip10_thread_reply_creates_metadata() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // Send root message via REST.
+    let root_event_id = send_rest_message(&keys, &channel, "root message for NIP-10 test").await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Build reply event with NIP-10 e-tag.
+    let h_tag = Tag::parse(["h", &channel]).expect("h tag");
+    let e_reply_tag = Tag::parse(["e", &root_event_id, "", "reply"]).expect("e reply tag");
+
+    let reply_content = format!("reply to root {}", uuid::Uuid::new_v4());
+    let reply_event = EventBuilder::new(Kind::Custom(9), &reply_content)
+        .tags([h_tag, e_reply_tag])
+        .sign_with_keys(&keys)
+        .expect("sign reply");
+
+    let ok = client.send_event(reply_event).await.expect("send reply");
+    assert!(ok.accepted, "relay rejected reply: {}", ok.message);
+    client.disconnect().await.expect("disconnect");
+
+    // Query the thread under the root via the relay's real surface: POST /query
+    // with the `depth_limit` extension routes to the thread-replies path, which
+    // reads `thread_metadata` keyed on `root_event_id`. A row exists there only
+    // for events the relay recorded as NIP-10 replies — so the reply appearing
+    // here proves the relay created its thread metadata under this root.
+    let thread = query_thread_replies(&keys, &channel, &root_event_id).await;
+
+    let reply = thread
+        .iter()
+        .find(|e| e["content"].as_str() == Some(reply_content.as_str()))
+        .unwrap_or_else(|| panic!("reply not recorded under root. thread events: {thread:?}"));
+
+    // Metadata correctness: the recorded reply carries the NIP-10 `reply` e-tag
+    // pointing at the root it threads under.
+    let e_reply_to_root = reply["tags"].as_array().is_some_and(|tags| {
+        tags.iter().any(|t| {
+            let parts: Vec<&str> = t.as_array().map_or(Vec::new(), |a| {
+                a.iter().filter_map(|v| v.as_str()).collect()
+            });
+            parts.first() == Some(&"e")
+                && parts.get(1) == Some(&root_event_id.as_str())
+                && parts.get(3) == Some(&"reply")
+        })
+    });
+    assert!(
+        e_reply_to_root,
+        "recorded reply is missing NIP-10 e-tag (reply -> root {root_event_id}). reply: {reply:?}"
+    );
+
+    // The root itself is not a reply, so it must NOT appear among the thread
+    // replies — its `thread_metadata` stub has a NULL `root_event_id`.
+    assert!(
+        thread
+            .iter()
+            .all(|e| e["id"].as_str() != Some(root_event_id.as_str())),
+        "root must not be returned as a thread reply. thread events: {thread:?}"
+    );
+}
+
+/// Send a reply via WS with e-tags pointing to a nonexistent parent.
+/// Verify: relay rejects with OK false, message contains "parent not found".
+#[tokio::test]
+#[ignore]
+async fn test_nip10_unknown_parent_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Use a random 32-byte hex as a nonexistent parent ID.
+    let fake_parent_id = hex::encode([0xdeu8; 32]);
+
+    let h_tag = Tag::parse(["h", &channel]).expect("h tag");
+    let e_reply_tag = Tag::parse(["e", &fake_parent_id, "", "reply"]).expect("e reply tag");
+
+    let event = EventBuilder::new(Kind::Custom(9), "orphan reply")
+        .tags([h_tag, e_reply_tag])
+        .sign_with_keys(&keys)
+        .expect("sign event");
+
+    let ok = client.send_event(event).await.expect("send event");
+
+    assert!(
+        !ok.accepted,
+        "relay should have rejected reply to nonexistent parent, but accepted it"
+    );
+    assert!(
+        ok.message.to_lowercase().contains("parent not found")
+            || ok.message.to_lowercase().contains("not found"),
+        "expected 'parent not found' in rejection message, got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Send a root message, then send a reply with a wrong root tag.
+/// Verify: relay rejects with OK false, message contains "root tag does not match".
+#[tokio::test]
+#[ignore]
+async fn test_nip10_root_mismatch_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // Send a real root message.
+    let real_parent_id = send_rest_message(&keys, &channel, "real parent for mismatch test").await;
+
+    // Use a different random ID as the claimed root.
+    let wrong_root_id = hex::encode([0xabu8; 32]);
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let h_tag = Tag::parse(["h", &channel]).expect("h tag");
+    // wrong_root as "root" marker, real_parent as "reply" marker — mismatch.
+    let e_root_tag = Tag::parse(["e", &wrong_root_id, "", "root"]).expect("e root tag");
+    let e_reply_tag = Tag::parse(["e", &real_parent_id, "", "reply"]).expect("e reply tag");
+
+    let event = EventBuilder::new(Kind::Custom(9), "reply with wrong root")
+        .tags([h_tag, e_root_tag, e_reply_tag])
+        .sign_with_keys(&keys)
+        .expect("sign event");
+
+    let ok = client.send_event(event).await.expect("send event");
+
+    assert!(
+        !ok.accepted,
+        "relay should have rejected root mismatch, but accepted it"
+    );
+    assert!(
+        ok.message
+            .to_lowercase()
+            .contains("root tag does not match")
+            || ok.message.to_lowercase().contains("root"),
+        "expected root mismatch in rejection message, got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Create a kind:1059 event signed by an ephemeral key (different from auth key).
+/// Verify: relay accepts despite pubkey mismatch (gift wraps are exempt).
+#[tokio::test]
+#[ignore]
+async fn test_nip17_gift_wrap_accepted() {
+    let url = relay_url();
+    let auth_keys = Keys::generate();
+    let recipient_keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &auth_keys)
+        .await
+        .expect("connect");
+
+    // Sign with a different ephemeral key — not the auth key.
+    let ephemeral_keys = Keys::generate();
+    let p_tag = Tag::parse(["p", &recipient_keys.public_key().to_hex()]).expect("p tag");
+
+    let gift_wrap = EventBuilder::new(Kind::Custom(1059), "encrypted-content")
+        .tags([p_tag])
+        .sign_with_keys(&ephemeral_keys)
+        .expect("sign gift wrap");
+
+    let ok = client.send_event(gift_wrap).await.expect("send gift wrap");
+
+    assert!(
+        ok.accepted,
+        "relay rejected gift wrap (kind:1059): {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Subscribe with `{kinds:[1059]}` and no `#p` filter.
+/// Verify: relay sends CLOSED with message containing "p-gated" or "#p".
+#[tokio::test]
+#[ignore]
+async fn test_nip17_gift_wrap_requires_p_filter() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("nip17-no-p");
+    // No #p filter — should be rejected.
+    let filter = Filter::new().kind(Kind::Custom(1059));
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    // Drain until CLOSED.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv message");
+        match &m {
+            RelayMessage::Eose { .. } | RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            let msg_lower = message.to_lowercase();
+            assert!(
+                msg_lower.contains("p-gated")
+                    || msg_lower.contains("#p")
+                    || msg_lower.contains("restricted"),
+                "expected p-gated rejection in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// User A sends a kind:1059 gift wrap with `#p` = user B's pubkey.
+/// User B subscribes with `{kinds:[1059], #p:[B_pubkey]}`.
+/// Verify: B receives the gift wrap event.
+#[tokio::test]
+#[ignore]
+async fn test_nip17_gift_wrap_recipient_receives() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // Connect B first and subscribe.
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+
+    let sid_b = sub_id("nip17-recv-b");
+    let filter_b = Filter::new().kind(Kind::Custom(1059)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        b_pubkey_hex.as_str(),
+    );
+
+    client_b
+        .subscribe(&sid_b, vec![filter_b])
+        .await
+        .expect("client B subscribe");
+
+    // Drain EOSE so we're ready for live events.
+    client_b
+        .collect_until_eose(&sid_b, Duration::from_secs(5))
+        .await
+        .expect("client B EOSE");
+
+    // Connect A and send gift wrap addressed to B.
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    let ephemeral_keys = Keys::generate();
+    let p_tag = Tag::parse(["p", &b_pubkey_hex]).expect("p tag");
+    let unique_content = format!("gift-wrap-{}", uuid::Uuid::new_v4());
+
+    let gift_wrap = EventBuilder::new(Kind::Custom(1059), &unique_content)
+        .tags([p_tag])
+        .sign_with_keys(&ephemeral_keys)
+        .expect("sign gift wrap");
+
+    let ok = client_a
+        .send_event(gift_wrap)
+        .await
+        .expect("send gift wrap");
+    assert!(ok.accepted, "relay rejected gift wrap: {}", ok.message);
+
+    // B should receive the gift wrap.
+    let msg = client_b
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("client B recv gift wrap");
+
+    match msg {
+        RelayMessage::Event {
+            subscription_id,
+            event,
+        } => {
+            assert_eq!(
+                subscription_id, sid_b,
+                "event delivered to wrong subscription"
+            );
+            assert_eq!(
+                event.kind,
+                Kind::Custom(1059),
+                "expected kind:1059, got {}",
+                event.kind.as_u16()
+            );
+            assert_eq!(event.content, unique_content, "gift wrap content mismatch");
+        }
+        other => panic!("expected EVENT kind:1059, got {other:?}"),
+    }
+
+    client_a.disconnect().await.expect("disconnect A");
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// Create a DM via REST, then subscribe as a participant to verify discovery events.
+/// Verify: kind:39000 event received with `hidden` and `private` tags.
+/// Verify: kind:44100 membership notification received.
+#[tokio::test]
+#[ignore]
+async fn test_dm_discovery_events_emitted() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // Create the DM via REST (A creates DM with B). This persists the relay's
+    // kind:39000 discovery event and the kind:44100 membership notification
+    // (stored globally, channel_id = None), then fans both out live.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    // Connect A and subscribe AFTER create_dm. Both events are now in history,
+    // so each subscription replays its event before EOSE — no dependency on
+    // catching a live fan-out. (The previous ordering subscribed first, then let
+    // the discovery subscription's drain silently discard the live membership
+    // event before the test could read it, hanging the recv forever.)
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    let sid_membership = sub_id("dm-discovery-44100");
+    let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        a_pubkey_hex.as_str(),
+    );
+    client_a
+        .subscribe(&sid_membership, vec![membership_filter])
+        .await
+        .expect("subscribe membership");
+    let membership_events = client_a
+        .collect_until_eose(&sid_membership, Duration::from_secs(10))
+        .await
+        .expect("membership EOSE");
+
+    let membership = membership_events
+        .iter()
+        .find(|e| {
+            e.kind == Kind::Custom(44100)
+                && e.tags.iter().any(|t| {
+                    let p = t.as_slice();
+                    p.len() >= 2 && p[0] == "p" && p[1] == a_pubkey_hex
+                })
+        })
+        .expect("kind:44100 membership notification addressed to A");
+
+    let membership_has_h = membership.tags.iter().any(|t| {
+        let p = t.as_slice();
+        p.len() >= 2 && p[0] == "h" && p[1] == channel_id
+    });
+    assert!(
+        membership_has_h,
+        "kind:44100 missing h tag = DM channel id. tags: {:?}",
+        membership.tags
+    );
+
+    let sid_discovery = sub_id("dm-discovery-39000");
+    let discovery_filter = Filter::new()
+        .kind(Kind::Custom(39000))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), channel_id.as_str());
+    client_a
+        .subscribe(&sid_discovery, vec![discovery_filter])
+        .await
+        .expect("subscribe discovery");
+    let discovery_events = client_a
+        .collect_until_eose(&sid_discovery, Duration::from_secs(10))
+        .await
+        .expect("discovery EOSE");
+
+    assert!(
+        !discovery_events.is_empty(),
+        "expected kind:39000 discovery event for DM channel {channel_id}, got none"
+    );
+
+    let discovery_event = &discovery_events[0];
+    assert_eq!(
+        discovery_event.kind,
+        Kind::Custom(39000),
+        "expected kind:39000, got {}",
+        discovery_event.kind.as_u16()
+    );
+
+    let tags: Vec<Vec<String>> = discovery_event
+        .tags
+        .iter()
+        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+        .collect();
+
+    let has_hidden = tags.iter().any(|t| t[0] == "hidden");
+    let has_private = tags.iter().any(|t| t[0] == "private");
+
+    assert!(
+        has_hidden,
+        "kind:39000 missing 'hidden' tag. tags: {tags:?}"
+    );
+    assert!(
+        has_private,
+        "kind:39000 missing 'private' tag. tags: {tags:?}"
+    );
+
+    client_a.disconnect().await.expect("disconnect");
+}
+
+/// Send a non-broadcast NIP-10 reply AND a broadcast (`["broadcast","1"]`)
+/// reply, then prove the relay's real top-level rule both directions.
+///
+/// The relay's top-level view is `get_channel_window`
+/// (`thread.rs`): a message is surfaced at top level iff
+/// `depth IS NULL OR depth = 0 OR (depth = 1 AND broadcast = true)`. So a
+/// depth-1 reply is EXCLUDED only when `broadcast = false`, and a depth-1 reply
+/// with `broadcast = true` IS surfaced. That predicate is now exposed over
+/// `POST /query` via the `top_level: true` window extension
+/// (docs/bridge-channel-window.md), but this test predates it and pins the
+/// rule via its two
+/// test-observable inputs — recorded depth and the `broadcast` tag — instead of
+/// a one-sided "threads under root" correlate.
+#[tokio::test]
+#[ignore]
+async fn test_nip10_thread_reply_not_in_top_level() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // Send root message via REST.
+    let root_content = format!("root-toplevel-{}", uuid::Uuid::new_v4());
+    let root_event_id = send_rest_message(&keys, &channel, &root_content).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let h_tag = Tag::parse(["h", &channel]).expect("h tag");
+    let e_reply_tag = Tag::parse(["e", &root_event_id, "", "reply"]).expect("e reply tag");
+
+    // Reply A: depth-1, NO broadcast tag → real predicate EXCLUDES it.
+    let excluded_content = format!("reply-excluded-{}", uuid::Uuid::new_v4());
+    let excluded_reply = EventBuilder::new(Kind::Custom(9), &excluded_content)
+        .tags([h_tag.clone(), e_reply_tag.clone()])
+        .sign_with_keys(&keys)
+        .expect("sign excluded reply");
+    let ok = client
+        .send_event(excluded_reply)
+        .await
+        .expect("send excluded reply");
+    assert!(ok.accepted, "relay rejected excluded reply: {}", ok.message);
+
+    // Reply B: depth-1 WITH `["broadcast","1"]` → real predicate SURFACES it.
+    let broadcast_content = format!("reply-broadcast-{}", uuid::Uuid::new_v4());
+    let broadcast_tag = Tag::parse(["broadcast", "1"]).expect("broadcast tag");
+    let broadcast_reply = EventBuilder::new(Kind::Custom(9), &broadcast_content)
+        .tags([h_tag, e_reply_tag, broadcast_tag])
+        .sign_with_keys(&keys)
+        .expect("sign broadcast reply");
+    let ok = client
+        .send_event(broadcast_reply)
+        .await
+        .expect("send broadcast reply");
+    assert!(
+        ok.accepted,
+        "relay rejected broadcast reply: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+
+    // Both replies are recorded under the root (depth >= 1): they appear in the
+    // thread query, which reads `thread_metadata` keyed on `root_event_id`.
+    let under_root = query_thread_replies(&keys, &channel, &root_event_id).await;
+    let find = |content: &str| {
+        under_root
+            .iter()
+            .find(|e| e["content"].as_str() == Some(content))
+            .cloned()
+    };
+    let excluded = find(&excluded_content).unwrap_or_else(|| {
+        panic!("excluded reply must be recorded under root. got: {under_root:?}")
+    });
+    let broadcast = find(&broadcast_content).unwrap_or_else(|| {
+        panic!("broadcast reply must be recorded under root. got: {under_root:?}")
+    });
+
+    // Negative direction: depth >= 1 AND broadcast = false → EXCLUDED.
+    // (Recorded under root + no `["broadcast","1"]` tag are exactly the two
+    // conditions the real predicate uses to hide a reply from top level.)
+    assert!(
+        !has_broadcast_tag(&excluded),
+        "excluded reply must NOT carry a broadcast tag (broadcast=false → hidden). got: {excluded:?}"
+    );
+
+    // Positive direction: depth = 1 AND broadcast = true → SURFACED.
+    // Same depth-1 placement, but the broadcast tag flips it into the top-level
+    // set — proving the rule is `broadcast`-gated, not depth-gated alone.
+    assert!(
+        has_broadcast_tag(&broadcast),
+        "broadcast reply must carry `[\"broadcast\",\"1\"]` (broadcast=true → surfaced). got: {broadcast:?}"
+    );
+
+    // The root itself is top-level (depth IS NULL): a plain channel query
+    // (no `depth_limit`) returns it.
+    let top_level = query_channel_messages(&keys, &channel).await;
+    assert!(
+        top_level
+            .iter()
+            .any(|e| e["content"].as_str() == Some(root_content.as_str())),
+        "root must remain present as a top-level message. got: {top_level:?}"
+    );
+}
+
+/// Send a kind:1059 gift wrap AND a kind:9 message with the same unique content.
+/// Use the relay NIP-50 search to prove the gift wrap was NOT indexed while
+/// the kind:9 message WAS, exercising the storage-level exclusion in the
+/// `events.search_tsv` generated column.
+#[tokio::test]
+#[ignore]
+async fn test_nip17_gift_wrap_not_searchable() {
+    // Privacy regression gate at the relay's actual NIP-50 search seam.
+    //
+    // Storage-level exclusion lives in the `events.search_tsv` generated
+    // column (migrations/0001_initial_schema.sql): a row whose `kind` is
+    // in the privacy skip-set yields a NULL tsvector and never matches
+    // `@@`. This test proves the property from the wire: REQ with a
+    // NIP-50 `search` filter returns the kind:9 control and does NOT
+    // return the kind:1059 gift wrap.
+    //
+    // The mutate-bite for the underlying property lives in
+    // `crates/buzz-search/tests/fts_integration.rs::
+    //  excluded_kinds_are_storage_level_unsearchable`
+    // (drops the CASE → all excluded kinds surface).
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let channel = create_test_channel(&keys_a).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("connect");
+
+    let unique_token = format!("giftwrap-nosearch-{}", uuid::Uuid::new_v4().simple());
+
+    // 1. Send kind:1059 gift wrap.
+    let ephemeral_keys = Keys::generate();
+    let p_tag = Tag::parse(["p", &keys_b.public_key().to_hex()]).expect("p tag");
+    let gift_wrap = EventBuilder::new(Kind::Custom(1059), &unique_token)
+        .tags([p_tag])
+        .sign_with_keys(&ephemeral_keys)
+        .expect("sign gift wrap");
+    let ok = client.send_event(gift_wrap).await.expect("send gift wrap");
+    assert!(ok.accepted, "relay rejected gift wrap: {}", ok.message);
+
+    // 2. Send kind:9 control message containing the same unique token.
+    let ok2 = client
+        .send_text_message(&keys_a, &channel, &unique_token, 9)
+        .await
+        .expect("send kind:9");
+    assert!(ok2.accepted, "relay rejected kind:9: {}", ok2.message);
+
+    // Small delay so the FTS column (generated, in-row) is visible to readers.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 3. NIP-50 search via the relay (no kind filter — we want to see what
+    //    surfaces). `h` tag scopes to our channel to keep the result set tight.
+    let sid = sub_id("nip17-not-searchable");
+    let filter = Filter::new()
+        .search(&unique_token)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+
+    let kinds: Vec<u16> = events.iter().map(|e| e.kind.as_u16()).collect();
+
+    // Control: kind:9 IS searchable — proves the search path works at all.
+    assert!(
+        kinds.contains(&9),
+        "kind:9 control not returned by NIP-50 search — indexing broken. kinds={kinds:?}",
+    );
+
+    // Load-bearing: kind:1059 MUST NOT surface.
+    assert!(
+        !kinds.contains(&1059),
+        "kind:1059 gift wrap surfaced via NIP-50 search — privacy regression in \
+         the `search_tsv` generated column. kinds={kinds:?}",
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Send 3 messages with varying relevance to a query, wait for indexing, then search.
+/// Verify: the exact-match message is present in results (relevance-based, not just chronological).
+#[tokio::test]
+#[ignore]
+async fn test_nip50_search_relevance_order() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // Unique prefix to isolate this test's messages from other test runs.
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+    let msg1 = format!("{prefix} alpha bravo charlie"); // oldest, exact match
+    let msg2 = format!("{prefix} delta echo foxtrot"); // middle, no match
+    let msg3 = format!("{prefix} alpha bravo"); // newest, partial match
+
+    let id1 = send_rest_message(&keys, &channel, &msg1).await;
+    send_rest_message(&keys, &channel, &msg2).await;
+    send_rest_message(&keys, &channel, &msg3).await;
+
+    // Wait for FTS indexing.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("nip50-relevance");
+    let query = format!("{prefix} alpha bravo charlie");
+    let filter = Filter::new()
+        .kind(Kind::Custom(9))
+        .search(&query)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+
+    // Must have at least 1 result.
+    assert!(!events.is_empty(), "expected search results, got none");
+
+    // The FIRST result must be the exact-match message (msg1), not the newer
+    // partial match (msg3). This proves relevance ordering, not chronological.
+    let first = &events[0];
+    assert!(
+        first.id.to_hex() == id1 || first.content.contains("alpha bravo charlie"),
+        "expected exact-match message as FIRST result (relevance order), \
+         but got: '{}'. All results: {:?}",
+        first.content,
+        events.iter().map(|e| &e.content).collect::<Vec<_>>()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Send a kind:9 message, then subscribe with two filters in one REQ:
+///   Filter A: wrong author — will NOT match
+///   Filter B: no author restriction — WILL match
+/// Verify: the message IS returned, proving dedup happens after per-filter
+/// acceptance and OR semantics are preserved.
+#[tokio::test]
+#[ignore]
+async fn test_historical_req_dedup_preserves_or_semantics() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    let content = format!("dedup-or-{}", uuid::Uuid::new_v4());
+    let event_id = send_rest_message(&keys, &channel, &content).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Generate a random wrong author key.
+    let wrong_author = Keys::generate();
+
+    let sid = sub_id("dedup-or");
+
+    // Filter A: restricts to wrong author — will not match our message.
+    let filter_a = Filter::new()
+        .kind(Kind::Custom(9))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+        .author(wrong_author.public_key());
+
+    // Filter B: no author restriction — will match our message.
+    let filter_b = Filter::new()
+        .kind(Kind::Custom(9))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter_a, filter_b])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+
+    // Our message must be returned (filter B matches even though filter A doesn't).
+    assert!(
+        events
+            .iter()
+            .any(|e| e.id.to_hex() == event_id || e.content == content),
+        "expected message to be returned via filter B, but it was missing. \
+         events: {:?}",
+        events.iter().map(|e| &e.content).collect::<Vec<_>>()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// REQ with `kinds:[]` must return zero historical events and EOSE.
+/// This proves the empty-kinds sentinel is honored end-to-end (DB returns
+/// zero rows instead of matching all kinds).
+#[tokio::test]
+#[ignore]
+async fn test_empty_kinds_returns_zero_events() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // Send a message so there IS data in the channel.
+    send_rest_message(&keys, &channel, "should not appear").await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("empty-kinds");
+    // kinds:[] = match nothing per NIP-01.
+    let filter = Filter::new()
+        .kinds(vec![] as Vec<Kind>)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect until EOSE");
+
+    assert!(
+        events.is_empty(),
+        "kinds:[] must return zero events, got {}",
+        events.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Helper: read the viewer's latest relay-signed NIP-DV snapshot event
+/// (kind:30622, queried by `#p` since snapshots are `#p`-gated to their owner).
+/// Returns `None` if no snapshot exists yet.
+async fn read_snapshot_event(
+    client: &mut BuzzTestClient,
+    viewer_hex: &str,
+) -> Option<nostr::Event> {
+    let sid = sub_id("nipdv-snapshot");
+    let filter = Filter::new()
+        .kind(Kind::Custom(30622))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), viewer_hex);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe nip-dv snapshot");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("nip-dv snapshot EOSE");
+    client
+        .close_subscription(&sid)
+        .await
+        .expect("close nip-dv sub");
+
+    // Parameterized-replaceable: at most one current event, but take the
+    // newest defensively.
+    events.into_iter().max_by_key(|e| e.created_at.as_secs())
+}
+
+/// Helper: the set of hidden DM channel ids from the viewer's latest snapshot.
+async fn read_hidden_dms(client: &mut BuzzTestClient, viewer_hex: &str) -> Vec<String> {
+    match read_snapshot_event(client, viewer_hex).await {
+        None => Vec::new(),
+        Some(ev) => ev
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let s = t.as_slice();
+                (s.len() >= 2 && s[0] == "h").then(|| s[1].to_string())
+            })
+            .collect(),
+    }
+}
+
+/// NIP-DV regression: hiding a DM must surface it in the viewer's relay-signed
+/// visibility snapshot, and re-opening it must drop it back out — newest-wins.
+///
+/// This is the fix for "hidden DMs come back": the client filters its DM list
+/// against this snapshot, so the snapshot must be the authoritative hidden set.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_hide_then_reopen_updates_snapshot() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // A opens a DM with B.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    // Baseline: no DMs hidden.
+    let before = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        !before.contains(&channel_id),
+        "DM should not be hidden before hide; snapshot h tags: {before:?}"
+    );
+
+    // A hides the DM (kind:41012, h = channel).
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // Snapshot must now list the DM as hidden.
+    let after_hide = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        after_hide.contains(&channel_id),
+        "DM must appear in snapshot after hide; snapshot h tags: {after_hide:?}"
+    );
+
+    // A re-opens the DM (kind:41010, p = the other participant) — this clears
+    // hidden_at and must refresh the snapshot.
+    post_signed_event(
+        &keys_a,
+        41010,
+        vec![Tag::parse(["p", &b_pubkey_hex]).unwrap()],
+    )
+    .await;
+
+    // Snapshot must drop the DM back out — proving re-open is reflected, the
+    // exact asymmetry a client-side filter could not handle on its own.
+    let after_reopen = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        !after_reopen.contains(&channel_id),
+        "DM must be dropped from snapshot after re-open; snapshot h tags: {after_reopen:?}"
+    );
+
+    client_a.disconnect().await.expect("disconnect");
+}
+
+/// NIP-DV monotonicity regression: a hide immediately followed by a re-open
+/// within the same wall-clock second must still leave the re-open authoritative.
+///
+/// `created_at` is second-resolution; on a same-second tie `replace_parameterized_event`
+/// keeps whichever event id sorts lower (random), so without a monotonic guard the
+/// hide snapshot wins the tie ~50% of the time and the DM stays hidden forever — the
+/// exact "hidden DMs come back" symptom, narrowed to a double-action timing window.
+/// The publisher forces `created_at = max(now, prior + 1)`, so the re-open snapshot
+/// always supersedes. This test posts hide→reopen back-to-back (no sleep) to land in
+/// one second, then asserts the re-open is reflected and the snapshot strictly advanced.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_same_second_reopen_supersedes_hide() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    // Hide, then immediately re-open — no sleep, so both snapshots land in the
+    // same wall-clock second and collide on the second-resolution tiebreaker.
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+    let hide_snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("hide snapshot present");
+
+    post_signed_event(
+        &keys_a,
+        41010,
+        vec![Tag::parse(["p", &b_pubkey_hex]).unwrap()],
+    )
+    .await;
+    let reopen_snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("reopen snapshot present");
+
+    // Monotonic guard: the re-open snapshot must strictly supersede the hide one,
+    // even when both were minted in the same second.
+    assert!(
+        reopen_snapshot.created_at.as_secs() > hide_snapshot.created_at.as_secs(),
+        "reopen snapshot created_at ({}) must advance past hide snapshot ({})",
+        reopen_snapshot.created_at.as_secs(),
+        hide_snapshot.created_at.as_secs(),
+    );
+
+    // And the re-open must actually be the authoritative state.
+    let after_reopen = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        !after_reopen.contains(&channel_id),
+        "same-second re-open must win; DM still hidden: {after_reopen:?}"
+    );
+
+    client_a.disconnect().await.expect("disconnect");
+}
+
+/// NIP-DV privacy: a third party MUST NOT be able to read another viewer's
+/// DM visibility snapshot. The snapshot is `#p`-gated to its owner, so a
+/// `#p`=<someone-else> query is rejected by the relay's read-auth gate.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_snapshot_is_private_to_owner() {
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // A opens a DM with B and hides it, producing a NIP-DV snapshot for A.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // B queries A's snapshot via REST (#p = A). The relay's #p-gate must reject
+    // this — B may only read snapshots addressed to B.
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [30622],
+        "#p": [a_pubkey_hex],
+        "limit": 1,
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &b_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit cross-viewer query");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "B querying A's NIP-DV snapshot must be forbidden, got {}",
+        resp.status()
+    );
+}
+
+/// NIP-DV regression for the per-viewer replacement key: two viewers with
+/// independent hidden sets must NOT clobber each other's snapshot. This is the
+/// case that breaks if the snapshot is stored keyed by (kind, relay_pubkey)
+/// alone instead of by the viewer's `d` tag — B's write would tombstone A's,
+/// and A's hidden DM would reappear.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_two_viewers_independent_snapshots() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let keys_c = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+    let c_pubkey_hex = keys_c.public_key().to_hex();
+
+    // A hides a DM with C; then B hides a (different) DM with C.
+    let dm_a = create_dm(&keys_a, &c_pubkey_hex).await;
+    post_signed_event(&keys_a, 41012, vec![Tag::parse(["h", &dm_a]).unwrap()]).await;
+
+    let dm_b = create_dm(&keys_b, &c_pubkey_hex).await;
+    post_signed_event(&keys_b, 41012, vec![Tag::parse(["h", &dm_b]).unwrap()]).await;
+
+    // A's snapshot must still list A's hidden DM (B's write must not clobber it).
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let a_hidden = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        a_hidden.contains(&dm_a),
+        "A's snapshot lost its hidden DM after B wrote; A sees: {a_hidden:?}"
+    );
+    assert!(
+        !a_hidden.contains(&dm_b),
+        "A's snapshot leaked B's hidden DM; A sees: {a_hidden:?}"
+    );
+    client_a.disconnect().await.expect("disconnect A");
+
+    // B's snapshot lists only B's hidden DM.
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let b_hidden = read_hidden_dms(&mut client_b, &b_pubkey_hex).await;
+    assert!(
+        b_hidden.contains(&dm_b),
+        "B's snapshot missing its hidden DM; B sees: {b_hidden:?}"
+    );
+    assert!(
+        !b_hidden.contains(&dm_a),
+        "B's snapshot leaked A's hidden DM; B sees: {b_hidden:?}"
+    );
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// NIP-DV privacy via WebSocket REQ: a third party subscribing to another
+/// viewer's snapshot (`kind:30622 #p=A` as B) must be rejected with CLOSED, not
+/// served A's hidden set.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_ws_req_rejects_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // B subscribes for A's snapshot over WS — must be CLOSED, never EVENT.
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let sid = sub_id("nipdv-cross-ws");
+    let filter = Filter::new().kind(Kind::Custom(30622)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        a_pubkey_hex.as_str(),
+    );
+    client_b
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    let msg = loop {
+        let m = client_b
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv message");
+        match &m {
+            RelayMessage::Event { .. } => {
+                panic!("relay served A's NIP-DV snapshot to B over WS REQ")
+            }
+            RelayMessage::Eose { .. } => continue,
+            _ => break m,
+        }
+    };
+    match msg {
+        RelayMessage::Closed {
+            subscription_id, ..
+        } => {
+            assert_eq!(subscription_id, sid, "CLOSED for wrong subscription");
+        }
+        other => panic!("expected CLOSED for third-party snapshot REQ, got {other:?}"),
+    }
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// NIP-DV privacy via the `ids` escape hatch: even if a third party learns the
+/// event id of A's snapshot, querying `ids:[that_id]` must NOT return it. A
+/// kindless `ids` filter is intentionally exempt from the filter-level `#p`
+/// gate (so legitimate id-lookups of other kinds still work), so the
+/// result-level owner check is what holds the line — B's query succeeds (200)
+/// but returns an empty set. An *explicit* `kinds:[30622]` filter is rejected
+/// earlier, at the gate, with 403 (covered separately).
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_ids_query_rejects_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // A reads its own snapshot to learn its event id.
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("A should have a snapshot after hiding");
+    let snapshot_id = snapshot.id.to_hex();
+    client_a.disconnect().await.expect("disconnect A");
+
+    // B queries by that id over REST with a kindless filter — passes the gate
+    // (ids exemption) but the result-level owner check yields an empty set.
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{ "ids": [snapshot_id], "limit": 1 }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &b_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit ids query");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "kindless ids query is gate-exempt, expected 200, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse query response");
+    let arr = body.as_array().expect("query response is an array");
+    assert!(
+        arr.is_empty(),
+        "B must not receive A's snapshot via kindless ids query, got {} event(s)",
+        arr.len()
+    );
+}
+
+/// NIP-DV privacy: an *explicit* `kinds:[30622]` query for another viewer is
+/// rejected at the filter-level gate with 403 — the explicit-kind path loses
+/// the `ids` exemption.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_explicit_kind_query_forbidden_for_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("A should have a snapshot after hiding");
+    let snapshot_id = snapshot.id.to_hex();
+    client_a.disconnect().await.expect("disconnect A");
+
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{ "kinds": [30622], "ids": [snapshot_id], "limit": 1 }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &b_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit explicit-kind query");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "explicit kinds:[30622] query for another viewer must be forbidden, got {}",
+        resp.status()
+    );
+}
+
+/// NIP-DV privacy via NIP-50 search: a third party must not harvest A's
+/// snapshot through a search query, even with a kindless `ids:[A_snapshot_id]`
+/// filter that slips the filter-level `#p` gate (the `ids` exemption applies to
+/// kindless filters). Two defenses must hold: 30622 is never search-indexed,
+/// and the search result loop applies the result-level owner check. Either way
+/// B sees zero results.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_search_rejects_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("A should have a snapshot after hiding");
+    let snapshot_id = snapshot.id.to_hex();
+    client_a.disconnect().await.expect("disconnect A");
+
+    // Give FTS a beat (it must NOT have indexed the snapshot).
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // B issues a kindless search filter carrying A's snapshot id — the bypass
+    // shape. Must return zero results, not A's hidden set.
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let sid = sub_id("nipdv-search-bypass");
+    let id = nostr::EventId::from_hex(&snapshot_id).expect("parse snapshot id");
+    let filter = Filter::new().id(id).search("dm");
+    client_b
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client_b
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+    assert!(
+        events.is_empty(),
+        "B must not receive A's snapshot via search, got {} event(s)",
+        events.len()
+    );
+}
+
+/// POST /query with `top_level: true` and its extension flags — the channel
+/// window surface (docs/bridge-channel-window.md).
+async fn query_channel_window(
+    keys: &Keys,
+    channel_id: &str,
+    limit: u32,
+    cursor: Option<(i64, &str)>,
+) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let mut filter = serde_json::json!({
+        "kinds": [9],
+        "#h": [channel_id],
+        "limit": limit,
+        "top_level": true,
+        "include_summaries": true,
+        "include_aux": true,
+    });
+    if let Some((until, before_id)) = cursor {
+        filter["until"] = serde_json::json!(until);
+        filter["before_id"] = serde_json::json!(before_id);
+    }
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&serde_json::json!([filter])).unwrap())
+        .send()
+        .await
+        .expect("submit window query");
+    assert!(
+        resp.status().is_success(),
+        "window query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse window query response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// Partition a window response by kind, the way the client contract requires:
+/// rows (9), summaries (39005), exactly-one bounds (39006), aux (the rest).
+fn partition_window(
+    events: &[serde_json::Value],
+) -> (
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    serde_json::Value,
+    Vec<serde_json::Value>,
+) {
+    let mut rows = Vec::new();
+    let mut summaries = Vec::new();
+    let mut bounds = Vec::new();
+    let mut aux = Vec::new();
+    for e in events {
+        match e["kind"].as_u64() {
+            Some(9) => rows.push(e.clone()),
+            Some(39005) => summaries.push(e.clone()),
+            Some(39006) => bounds.push(e.clone()),
+            _ => aux.push(e.clone()),
+        }
+    }
+    assert_eq!(
+        bounds.len(),
+        1,
+        "exactly one 39006 bounds overlay per window response, got {}",
+        bounds.len()
+    );
+    (rows, summaries, bounds.remove(0), aux)
+}
+
+/// End-to-end channel window: replies stay out of the rows, thread summaries
+/// and reactions ride along, and `39006.has_more`/`next_cursor` chain pages
+/// to exhaustion — including the exact-multiple final page, where row count
+/// alone would lie.
+#[tokio::test]
+#[ignore]
+async fn test_channel_window_rows_overlays_and_exact_multiple_exhaustion() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // 4 top-level messages: with page limit 2 the channel is an exact
+    // multiple — the shape where "rows < limit" heuristics fail.
+    let mut top_ids = Vec::new();
+    for i in 0..4 {
+        top_ids.push(send_rest_message(&keys, &channel, &format!("window top {i}")).await);
+    }
+
+    // All four roots share a created_at second, so ordering is decided by
+    // the composite key's id ASC tie-break — the dense-second case the old
+    // timestamp-only cursor got wrong. Probe the window to learn which root
+    // the relay puts first, then hang the reply and reaction off that row so
+    // its 39005/aux land on page 1.
+    let probe = query_channel_window(&keys, &channel, 2, None).await;
+    let (probe_rows, _, _, _) = partition_window(&probe);
+    let root_id = probe_rows[0]["id"]
+        .as_str()
+        .expect("probe row id")
+        .to_string();
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let reply = EventBuilder::new(Kind::Custom(9), "window reply")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &root_id, "", "reply"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign reply");
+    let reply_id = reply.id.to_hex();
+    let ok = client.send_event(reply).await.expect("send reply");
+    assert!(ok.accepted, "relay rejected reply: {}", ok.message);
+    let reaction = EventBuilder::new(Kind::Reaction, "👍")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &root_id]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign reaction");
+    let ok = client.send_event(reaction).await.expect("send reaction");
+    assert!(ok.accepted, "relay rejected reaction: {}", ok.message);
+    client.disconnect().await.expect("disconnect");
+
+    // Page 1 (head request).
+    let page1 = query_channel_window(&keys, &channel, 2, None).await;
+    let (rows1, summaries1, bounds1, aux1) = partition_window(&page1);
+
+    assert_eq!(rows1.len(), 2, "page 1 rows: {rows1:?}");
+    assert!(
+        rows1
+            .iter()
+            .all(|r| r["id"].as_str() != Some(reply_id.as_str())),
+        "reply must never appear as a channel row"
+    );
+    // Newest-first: the replied/reacted root is the newest top-level row.
+    assert_eq!(rows1[0]["id"].as_str(), Some(root_id.as_str()));
+
+    // The replied root carries a 39005 with its reply count, signed by a key
+    // that is not the requester (the relay's).
+    let summary = summaries1
+        .iter()
+        .find(|s| {
+            s["tags"].as_array().is_some_and(|tags| {
+                tags.iter()
+                    .any(|t| t[0].as_str() == Some("e") && t[1].as_str() == Some(root_id.as_str()))
+            })
+        })
+        .unwrap_or_else(|| panic!("no 39005 for replied root. summaries: {summaries1:?}"));
+    let summary_content: serde_json::Value =
+        serde_json::from_str(summary["content"].as_str().unwrap()).expect("summary content JSON");
+    assert_eq!(summary_content["reply_count"].as_i64(), Some(1));
+    assert_ne!(
+        summary["pubkey"].as_str(),
+        Some(keys.public_key().to_hex().as_str()),
+        "39005 must be relay-signed, not requester-signed"
+    );
+
+    // The reaction rides in the aux closure.
+    assert!(
+        aux1.iter().any(|a| a["kind"].as_u64() == Some(7)),
+        "reaction missing from aux closure: {aux1:?}"
+    );
+
+    // Bounds: head request d-tag suffix, has_more true, cursor present.
+    let d1 = bounds1["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|t| (t[0].as_str() == Some("d")).then(|| t[1].as_str().unwrap().to_string()));
+    assert_eq!(d1, Some(format!("{channel}:head")), "head d-tag suffix");
+    let bc1: serde_json::Value =
+        serde_json::from_str(bounds1["content"].as_str().unwrap()).expect("bounds content JSON");
+    assert_eq!(bc1["has_more"].as_bool(), Some(true));
+    let cursor = &bc1["next_cursor"];
+    let (c_ts, c_id) = (
+        cursor["created_at"].as_i64().expect("cursor created_at"),
+        cursor["id"].as_str().expect("cursor id").to_string(),
+    );
+
+    // Page 2 (cursor request): the exact-multiple final page. Two full rows,
+    // yet has_more must be false and next_cursor null — the server fact, not
+    // a row-count guess.
+    let page2 = query_channel_window(&keys, &channel, 2, Some((c_ts, &c_id))).await;
+    let (rows2, _summaries2, bounds2, _aux2) = partition_window(&page2);
+    assert_eq!(rows2.len(), 2, "final page is exactly full");
+    let d2 = bounds2["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|t| (t[0].as_str() == Some("d")).then(|| t[1].as_str().unwrap().to_string()));
+    assert_eq!(
+        d2,
+        Some(format!("{channel}:{c_ts}:{c_id}")),
+        "cursor-request d-tag echoes the request cursor"
+    );
+    let bc2: serde_json::Value =
+        serde_json::from_str(bounds2["content"].as_str().unwrap()).expect("bounds content JSON");
+    assert_eq!(
+        bc2["has_more"].as_bool(),
+        Some(false),
+        "exact-multiple final page must report exhausted"
+    );
+    assert!(bc2["next_cursor"].is_null());
+
+    // No row is lost or duplicated across the two pages.
+    let mut paged: Vec<String> = rows1
+        .iter()
+        .chain(rows2.iter())
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    paged.sort();
+    let mut expected = top_ids.clone();
+    expected.sort();
+    assert_eq!(paged, expected, "paged union != inserted top-level set");
+}
+
+/// The window cursor is composite by contract: `until` without `before_id`
+/// (or vice versa) is a deterministic 400, never a silent timestamp-only
+/// fallback. And client-submitted 39005/39006 are rejected at ingest —
+/// overlay kinds are relay-only.
+#[tokio::test]
+#[ignore]
+async fn test_channel_window_rejects_half_cursor_and_client_overlay_kinds() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    send_rest_message(&keys, &channel, "lone row").await;
+
+    // Half a cursor: until without before_id → 400.
+    let client = reqwest::Client::new();
+    let filter = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel],
+        "limit": 2,
+        "top_level": true,
+        "until": nostr::Timestamp::now().as_secs(),
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filter).unwrap())
+        .send()
+        .await
+        .expect("submit half-cursor query");
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "top_level with until but no before_id must be a 400"
+    );
+
+    // Malformed before_id with no until → 400. Before the BeforeId enum, a
+    // malformed value decoded to None and silently demoted the request to a
+    // head fetch — the client would receive page zero instead of an error.
+    let filter = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel],
+        "limit": 2,
+        "top_level": true,
+        "before_id": "not-a-hex-event-id",
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filter).unwrap())
+        .send()
+        .await
+        .expect("submit malformed before_id query");
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "top_level with malformed before_id must be a 400, not a head request"
+    );
+
+    // Client-submitted overlay kinds are rejected at ingest.
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    for kind in [39005u16, 39006u16] {
+        let forged = EventBuilder::new(Kind::Custom(kind), "{}")
+            .tags([Tag::parse(["h", &channel]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign forged overlay");
+        let ok = ws.send_event(forged).await.expect("send forged overlay");
+        assert!(
+            !ok.accepted,
+            "client-submitted kind:{kind} must be rejected at ingest"
+        );
+    }
+    ws.disconnect().await.expect("disconnect");
+}

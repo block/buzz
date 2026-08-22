@@ -1,0 +1,176 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  buildAgentSnapshotClipboardHtml,
+  buildTeamSnapshotClipboardHtml,
+  handleAgentSnapshotPaste,
+  parseAgentSnapshotClipboardHtml,
+} from "./agentSnapshotClipboard.ts";
+
+const SHA256 = "a".repeat(64);
+const URL = `https://relay.example/media/${SHA256}.png`;
+
+function buildHtml(overrides = {}) {
+  return buildAgentSnapshotClipboardHtml({
+    attachment: {
+      filename: "animation-auditor.agent.png",
+      sha256: SHA256,
+      size: 1234,
+      type: "image/png",
+      uploaded: 1,
+      url: URL,
+      ...overrides,
+    },
+    displayName: "Animation Auditor",
+  });
+}
+
+test("copied agent HTML restores a labeled snapshot attachment", () => {
+  assert.deepEqual(parseAgentSnapshotClipboardHtml(buildHtml()), {
+    displayLabel: "Animation Auditor",
+    filename: "animation-auditor.agent.png",
+    sha256: SHA256,
+    size: 1234,
+    type: "image/png",
+    uploaded: 0,
+    url: URL,
+  });
+});
+
+test("copied team HTML restores a labeled snapshot attachment", () => {
+  const html = buildTeamSnapshotClipboardHtml({
+    attachment: {
+      filename: "design-review.team.png",
+      sha256: SHA256,
+      size: 4321,
+      type: "image/png",
+      uploaded: 1,
+      url: URL,
+    },
+    displayName: "Design Review",
+  });
+
+  assert.deepEqual(parseAgentSnapshotClipboardHtml(html), {
+    displayLabel: "Design Review",
+    filename: "design-review.team.png",
+    sha256: SHA256,
+    size: 4321,
+    type: "image/png",
+    uploaded: 0,
+    url: URL,
+  });
+});
+
+test("copied team HTML accepts snapshots above the agent size cap", () => {
+  const teamSize = 11 * 1024 * 1024;
+  const html = buildTeamSnapshotClipboardHtml({
+    attachment: {
+      filename: "design-review.team.png",
+      sha256: SHA256,
+      size: teamSize,
+      type: "image/png",
+      uploaded: 1,
+      url: URL,
+    },
+    displayName: "Design Review",
+  });
+
+  assert.equal(parseAgentSnapshotClipboardHtml(html)?.size, teamSize);
+});
+
+test("copied agent HTML escapes its visible link and name", () => {
+  const html = buildAgentSnapshotClipboardHtml({
+    attachment: {
+      filename: "research.agent.png",
+      sha256: SHA256,
+      size: 1234,
+      type: "image/png",
+      uploaded: 1,
+      url: "https://relay.example/media/a.png?x=1&y=2",
+    },
+    displayName: 'Research <Agent> "One"',
+  });
+
+  assert.match(html, /Research &lt;Agent&gt; &quot;One&quot;/);
+  assert.match(html, /x=1&amp;y=2/);
+});
+
+test("invalid copied snapshot metadata falls through to normal paste", () => {
+  const oversizedTeamHtml = buildTeamSnapshotClipboardHtml({
+    attachment: {
+      filename: "design-review.team.png",
+      sha256: SHA256,
+      size: 51 * 1024 * 1024,
+      type: "image/png",
+      uploaded: 1,
+      url: URL,
+    },
+    displayName: "Design Review",
+  });
+  const invalid = [
+    buildHtml({ sha256: "short" }),
+    buildHtml({ filename: "not-an-agent.png" }),
+    buildHtml({ size: 11 * 1024 * 1024 }),
+    oversizedTeamHtml,
+    buildHtml({ type: "text/html" }),
+    buildHtml({ url: "javascript:alert(1)" }),
+    buildHtml({ url: `${URL})[hidden](https://attacker.example` }),
+    buildHtml({ url: `${URL}\n[hidden](https://attacker.example)` }),
+    buildHtml({ url: `${URL} trailing` }),
+  ];
+
+  for (const html of invalid) {
+    assert.equal(parseAgentSnapshotClipboardHtml(html), null);
+  }
+});
+
+test("malformed copied snapshot field types fall through to normal paste", () => {
+  const validPayload = {
+    version: 1,
+    displayName: "Animation Auditor",
+    filename: "animation-auditor.agent.png",
+    sha256: SHA256,
+    size: 1234,
+    type: "image/png",
+    url: URL,
+  };
+
+  for (const override of [
+    { displayName: 5 },
+    { filename: { value: "animation-auditor.agent.png" } },
+    { sha256: [SHA256] },
+  ]) {
+    const encodedPayload = encodeURIComponent(
+      JSON.stringify({ ...validPayload, ...override }),
+    );
+    const html = `<a data-buzz-agent-snapshot="${encodedPayload}">Snapshot</a>`;
+
+    assert.doesNotThrow(() => parseAgentSnapshotClipboardHtml(html));
+    assert.equal(parseAgentSnapshotClipboardHtml(html), null);
+  }
+});
+
+test("ordinary clipboard HTML is ignored", () => {
+  assert.equal(
+    parseAgentSnapshotClipboardHtml('<a href="https://example.com">link</a>'),
+    null,
+  );
+});
+
+test("snapshot paste adds one attachment and prevents the raw link paste", () => {
+  let attachments = [];
+  let preventDefaultCount = 0;
+  const event = {
+    clipboardData: { getData: () => buildHtml() },
+    preventDefault: () => preventDefaultCount++,
+  };
+  const setPending = (update) => {
+    attachments = update(attachments);
+  };
+
+  assert.equal(handleAgentSnapshotPaste(event, setPending), true);
+  assert.equal(handleAgentSnapshotPaste(event, setPending), true);
+  assert.equal(attachments.length, 1);
+  assert.equal(preventDefaultCount, 2);
+});
