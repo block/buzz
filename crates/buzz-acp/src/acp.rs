@@ -3023,10 +3023,43 @@ mod tests {
         );
     }
 
+    /// Spawn a fake ACP agent that runs `script` under a resolved POSIX shell.
+    ///
+    /// Goes through [`crate::testshell::posix_shell_command`] rather than the
+    /// bare name `"bash"`: on Windows the bare name resolves to WSL's
+    /// `System32\bash.exe`, whose `read` builtin returns empty over a pipe.
+    /// See that module for the full failure mode.
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script.into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test script")
+    }
+
+    /// [`spawn_script`], but blocks until the fixture has actually started.
+    ///
+    /// Deadline-sensitive tests must start their clock only once the shell is
+    /// provably executing. Process startup is near-free on Linux but costs
+    /// hundreds of milliseconds under MSYS fork emulation on Windows, so a
+    /// hard deadline measured from before the spawn is partly measuring host
+    /// startup rather than the behaviour under test — which is how these tests
+    /// came to depend on whichever interpreter happened to boot fastest.
+    ///
+    /// The sentinel is consumed here, so the JSON-RPC read loop never sees it.
+    async fn spawn_script_ready(script: &str) -> AcpClient {
+        let mut client = spawn_script(&format!("printf 'READY\\n'; {script}")).await;
+        let line = client
+            .reader
+            .next()
             .await
-            .expect("failed to spawn test script")
+            .expect("fixture must emit READY before running its body")
+            .expect("fixture stdout must be readable");
+        assert_eq!(line.trim(), "READY", "unexpected first line from fixture");
+        client
     }
 
     #[cfg(unix)]
@@ -3187,31 +3220,96 @@ mod tests {
         );
     }
 
+    /// Idle budget for the two "activity resets the idle timer" tests, and the
+    /// elapsed floor that proves a reset happened.
+    ///
+    /// INVARIANT: `RESET_FLOOR` must stay strictly greater than `RESET_IDLE` —
+    /// 2x here. A run in which no reset occurred returns elapsed ≈ `RESET_IDLE`,
+    /// so a floor at or below it would be satisfied by the bug these tests
+    /// exist to catch.
+    const RESET_IDLE: std::time::Duration = std::time::Duration::from_millis(600);
+    const RESET_FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
+
+    /// Drive `script` through the read loop and assert that incoming activity
+    /// kept the turn alive well past a single idle timeout.
+    ///
+    /// Retries an *inconclusive* run, and only that. The fixture's cadence
+    /// comes from a real subprocess — `sleep` is an external binary under MSYS,
+    /// so each tick costs a process spawn and the observed inter-line gap is
+    /// ~98ms (up to ~244ms idle, worse under parallel load) against a nominal
+    /// 50ms. When the host stalls longer than the idle budget, the read loop
+    /// times out *correctly* and the run tells us nothing about the behaviour
+    /// under test. Widening the constants cannot fix this: Linux finishes the
+    /// activity window in ~1s and Windows takes ~2s, so the floor is squeezed
+    /// from both sides.
+    ///
+    /// This does not weaken the assertion, because the two outcomes have
+    /// different shapes. A genuine failure to reset the idle timer is
+    /// deterministic — elapsed ≈ `RESET_IDLE` on every attempt, so every
+    /// attempt fails and so does the test. A host stall is intermittent, so a
+    /// healthy implementation clears the floor within a couple of tries.
+    /// Measured before this helper existed: 4 of 9 full-suite runs failed here.
+    async fn assert_activity_resets_idle(script: &str, what: &str) {
+        // Sized against how loaded the suite actually is, not by feel. Four was
+        // enough at 797 tests; at 811 — the count once the agent-lifecycle
+        // branch's process fixtures are also present — one run in three still
+        // exhausted it. Each extra attempt costs a fixture spawn only on a host
+        // that is already stalling, and never on a genuine regression: that
+        // fails on the first attempt, deterministically.
+        const ATTEMPTS: usize = 8;
+        let mut inconclusive = Vec::new();
+
+        for _ in 0..ATTEMPTS {
+            let mut client = spawn_script(script).await;
+            let max_dur = std::time::Duration::from_secs(30);
+            let hard_deadline = tokio::time::Instant::now() + max_dur;
+            let start = std::time::Instant::now();
+            let result = client
+                .read_until_response_with_idle_timeout(
+                    "test",
+                    999,
+                    RESET_IDLE,
+                    hard_deadline,
+                    max_dur,
+                )
+                .await;
+            let elapsed = start.elapsed();
+            client.shutdown().await;
+
+            // Always a true assertion: the turn must end by idling out, never
+            // by hitting the hard deadline or losing the child.
+            assert!(
+                matches!(result, Err(AcpError::IdleTimeout(_))),
+                "{what}: expected IdleTimeout, got {result:?}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(20),
+                "{what}: read loop ran away; elapsed {elapsed:?}"
+            );
+
+            if elapsed >= RESET_FLOOR {
+                return;
+            }
+            inconclusive.push(elapsed);
+        }
+
+        panic!(
+            "{what}: idle fired before {RESET_FLOOR:?} on all {ATTEMPTS} attempts \
+             (elapsed {inconclusive:?}, idle budget {RESET_IDLE:?}). Activity is \
+             not resetting the idle timer. A merely-slow host would have cleared \
+             the floor on at least one attempt."
+        );
+    }
+
+    /// Valid JSON `session/update` notifications reset the idle timer; non-JSON
+    /// lines do not.
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
-        // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+        assert_activity_resets_idle(
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 30"#,
+            "agent_thought_chunk activity",
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(200),
-                hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
-        assert!(elapsed < std::time::Duration::from_secs(3));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]
@@ -3384,35 +3482,18 @@ mod tests {
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
     }
 
+    /// Keepalive `session/update` lines must keep resetting the idle timer, so
+    /// the turn survives far past a single idle deadline. This is the
+    /// regression test for the keepalive fix itself.
+    ///
+    /// See [`assert_activity_resets_idle`] for the budget and the retry rule.
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
+        assert_activity_resets_idle(
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 30"#,
+            "keepalive",
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(100),
-                hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
-        assert!(
-            elapsed >= std::time::Duration::from_millis(500),
-            "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
-        );
-        assert!(elapsed < std::time::Duration::from_secs(5));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]
@@ -3967,21 +4048,31 @@ mod tests {
     /// fix (acp.rs:1440-1444): without renewal, the read loop returns
     /// `HardTimeout` before the prompt response arrives.
     ///
-    /// Timeline:
-    ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
-    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
-    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
-    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
+    /// Timeline (t=0 is *after* the fixture reports READY, so shell startup is
+    /// outside the measured window — see [`spawn_script_ready`]):
+    ///   t≈0:  read loop starts, `hard_deadline = now + 2s`
+    ///   t≈0:  `read` unblocks the moment the read loop writes the steer
+    ///         request, and the script answers (id=0) → Success renewal moves
+    ///         `hard_deadline` to `now + 10s`
+    ///   t≈3s: script emits prompt response (id=999) → `Ok`
     ///
-    /// Old code: `HardTimeout` at t≈1s (before prompt response).
-    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    /// Old code: `HardTimeout` at t≈2s (before the prompt response).
+    /// New code: deadline renewed at t≈0 → prompt response at t≈3s → `Ok`.
+    ///
+    /// The leading `read` is a *causal* barrier, not a timed one, and that is
+    /// load-bearing: the steer response must arrive before the deadline, and a
+    /// `sleep` cannot guarantee that when `sleep` is an external binary whose
+    /// spawn a loaded host can delay past the deadline itself. Blocking on the
+    /// request makes the ordering independent of wall-clock entirely. The
+    /// trailing `sleep 3` needs no such treatment: it only has to land *after*
+    /// the original deadline, and a stall pushes it further in that direction.
     #[tokio::test]
     async fn steer_success_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
+        let script = "read -r _; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
-                      sleep 1; \
+                      sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
 
         let update = session_info_update_msg(Some(serde_json::json!("run-99")));
         let _ = client.handle_session_update(&update);
@@ -4001,8 +4092,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -4041,13 +4132,27 @@ mod tests {
         capture_path: &std::path::Path,
         response: &str,
     ) -> AcpClient {
+        // The redirect target MUST be single-quoted. `capture_path` is absolute,
+        // and on Windows that means `C:\Users\...\x.json`; interpolated bare,
+        // bash consumes every backslash as an escape and the redirect lands on a
+        // *relative* file named `C:UsersmfethAppData...json` in the crate source
+        // directory. The parent then reads the real path, finds nothing, and the
+        // test fails — while quietly littering the working tree. Quoting keeps
+        // the backslashes intact, which MSYS accepts as a Win32 path.
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > '{capture}'; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = crate::testshell::quote_for_shell(capture_path),
             response = response,
         );
-        spawn_script(&script).await
+        // READY-gated, because `run_one_steer` gives the fixture an 800ms idle
+        // budget and `spawn_script` would leave MSYS shell startup inside it.
+        // Starting a real bash costs a large and load-dependent fraction of
+        // that budget, so under a loaded suite the read loop idled out before
+        // the fixture had answered at all — surfacing as whichever
+        // capture-based steer test happened to be running, which reads as four
+        // unrelated flakes rather than one shared cause.
+        spawn_script_ready(&script).await
     }
 
     /// Drive one steer through the read loop and return
@@ -4074,7 +4179,15 @@ mod tests {
                 .expect("steer_tx send should succeed");
         });
 
-        let idle = std::time::Duration::from_millis(800);
+        // The idle timeout is only how this loop *exits* once the fixture has
+        // answered — no assertion depends on its value, and the ack and the
+        // captured bytes are checked afterwards either way. At 800ms it was
+        // also, accidentally, a deadline the fixture had to beat: an MSYS
+        // `read` plus a file write can exceed it on a loaded host, and then
+        // the loop gave up before the response arrived. Three seconds is far
+        // outside that range while still bounding a fixture that never
+        // answers, which the 10s cap catches regardless.
+        let idle = std::time::Duration::from_secs(3);
         let max_dur = std::time::Duration::from_secs(10);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let _ = client
@@ -4089,10 +4202,15 @@ mod tests {
     }
 
     /// Unique temp path for one test's captured request bytes.
+    ///
+    /// The uuid suffix is load-bearing: `%TEMP%` is shared across every
+    /// concurrent `cargo test -p buzz-acp` on the machine, so a fixed name
+    /// makes two runs — two git worktrees, or a rerun overlapping a previous
+    /// one — read each other's captures.
     fn capture_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("buzz-acp-steer-capture");
         std::fs::create_dir_all(&dir).expect("create capture dir");
-        let path = dir.join(format!("{name}.json"));
+        let path = dir.join(format!("{name}-{}.json", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -4300,15 +4418,19 @@ mod tests {
     /// `steer_success_renews_hard_deadline_and_survives_past_original` for
     /// the `_session/steering` transport.
     ///
-    /// Timeline: original hard deadline at t≈1s; steer response at t≈0.5s
-    /// renews it to t≈3.5s; prompt response at t≈1.5s lands inside it.
+    /// Timeline (t=0 is after READY): original hard deadline at t≈2s; the
+    /// leading `read` unblocks when the read loop writes the steer request, so
+    /// the steer response lands at t≈0 and renews the deadline to t≈10s;
+    /// prompt response at t≈3s lands inside it. See
+    /// `steer_success_renews_hard_deadline_and_survives_past_original` for why
+    /// the barrier is a `read` and not a `sleep`.
     #[tokio::test]
     async fn acp_steer_injected_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
+        let script = "read -r _; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"injected\"}}'; \
-                      sleep 1; \
+                      sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
         set_steering_supported(&mut client);
 
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
@@ -4325,8 +4447,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -4351,17 +4473,21 @@ mod tests {
     /// deadline — that clock belongs to a turn which is already settled.
     ///
     /// Same timeline as the `injected` test, so the only difference is the
-    /// outcome string: original hard deadline at t≈1s, steer response at
-    /// t≈0.5s, prompt response at t≈1.5s. With renewal the prompt response
-    /// would land and this returns `Ok`; without renewal the original
-    /// deadline fires first and we get `HardTimeout`.
+    /// outcome string: original hard deadline at t≈2s, steer response at t≈0
+    /// (the leading `read` unblocks on the steer request), prompt response at
+    /// t≈3s. With renewal the prompt response would land and this returns
+    /// `Ok`; without renewal the original deadline fires first and we get
+    /// `HardTimeout`. The steer response must arrive *before* the deadline (so
+    /// the ack is still produced) and the prompt response *after* it — the
+    /// `read` barrier guarantees the first ordering causally rather than
+    /// betting on a `sleep`, and the trailing `sleep 3` only has to be late.
     #[tokio::test]
     async fn acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline() {
-        let script = "sleep 0.5; \
+        let script = "read -r _; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"startedNewTurn\"}}'; \
-             sleep 1; \
+             sleep 3; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
         set_steering_supported(&mut client);
 
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
@@ -4378,8 +4504,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -5025,6 +5151,43 @@ mod tests {
         assert!(
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
+        );
+    }
+
+    /// npm installs every JS CLI on Windows as a `.cmd` shim, so an agent
+    /// configured as `hermes-acp.cmd` is the ordinary case — and
+    /// `normalize_agent_command_identity` already strips `.cmd`/`.bat` when
+    /// deriving agent identity, so the rest of the harness assumes such a
+    /// command runs.
+    ///
+    /// It does: `std::process::Command` detects those extensions and routes
+    /// them through `cmd.exe` itself, with the argument escaping that was
+    /// hardened for CVE-2024-24576. This test exists to keep that assumption
+    /// checked rather than assumed, since nothing else in the suite spawns a
+    /// batch shim and the failure mode if it ever regressed — agents that
+    /// simply never start on Windows — is expensive to diagnose from the
+    /// symptom.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn acp_client_can_spawn_an_npm_style_cmd_shim() {
+        let shim = std::env::temp_dir().join(format!("buzz-agent-{}.cmd", uuid::Uuid::new_v4()));
+        // Stay alive long enough to be observed, without emitting ACP traffic.
+        // Kept short: `shutdown()` ends the shim but not the `ping` beneath it,
+        // and this suite should not leave a process behind for 20 seconds.
+        std::fs::write(&shim, "@echo off\r\nping -n 6 127.0.0.1 > nul\r\n")
+            .expect("shim must be writable");
+
+        let spawned = AcpClient::spawn(&shim.to_string_lossy(), &[], &[], false).await;
+        let ok = spawned.is_ok();
+        if let Ok(mut client) = spawned {
+            client.shutdown().await;
+        }
+        let _ = std::fs::remove_file(&shim);
+
+        assert!(
+            ok,
+            "an npm-style .cmd agent shim must be spawnable — this is the \
+             '%1 is not a valid Win32 application' failure"
         );
     }
 }

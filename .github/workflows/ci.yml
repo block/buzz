@@ -1021,6 +1021,15 @@ jobs:
         # Serial: windows_resolver_tests mutate process-global env
         # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
         run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
+      - name: Test (buzz-acp)
+        # buzz-acp's fake-agent fixtures spawn a POSIX shell and speak JSON-RPC
+        # to it over pipes, so they exercise Windows-specific process and path
+        # behaviour that no Linux job can reach. This crate previously had 16
+        # failures on Windows that no CI job could see, because the Linux jobs
+        # do not run it either (see `just test-unit`) and this job only
+        # compiles it. Unlike buzz-dev-mcp above, these tests do not mutate
+        # process-global env, so they run in parallel.
+        run: cargo test -p buzz-acp --lib --target $env:TARGET
       # Smoke-test the new host-prereq contract: Git for Windows (which provides
       # bash) is available on the runner, a shell command round-trips, and bash
       # does NOT resolve from System32 (so WSL's launcher is never picked up).
