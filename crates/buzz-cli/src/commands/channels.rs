@@ -1043,18 +1043,38 @@ async fn fetch_own_agent_profile(client: &BuzzClient) -> Result<StoredAgentProfi
         "authors": [client.keys().public_key().to_hex()],
         "limit": 1,
     });
-    let raw = client.query(&filter).await.map_err(|e| {
-        CliError::Other(format!(
-            "could not read the current agent profile, so the policy change was \
-             not published (publishing without it would erase the profile): {e}"
-        ))
-    })?;
+    let raw = client.query(&filter).await.map_err(profile_read_error)?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
         CliError::Other(format!(
             "relay returned an unreadable profile query result: {e}"
         ))
     })?;
     parse_stored_profile(&events)
+}
+
+/// Explain a failed profile read without flattening its category.
+///
+/// `exit_code` and `is_retryable_error` classify by variant, and those codes are
+/// the CLI's agent-facing contract (2 = network/relay, 3 = auth, 4 = other), so
+/// mapping a 503 or a connect timeout to `Other` would tell a caller to abandon
+/// a transient outage as permanent, and an expired `BUZZ_AUTH_TAG` to treat
+/// re-authenticating as pointless. Context is added where the variant has room
+/// for it.
+fn profile_read_error(e: CliError) -> CliError {
+    const CONTEXT: &str = "could not read the current agent profile, so the policy change \
+                           was not published (publishing without it would erase the profile)";
+    match e {
+        // `reqwest::Error` has nowhere to put added context, and the variant —
+        // exit 2, retryable — is what a caller acts on.
+        CliError::Network(_) => e,
+        CliError::Relay { status, body } => CliError::Relay {
+            status,
+            body: format!("{CONTEXT}: {body}"),
+        },
+        CliError::Auth(message) => CliError::Auth(format!("{CONTEXT}: {message}")),
+        CliError::Key(message) => CliError::Key(format!("{CONTEXT}: {message}")),
+        other => CliError::Other(format!("{CONTEXT}: {other}")),
+    }
 }
 
 /// The stored profile a query result describes, or an error rather than a guess.
@@ -1069,14 +1089,25 @@ fn parse_stored_profile(events: &[serde_json::Value]) -> Result<StoredAgentProfi
             created_at: 0,
         });
     };
-    let created_at = event
-        .get("created_at")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let content = event
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    // A result row we cannot fully read is not an absent profile, and both
+    // fields are checked together because both defaults were unsafe:
+    // defaulting `content` to `""` takes the empty-body path below and
+    // republishes a single-field profile — the wipe this merge exists to
+    // prevent — and defaulting `created_at` to 0 stamps the write at a plain
+    // `now`, restoring the same-second event-id coin flip
+    // `profile_publish_timestamp` exists to avoid. Only a genuinely absent
+    // event yields an empty body.
+    let (Some(created_at), Some(content)) = (
+        event.get("created_at").and_then(serde_json::Value::as_u64),
+        event.get("content").and_then(serde_json::Value::as_str),
+    ) else {
+        return Err(CliError::Other(
+            "the relay returned an agent profile event without a readable \
+             `created_at` and `content`; refusing to replace the stored profile \
+             from a result this command cannot interpret."
+                .to_string(),
+        ));
+    };
     if content.trim().is_empty() {
         // A profile event with no body carries nothing to preserve, so this is
         // the "no profile" case rather than a lookup we failed to read.
@@ -1089,7 +1120,10 @@ fn parse_stored_profile(events: &[serde_json::Value]) -> Result<StoredAgentProfi
         Ok(serde_json::Value::Object(body)) => Ok(StoredAgentProfile { body, created_at }),
         _ => Err(CliError::Other(
             "the stored agent profile is not a JSON object; refusing to replace it \
-             with a single-field profile. Republish a valid kind:10100 profile first."
+             with a single-field profile. This command only merges into an object \
+             body and is the only in-repo publisher of kind:10100, so recover by \
+             signing a corrected kind:10100 event and submitting it to the relay's \
+             `POST /events`, then re-run."
                 .to_string(),
         )),
     }
@@ -1097,9 +1131,14 @@ fn parse_stored_profile(events: &[serde_json::Value]) -> Result<StoredAgentProfi
 
 /// How far ahead of this host's clock a merge may stamp its `created_at`.
 ///
-/// The relay accepts a ±900s window (`crates/buzz-relay/src/handlers/ingest.rs`).
-/// This sits well inside it, so a refusal means the stored profile's timestamp is
-/// genuinely broken rather than merely written by a host whose clock leads ours.
+/// The relay accepts a ±900s window measured against *its own* clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS`, `crates/buzz-relay/src/handlers/ingest.rs`);
+/// this budget is measured against ours, so the two are not directly
+/// comparable. A stored copy accepted at `S` when relay time was `R` proves
+/// only `S - R <= 900`, so out-bidding it at `S + 1` can sit up to 901s from
+/// relay time. The headroom below 900 absorbs that overshoot, so a refusal here
+/// means the stored profile's timestamp is genuinely broken rather than merely
+/// written by a host whose clock leads ours.
 const MAX_PROFILE_PUBLISH_LEAD_SECS: u64 = 600;
 
 fn unix_secs_now() -> u64 {
@@ -1113,8 +1152,8 @@ fn unix_secs_now() -> u64 {
 ///
 /// Out-bids the stored copy by timestamp rather than leaving it to the event-id
 /// tiebreak. `Db::replace_addressable_event` resolves a same-second write by
-/// lowest id, so a plain `now` write is a coin flip against the ACP harness
-/// republishing in the same second — and a deterministic *loss* against a stored
+/// lowest id, so a plain `now` write is a coin flip against a peer republishing
+/// the profile in the same second — and a deterministic *loss* against a stored
 /// copy stamped later by a skewed peer. Retrying at `now` cannot win either, so
 /// retries alone do not fix it.
 ///
@@ -1177,12 +1216,13 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     // profile, taking the agent out of every channel's @mention picker.
     //
     // This is a read-modify-write on a replaceable event with no
-    // compare-and-set, so it races the ACP harness's `ProfileChannelUpdater`,
-    // which republishes the same event on every membership change under the
-    // same key. Re-read after publishing and redo the merge if someone else's
-    // copy is now stored: without that, an operator running this command while
-    // an agent is being invited to a channel silently drops the invite from
-    // `channel_ids` — the exact staleness the harness exists to prevent.
+    // compare-and-set, so it races any other client publishing kind:10100 for
+    // this identity under the same key. No in-repo writer other than this
+    // command publishes that kind, so the peer is an out-of-repo one — an agent
+    // harness that republishes the profile as its channel membership changes.
+    // Re-read after publishing and redo the merge if someone else's copy is now
+    // stored: without that, an operator running this command while an agent is
+    // being invited to a channel silently drops the invite from `channel_ids`.
     //
     // The window is narrowed, not closed. A peer that publishes between our
     // read and our write still loses its change, because a replaceable write
@@ -1191,9 +1231,9 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     const CONFLICT_MSG: &str = "another writer replaced the agent profile while this policy \
                                 change was being published; the change did not stick. Retry.";
     use nostr::{EventBuilder, Kind};
-    // No sleep between attempts: unlike the harness, which republishes
-    // repeatedly and would ratchet its own stamps upward, this runs at most
-    // three times per invocation. Sleeping here only delayed the command.
+    // No sleep between attempts: unlike a harness that republishes repeatedly
+    // and would ratchet its own stamps upward, this runs at most three times
+    // per invocation. Sleeping here only delayed the command.
     for _ in 1..=MAX_MERGE_ATTEMPTS {
         let stored = fetch_own_agent_profile(client).await?;
         let mut profile = stored.body;
@@ -1206,11 +1246,10 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         // Out-bid the stored copy by timestamp rather than leaving it to the
         // event-id tiebreak. `Db::replace_addressable_event` resolves a
         // same-second write by lowest id, so a default `created_at = now` write
-        // is a coin flip against the ACP harness republishing in the same second
-        // — and a deterministic *loss* against a stored copy stamped later by a
-        // skewed peer. Retrying at `now` cannot win either, so retries alone do
-        // not fix it. The sleep hands the lead back before we publish, so stamps
-        // do not ratchet upward across attempts.
+        // is a coin flip against a peer republishing the profile in the same
+        // second — and a deterministic *loss* against a stored copy stamped
+        // later by a skewed peer. Retrying at `now` cannot win either, so retries alone do
+        // not fix it.
         let created_at = profile_publish_timestamp(unix_secs_now(), stored.created_at)?;
 
         let builder = EventBuilder::new(
@@ -1228,14 +1267,26 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         // loser of a replaceable compare. It arrives as `accepted: true`, so
         // reading only `accepted` would report success for a discarded write.
         match parse_write_response(&resp, CONFLICT_MSG) {
-            Ok(rendered) => {
-                // Accepted is still not landed: a peer may have published
-                // straight after us and replaced our copy.
-                if stored_profile_event_id(client).await? == Some(event_id) {
+            // Accepted is still not landed: a peer may have published straight
+            // after us and replaced our copy.
+            Ok(rendered) => match confirm_stored_profile(client, &event_id, created_at).await {
+                Confirmation::Landed => {
                     println!("{rendered}");
                     return Ok(());
                 }
-            }
+                Confirmation::Replaced => {}
+                // The relay accepted the event and nothing that could have
+                // replaced it is stored, so this is a write we could not
+                // confirm rather than one that failed. Reporting a conflict
+                // here told a caller to retry a change that had already
+                // landed — and the retry rebuilt the same body at the same
+                // stamp, so it came back `duplicate:` and looked like a
+                // conflict again, all the way to exit 5.
+                Confirmation::Unconfirmed(reason) => {
+                    println!("{}", unconfirmed_write_response(&rendered, &reason));
+                    return Ok(());
+                }
+            },
             Err(CliError::Conflict(_)) => {}
             Err(other) => return Err(other),
         }
@@ -1246,8 +1297,93 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     Err(CliError::Conflict(CONFLICT_MSG.to_string()))
 }
 
-/// Event id of the kind:10100 profile the relay currently stores for us.
-async fn stored_profile_event_id(client: &BuzzClient) -> Result<Option<String>, CliError> {
+/// What a post-publish read proves about the event we just published.
+#[derive(Debug, PartialEq, Eq)]
+enum Confirmation {
+    /// Our event is the stored copy.
+    Landed,
+    /// A copy that beats ours is stored, so ours was replaced: merge onto the
+    /// new one and publish again.
+    Replaced,
+    /// The read proves nothing — it cannot see our write yet, or it failed.
+    Unconfirmed(String),
+}
+
+/// Read the stored kind:10100 head back and classify our write against it.
+///
+/// A failed read is `Unconfirmed`, never an error: the mutation has already
+/// happened by the time this runs, so borrowing the read's error would report a
+/// successful policy change as a network or relay failure and send exit 2 to a
+/// caller whose write landed.
+async fn confirm_stored_profile(
+    client: &BuzzClient,
+    published_id: &str,
+    published_created_at: u64,
+) -> Confirmation {
+    match stored_profile_head(client).await {
+        Ok(stored) => classify_confirmation(
+            published_id,
+            published_created_at,
+            stored
+                .as_ref()
+                .map(|(id, created_at)| (id.as_str(), *created_at)),
+        ),
+        Err(e) => Confirmation::Unconfirmed(format!(
+            "the relay accepted the event, but reading the profile back to confirm \
+             it did not succeed: {e}"
+        )),
+    }
+}
+
+/// Classify a read-back head against the event we published.
+///
+/// The read cannot be pinned to the primary: kind:10100 is global, so the
+/// filter carries neither a channel pin nor an `until`, which makes it
+/// `RoutePredicate::Bounded` and lets the relay serve it from a read replica
+/// whenever `BUZZ_REPLICA_READ_MAX_AGE_MS` is set. That budget bounds how
+/// recently the replica proved its replay position, not whether a write from a
+/// moment ago is visible, so a read issued straight after the publish can
+/// legitimately return the pre-write event.
+///
+/// The relay's own replace rule separates that lag from a real loss:
+/// `Db::replace_addressable_event` keeps the higher `created_at` and breaks a
+/// tie by lowest event id. A stored copy that loses that comparison to the
+/// event we just published therefore cannot have replaced it — the read is
+/// simply behind. Treating it as a conflict republished a byte-identical event,
+/// drew `duplicate:`, and returned exit 5 for a policy change that was stored.
+fn classify_confirmation(
+    published_id: &str,
+    published_created_at: u64,
+    stored: Option<(&str, u64)>,
+) -> Confirmation {
+    let Some((stored_id, stored_created_at)) = stored else {
+        // The relay accepted our event, so an empty read is one that cannot see
+        // it yet: a replaceable write is never removed by a peer's.
+        return Confirmation::Unconfirmed(
+            "the relay accepted the event, but the profile read back empty".to_string(),
+        );
+    };
+    if stored_id == published_id {
+        return Confirmation::Landed;
+    }
+    let stored_beats_ours = match stored_created_at.cmp(&published_created_at) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => stored_id < published_id,
+        std::cmp::Ordering::Less => false,
+    };
+    if stored_beats_ours {
+        Confirmation::Replaced
+    } else {
+        Confirmation::Unconfirmed(format!(
+            "the relay accepted the event, but the profile read back a copy \
+             ({stored_id} at {stored_created_at}) that cannot have replaced it"
+        ))
+    }
+}
+
+/// Event id and `created_at` of the kind:10100 profile the relay currently
+/// stores for us.
+async fn stored_profile_head(client: &BuzzClient) -> Result<Option<(String, u64)>, CliError> {
     let filter = serde_json::json!({
         "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
         "authors": [client.keys().public_key().to_hex()],
@@ -1256,11 +1392,36 @@ async fn stored_profile_event_id(client: &BuzzClient) -> Result<Option<String>, 
     let raw = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("unreadable profile query result: {e}")))?;
-    Ok(events
-        .first()
-        .and_then(|event| event.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string))
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+    let (Some(id), Some(created_at)) = (
+        event.get("id").and_then(serde_json::Value::as_str),
+        event.get("created_at").and_then(serde_json::Value::as_u64),
+    ) else {
+        return Err(CliError::Other(
+            "the relay returned a profile event without a readable id and `created_at`".to_string(),
+        ));
+    };
+    Ok(Some((id.to_string(), created_at)))
+}
+
+/// Attach a confirmation caveat to an accepted write response.
+///
+/// The relay accepted the event, so this is a success: stdout keeps the
+/// documented `{event_id, accepted, message}` shape, and the extra `warning`
+/// key is additive the same way the create commands inject the new entity id.
+fn unconfirmed_write_response(rendered: &str, reason: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(rendered) {
+        Ok(serde_json::Value::Object(mut response)) => {
+            response.insert(
+                "warning".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            );
+            serde_json::Value::Object(response).to_string()
+        }
+        _ => rendered.to_string(),
+    }
 }
 
 pub async fn cmd_set_canvas(
@@ -1396,11 +1557,11 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, build_template_report, cmd_set_add_policy,
+        apply_cardinality_rule, build_template_report, classify_confirmation, cmd_set_add_policy,
         finalize_roster_resolution, name_matches, parse_stored_profile, profile_publish_timestamp,
-        resolve_roster_with_archive_filter, validate_ttl_seconds, validate_update_channel_fields,
-        ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
-        MAX_PROFILE_PUBLISH_LEAD_SECS,
+        profile_read_error, resolve_roster_with_archive_filter, unconfirmed_write_response,
+        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
+        Confirmation, ResolvedAgent, RosterResolution, SkippedSlug, MAX_PROFILE_PUBLISH_LEAD_SECS,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -2025,6 +2186,109 @@ mod tests {
         assert!(
             matches!(err, CliError::Other(ref m) if m.contains("clock skew")),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_result_row_we_cannot_read_is_refused_rather_than_treated_as_absent() {
+        // Defaulting `content` to "" republished a single-field profile — the
+        // wipe this merge exists to prevent — and defaulting `created_at` to 0
+        // dropped the write back to a plain `now` stamp, restoring the
+        // same-second event-id coin flip.
+        for event in [
+            json!({ "created_at": 100 }),
+            json!({ "created_at": 100, "content": 42 }),
+            json!({ "content": "{}" }),
+        ] {
+            let err = parse_stored_profile(std::slice::from_ref(&event))
+                .expect_err("an unreadable row must not look like an absent profile");
+            assert!(
+                matches!(err, CliError::Other(ref m) if m.contains("cannot interpret")),
+                "unexpected error for {event}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transient_profile_read_failure_keeps_its_exit_code() {
+        // Flattening these to `Other` reports exit 4 and `retryable: false` for
+        // a relay outage or an expired auth tag, against the exit-code contract
+        // agents drive the CLI by.
+        let relay = profile_read_error(CliError::Relay {
+            status: 503,
+            body: "unavailable".into(),
+        });
+        assert!(
+            matches!(relay, CliError::Relay { status: 503, .. }),
+            "{relay:?}"
+        );
+        assert!(crate::error::is_retryable_error(&relay));
+        assert_eq!(crate::error::exit_code(&relay), 2);
+
+        let auth = profile_read_error(CliError::Auth("token expired".into()));
+        assert_eq!(crate::error::exit_code(&auth), 3);
+
+        let other = profile_read_error(CliError::Other("unreadable body".into()));
+        assert!(matches!(other, CliError::Other(_)), "{other:?}");
+        assert_eq!(crate::error::exit_code(&other), 4);
+    }
+
+    // ---- post-publish confirmation ----------------------------------------
+
+    #[test]
+    fn our_own_event_reading_back_is_the_only_landed_case() {
+        assert_eq!(
+            classify_confirmation("aa", 1_000, Some(("aa", 1_000))),
+            Confirmation::Landed
+        );
+    }
+
+    #[test]
+    fn a_read_that_cannot_see_our_write_is_not_a_conflict() {
+        // The confirmation filter is neither channel-pinned nor `until`-bounded,
+        // so the relay may serve it from a lagging read replica and return the
+        // pre-write event. A stored copy that loses the relay's replace
+        // comparison cannot have replaced ours, so the read is behind — and
+        // calling that a conflict republished a byte-identical event, drew
+        // `duplicate:`, and exited 5 on a policy change that was stored.
+        let older = classify_confirmation("bb", 1_001, Some(("aa", 1_000)));
+        assert!(matches!(older, Confirmation::Unconfirmed(_)), "{older:?}");
+
+        // Same second, higher stored id: the lowest-id tiebreak went to us, so
+        // this copy cannot be the stored head either.
+        let tie = classify_confirmation("aa", 1_000, Some(("bb", 1_000)));
+        assert!(matches!(tie, Confirmation::Unconfirmed(_)), "{tie:?}");
+
+        // Our write was accepted, so nothing can have removed it.
+        let empty = classify_confirmation("aa", 1_000, None);
+        assert!(matches!(empty, Confirmation::Unconfirmed(_)), "{empty:?}");
+    }
+
+    #[test]
+    fn a_copy_that_beats_ours_is_a_replacement_to_merge_onto() {
+        assert_eq!(
+            classify_confirmation("aa", 1_000, Some(("bb", 1_001))),
+            Confirmation::Replaced
+        );
+        // Same second, lower stored id: the lowest-id tiebreak went to the peer.
+        assert_eq!(
+            classify_confirmation("bb", 1_000, Some(("aa", 1_000))),
+            Confirmation::Replaced
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_write_reports_success_with_a_warning() {
+        let rendered = r#"{"event_id":"aa","accepted":true,"message":"ok"}"#;
+        let out = unconfirmed_write_response(rendered, "could not confirm the write");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json response");
+        // The documented write-response shape survives; the caveat is additive.
+        assert_eq!(parsed.get("event_id"), Some(&json!("aa")));
+        assert_eq!(parsed.get("accepted"), Some(&json!(true)));
+        assert_eq!(parsed.get("message"), Some(&json!("ok")));
+        assert_eq!(
+            parsed.get("warning"),
+            Some(&json!("could not confirm the write"))
         );
     }
 }
