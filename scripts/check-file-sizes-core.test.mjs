@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -51,6 +51,27 @@ test("counts empty, LF, and CRLF content with the existing semantics", () => {
   assert.equal(countLines(""), 0);
   assert.equal(countLines("one\n"), 2);
   assert.equal(countLines("one\r\ntwo"), 2);
+});
+
+test("surface entrypoints keep the intended ceilings", () => {
+  const repoRoot = path.resolve(import.meta.dirname, "..");
+  const desktop = readFileSync(
+    path.join(repoRoot, "desktop/scripts/check-file-sizes.mjs"),
+    "utf8",
+  );
+  const mobile = readFileSync(
+    path.join(repoRoot, "mobile/scripts/check-file-sizes.mjs"),
+    "utf8",
+  );
+  const web = readFileSync(
+    path.join(repoRoot, "web/scripts/check-file-sizes.mjs"),
+    "utf8",
+  );
+
+  assert.match(desktop, /DESKTOP_FRONTEND_MAX_LINES = 1200/);
+  assert.match(desktop, /DESKTOP_RUST_MAX_LINES = 1500/);
+  assert.match(mobile, /MAX_LINES = 1200/);
+  assert.match(web, /MAX_LINES = 1000/);
 });
 
 test("new files use the configured ceiling", () => {

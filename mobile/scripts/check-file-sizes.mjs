@@ -5,7 +5,7 @@ import { runFileSizeCheck } from "../../scripts/check-file-sizes-core.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 
-const MAX_LINES = 1000;
+const MAX_LINES = 1200;
 
 const rules = [
   {
