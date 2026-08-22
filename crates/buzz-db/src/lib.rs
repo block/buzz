@@ -57,7 +57,9 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use event::{
+    EventQuery, ParamReplaceOutcome, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT,
+};
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
@@ -5195,7 +5197,7 @@ impl Db {
         event: &nostr::Event,
         d_tag: &str,
         channel_id: Option<Uuid>,
-    ) -> Result<(StoredEvent, bool)> {
+    ) -> Result<(StoredEvent, event::ParamReplaceOutcome)> {
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;
@@ -5294,9 +5296,23 @@ impl Db {
         if dominated {
             tx.rollback().await?;
             let received_at = chrono::Utc::now();
+            // Classify the loss: an exact-id resubmit of a head we already hold
+            // is idempotent (client's content already matches), but a distinct
+            // event that merely lost last-write-wins is a conflict the client
+            // must resolve by refetching. Reported differently on the wire so a
+            // losing device does not record a stale write as success.
+            let is_exact_id_resubmit = existing
+                .iter()
+                .chain(watermark.iter())
+                .any(|(_, accepted_id)| incoming_id == accepted_id.as_slice());
+            let outcome = if is_exact_id_resubmit {
+                event::ParamReplaceOutcome::Duplicate
+            } else {
+                event::ParamReplaceOutcome::Stale
+            };
             return Ok((
                 StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                false,
+                outcome,
             ));
         }
 
@@ -5367,9 +5383,11 @@ impl Db {
         let was_inserted = insert_result.rows_affected() > 0;
         if !was_inserted {
             tx.rollback().await?;
+            // The insert hit an existing row with this exact id (e.g. a
+            // previously soft-deleted coordinate). Idempotent — not a conflict.
             return Ok((
                 StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                false,
+                event::ParamReplaceOutcome::Duplicate,
             ));
         }
 
@@ -5400,7 +5418,7 @@ impl Db {
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-            true,
+            event::ParamReplaceOutcome::Inserted,
         ))
     }
 }
@@ -5962,18 +5980,18 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign new");
 
-        assert!(
-            db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("insert old")
-                .1
-        );
-        assert!(
-            db.replace_parameterized_event(community, &new, &d_tag, None)
-                .await
-                .expect("replace with new")
-                .1
-        );
+        assert!(db
+            .replace_parameterized_event(community, &old, &d_tag, None)
+            .await
+            .expect("insert old")
+            .1
+            .was_inserted());
+        assert!(db
+            .replace_parameterized_event(community, &new, &d_tag, None)
+            .await
+            .expect("replace with new")
+            .1
+            .was_inserted());
 
         let rows: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
@@ -5996,12 +6014,12 @@ mod tests {
         .await
         .expect("simulate NIP-09 coordinate deletion");
 
-        assert!(
-            !db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("replay old")
-                .1
-        );
+        assert!(!db
+            .replace_parameterized_event(community, &old, &d_tag, None)
+            .await
+            .expect("replay old")
+            .1
+            .was_inserted());
         let live: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
         )
@@ -6012,6 +6030,72 @@ mod tests {
         .await
         .expect("count live NIP-RS rows");
         assert_eq!(live, 0, "watermark must block stale resurrection");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn param_replace_distinguishes_stale_conflict_from_exact_id_duplicate() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = "channel-sections";
+        let tags = vec![Tag::parse(["d", d_tag]).expect("d tag")];
+        let base = Timestamp::now().as_secs();
+
+        let build = |content: &str, ts: u64| {
+            EventBuilder::new(Kind::Custom(30078), content)
+                .tags(tags.clone())
+                .custom_created_at(Timestamp::from(ts))
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+
+        // Newer head v2 stored.
+        let v2 = build("v2", base + 10);
+        let (_, outcome) = db
+            .replace_parameterized_event(community, &v2, d_tag, None)
+            .await
+            .expect("insert v2");
+        assert_eq!(outcome, ParamReplaceOutcome::Inserted);
+
+        // Distinct older write v1 loses last-write-wins → Stale conflict, not a
+        // duplicate: the relay must reply OK false so the loser refetches.
+        let v1 = build("v1", base);
+        let (_, outcome) = db
+            .replace_parameterized_event(community, &v1, d_tag, None)
+            .await
+            .expect("replay v1");
+        assert_eq!(
+            outcome,
+            ParamReplaceOutcome::Stale,
+            "a distinct losing write must be a conflict, not an idempotent duplicate"
+        );
+
+        // Resubmitting the exact current head v2 is idempotent → Duplicate.
+        let (_, outcome) = db
+            .replace_parameterized_event(community, &v2, d_tag, None)
+            .await
+            .expect("resubmit v2");
+        assert_eq!(
+            outcome,
+            ParamReplaceOutcome::Duplicate,
+            "an exact-id resubmit of the current head must stay an idempotent duplicate"
+        );
+
+        // The stored head is still v2 and there is exactly one live row.
+        let live_content: String = sqlx::query_scalar(
+            "SELECT content FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 \
+             AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("load live head");
+        assert_eq!(live_content, "v2", "v2 must remain the coordinate head");
     }
 
     #[tokio::test]
@@ -6037,12 +6121,12 @@ mod tests {
             .custom_created_at(Timestamp::from(base + offset))
             .sign_with_keys(&keys)
             .expect("sign mesh status");
-            assert!(
-                db.replace_parameterized_event(community, &event, d_tag, None)
-                    .await
-                    .expect("replace mesh status")
-                    .1
-            );
+            assert!(db
+                .replace_parameterized_event(community, &event, d_tag, None)
+                .await
+                .expect("replace mesh status")
+                .1
+                .was_inserted());
         }
 
         let (rows, live): (i64, i64) = sqlx::query_as(
@@ -6105,12 +6189,12 @@ mod tests {
         };
 
         for (content, offset) in [("v1", 0), ("v2", 100)] {
-            assert!(
-                db.replace_parameterized_event(community, &version(content, offset), d_tag, None)
-                    .await
-                    .expect("store project version")
-                    .1
-            );
+            assert!(db
+                .replace_parameterized_event(community, &version(content, offset), d_tag, None)
+                .await
+                .expect("store project version")
+                .1
+                .was_inserted());
         }
 
         // Tombstone timestamped between V1 and V2: it authorizes deleting V1,
@@ -6207,18 +6291,18 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign new event");
 
-            assert!(
-                db.replace_parameterized_event(community, &old, &d_tag, None)
-                    .await
-                    .expect("insert old event")
-                    .1
-            );
-            assert!(
-                db.replace_parameterized_event(community, &new, &d_tag, None)
-                    .await
-                    .expect("replace with new event")
-                    .1
-            );
+            assert!(db
+                .replace_parameterized_event(community, &old, &d_tag, None)
+                .await
+                .expect("insert old event")
+                .1
+                .was_inserted());
+            assert!(db
+                .replace_parameterized_event(community, &new, &d_tag, None)
+                .await
+                .expect("replace with new event")
+                .1
+                .was_inserted());
 
             let (rows, live): (i64, i64) = sqlx::query_as(
                 "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
@@ -6267,12 +6351,12 @@ mod tests {
         .custom_created_at(Timestamp::from(base))
         .sign_with_keys(&keys)
         .expect("sign conforming event");
-        assert!(
-            db.replace_parameterized_event(community, &conforming, &conforming_d, None)
-                .await
-                .expect("insert conforming event")
-                .1
-        );
+        assert!(db
+            .replace_parameterized_event(community, &conforming, &conforming_d, None)
+            .await
+            .expect("insert conforming event")
+            .1
+            .was_inserted());
         sqlx::query(
             "INSERT INTO event_mentions \
              (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
@@ -6324,12 +6408,12 @@ mod tests {
         .custom_created_at(Timestamp::from(base + 1))
         .sign_with_keys(&keys)
         .expect("sign nonconforming event");
-        assert!(
-            db.replace_parameterized_event(community, &nonconforming, &nonconforming_d, None,)
-                .await
-                .expect("insert nonconforming event")
-                .1
-        );
+        assert!(db
+            .replace_parameterized_event(community, &nonconforming, &nonconforming_d, None,)
+            .await
+            .expect("insert nonconforming event")
+            .1
+            .was_inserted());
         let rejected_nonconforming = sqlx::query(
             "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
         )
@@ -6349,12 +6433,12 @@ mod tests {
             .custom_created_at(Timestamp::from(base + 2))
             .sign_with_keys(&keys)
             .expect("sign unrelated event");
-        assert!(
-            db.replace_parameterized_event(community, &unrelated, &unrelated_d, None)
-                .await
-                .expect("insert unrelated event")
-                .1
-        );
+        assert!(db
+            .replace_parameterized_event(community, &unrelated, &unrelated_d, None)
+            .await
+            .expect("insert unrelated event")
+            .1
+            .was_inserted());
         let unrelated_delete = sqlx::query(
             "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
         )
@@ -6571,7 +6655,7 @@ mod tests {
             .expect("Rust hard delete deadlocked with mention insert")
             .expect("replacement task panicked")
             .expect("replace B with C");
-        assert!(replaced.1, "C must replace B");
+        assert!(replaced.1.was_inserted(), "C must replace B");
         let b_mentions: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
         )

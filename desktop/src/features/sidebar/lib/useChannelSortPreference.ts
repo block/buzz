@@ -86,9 +86,13 @@ export function useChannelSortPreference(
       return (prev) => {
         if (!pubkey) return prev;
         if (remote.createdAt < lastAppliedRemoteTs.current) return prev;
+        // Equal timestamps: the relay/database break ties by `id ASC` — the
+        // LOWEST event id is the canonical winner. Apply a strictly-lower id and
+        // ignore any id >= the last applied, so the UI converges on the same
+        // event the relay stored rather than the largest id seen.
         if (
           remote.createdAt === lastAppliedRemoteTs.current &&
-          remote.eventId <= lastAppliedEventId.current
+          remote.eventId >= lastAppliedEventId.current
         )
           return prev;
         lastAppliedRemoteTs.current = remote.createdAt;

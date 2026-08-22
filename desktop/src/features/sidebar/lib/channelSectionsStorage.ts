@@ -194,3 +194,57 @@ export function writeChannelSectionsStore(
     return false;
   }
 }
+
+const OUTBOX_KEY_PREFIX = "buzz-channel-sections-outbox.v1";
+
+function outboxKey(pubkey: string, relayUrl: string): string {
+  return `${OUTBOX_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalizeRelayUrl(relayUrl))}`;
+}
+
+/**
+ * Persist an unpublished edit so it survives quit/community-switch within the
+ * 2s publish debounce. Written synchronously on every edit; cleared once the
+ * edit is published, superseded by an adopted remote head, or found identical
+ * to the last published store. Resumed on next mount so a durable intent is
+ * never silently dropped at teardown.
+ */
+export function writeChannelSectionsOutbox(
+  pubkey: string,
+  store: ChannelSectionStore,
+  relayUrl: string,
+): void {
+  try {
+    window.localStorage.setItem(
+      outboxKey(pubkey, relayUrl),
+      JSON.stringify(boundChannelSectionsStore(store)),
+    );
+  } catch {
+    // Best-effort durability; the in-memory pendingStore still drives this
+    // session's publish even if the persisted copy could not be written.
+  }
+}
+
+/** Read a persisted unpublished edit, or null when none/unparseable. */
+export function readChannelSectionsOutbox(
+  pubkey: string,
+  relayUrl: string,
+): ChannelSectionStore | null {
+  try {
+    return parseRaw(window.localStorage.getItem(outboxKey(pubkey, relayUrl)));
+  } catch {
+    return null;
+  }
+}
+
+/** Clear the persisted outbox (edit published, superseded, or a no-op). */
+export function clearChannelSectionsOutbox(
+  pubkey: string,
+  relayUrl: string,
+): void {
+  try {
+    window.localStorage.removeItem(outboxKey(pubkey, relayUrl));
+  } catch {
+    // Ignore — a stale outbox entry is re-evaluated (and re-cleared if
+    // identical to the head) on the next publish attempt.
+  }
+}

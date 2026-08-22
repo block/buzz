@@ -112,6 +112,30 @@ export function mergeStores(
   local: ChannelStarStore,
   remote: ChannelStarStore,
 ): ChannelStarStore {
+  return mergeStoresWithTie(local, remote, false);
+}
+
+/**
+ * Merge a remote store that has already won the event-level canonical tie-break
+ * (`created_at DESC, id ASC`) into the local store, resolving a per-entry
+ * `updatedAt` tie in favour of the *remote* value. Once the comparator has
+ * chosen this remote event as the stored winner, its per-entry values must
+ * survive, or a stale value from a superseded larger-id event delivered first
+ * would win the merge and silently undo the canonical winner. Strictly-newer
+ * local per-entry edits (`l.updatedAt > r.updatedAt`) still win.
+ */
+export function mergeApplyingRemote(
+  local: ChannelStarStore,
+  remote: ChannelStarStore,
+): ChannelStarStore {
+  return mergeStoresWithTie(local, remote, true);
+}
+
+function mergeStoresWithTie(
+  local: ChannelStarStore,
+  remote: ChannelStarStore,
+  preferRemoteOnTie: boolean,
+): ChannelStarStore {
   const allIds = new Set([
     ...Object.keys(local.channels),
     ...Object.keys(remote.channels),
@@ -121,7 +145,10 @@ export function mergeStores(
     const l = local.channels[id];
     const r = remote.channels[id];
     if (l && r) {
-      merged[id] = l.updatedAt >= r.updatedAt ? l : r;
+      const localWins = preferRemoteOnTie
+        ? l.updatedAt > r.updatedAt
+        : l.updatedAt >= r.updatedAt;
+      merged[id] = localWins ? l : r;
     } else {
       merged[id] = (l ?? r) as ChannelStarEntry;
     }

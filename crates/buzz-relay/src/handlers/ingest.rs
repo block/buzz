@@ -3148,11 +3148,23 @@ async fn ingest_event_inner(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
-        state
+        let (stored, outcome) = state
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+        // A strictly-losing coordinate write is a conflict, not a duplicate:
+        // reply OK false so the client refetches the head and converges,
+        // instead of recording its stale content as successfully synced. An
+        // exact-id resubmit stays an idempotent OK true duplicate below.
+        if outcome == buzz_db::ParamReplaceOutcome::Stale {
+            return Ok(IngestResult {
+                event_id: event_id_hex,
+                accepted: false,
+                message: "conflict: newer version exists".into(),
+            });
+        }
+        (stored, outcome.was_inserted())
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state

@@ -152,6 +152,34 @@ pub enum ReactionEventInsertOutcome {
     },
 }
 
+/// Outcome of a NIP-33 parameterized-replaceable coordinate write.
+///
+/// Distinguishes the two ways a write can fail to store, which the relay must
+/// signal differently on the wire: an exact-id resubmit is a harmless
+/// idempotent duplicate (`OK true`), whereas a strictly-losing write against a
+/// newer coordinate head is a conflict the client must resolve by refetching
+/// (`OK false`). Conflating them — as the pre-fix `bool` did — told a losing
+/// device its write succeeded, so it never refetched and diverged silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamReplaceOutcome {
+    /// New coordinate head stored; the event should be fanned out.
+    Inserted,
+    /// The exact same event id is already stored (or was previously stored and
+    /// coordinate-deleted). Idempotent no-op — content already matches intent.
+    Duplicate,
+    /// A newer `(created_at, id)` head already dominates this coordinate, so
+    /// this distinct write lost last-write-wins and was not stored. The
+    /// client's content differs from the head and must refetch to converge.
+    Stale,
+}
+
+impl ParamReplaceOutcome {
+    /// True only when a new head was stored (and must be fanned out).
+    pub fn was_inserted(self) -> bool {
+        matches!(self, ParamReplaceOutcome::Inserted)
+    }
+}
+
 /// Maximum length for a `d_tag` value (bytes). NIP-33 d-tags are short identifiers;
 /// anything beyond this is either a bug or abuse.
 pub const D_TAG_MAX_LEN: usize = 1024;

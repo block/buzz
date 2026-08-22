@@ -3445,11 +3445,11 @@ pub async fn publish_dm_visibility_snapshot(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
 
-    let (stored, was_inserted) = state
+    let (stored, outcome) = state
         .db
         .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
         .await?;
-    if was_inserted {
+    if outcome.was_inserted() {
         dispatch_persistent_event(
             tenant,
             state,
