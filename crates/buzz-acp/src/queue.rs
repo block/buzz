@@ -409,6 +409,14 @@ impl EventQueue {
         }
     }
 
+    /// Number of failed processing attempts already recorded for a channel.
+    ///
+    /// Used by the harness to emit one immediate user-visible retry notice,
+    /// without repeating that notice on every exponential-backoff attempt.
+    pub(crate) fn retry_count(&self, channel_id: &Uuid) -> u32 {
+        self.retry_counts.get(channel_id).copied().unwrap_or(0)
+    }
+
     /// Re-queue a batch of events that failed to process.
     ///
     /// Events are pushed back to the **front** of the channel's queue so they
@@ -3117,6 +3125,25 @@ mod tests {
         // Retry state is cleared so fresh traffic isn't throttled.
         assert!(!q.retry_counts.contains_key(&ch));
         assert!(!q.retry_after.contains_key(&ch));
+    }
+
+    #[test]
+    fn test_retry_count_tracks_first_failure_and_resets_after_success() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "retry-visible"));
+        let batch = q.flush_next().expect("flush");
+
+        assert_eq!(q.retry_count(&ch), 0);
+        assert!(q.requeue(batch).is_none());
+        assert_eq!(q.retry_count(&ch), 1);
+        q.mark_complete(ch);
+
+        q.retry_after
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+        let _batch = q.flush_next().expect("retry flush");
+        q.mark_complete(ch);
+        assert_eq!(q.retry_count(&ch), 0);
     }
 
     #[test]

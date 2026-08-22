@@ -1908,15 +1908,23 @@ where
             )));
         }
         if status.is_server_error() || status == 429 || status.as_u16() == 499 {
+            let retry_after = (status == 429)
+                .then(|| parse_retry_after_header(resp.headers()))
+                .flatten();
             let body = read_error_body(resp).await;
             if attempt + 1 < MAX_RETRIES {
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_attempts = MAX_RETRIES,
                     %status,
+                    retry_after_ms = retry_after.map(|delay| delay.as_millis() as u64),
                     "llm: retryable status, retrying"
                 );
-                backoff_with_jitter(attempt).await;
+                if let Some(delay) = retry_after {
+                    tokio::time::sleep(delay).await;
+                } else {
+                    backoff_with_jitter(attempt).await;
+                }
                 continue;
             }
             return Err(PostError::Agent(terminal_llm_error(
@@ -7544,6 +7552,39 @@ mod tests {
         .await
         .expect("second attempt succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
+        assert!(
+            before.elapsed() >= Duration::from_secs(1),
+            "must sleep at least the Retry-After hint"
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// The generic OpenAI-compatible transport honors Retry-After too. Azure
+    /// Foundry uses this path, so ignoring the header would immediately spend
+    /// all three attempts inside the same throttling window.
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_429_honors_retry_after_header() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
+            CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
+                .with_header("Retry-After", "1"),
+            CannedResponse::new(200, r#"{"ok":true}"#),
+        ])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let before = std::time::Instant::now();
+        let out = post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            Duration::from_secs(5),
+            |request| request,
+        )
+        .await
+        .expect("second attempt succeeds");
+        assert_eq!(out["ok"], true);
         assert!(
             before.elapsed() >= Duration::from_secs(1),
             "must sleep at least the Retry-After hint"
