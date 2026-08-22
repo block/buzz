@@ -709,6 +709,19 @@ jobs:
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Replica routing database tests
+        # Keep the selection auditable at the source: every ignored fixture in
+        # tests::replica_routing is part of the replica-read activation gate.
+        # Run serially because these Postgres fixtures create and drop scratch
+        # databases on the same server.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(/replica_routing::/)' \
+            --run-ignored ignored-only \
+            --test-threads 1
+        env:
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Workspace profile (kind:9033) gate tests
         # Call-site integration for the 9033 authorization gate: open relay
         # rosterless/steward transitions and the closed-relay admin/owner rule,
