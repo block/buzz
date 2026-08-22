@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+mod pending_store;
 mod pool;
 mod pool_lifecycle;
 mod queue;
@@ -2148,8 +2149,18 @@ async fn tokio_main() -> Result<()> {
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
     let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let pending_store = pending_store::PendingStore::open(&pubkey_hex)
+        .map_err(|error| anyhow::anyhow!("open durable pending-work journal: {error}"))?;
+    let mut queue = EventQueue::new(dedup_mode)
+        .with_in_flight_deadline(config.max_turn_duration_secs)
+        .with_pending_store(pending_store);
+    let restored_event_ids = queue.pending_event_ids();
+    if !restored_event_ids.is_empty() {
+        let rest = relay.rest_client();
+        for event_id in &restored_event_ids {
+            pool::reaction_add(&rest, event_id, "👀").await;
+        }
+    }
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -3429,6 +3440,15 @@ async fn tokio_main() -> Result<()> {
     // explicitly shut them down here to reap child processes. If the grace
     // period expires, remaining tasks are aborted and fall back to
     // AcpClient::Drop (start_kill + try_wait — best-effort, not guaranteed).
+    let shutdown_batches: HashMap<usize, FlushBatch> = pool
+        .task_map()
+        .values()
+        .filter_map(|meta| {
+            meta.recoverable_batch
+                .clone()
+                .map(|batch| (meta.agent_index, batch))
+        })
+        .collect();
     let (rx_ref, js_ref) = pool.rx_and_join_set();
     let shutdown_result = tokio::time::timeout(grace, async {
         loop {
@@ -3443,6 +3463,11 @@ async fn tokio_main() -> Result<()> {
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
                         let idx = pr.agent.index;
+                        if matches!(pr.outcome, PromptOutcome::Ok(_)) {
+                            if let Some(batch) = shutdown_batches.get(&idx) {
+                                queue.finish_batch(batch);
+                            }
+                        }
                         pr.agent.acp.shutdown().await;
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
                     }
@@ -3460,6 +3485,11 @@ async fn tokio_main() -> Result<()> {
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
         let idx = pr.agent.index;
+        if matches!(pr.outcome, PromptOutcome::Ok(_)) {
+            if let Some(batch) = shutdown_batches.get(&idx) {
+                queue.finish_batch(batch);
+            }
+        }
         pr.agent.acp.shutdown().await;
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
     }
@@ -3865,6 +3895,12 @@ fn handle_prompt_result(
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
+    let had_retry_batch = result.batch.is_some();
+    let recoverable_batch = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == result.agent.index)
+        .and_then(|meta| meta.recoverable_batch.clone());
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
     let successful_steer_deliveries = pool
@@ -3947,6 +3983,7 @@ fn handle_prompt_result(
                     config.max_turn_duration_secs
                 );
                 spawn_failure_notice(rest_client, &batch, content);
+                queue.finish_batch(&batch);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
             } else if matches!(
                 result.outcome,
@@ -3965,6 +4002,7 @@ fn handle_prompt_result(
                         config.max_turn_duration_secs
                     );
                     spawn_failure_notice(rest_client, &dead, content);
+                    queue.finish_batch(&dead);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
@@ -3984,6 +4022,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                queue.finish_batch(&batch);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -3998,6 +4037,7 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                queue.finish_batch(&dead);
             }
         } else {
             tracing::debug!(
@@ -4006,6 +4046,18 @@ fn handle_prompt_result(
                 "dropping failed batch for removed channel"
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            queue.finish_batch(&batch);
+        }
+    }
+
+    if matches!(result.outcome, PromptOutcome::Ok(_))
+        || (matches!(
+            result.outcome,
+            PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
+        ) && !had_retry_batch)
+    {
+        if let Some(batch) = recoverable_batch.as_ref() {
+            queue.finish_batch(batch);
         }
     }
 
@@ -4267,7 +4319,9 @@ fn recover_panicked_agent(
             if !removed_channels.contains(&ch) {
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
+                if let Some(dead) = queue.requeue(batch) {
+                    queue.finish_batch(&dead);
+                }
                 tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
