@@ -34,7 +34,7 @@ import type { AutocompleteEdit } from "./useRichTextEditor";
 import type { ChannelMember, ChannelType } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, normalizePubkeySet } from "@/shared/lib/pubkey";
 import { channelMemberPubkeySet } from "@/shared/lib/rosterDerivations";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
@@ -152,12 +152,7 @@ export function useMentions(
     [managedAgentsQuery.data],
   );
   const managedAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (managedAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
+    () => normalizePubkeySet(managedAgentsQuery.data),
     [managedAgentsQuery.data],
   );
   const relayAgentNamesByPubkey = React.useMemo(
@@ -177,9 +172,16 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
+  // Identity-cached (shared with the timeline's roster derivations) — the
+  // Set is built once per distinct roster instead of per consumer.
+  const memberPubkeys = React.useMemo(
+    () => (members ? channelMemberPubkeySet(members) : new Set<string>()),
+    [members],
+  );
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
+        channelMemberPubkeys: memberPubkeys,
         currentPubkey,
         eligibilityScope: mentionChannelId
           ? { type: "channel", channelId: mentionChannelId }
@@ -191,6 +193,7 @@ export function useMentions(
     [
       currentPubkey,
       managedAgentPubkeys,
+      memberPubkeys,
       mentionChannelId,
       relayAgentsQuery.data,
       sharedChannelIds,
@@ -224,12 +227,6 @@ export function useMentions(
   const activePersonaIds = React.useMemo(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
-  );
-  // Identity-cached (shared with the timeline's roster derivations) — the
-  // Set is built once per distinct roster instead of per consumer.
-  const memberPubkeys = React.useMemo(
-    () => (members ? channelMemberPubkeySet(members) : new Set<string>()),
-    [members],
   );
   const agentIdentityPubkeys = React.useMemo(
     () =>
@@ -809,6 +806,7 @@ export function useMentions(
   ).current;
   const revalidateMentionPubkeys = useAgentMentionRevalidation({
     agentPubkeys: agentIdentityPubkeys,
+    channelMemberPubkeys: memberPubkeys,
     getSelectedAgentPubkeys,
     currentPubkey,
     eligibilityScope: mentionChannelId
