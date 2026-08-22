@@ -700,6 +700,7 @@ pub fn run() {
             set_managed_agent_auto_restart,
             delete_managed_agent,
             get_managed_agent_log,
+            get_agent_usage_dashboard,
             get_agent_models,
             discover_agent_models,
             agent_access_owner_only,
