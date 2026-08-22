@@ -215,9 +215,16 @@ Save these. Losing any of them is data loss. See NOTES.txt printed by `helm inst
 
 1. `BUZZ_RELAY_PRIVATE_KEY` — relay identity. Rotating it = new identity (federation peers will not recognize the relay).
 2. PostgreSQL database — the canonical event store.
-3. S3 bucket — media blobs (chart default bucket: `buzz-media`).
-4. Git PVC — repo on-disk state served by the relay's git endpoint.
+3. Complete S3 bucket — the durable source of truth for media plus Git packs, manifests, and manifest pointers (chart default bucket: `buzz-media`).
+4. Git PVC — optional scratch data and a process-local pack cache. Its cache contents are not reused after a relay restart, and it is not a repository backup.
 5. Owner private key — held by the operator, not by this chart. Restore by re-installing with the same `ownerPubkey`.
+
+Stop write traffic while taking the PostgreSQL and object-store snapshots when
+possible. If the storage provider only supports ordered live snapshots, capture
+PostgreSQL before the object store. After a restore, start an isolated relay and
+perform an authenticated clone, then compare the expected refs, commits, and
+trees. A healthy pod, database row counts, object counts, or a restored Git PVC
+do not prove repository recovery.
 
 ## Honest limitations (v1)
 

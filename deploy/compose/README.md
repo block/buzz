@@ -46,6 +46,28 @@ keypair.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
+## Backup and recovery
+
+Back up `.env`, PostgreSQL, and the complete configured MinIO/S3 bucket from
+the same maintenance window. Stop the stack while taking the data snapshots
+when possible. If the storage provider only supports ordered live snapshots,
+capture PostgreSQL before the object store. The object store is the durable
+source of truth for Git packs, manifests, and manifest pointers as well as
+media. Redis contains disposable coordination and presence state and can be
+recreated empty after a restore.
+
+The `buzz-git-data` volume holds only scratch data and a process-local pack
+cache. Its cache contents are not reused after a relay restart, and the volume
+is not a repository backup.
+
+A recovery test must restore the coordinated data into an isolated stack and
+perform an authenticated clone. Compare the recovered branch and tag refs,
+commits, and trees with values recorded before the backup. Container health,
+database row counts, object counts, or a restored `buzz-git-data` volume do not
+prove that a repository can be read. See
+[`docs/git-on-object-storage.md`](../../docs/git-on-object-storage.md) for the
+storage model.
+
 ## Validation
 
 Before sharing an install link publicly, verify a fresh install with:
