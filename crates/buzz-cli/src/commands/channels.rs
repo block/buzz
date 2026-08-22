@@ -10,6 +10,7 @@ use crate::client::{
 };
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
+use crate::commands::parse_write_response;
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
@@ -1018,6 +1019,126 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// The kind:10100 profile the relay currently stores for us.
+#[derive(Debug)]
+struct StoredAgentProfile {
+    /// Parsed event body, or empty when no profile is stored.
+    body: serde_json::Map<String, serde_json::Value>,
+    /// `created_at` of the stored event, or 0 when none is stored. A replaceable
+    /// write must out-bid this to land.
+    created_at: u64,
+}
+
+/// Fetch this identity's current kind:10100 profile body as a JSON object.
+///
+/// Returns an empty object only when the identity genuinely has no profile
+/// yet. Every other outcome is an error: the caller writes a replaceable event
+/// built from this map, so treating a failed lookup as "no profile" would
+/// republish a single-field profile and erase `name`, `display_name`,
+/// `channel_ids` and `respond_to` — the exact wipe this merge exists to
+/// prevent. Failing loudly leaves the stored profile intact.
+async fn fetch_own_agent_profile(client: &BuzzClient) -> Result<StoredAgentProfile, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await.map_err(|e| {
+        CliError::Other(format!(
+            "could not read the current agent profile, so the policy change was \
+             not published (publishing without it would erase the profile): {e}"
+        ))
+    })?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
+        CliError::Other(format!(
+            "relay returned an unreadable profile query result: {e}"
+        ))
+    })?;
+    parse_stored_profile(&events)
+}
+
+/// The stored profile a query result describes, or an error rather than a guess.
+///
+/// Separate from the query so the decision that matters — when it is safe to
+/// treat a result as "no profile" — is testable without a relay. Getting it
+/// wrong republishes a single-field profile and erases the rest.
+fn parse_stored_profile(events: &[serde_json::Value]) -> Result<StoredAgentProfile, CliError> {
+    let Some(event) = events.first() else {
+        return Ok(StoredAgentProfile {
+            body: serde_json::Map::new(),
+            created_at: 0,
+        });
+    };
+    let created_at = event
+        .get("created_at")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let content = event
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if content.trim().is_empty() {
+        // A profile event with no body carries nothing to preserve, so this is
+        // the "no profile" case rather than a lookup we failed to read.
+        return Ok(StoredAgentProfile {
+            body: serde_json::Map::new(),
+            created_at,
+        });
+    }
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(body)) => Ok(StoredAgentProfile { body, created_at }),
+        _ => Err(CliError::Other(
+            "the stored agent profile is not a JSON object; refusing to replace it \
+             with a single-field profile. Republish a valid kind:10100 profile first."
+                .to_string(),
+        )),
+    }
+}
+
+/// How far ahead of this host's clock a merge may stamp its `created_at`.
+///
+/// The relay accepts a ±900s window (`crates/buzz-relay/src/handlers/ingest.rs`).
+/// This sits well inside it, so a refusal means the stored profile's timestamp is
+/// genuinely broken rather than merely written by a host whose clock leads ours.
+const MAX_PROFILE_PUBLISH_LEAD_SECS: u64 = 600;
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `created_at` a merge must publish to replace `stored_created_at`.
+///
+/// Out-bids the stored copy by timestamp rather than leaving it to the event-id
+/// tiebreak. `Db::replace_addressable_event` resolves a same-second write by
+/// lowest id, so a plain `now` write is a coin flip against the ACP harness
+/// republishing in the same second — and a deterministic *loss* against a stored
+/// copy stamped later by a skewed peer. Retrying at `now` cannot win either, so
+/// retries alone do not fix it.
+///
+/// Bounded against the *relay's* tolerance, not against a tight local-clock
+/// assumption. Stamping `stored_created_at + 1` is only ever one second ahead of
+/// whichever writer produced the stored copy, so the lead measured against our
+/// own clock is just this host's skew from that writer's — and refusing on a few
+/// seconds of it made the command unusable on any deployment where the harness
+/// host's clock runs ahead of the operator's. What needs guarding is a stored
+/// copy so far in the future that out-bidding it would fall outside the relay's
+/// ±900s window.
+fn profile_publish_timestamp(now: u64, stored_created_at: u64) -> Result<u64, CliError> {
+    let created_at = now.max(stored_created_at + 1);
+    let lead = created_at.saturating_sub(now);
+    if lead > MAX_PROFILE_PUBLISH_LEAD_SECS {
+        return Err(CliError::Other(format!(
+            "the stored agent profile is timestamped {lead}s ahead of this host's clock; \
+             out-bidding it would fall outside the relay's timestamp tolerance. \
+             Check for clock skew, or republish a correctly stamped kind:10100 profile."
+        )));
+    }
+    Ok(created_at)
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1049,18 +1170,97 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    // kind:10100 is replaceable, and the relay projects only
+    // `channel_add_policy` into a column — `channel_ids`, `name`,
+    // `display_name` and `respond_to` live solely in the event body clients
+    // read. Publishing this one field alone therefore erased the rest of the
+    // profile, taking the agent out of every channel's @mention picker.
+    //
+    // This is a read-modify-write on a replaceable event with no
+    // compare-and-set, so it races the ACP harness's `ProfileChannelUpdater`,
+    // which republishes the same event on every membership change under the
+    // same key. Re-read after publishing and redo the merge if someone else's
+    // copy is now stored: without that, an operator running this command while
+    // an agent is being invited to a channel silently drops the invite from
+    // `channel_ids` — the exact staleness the harness exists to prevent.
+    //
+    // The window is narrowed, not closed. A peer that publishes between our
+    // read and our write still loses its change, because a replaceable write
+    // carries the whole body and nothing records what we replaced.
+    const MAX_MERGE_ATTEMPTS: usize = 3;
+    const CONFLICT_MSG: &str = "another writer replaced the agent profile while this policy \
+                                change was being published; the change did not stick. Retry.";
     use nostr::{EventBuilder, Kind};
-    let builder = EventBuilder::new(
-        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
-        &content,
-    )
-    .tags([]);
-    let event = client.sign_event(builder)?;
+    // No sleep between attempts: unlike the harness, which republishes
+    // repeatedly and would ratchet its own stamps upward, this runs at most
+    // three times per invocation. Sleeping here only delayed the command.
+    for _ in 1..=MAX_MERGE_ATTEMPTS {
+        let stored = fetch_own_agent_profile(client).await?;
+        let mut profile = stored.body;
+        profile.insert(
+            "channel_add_policy".to_string(),
+            serde_json::Value::String(policy.to_string()),
+        );
+        let content = serde_json::Value::Object(profile).to_string();
 
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+        // Out-bid the stored copy by timestamp rather than leaving it to the
+        // event-id tiebreak. `Db::replace_addressable_event` resolves a
+        // same-second write by lowest id, so a default `created_at = now` write
+        // is a coin flip against the ACP harness republishing in the same second
+        // — and a deterministic *loss* against a stored copy stamped later by a
+        // skewed peer. Retrying at `now` cannot win either, so retries alone do
+        // not fix it. The sleep hands the lead back before we publish, so stamps
+        // do not ratchet upward across attempts.
+        let created_at = profile_publish_timestamp(unix_secs_now(), stored.created_at)?;
+
+        let builder = EventBuilder::new(
+            Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+            &content,
+        )
+        .tags([])
+        .custom_created_at(nostr::Timestamp::from_secs(created_at));
+        let event = client.sign_event(builder)?;
+        let event_id = event.id.to_hex();
+
+        let resp = client.submit_event(event).await?;
+
+        // `duplicate:` means the relay took the write and rolled it back — the
+        // loser of a replaceable compare. It arrives as `accepted: true`, so
+        // reading only `accepted` would report success for a discarded write.
+        match parse_write_response(&resp, CONFLICT_MSG) {
+            Ok(rendered) => {
+                // Accepted is still not landed: a peer may have published
+                // straight after us and replaced our copy.
+                if stored_profile_event_id(client).await? == Some(event_id) {
+                    println!("{rendered}");
+                    return Ok(());
+                }
+            }
+            Err(CliError::Conflict(_)) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    // Never report success for a write we could not confirm landed. Exit 5 is
+    // the CLI's write-conflict code, so a caller can distinguish "retry me"
+    // from a usage or network error.
+    Err(CliError::Conflict(CONFLICT_MSG.to_string()))
+}
+
+/// Event id of the kind:10100 profile the relay currently stores for us.
+async fn stored_profile_event_id(client: &BuzzClient) -> Result<Option<String>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [client.keys().public_key().to_hex()],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("unreadable profile query result: {e}")))?;
+    Ok(events
+        .first()
+        .and_then(|event| event.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
 }
 
 pub async fn cmd_set_canvas(
@@ -1197,9 +1397,10 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
-        ResolvedAgent, RosterResolution, SkippedSlug,
+        finalize_roster_resolution, name_matches, parse_stored_profile, profile_publish_timestamp,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, validate_update_channel_fields,
+        ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
+        MAX_PROFILE_PUBLISH_LEAD_SECS,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1745,6 +1946,85 @@ mod tests {
         assert!(
             report.get("archive_state_warning").is_none(),
             "no warning key expected: {report}"
+        );
+    }
+
+    // ---- kind:10100 profile merge -----------------------------------------
+
+    fn profile_event(created_at: u64, content: &str) -> serde_json::Value {
+        json!({ "created_at": created_at, "content": content })
+    }
+
+    #[test]
+    fn a_stored_profile_keeps_every_field_the_policy_does_not_own() {
+        // The defect: publishing `{"channel_add_policy": ...}` alone replaced
+        // the whole event body, taking the agent out of every @mention picker.
+        let stored = parse_stored_profile(&[profile_event(
+            100,
+            r#"{"name":"probe","channel_ids":["a","b"],"respond_to":["owner"]}"#,
+        )])
+        .expect("a JSON object body parses");
+        let mut merged = stored.body;
+        merged.insert("channel_add_policy".into(), json!("open"));
+
+        assert_eq!(merged.get("name"), Some(&json!("probe")));
+        assert_eq!(merged.get("channel_ids"), Some(&json!(["a", "b"])));
+        assert_eq!(merged.get("respond_to"), Some(&json!(["owner"])));
+        assert_eq!(merged.get("channel_add_policy"), Some(&json!("open")));
+    }
+
+    #[test]
+    fn no_stored_profile_is_the_only_case_that_yields_an_empty_body() {
+        let none = parse_stored_profile(&[]).expect("no events is not an error");
+        assert!(none.body.is_empty());
+        assert_eq!(none.created_at, 0);
+
+        let blank = parse_stored_profile(&[profile_event(42, "  ")])
+            .expect("an empty body carries nothing to preserve");
+        assert!(blank.body.is_empty());
+        // Still out-bid the stored copy: the event exists, only its body is empty.
+        assert_eq!(blank.created_at, 42);
+    }
+
+    #[test]
+    fn an_unreadable_profile_is_refused_rather_than_replaced() {
+        // Treating this as "no profile" would republish a single-field profile
+        // and erase the rest, which is the wipe this merge exists to prevent.
+        for content in [r#"["not","an","object"]"#, "not json at all", r#""string""#] {
+            let err = parse_stored_profile(&[profile_event(1, content)])
+                .expect_err("a non-object body must not be treated as absent");
+            assert!(
+                matches!(err, CliError::Other(ref m) if m.contains("refusing to replace")),
+                "unexpected error for {content:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_out_bids_the_stored_copy_instead_of_tying_it() {
+        // A same-second write is resolved by lowest event id, so publishing at
+        // `now` is a coin flip against the harness republishing concurrently.
+        assert_eq!(profile_publish_timestamp(1_000, 999).unwrap(), 1_000);
+        assert_eq!(profile_publish_timestamp(1_000, 1_000).unwrap(), 1_001);
+        assert_eq!(profile_publish_timestamp(1_000, 1_050).unwrap(), 1_051);
+    }
+
+    #[test]
+    fn ordinary_clock_skew_does_not_block_a_policy_change() {
+        // Refusing on a few seconds of skew made the command unusable wherever
+        // the harness host's clock led the operator's.
+        let stored = 1_000 + MAX_PROFILE_PUBLISH_LEAD_SECS - 1;
+        assert!(profile_publish_timestamp(1_000, stored).is_ok());
+    }
+
+    #[test]
+    fn a_stored_stamp_past_the_relay_window_is_refused_not_out_bid() {
+        let stored = 1_000 + MAX_PROFILE_PUBLISH_LEAD_SECS + 1;
+        let err = profile_publish_timestamp(1_000, stored)
+            .expect_err("out-bidding this would fall outside the relay's tolerance");
+        assert!(
+            matches!(err, CliError::Other(ref m) if m.contains("clock skew")),
+            "unexpected error: {err:?}"
         );
     }
 }
