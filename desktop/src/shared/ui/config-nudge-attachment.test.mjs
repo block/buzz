@@ -28,6 +28,7 @@ globalThis.window = {
 
 import {
   focusTargetForRequirement,
+  isInformationalOnly,
   shouldOpenDoctor,
 } from "./config-nudge-attachment.tsx";
 import {
@@ -55,6 +56,38 @@ test("shouldOpenDoctor_regularMixedRequirements_routesToEditAgent", () => {
     shouldOpenDoctor([
       { surface: "env_key", key: "ANTHROPIC_API_KEY" },
       { surface: "normalized_field", field: "model" },
+    ]),
+    false,
+  );
+});
+
+test("isInformationalOnly_missingBinary_hasNoMisleadingEditAgentRoute", () => {
+  assert.equal(
+    isInformationalOnly([{ surface: "missing_binary", command: "custom-acp" }]),
+    true,
+  );
+});
+
+test("isInformationalOnly_allExternalRequirements_hasNoInAppRoute", () => {
+  assert.equal(
+    isInformationalOnly([
+      { surface: "missing_binary", command: "custom-acp" },
+      {
+        surface: "cli_config_invalid",
+        probe_args: ["codex"],
+        setup_copy: "fix the config",
+        diagnostic: "invalid TOML",
+      },
+    ]),
+    true,
+  );
+});
+
+test("isInformationalOnly_externalMixedWithEditable_stillRoutesToEditAgent", () => {
+  assert.equal(
+    isInformationalOnly([
+      { surface: "missing_binary", command: "custom-acp" },
+      { surface: "env_key", key: "ANTHROPIC_API_KEY" },
     ]),
     false,
   );
