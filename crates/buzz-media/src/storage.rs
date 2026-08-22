@@ -9,6 +9,7 @@ use crate::config::{MediaConfig, S3AddressingStyle};
 use crate::error::MediaError;
 use bytes::Bytes;
 use s3::creds::Credentials;
+use s3::serde_types::ObjectIdentifier;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
 
@@ -158,11 +159,20 @@ impl MediaStorage {
     }
 
     /// Delete an object. Returns an error on failure — callers decide whether to propagate.
+    /// Uses the multi-object endpoint because R2 rejects rust-s3's
+    /// single-object DELETE signature; MinIO supports both forms.
     pub async fn delete(&self, key: &str) -> Result<(), MediaError> {
-        self.bucket
-            .delete_object(key)
+        let result = self
+            .bucket
+            .delete_objects(vec![ObjectIdentifier::new(key)])
             .await
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        if let Some(error) = result.errors.first() {
+            return Err(MediaError::StorageError(format!(
+                "object delete failed for {}: {}: {}",
+                error.key, error.code, error.message
+            )));
+        }
         Ok(())
     }
 
