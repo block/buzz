@@ -95,6 +95,18 @@ test("Today reconstruction skips decrypt failures without admitting bad proof", 
   assert.equal(surface.snapshotProjection.bounded, true);
 });
 
+test("Today reconstruction discloses frames excluded before range paging", async () => {
+  const surface = await buildTodayActivityFromArchivedPages({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    pages: [{ events: [], excludedObserverFrames: 2 }],
+  });
+
+  assert.equal(surface.counts.journals, 0);
+  assert.equal(surface.snapshotProjection.excludedObserverFrames, 2);
+  assert.equal(surface.snapshotProjection.bounded, true);
+});
+
 test("Today reconstruction reports malformed or empty observer batches", async () => {
   const event = relayEvent({
     id: "empty-batch",

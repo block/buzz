@@ -618,6 +618,7 @@ pub struct ArchivedObserverRangeInput {
 pub struct ArchivedObserverRangeOutput {
     events: Vec<String>,
     backfill_complete: bool,
+    unindexed_observer_frames: i64,
 }
 
 #[tauri::command]
@@ -660,8 +661,11 @@ pub async fn read_archived_observer_events_for_range(
                 return Ok(ArchivedObserverRangeOutput {
                     events: Vec::new(),
                     backfill_complete: false,
+                    unindexed_observer_frames: 0,
                 });
             }
+            let unindexed_observer_frames =
+                store::count_unindexed_observer_frames(conn, &identity_pk, &relay_url)?;
             let events = store::read_archived_observer_events_for_range(
                 conn,
                 &identity_pk,
@@ -677,6 +681,7 @@ pub async fn read_archived_observer_events_for_range(
             Ok(ArchivedObserverRangeOutput {
                 events,
                 backfill_complete: true,
+                unindexed_observer_frames,
             })
         })
         .await

@@ -464,6 +464,8 @@ export type ArchivedObserverRangeCursor = {
 export type ArchivedObserverRangePage = {
   events: import("@/shared/api/types").RelayEvent[];
   backfillComplete: boolean;
+  /** Owner-scoped frames whose missing inner time prevents day attribution. */
+  unindexedObserverFrames: number;
   hasMore: boolean;
   nextBefore: ArchivedObserverRangeCursor | null;
 };
@@ -489,6 +491,7 @@ export async function readArchivedObserverEventsForRange(opts: {
   const rawPage = await invokeTauri<{
     events: string[];
     backfillComplete: boolean;
+    unindexedObserverFrames: number;
   }>("read_archived_observer_events_for_range", {
     input: {
       startCreatedAt: opts.startCreatedAt,
@@ -517,9 +520,18 @@ export async function readArchivedObserverEventsForRange(opts: {
         event !== null,
     );
   const oldest = events.at(-1) ?? null;
+  if (
+    !Number.isSafeInteger(rawPage.unindexedObserverFrames) ||
+    rawPage.unindexedObserverFrames < 0
+  ) {
+    throw new Error(
+      "Archived observer range returned an invalid exclusion count.",
+    );
+  }
   return {
     events,
     backfillComplete: rawPage.backfillComplete,
+    unindexedObserverFrames: rawPage.unindexedObserverFrames,
     hasMore: !rawPage.backfillComplete || rawPage.events.length === limit,
     nextBefore: oldest ? { createdAt: oldest.created_at, id: oldest.id } : null,
   };
@@ -560,8 +572,12 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
   agentPubkey?: string | null;
   channelId?: string | null;
   pageSize?: number;
-}): AsyncGenerator<import("@/shared/api/types").RelayEvent[]> {
+}): AsyncGenerator<{
+  events: import("@/shared/api/types").RelayEvent[];
+  excludedObserverFrames: number;
+}> {
   let before: ArchivedObserverRangeCursor | null = null;
+  let disclosedUnindexedFrames = false;
   for (;;) {
     const page = await readArchivedObserverEventsForRange({
       ...opts,
@@ -569,7 +585,13 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
       limit: opts.pageSize ?? 200,
     });
     if (!page.backfillComplete) continue;
-    yield page.events;
+    yield {
+      events: page.events,
+      excludedObserverFrames: disclosedUnindexedFrames
+        ? 0
+        : page.unindexedObserverFrames,
+    };
+    disclosedUnindexedFrames = true;
     if (!page.hasMore) return;
     if (!page.nextBefore) {
       throw new Error(

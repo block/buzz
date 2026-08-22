@@ -16,6 +16,12 @@ export type ActivityLedgerAgentIdentity = {
   name: string;
 };
 
+export type ArchivedObserverEventPage = {
+  events: readonly RelayEvent[];
+  /** Frames already excluded because no trustworthy inner time was indexable. */
+  excludedObserverFrames: number;
+};
+
 export const TODAY_SNAPSHOT_SURFACE_MAX_BYTES = 6 * 1024 * 1024;
 const TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL = 100;
 const TODAY_ARCHIVE_MAX_EVENTS_PER_JOURNAL = 300;
@@ -490,7 +496,9 @@ export function activityLedgerArchiveQueryRange(day: string): {
 async function buildTodayActivityFromArchivedEventPages(input: {
   day: string;
   agents: readonly ActivityLedgerAgentIdentity[];
-  pages: Iterable<readonly RelayEvent[]> | AsyncIterable<readonly RelayEvent[]>;
+  pages:
+    | Iterable<readonly RelayEvent[] | ArchivedObserverEventPage>
+    | AsyncIterable<readonly RelayEvent[] | ArchivedObserverEventPage>;
   decrypt?: DecryptObserverEvent;
 }): Promise<TodayActivitySurface> {
   const decrypt = input.decrypt ?? decryptObserverEvent;
@@ -504,7 +512,11 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   let textFieldsTruncated = 0;
   let checkpoint: BoundedTodayActivitySurface | null = null;
 
-  for await (const page of input.pages) {
+  for await (const archivedPage of input.pages) {
+    const page = "events" in archivedPage ? archivedPage.events : archivedPage;
+    if ("events" in archivedPage) {
+      excludedObserverFrames += archivedPage.excludedObserverFrames;
+    }
     const decodedPage: (ObserverEvent[] | null)[] = Array.from(
       { length: page.length },
       () => null,
@@ -649,7 +661,9 @@ export async function buildTodayActivityFromArchivedEvents(input: {
 export async function buildTodayActivityFromArchivedPages(input: {
   day: string;
   agents: readonly ActivityLedgerAgentIdentity[];
-  pages: Iterable<readonly RelayEvent[]> | AsyncIterable<readonly RelayEvent[]>;
+  pages:
+    | Iterable<readonly RelayEvent[] | ArchivedObserverEventPage>
+    | AsyncIterable<readonly RelayEvent[] | ArchivedObserverEventPage>;
   decrypt?: DecryptObserverEvent;
 }): Promise<TodayActivitySurface> {
   return buildTodayActivityFromArchivedEventPages(input);

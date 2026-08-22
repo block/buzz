@@ -147,6 +147,30 @@ pub(super) fn backfill_missing(
     Ok(complete)
 }
 
+/// Count owner-scoped observer envelopes whose inner timestamp cannot be
+/// attributed to any day. These rows must be disclosed by every ranged Today
+/// reconstruction: filtering them out silently could hide terminal or failure
+/// evidence while advertising a complete surface.
+pub(super) fn count_unindexed_observer_frames(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*)
+           FROM archived_events ae
+           JOIN archived_event_scopes aes USING (identity_pubkey, relay_url, id)
+           JOIN observer_time_index oti USING (identity_pubkey, relay_url, id)
+          WHERE ae.identity_pubkey = ?1 AND ae.relay_url = ?2
+            AND aes.scope_type = 'owner_p' AND aes.scope_value = ?1
+            AND ae.kind = 24200
+            AND (oti.observed_start_at IS NULL OR oti.observed_end_at IS NULL)",
+        params![identity_pubkey, relay_url],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("count observer frames without inner time: {error}"))
+}
+
 /// Read owner-scoped observer events whose decrypted inner timestamps overlap
 /// a half-open time range. The compound outer cursor remains stable for paging.
 #[allow(clippy::too_many_arguments)]
@@ -356,6 +380,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bounds, (None, None));
+        assert_eq!(
+            count_unindexed_observer_frames(&conn, &owner_pubkey, RELAY).unwrap(),
+            1
+        );
+        assert!(read_archived_observer_events_for_range(
+            &conn,
+            &owner_pubkey,
+            RELAY,
+            0,
+            i64::MAX,
+            None,
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
