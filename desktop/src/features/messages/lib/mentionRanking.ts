@@ -3,6 +3,7 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
+  isActiveAgent?: boolean;
   isMember: boolean;
   kind: "identity" | "persona" | "team";
   personaId?: string | null;
@@ -19,7 +20,7 @@ export type RankedMentionCandidate<T extends MentionCandidateForRanking> = {
   score: number;
 };
 
-export function getMentionCandidateGroupRank(
+function getMentionCandidateGroupRank(
   candidate: MentionCandidateForRanking,
   activePersonaIds: ReadonlySet<string>,
 ) {
@@ -49,6 +50,41 @@ function scoreMentionCandidateLabel(
   if (words.some((word) => word.startsWith(lowerQuery))) return 3;
 
   return null;
+}
+
+export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
+  candidates: readonly T[],
+  activePersonaIds: ReadonlySet<string> = new Set(),
+): T | null {
+  return (
+    candidates
+      .filter((candidate) => candidate.isAgent && Boolean(candidate.pubkey))
+      .sort((left, right) => {
+        const activeDiff =
+          Number(right.isActiveAgent === true) -
+          Number(left.isActiveAgent === true);
+        if (activeDiff !== 0) return activeDiff;
+        const memberDiff = Number(right.isMember) - Number(left.isMember);
+        if (memberDiff !== 0) return memberDiff;
+        const runnableDiff =
+          Number(
+            Boolean(right.personaId) &&
+              activePersonaIds.has(right.personaId ?? ""),
+          ) -
+          Number(
+            Boolean(left.personaId) &&
+              activePersonaIds.has(left.personaId ?? ""),
+          );
+        if (runnableDiff !== 0) return runnableDiff;
+        const labelDiff = (left.displayName ?? "").localeCompare(
+          right.displayName ?? "",
+          undefined,
+          { sensitivity: "base" },
+        );
+        if (labelDiff !== 0) return labelDiff;
+        return (left.pubkey ?? "").localeCompare(right.pubkey ?? "");
+      })[0] ?? null
+  );
 }
 
 export function rankMentionCandidates<T extends MentionCandidateForRanking>(

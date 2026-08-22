@@ -9,6 +9,7 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { InlineChip } from "@/shared/ui/InlineChip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export type ComposerAddressAgent = {
@@ -122,6 +123,41 @@ type AddressAgentsProps = {
   pulseVersionByPubkey?: Readonly<Record<string, number>>;
   shakeVersionByPubkey?: Readonly<Record<string, number>>;
 };
+
+export function ComposerAddressChips({
+  agents,
+  disabled,
+  onRemove,
+}: {
+  agents: readonly ComposerAddressAgent[];
+  disabled: boolean;
+  onRemove: (pubkey: string) => void;
+}) {
+  if (agents.length === 0) return null;
+
+  return (
+    <span
+      className="message-markdown flex shrink-0 flex-wrap items-center gap-1"
+      data-testid="composer-address-chips"
+    >
+      {agents.map((agent) => (
+        <InlineChip
+          aria-label={`Stop automatically mentioning ${agent.displayName}`}
+          as="button"
+          className="max-w-48 text-xs"
+          data-testid={`composer-address-chip-${agent.pubkey}`}
+          disabled={disabled}
+          icon="agent"
+          interactive
+          key={agent.pubkey}
+          onClick={() => onRemove(agent.pubkey)}
+        >
+          <span className="truncate">@{agent.displayName}</span>
+        </InlineChip>
+      ))}
+    </span>
+  );
+}
 
 export function ComposerMentionButton({
   agents,

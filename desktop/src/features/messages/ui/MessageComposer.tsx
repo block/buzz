@@ -59,6 +59,7 @@ import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
 import { MentionAutocomplete } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
+import { ComposerAddressChips } from "./ComposerAddressControls";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
@@ -488,7 +489,9 @@ function MessageComposerImpl({
   openMentionOptionsRef.current = openMentionOptions;
   const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
     enabled: Boolean(audienceScope && editTarget == null),
+    lockedAgent: lockedAgents[0],
     mentions,
+    onOpenPicker: openMentionPicker,
     onSelect: selectMentionSuggestion,
     onToggle: toggleAlwaysAddressAgent,
   });
@@ -964,12 +967,20 @@ function MessageComposerImpl({
             )}
             {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
             <div
-              className="rich-text-composer relative max-h-32 overflow-y-auto"
+              className="rich-text-composer relative flex max-h-32 items-start gap-1.5 overflow-y-auto"
               data-testid="message-input-scroll"
               ref={composerScrollRef}
               onKeyDown={handleEditorKeyDown}
             >
-              <EditorContent editor={richText.editor} />
+              <ComposerAddressChips
+                agents={editTarget == null ? lockedAgents : []}
+                disabled={composerDisabled}
+                onRemove={removeAddressedAgent}
+              />
+              <EditorContent
+                className="min-w-0 flex-1"
+                editor={richText.editor}
+              />
             </div>
             <ComposerDockToolbar
               addressedAgents={editTarget == null ? lockedAgents : []}

@@ -50,6 +50,7 @@ test("primary+Shift+M addresses the default agent or toggles the tray selection"
     "./useAlwaysAddressShortcut.ts"
   );
   const { isMacPlatform } = await import("@/shared/lib/platform");
+  const selected = [];
   const toggled = [];
   const suggestion = {
     displayName: "Agent Ada",
@@ -75,7 +76,8 @@ test("primary+Shift+M addresses the default agent or toggles the tray selection"
           mentionSelectedIndex: 0,
           suggestions: [suggestion],
         },
-        onSelect: (value) => toggled.push(value),
+        onOpenPicker: () => {},
+        onSelect: (value) => selected.push(value),
         onToggle: (value) => toggled.push(value),
       }),
     { initialProps: { isMentionOpen: false } },
@@ -83,11 +85,107 @@ test("primary+Shift+M addresses the default agent or toggles the tray selection"
 
   act(() => assert.equal(view.result.current(createEvent()), true));
   assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(selected, []);
 
   view.rerender({ isMentionOpen: true });
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion, suggestion]);
+  assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(selected, [suggestion]);
 
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion, suggestion, suggestion]);
+  assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(selected, [suggestion, suggestion]);
+});
+
+test("primary+Shift+M removes the current locked agent before choosing a new default", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAlwaysAddressShortcut } = await import(
+    "./useAlwaysAddressShortcut.ts"
+  );
+  const { isMacPlatform } = await import("@/shared/lib/platform");
+  const lockedAgent = {
+    avatarUrl: null,
+    displayName: "Agent Ada",
+    pubkey: "agent-a",
+  };
+  const defaultAgent = {
+    displayName: "Agent Bea",
+    isAgent: true,
+    pubkey: "agent-b",
+  };
+  const toggled = [];
+  const { result } = renderHook(() =>
+    useAlwaysAddressShortcut({
+      enabled: true,
+      lockedAgent,
+      mentions: {
+        getDefaultAgentSuggestion: () => defaultAgent,
+        isMentionOpen: false,
+        mentionSelectedIndex: 0,
+        suggestions: [],
+      },
+      onOpenPicker: () => {},
+      onSelect: () => {},
+      onToggle: (value) => toggled.push(value),
+    }),
+  );
+
+  act(() =>
+    assert.equal(
+      result.current({
+        altKey: false,
+        ctrlKey: !isMacPlatform(),
+        key: "m",
+        metaKey: isMacPlatform(),
+        preventDefault() {},
+        repeat: false,
+        shiftKey: true,
+      }),
+      true,
+    ),
+  );
+
+  assert.deepEqual(toggled, [{ ...lockedAgent, isAgent: true }]);
+});
+
+test("primary+Shift+M opens the picker when no default agent is ready", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAlwaysAddressShortcut } = await import(
+    "./useAlwaysAddressShortcut.ts"
+  );
+  const { isMacPlatform } = await import("@/shared/lib/platform");
+  let opened = 0;
+  const { result } = renderHook(() =>
+    useAlwaysAddressShortcut({
+      enabled: true,
+      mentions: {
+        getDefaultAgentSuggestion: () => null,
+        isMentionOpen: false,
+        mentionSelectedIndex: 0,
+        suggestions: [],
+      },
+      onOpenPicker: () => {
+        opened += 1;
+      },
+      onSelect: () => {},
+      onToggle: () => {},
+    }),
+  );
+
+  act(() =>
+    assert.equal(
+      result.current({
+        altKey: false,
+        ctrlKey: !isMacPlatform(),
+        key: "m",
+        metaKey: isMacPlatform(),
+        preventDefault() {},
+        repeat: false,
+        shiftKey: true,
+      }),
+      true,
+    ),
+  );
+
+  assert.equal(opened, 1);
 });

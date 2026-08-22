@@ -50,7 +50,7 @@ import {
   useMentionSelection,
 } from "./useMentionSelection";
 import {
-  getMentionCandidateGroupRank,
+  pickDefaultAgentCandidate,
   rankMentionCandidates,
 } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
@@ -173,6 +173,21 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const activeAgentPubkeys = React.useMemo(
+    () =>
+      new Set([
+        ...(managedAgentsQuery.data ?? [])
+          .filter(
+            (agent) =>
+              agent.status === "running" || agent.status === "deployed",
+          )
+          .map((agent) => normalizePubkey(agent.pubkey)),
+        ...(relayAgentsQuery.data ?? [])
+          .filter((agent) => agent.status !== "offline")
+          .map((agent) => normalizePubkey(agent.pubkey)),
+      ]),
+    [managedAgentsQuery.data, relayAgentsQuery.data],
+  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -279,6 +294,7 @@ export function useMentions(
               ? (candidate.displayName ?? current.displayName)
               : (current.displayName ?? candidate.displayName),
         isAgent: current.isAgent || candidate.isAgent,
+        isActiveAgent: current.isActiveAgent || candidate.isActiveAgent,
         isMember: current.isMember || candidate.isMember,
         personaId: current.personaId ?? candidate.personaId,
         personaName: current.personaName ?? candidate.personaName ?? null,
@@ -324,6 +340,7 @@ export function useMentions(
           member.role === "bot" ||
           managedAgentNamesByPubkey.has(pubkey) ||
           relayAgentNamesByPubkey.has(pubkey),
+        isActiveAgent: activeAgentPubkeys.has(pubkey),
         ownerPubkey: profile?.ownerPubkey ?? null,
         personaName: personaNameByPubkey.get(pubkey) ?? null,
         role: member.role,
@@ -345,6 +362,7 @@ export function useMentions(
           (activePersonaById.has(pubkey) ? pubkey : undefined),
         ownerPubkey: agent.ownerPubkey,
         isAgent: true,
+        isActiveAgent: agent.status !== "offline",
       });
     }
     for (const agent of managedAgentsQuery.data ?? []) {
@@ -354,6 +372,8 @@ export function useMentions(
         displayName: agent.name,
         isMember: false,
         isAgent: true,
+        isActiveAgent:
+          agent.status === "running" || agent.status === "deployed",
         isManagedAgent: true,
         personaId: agent.personaId ?? undefined,
         personaName:
@@ -409,6 +429,7 @@ export function useMentions(
     );
   }, [
     activePersonaById,
+    activeAgentPubkeys,
     activePersonas,
     userSearchResults,
     canSearchGlobalUsers,
@@ -539,16 +560,10 @@ export function useMentions(
   ]);
   const getDefaultAgentSuggestion =
     React.useCallback((): MentionSuggestion | null => {
-      let bestCandidate: MentionCandidate | null = null;
-      let bestRank = Number.POSITIVE_INFINITY;
-      for (const candidate of mentionCandidates) {
-        if (!candidate.isAgent || !candidate.pubkey) continue;
-        const rank = getMentionCandidateGroupRank(candidate, activePersonaIds);
-        if (rank < bestRank) {
-          bestCandidate = candidate;
-          bestRank = rank;
-        }
-      }
+      const bestCandidate = pickDefaultAgentCandidate(
+        mentionCandidates,
+        activePersonaIds,
+      );
       if (!bestCandidate) return null;
       return mapMentionCandidateToSuggestion({
         agentProvenanceReady: agentDirectoriesReady,

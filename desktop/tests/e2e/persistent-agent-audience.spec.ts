@@ -186,6 +186,13 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   await pressPrimaryShift(page, "M");
 
   await expect(input).toHaveText("draft text");
+  const addressChips = composer.getByTestId("composer-address-chips");
+  await expect(addressChips.getByRole("button")).toHaveCount(1);
+  await expect(addressChips.getByRole("button")).toContainText("@alice");
+  await pressPrimaryShift(page, "M");
+  await expect(addressChips).toHaveCount(0);
+  await expect(input).toHaveText("draft text");
+  await pressPrimaryShift(page, "M");
   await expect(
     composer
       .getByTestId("composer-address-locks")
@@ -488,7 +495,7 @@ test("channel automatic mentions carry into threads and stay synchronized", asyn
   await expect(threadAutomaticMention).toBeVisible();
 
   await threadComposer(page)
-    .getByRole("button", { name: "Stop automatically mentioning Morgarita" })
+    .getByTestId(`composer-address-chip-${AGENT_A}`)
     .click();
   await expect(threadAutomaticMention).toHaveCount(0);
   await expect(channelAutomaticMention).toHaveCount(0);

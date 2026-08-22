@@ -6,12 +6,16 @@ import type { MentionSuggestion } from "./MentionAutocomplete";
 
 export function useAlwaysAddressShortcut({
   enabled,
+  lockedAgent,
   mentions,
+  onOpenPicker,
   onSelect,
   onToggle,
 }: {
   enabled: boolean;
+  lockedAgent?: Pick<MentionSuggestion, "avatarUrl" | "displayName" | "pubkey">;
   mentions: UseMentionsResult;
+  onOpenPicker: (insertTrigger?: boolean) => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   onToggle: (suggestion: MentionSuggestion) => void;
 }) {
@@ -37,8 +41,13 @@ export function useAlwaysAddressShortcut({
       if (event.repeat) return true;
       const suggestion = isMentionOpen
         ? suggestions[mentionSelectedIndex]
-        : getDefaultAgentSuggestion();
-      if (!suggestion?.isAgent || !suggestion.pubkey) return true;
+        : lockedAgent
+          ? { ...lockedAgent, isAgent: true }
+          : getDefaultAgentSuggestion();
+      if (!suggestion?.isAgent || !suggestion.pubkey) {
+        if (!isMentionOpen) onOpenPicker(false);
+        return true;
+      }
       if (isMentionOpen) {
         onSelect(suggestion);
       } else {
@@ -50,7 +59,9 @@ export function useAlwaysAddressShortcut({
       enabled,
       getDefaultAgentSuggestion,
       isMentionOpen,
+      lockedAgent,
       mentionSelectedIndex,
+      onOpenPicker,
       onSelect,
       onToggle,
       suggestions,
