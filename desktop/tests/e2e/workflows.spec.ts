@@ -8,6 +8,50 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+// Fixture channel ids from src/testing/e2eBridge.ts. "sales" is an OPEN
+// channel the mock identity has not joined; "exec-private" is a PRIVATE
+// channel the mock identity has not joined. Together they pin the
+// visibility boundary WorkflowsRouteScreen/WorkflowsView enforce: open
+// non-member channels surface in the aggregate view, private non-member
+// channels stay hidden.
+const SALES_OPEN_NON_MEMBER_CHANNEL_ID = "c6f3a9b2-4d55-5a23-bf78-5b9e2g3c5d6f";
+const EXEC_PRIVATE_NON_MEMBER_CHANNEL_ID =
+  "5ec4e700-0000-4000-8000-000000000099";
+
+async function seedWorkflowInChannel(
+  page: import("@playwright/test").Page,
+  channelId: string,
+  name: string,
+) {
+  const yamlDefinition = [
+    `name: ${name}`,
+    "enabled: true",
+    "trigger:",
+    "  on: manual",
+    "steps:",
+    "  - name: step_1",
+  ].join("\n");
+
+  await page.evaluate(
+    async ({ channelId: id, yamlDefinition: yaml }) => {
+      const testWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      if (!testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__) {
+        throw new Error("__BUZZ_E2E_INVOKE_MOCK_COMMAND__ is not installed");
+      }
+      await testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("create_workflow", {
+        channelId: id,
+        yamlDefinition: yaml,
+      });
+    },
+    { channelId, yamlDefinition },
+  );
+}
+
 async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-workflows-view").click();
@@ -1078,4 +1122,52 @@ test("missing workflow routes show an unavailable modal with close and retry", a
   ).toBeVisible();
   await unavailable.getByRole("button", { name: "Close" }).click();
   await expect(page).toHaveURL(/#\/workflows$/);
+});
+
+test("surfaces a workflow from an open channel the owner has not joined", async ({
+  page,
+}) => {
+  const workflowName = `sales_open_nonmember_${Date.now()}`;
+  await page.goto("/");
+  await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
+  await seedWorkflowInChannel(
+    page,
+    SALES_OPEN_NON_MEMBER_CHANNEL_ID,
+    workflowName,
+  );
+
+  await page.getByTestId("open-workflows-view").click();
+  await expect(page).toHaveURL(/#\/workflows$/);
+  await expect(page.getByTestId("workflows-view")).toBeVisible();
+
+  const card = page
+    .locator('[data-testid^="workflow-card-"]')
+    .filter({ hasText: workflowName });
+  await expect(card).toBeVisible();
+  await waitForAnimations(page);
+  await card.screenshot({
+    path: "test-results/screenshots/workflow-visible-open-nonmember-channel.png",
+  });
+});
+
+test("keeps a workflow from a private channel the owner has not joined out of the aggregate view", async ({
+  page,
+}) => {
+  const workflowName = `private_nonmember_${Date.now()}`;
+  await page.goto("/");
+  await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
+  await seedWorkflowInChannel(
+    page,
+    EXEC_PRIVATE_NON_MEMBER_CHANNEL_ID,
+    workflowName,
+  );
+
+  await page.getByTestId("open-workflows-view").click();
+  await expect(page).toHaveURL(/#\/workflows$/);
+  await expect(page.getByTestId("workflows-view")).toBeVisible();
+
+  await expect(page.getByText("No workflows yet")).toBeVisible();
+  await expect(
+    page.getByTestId("workflows-view").getByText(workflowName),
+  ).toHaveCount(0);
 });

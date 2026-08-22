@@ -7,8 +7,13 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { circuitCooldownRemainingMs } from "@/features/agents/observerRelayStore";
+import { useAgentCircuitStatus } from "@/features/agents/agentCircuitHooks";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import {
+  formatDurationMs,
+  formatElapsed,
+} from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
@@ -23,6 +28,7 @@ import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { RestartDiffBadge } from "./RestartDiffBadge";
 
 export function ManagedAgentRow({
@@ -60,6 +66,7 @@ export function ManagedAgentRow({
     : null;
   const presenceStatus = presenceLookup[agent.pubkey.trim().toLowerCase()];
   const activeTurns = useAgentWorking(agent.pubkey).channels;
+  const circuitStatus = useAgentCircuitStatus(agent.pubkey);
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
@@ -120,6 +127,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
               />
               <StatusBlock
+                circuitStatus={circuitStatus}
                 friendlyError={friendlyError}
                 isWorking={isWorking}
                 presenceLoaded={presenceLoaded}
@@ -143,6 +151,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
               />
               <StatusBlock
+                circuitStatus={circuitStatus}
                 friendlyError={friendlyError}
                 isWorking={isWorking}
                 presenceLoaded={presenceLoaded}
@@ -353,7 +362,79 @@ function WorkingBadge({
   );
 }
 
+function CircuitOpenBadge({
+  circuitStatus,
+}: {
+  circuitStatus: ReturnType<typeof useAgentCircuitStatus>;
+}) {
+  const { goChannel } = useAppNavigation();
+  const { channelId, message } = circuitStatus;
+  const activate = channelId
+    ? () => {
+        void goChannel(channelId);
+      }
+    : undefined;
+
+  // Ticks every second so the cooldown countdown stays live. Shared timer
+  // across same-interval useNow consumers (see this repo's CLAUDE.md) — cheap
+  // even with many suspended agents in the list at once.
+  const now = useNow(1000);
+  const remainingMs = circuitCooldownRemainingMs(circuitStatus, now);
+  const label =
+    remainingMs === null
+      ? "Suspended — repeated crashes"
+      : remainingMs > 0
+        ? `Suspended — retrying in ${formatDurationMs(remainingMs)}`
+        : "Suspended — health check pending";
+
+  return (
+    <Tooltip>
+      {/* asChild renders the trigger as the Badge's <span> — see
+          RestartDiffBadge for why this must stay a non-nested-interactive
+          element rather than a real <button>. */}
+      <TooltipTrigger asChild>
+        <Badge
+          className={cn("gap-1", activate && "cursor-pointer hover:opacity-80")}
+          data-testid="managed-agent-circuit-open"
+          role={activate ? "button" : undefined}
+          tabIndex={0}
+          // Amber once the cooldown window has elapsed — a still-open circuit
+          // at that point means a health probe should be underway, not a
+          // fresh crash, so it reads as "recovering" rather than "on fire".
+          variant={remainingMs === 0 ? "warning" : "destructive"}
+          onClick={
+            activate
+              ? (e) => {
+                  e.stopPropagation();
+                  activate();
+                }
+              : undefined
+          }
+          onKeyDown={
+            activate
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    activate();
+                  }
+                }
+              : undefined
+          }
+        >
+          <AlertTriangle className="h-3 w-3" />
+          {label}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72 text-xs" side="bottom">
+        {message ?? "Agent suspended (repeated crashes)."}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function StatusBlock({
+  circuitStatus,
   friendlyError,
   isWorking,
   presenceLoaded,
@@ -361,6 +442,7 @@ function StatusBlock({
   processDetail,
   status,
 }: {
+  circuitStatus: ReturnType<typeof useAgentCircuitStatus>;
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
   presenceLoaded: boolean;
@@ -371,12 +453,17 @@ function StatusBlock({
   return (
     <div className="space-y-1 lg:pt-0.5">
       <SubsectionLabel className="lg:hidden">Status</SubsectionLabel>
-      <AgentStatusBadge
-        isWorking={isWorking}
-        presenceLoaded={presenceLoaded}
-        presenceStatus={presenceStatus}
-        status={status}
-      />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <AgentStatusBadge
+          isWorking={isWorking}
+          presenceLoaded={presenceLoaded}
+          presenceStatus={presenceStatus}
+          status={status}
+        />
+        {circuitStatus.isOpen ? (
+          <CircuitOpenBadge circuitStatus={circuitStatus} />
+        ) : null}
+      </div>
       <p className="text-xs text-muted-foreground">{processDetail}</p>
       {friendlyError ? (
         <p

@@ -1426,6 +1426,14 @@ struct SlotCircuit {
     /// Prevents duplicate spawns from maintenance ticks that fire before the
     /// previous spawn_and_init completes.
     respawn_in_flight: bool,
+    /// True once a circuit-open alert has been emitted for this slot and
+    /// not yet followed by a successful respawn. Lets the respawn-complete
+    /// path emit a matching "recovered" alert exactly once.
+    alerted_open: bool,
+    /// Channel of the prompt that triggered the crash behind `alerted_open`,
+    /// if any. Carried forward so the "recovered" alert renders in the same
+    /// channel as the "suspended" alert it resolves, instead of nowhere.
+    alerted_channel_id: Option<Uuid>,
 }
 
 /// Result of [`SlotCircuit::record_crash`].
@@ -1807,6 +1815,8 @@ mod idle_pool_sleep_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight,
+            alerted_open: false,
+            alerted_channel_id: None,
         }
     }
 
@@ -2373,6 +2383,8 @@ async fn tokio_main() -> Result<()> {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         })
         .collect();
 
@@ -2487,6 +2499,11 @@ async fn tokio_main() -> Result<()> {
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
+                    if crash_history[rr.index].alerted_open {
+                        crash_history[rr.index].alerted_open = false;
+                        let channel_id = crash_history[rr.index].alerted_channel_id.take();
+                        emit_circuit_recovered_alert(observer.as_ref(), rr.index, channel_id);
+                    }
                     respawn_collected = true;
                 }
                 Err(e) => {
@@ -3851,6 +3868,74 @@ fn spawn_failure_notice(
     }
 }
 
+/// Emit a user-visible alert when an agent slot's circuit breaker opens.
+///
+/// Previously this state transition (3 crashes/60s, or a failed half-open
+/// probe re-opening the circuit) only produced a `tracing::error!` log —
+/// invisible unless someone is watching server logs, so a permanently dark
+/// slot could go unnoticed indefinitely. This routes through the same
+/// owner-encrypted observer-frame pipeline already used for `agent_panic`
+/// and `turn_error`; the desktop app renders it via a dedicated
+/// `circuit_open`/`circuit_recovered` branch in `processTranscriptEvent`
+/// (desktop/src/features/agents/ui/agentSessionTranscript.ts) — no new
+/// transport, but client-side rendering had to be added alongside this.
+fn emit_circuit_open_alert(
+    observer: Option<&observer::ObserverHandle>,
+    agent_index: usize,
+    channel_id: Option<Uuid>,
+    trigger: &str,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let cooldown_secs = CIRCUIT_BREAKER_COOLDOWN.as_secs();
+    observer.emit(
+        "circuit_open",
+        Some(agent_index),
+        &observer::context_for(channel_id, None, None),
+        serde_json::json!({
+            "trigger": trigger,
+            "cooldown_secs": cooldown_secs,
+            "error": format!(
+                "Agent slot {agent_index} {trigger} repeatedly and its circuit breaker is now open \
+                 — it will not respond until the {cooldown_secs}s cooldown elapses and a health probe succeeds."
+            ),
+        }),
+    );
+}
+
+/// Emit a user-visible alert when a slot that previously tripped its circuit
+/// breaker ([`emit_circuit_open_alert`]) has successfully respawned.
+///
+/// Closes the loop for an owner watching the observer stream: they see both
+/// when a slot went dark and when it came back, rather than only the former.
+///
+/// `channel_id` is the channel of the prompt that triggered the crash behind
+/// this recovery, if any — carried from `SlotCircuit::alerted_channel_id` so
+/// this alert renders in the same channel as the "suspended" alert it
+/// resolves. Previously this was always emitted with no channel, so it had no
+/// channel-scoped surface in the desktop app and the "suspended" message
+/// never appeared to resolve.
+fn emit_circuit_recovered_alert(
+    observer: Option<&observer::ObserverHandle>,
+    agent_index: usize,
+    channel_id: Option<Uuid>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    observer.emit(
+        "circuit_recovered",
+        Some(agent_index),
+        &observer::context_for(channel_id, None, None),
+        serde_json::json!({
+            "error": format!(
+                "Agent slot {agent_index} recovered — its circuit breaker probe succeeded and it is responding again."
+            ),
+        }),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3867,6 +3952,14 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
+    // The channel that triggered this prompt, if any — threaded through to
+    // any crash-recovery alert below so it has somewhere to render instead
+    // of silently emitting with no channel context (a heartbeat prompt has
+    // no channel, so None is correct there).
+    let source_channel_id = match result.source {
+        PromptSource::Channel(channel_id) => Some(channel_id),
+        PromptSource::Heartbeat => None,
+    };
     let successful_steer_deliveries = pool
         .task_map()
         .values()
@@ -4112,6 +4205,7 @@ fn handle_prompt_result(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                source_channel_id,
             ) {
                 // Circuit open — slot stays empty until maintenance refill.
                 if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
@@ -4152,6 +4246,7 @@ fn handle_prompt_result(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                source_channel_id,
             ) {
                 // Circuit open — slot stays empty until maintenance refill.
                 if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
@@ -4217,6 +4312,7 @@ fn handle_prompt_result(
                     respawn_tx,
                     respawn_tasks,
                     observer,
+                    source_channel_id,
                 ) && pool.live_count() == 0
                     && !any_respawn_in_flight(crash_history)
                 {
@@ -4307,6 +4403,9 @@ fn recover_panicked_agent(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = i, "circuit open after panic — not respawning");
+            emit_circuit_open_alert(observer.as_ref(), i, meta.channel_id, "panicked");
+            slot.alerted_open = true;
+            slot.alerted_channel_id = meta.channel_id;
             return;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -4506,6 +4605,13 @@ fn default_heartbeat_prompt() -> String {
 /// the actual shutdown + backoff + spawn_and_init work into a background task.
 /// The result comes back through `respawn_tx` so the main loop stays responsive.
 ///
+/// `channel_id` is the channel of the prompt that triggered this crash, if
+/// any (`None` for a heartbeat-triggered crash) — threaded through so a
+/// circuit-open alert has somewhere to render; previously this was always
+/// `None` here, so most circuit-open alerts (the generic crash/timeout path,
+/// as opposed to the panic path which already had `meta.channel_id`) had no
+/// channel-scoped surface in the desktop app.
+///
 /// Returns `true` if a respawn task was spawned, `false` if the circuit is open.
 fn spawn_respawn_task(
     old_agent: OwnedAgent,
@@ -4514,6 +4620,7 @@ fn spawn_respawn_task(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    channel_id: Option<Uuid>,
 ) -> bool {
     let index = old_agent.index;
 
@@ -4521,6 +4628,9 @@ fn spawn_respawn_task(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = index, "circuit open — not respawning");
+            emit_circuit_open_alert(observer.as_ref(), index, channel_id, "crashed");
+            slot.alerted_open = true;
+            slot.alerted_channel_id = channel_id;
             return false;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -7096,6 +7206,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7168,6 +7280,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7282,6 +7396,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7343,6 +7459,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7424,6 +7542,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7512,6 +7632,8 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                alerted_open: false,
+                alerted_channel_id: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7604,6 +7726,8 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                alerted_open: false,
+                alerted_channel_id: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7710,6 +7834,8 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                alerted_open: false,
+                alerted_channel_id: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7787,6 +7913,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7881,6 +8009,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8009,6 +8139,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8139,6 +8271,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8328,6 +8462,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8414,6 +8550,8 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();

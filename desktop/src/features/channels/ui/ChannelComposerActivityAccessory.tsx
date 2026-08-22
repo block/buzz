@@ -42,19 +42,21 @@ export function ChannelComposerActivityAccessory({
     >
       <div className="flex w-full items-center gap-2 overflow-visible pl-2">
         {cardMintJobs.length > 0 ? <CardMintComposerChip /> : null}
-        {workingBotPubkeys.length > 0 ? (
-          <div className="flex min-w-0 flex-1 overflow-visible">
-            <BotActivityComposerAction
-              agents={agents}
-              channelId={channel?.id ?? null}
-              onOpenAgentSession={onOpenAgentSession}
-              openAgentSessionPubkey={openAgentSessionPubkey}
-              profiles={profiles}
-              workingBotPubkeys={workingBotPubkeys}
-              variant="inline"
-            />
-          </div>
-        ) : null}
+        {/* BotActivityComposerAction also renders for suspended (circuit-open)
+            agents, not just working ones — its own internal check decides
+            whether there's anything to show, so this wrapper no longer gates
+            on workingBotPubkeys alone. */}
+        <div className="flex min-w-0 flex-1 overflow-visible">
+          <BotActivityComposerAction
+            agents={agents}
+            channelId={channel?.id ?? null}
+            onOpenAgentSession={onOpenAgentSession}
+            openAgentSessionPubkey={openAgentSessionPubkey}
+            profiles={profiles}
+            workingBotPubkeys={workingBotPubkeys}
+            variant="inline"
+          />
+        </div>
         {typingPubkeys.length > 0 ? (
           <TypingIndicatorRow
             channel={channel}

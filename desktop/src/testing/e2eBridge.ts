@@ -2931,6 +2931,36 @@ const mockChannels: MockChannel[] = [
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 540),
     ],
   }),
+  // Private channel the mock identity is NOT a member of (unlike every other
+  // private fixture above, which all include MOCK_IDENTITY_PUBKEY). Exercises
+  // the workflow-visibility boundary: an open non-member channel's workflows
+  // must surface in the aggregate Workflows view, but a private non-member
+  // channel's must stay hidden. See workflows.spec.ts.
+  createMockChannel({
+    id: "5ec4e700-0000-4000-8000-000000000099",
+    name: "exec-private",
+    channel_type: "stream",
+    visibility: "private",
+    description: "Private channel the mock identity has not joined",
+    topic: null,
+    purpose: null,
+    last_message_at: null,
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 500,
+    updated_minutes_ago: 500,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 500),
+      createMockMember(BOB_PUBKEY, "member", 480),
+    ],
+  }),
   createMockChannel({
     id: "f48efb06-0c93-5025-aac9-2e646bb6bfa8",
     name: "alice-tyler",
