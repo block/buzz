@@ -106,6 +106,83 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Why a harness finished startup with no channel subscription it can hear on.
+///
+/// The two causes need different copy because they point at different fixes:
+/// one is a membership/rule problem, the other a relay problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelReachGap {
+    /// No rule matched any channel, so no REQ was even attempted.
+    NothingResolved,
+    /// Channels resolved, but every REQ failed to reach the relay.
+    AllSubscribesFailed,
+}
+
+/// Assess whether startup left the harness able to receive channel work.
+///
+/// `resolved` counts the channel filters startup intended to subscribe;
+/// `live` counts the ones whose REQ actually went out. Returns `None` for the
+/// healthy case — at least one live subscription.
+///
+/// Why this is measured AFTER the subscribe loop rather than before it: the
+/// pre-loop check could only see `resolved`, so an agent that resolved
+/// channels and then failed every single `subscribe_channel` call was deaf
+/// with nothing logged about it — the failures were reported one-by-one as
+/// individual channel warnings, and the aggregate condition ("this agent can
+/// no longer hear anything") was never stated. That is the silent case this
+/// exists to name.
+///
+/// Note this is deliberately only a diagnostic. Zero live subscriptions is a
+/// legitimate steady state — an agent in no channels yet — so it must not fail
+/// startup, and it must not withhold the `online` presence that desktop
+/// callers wait on as their readiness boundary before sending a first mention.
+fn assess_channel_reach(resolved: usize, live: usize) -> Option<ChannelReachGap> {
+    if live > 0 {
+        None
+    } else if resolved == 0 {
+        Some(ChannelReachGap::NothingResolved)
+    } else {
+        Some(ChannelReachGap::AllSubscribesFailed)
+    }
+}
+
+#[cfg(test)]
+mod channel_reach_tests {
+    use super::{assess_channel_reach, ChannelReachGap};
+
+    #[test]
+    fn one_live_subscription_is_healthy() {
+        assert_eq!(assess_channel_reach(1, 1), None);
+    }
+
+    #[test]
+    fn a_partial_failure_is_still_healthy() {
+        // Some channels failed, but the agent can still hear on one, so this is
+        // not deafness — the per-channel warnings already cover the failures.
+        assert_eq!(assess_channel_reach(3, 1), None);
+    }
+
+    #[test]
+    fn nothing_resolved_is_reported() {
+        assert_eq!(
+            assess_channel_reach(0, 0),
+            Some(ChannelReachGap::NothingResolved)
+        );
+    }
+
+    #[test]
+    fn every_subscribe_failing_is_reported_not_silent() {
+        // The regression this exists for: the old check ran before the
+        // subscribe loop and keyed on resolved filters, so resolving three
+        // channels and then failing all three REQs produced no deafness
+        // report at all.
+        assert_eq!(
+            assess_channel_reach(3, 0),
+            Some(ChannelReachGap::AllSubscribesFailed)
+        );
+    }
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -2136,9 +2213,6 @@ async fn tokio_main() -> Result<()> {
     };
 
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
-    if channel_filters.is_empty() {
-        tracing::warn!("no channel subscriptions resolved — agent will sit idle");
-    }
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
@@ -2147,6 +2221,23 @@ async fn tokio_main() -> Result<()> {
             subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
         }
+    }
+
+    // Deafness is assessed against subscriptions that actually went out, not
+    // against the filters we hoped to send, so that "resolved N, subscribed 0"
+    // is reported instead of passing silently. See `assess_channel_reach`.
+    match assess_channel_reach(channel_filters.len(), subscribed_channel_ids.len()) {
+        Some(ChannelReachGap::NothingResolved) => tracing::warn!(
+            subscribe_mode = ?config.subscribe_mode,
+            rules = rules.len(),
+            "no channel subscriptions resolved — agent will sit idle"
+        ),
+        Some(ChannelReachGap::AllSubscribesFailed) => tracing::warn!(
+            subscribe_mode = ?config.subscribe_mode,
+            resolved = channel_filters.len(),
+            "every channel subscription failed — agent is connected but will sit idle"
+        ),
+        None => {}
     }
 
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
