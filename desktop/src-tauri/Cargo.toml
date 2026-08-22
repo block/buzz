@@ -58,6 +58,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
+buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
 window-vibrancy = "0.6"
 user-idle = { version = "0.6", default-features = false }
 plist = "1"
@@ -153,6 +154,6 @@ tauri-utils = "2"
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
 # admission gate tests can assert exact wait durations without real sleeps.
 tokio = { version = "1", features = ["test-util"] }
-# The relay's media validation, so the snapshot-sharing tests can prove the
-# full export → sanitize → relay-accept → import contract end to end.
+# Production macOS code validates avconvert output before upload; cross-platform
+# snapshot tests also exercise the relay contract.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }

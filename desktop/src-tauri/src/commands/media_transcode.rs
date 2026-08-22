@@ -122,18 +122,17 @@ pub(super) fn has_heic_extension(path: &std::path::Path) -> bool {
 /// blocking a Tokio worker thread indefinitely.
 const FFMPEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Run an ffmpeg command with a wall-clock timeout and optional cancellation.
+/// Run a child process with a wall-clock timeout and optional cancellation.
 ///
 /// Spawns the child process, polls `try_wait()` every 500ms, and kills it
 /// if the deadline is exceeded. Returns the same `Output` as `Command::output()`.
 ///
-/// **IMPORTANT**: callers MUST pass `-loglevel error` (or `quiet`) to ffmpeg.
-/// This function reads stderr only after the child exits. If ffmpeg writes
-/// enough progress/diagnostic output to fill the OS pipe buffer (~64 KiB),
-/// the child blocks on write() and never exits — causing a false timeout.
-/// `-loglevel error` suppresses progress spam, keeping stderr small.
-fn run_ffmpeg_with_cancellation(
+/// **IMPORTANT**: callers must keep piped output bounded. This function reads
+/// stderr only after the child exits; enough output to fill the OS pipe would
+/// block the child and cause a false timeout.
+fn run_process_with_cancellation(
     cmd: &mut std::process::Command,
+    process_name: &str,
     timeout: std::time::Duration,
     cancellation: Option<&CancellationToken>,
 ) -> Result<std::process::Output, String> {
@@ -142,7 +141,7 @@ fn run_ffmpeg_with_cancellation(
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+        .map_err(|e| format!("failed to spawn {process_name}: {e}"))?;
 
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -175,11 +174,14 @@ fn run_ffmpeg_with_cancellation(
                 if std::time::Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait(); // reap zombie
-                    return Err(format!("ffmpeg timed out after {}s", timeout.as_secs()));
+                    return Err(format!(
+                        "{process_name} timed out after {}s",
+                        timeout.as_secs()
+                    ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            Err(e) => return Err(format!("failed to wait on ffmpeg: {e}")),
+            Err(e) => return Err(format!("failed to wait on {process_name}: {e}")),
         }
     }
 }
@@ -199,7 +201,7 @@ fn transcode_to_mp4_with_cancellation(
     // UUID-based temp path — unique across concurrent uploads.
     let output = std::env::temp_dir().join(format!("buzz-transcode-{}.mp4", uuid::Uuid::new_v4()));
 
-    let result = run_ffmpeg_with_cancellation(
+    let result = run_process_with_cancellation(
         ffmpeg_command(ffmpeg)
             .args([
                 "-y",
@@ -250,6 +252,7 @@ fn transcode_to_mp4_with_cancellation(
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
+        "ffmpeg",
         FFMPEG_TIMEOUT,
         cancellation,
     )
@@ -291,7 +294,7 @@ fn transcode_heic_to_jpeg(
     // Single-frame image decode — 60s is generous even for large HEICs.
     let heic_timeout = std::time::Duration::from_secs(60);
 
-    let result = run_ffmpeg_with_cancellation(
+    let result = run_process_with_cancellation(
         ffmpeg_command(ffmpeg)
             .args([
                 "-y",
@@ -316,6 +319,7 @@ fn transcode_heic_to_jpeg(
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
+        "ffmpeg",
         heic_timeout,
         cancellation,
     )
@@ -378,7 +382,7 @@ fn extract_poster_frame_with_cancellation(
     let poster_timeout = std::time::Duration::from_secs(30);
 
     // Try seeking to 1s first (avoids black first frames from fade-ins).
-    let result = run_ffmpeg_with_cancellation(
+    let result = run_process_with_cancellation(
         ffmpeg_command(ffmpeg)
             .args([
                 "-y",
@@ -396,6 +400,7 @@ fn extract_poster_frame_with_cancellation(
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
+        "ffmpeg",
         poster_timeout,
         cancellation,
     )?;
@@ -410,7 +415,7 @@ fn extract_poster_frame_with_cancellation(
             eprintln!("buzz-desktop: poster seek-to-1s failed, trying first frame: {stderr}");
         }
         let _ = std::fs::remove_file(&output);
-        let fallback = run_ffmpeg_with_cancellation(
+        let fallback = run_process_with_cancellation(
             ffmpeg_command(ffmpeg)
                 .args([
                     "-y",
@@ -426,6 +431,7 @@ fn extract_poster_frame_with_cancellation(
                 .arg(&output)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped()),
+            "ffmpeg",
             poster_timeout,
             cancellation,
         )?;
@@ -439,6 +445,135 @@ fn extract_poster_frame_with_cancellation(
     }
 
     Ok(output)
+}
+
+/// Give `avconvert` a source path whose extension matches its magic bytes.
+///
+/// The deferred-upload path starts from raw bytes and therefore uses an
+/// extensionless temp file. AVFoundation can identify those bytes, but the
+/// `avconvert` CLI refuses to open the file unless its path has a recognized
+/// video extension. Stage only mismatched paths, preferring a hard link to
+/// avoid copying large uploads.
+#[cfg(target_os = "macos")]
+fn prepare_avconvert_source(
+    source: &std::path::Path,
+) -> Result<(std::path::PathBuf, bool), String> {
+    let extension = infer::get_from_path(source)
+        .map_err(|error| format!("failed to inspect video for conversion: {error}"))?
+        .filter(|kind| kind.matcher_type() == infer::MatcherType::Video)
+        .map_or("mov", |kind| kind.extension());
+
+    if source
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+    {
+        return Ok((source.to_path_buf(), false));
+    }
+
+    let staged = std::env::temp_dir().join(format!(
+        "buzz-avconvert-source-{}.{}",
+        uuid::Uuid::new_v4(),
+        extension
+    ));
+    if std::fs::hard_link(source, &staged).is_err() {
+        std::fs::copy(source, &staged)
+            .map_err(|error| format!("failed to stage video for conversion: {error}"))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&staged);
+            })?;
+    }
+    Ok((staged, true))
+}
+
+/// Reject output that the relay cannot ingest before spending bandwidth.
+///
+/// `avconvert` can preserve metadata tracks from some source containers, while
+/// the relay deliberately accepts exactly one H.264 video track and at most
+/// one AAC audio track. Validate locally so those inputs fail with a useful
+/// conversion error instead of a later generic upload rejection.
+#[cfg(target_os = "macos")]
+fn validate_avconvert_output(path: &std::path::Path) -> Result<(), String> {
+    let config = buzz_media_pkg::MediaConfig {
+        s3_endpoint: String::new(),
+        s3_access_key: String::new(),
+        s3_secret_key: String::new(),
+        s3_bucket: String::new(),
+        s3_region: "us-east-1".to_string(),
+        s3_addressing_style: buzz_media_pkg::S3AddressingStyle::Path,
+        max_image_bytes: 50 * 1024 * 1024,
+        max_gif_bytes: 10 * 1024 * 1024,
+        max_video_bytes: 500 * 1024 * 1024,
+        max_file_bytes: 100 * 1024 * 1024,
+        public_base_url: String::new(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    };
+    buzz_media_pkg::validation::validate_video_file(path, &config)
+        .map(|_| ())
+        .map_err(|error| format!("Video conversion produced an unsupported file: {error}"))
+}
+
+/// Transcode a video with macOS's built-in AVFoundation converter.
+///
+/// Release builds do not bundle ffmpeg, and a stock macOS installation does
+/// not provide it. `avconvert` normalizes QuickTime screen recordings to an
+/// MP4 that the relay accepts while applying Apple's default metadata filter.
+#[cfg(target_os = "macos")]
+fn transcode_with_avconvert(
+    source: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<u8>, String> {
+    let output = std::env::temp_dir().join(format!("buzz-avconvert-{}.mp4", uuid::Uuid::new_v4()));
+    let (prepared_source, remove_prepared_source) = prepare_avconvert_source(source)?;
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        if remove_prepared_source {
+            let _ = std::fs::remove_file(&prepared_source);
+        }
+        return Err("upload cancelled".to_string());
+    }
+
+    let result = (|| {
+        let mut command = std::process::Command::new("/usr/bin/avconvert");
+        command
+            .env_clear()
+            .env("LANG", "C")
+            .args(["--source"])
+            .arg(&prepared_source)
+            .args(["--preset", "PresetHighestQuality", "--output"])
+            .arg(&output)
+            .arg("--replace")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        crate::util::configure_no_window(&mut command);
+
+        let process =
+            run_process_with_cancellation(&mut command, "avconvert", FFMPEG_TIMEOUT, cancellation)?;
+
+        if !process.status.success() || !output.exists() {
+            let stderr = String::from_utf8_lossy(&process.stderr);
+            let detail = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("unknown error");
+            return Err(format!("Video conversion failed: {detail}"));
+        }
+
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("upload cancelled".to_string());
+        }
+
+        validate_avconvert_output(&output)?;
+        std::fs::read(&output).map_err(|error| format!("failed to read converted video: {error}"))
+    })();
+
+    let _ = std::fs::remove_file(&output);
+    if remove_prepared_source {
+        let _ = std::fs::remove_file(&prepared_source);
+    }
+    result
 }
 
 /// Transcode video and extract poster frame. Returns (video_bytes, Option<poster_bytes>).
@@ -455,7 +590,13 @@ pub(super) fn transcode_and_extract_poster_with_cancellation(
     source: &std::path::Path,
     cancellation: Option<&CancellationToken>,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    let ffmpeg_path = find_ffmpeg()?;
+    let ffmpeg_path = match find_ffmpeg() {
+        Ok(path) => path,
+        #[cfg(target_os = "macos")]
+        Err(_) => return transcode_with_avconvert(source, cancellation).map(|video| (video, None)),
+        #[cfg(not(target_os = "macos"))]
+        Err(error) => return Err(error),
+    };
     let transcoded = transcode_to_mp4_with_cancellation(source, &ffmpeg_path, cancellation)?;
 
     // Extract poster from the transcoded file (not the original — guarantees decodability).
@@ -487,6 +628,52 @@ pub(super) fn transcode_and_extract_poster_with_cancellation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_avconvert_stages_extensionless_quicktime_source() {
+        let source = std::env::temp_dir().join(format!(
+            "buzz-avconvert-extensionless-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&source, b"\0\0\0\x14ftypqt  \0\0\0\0qt  ").expect("write QuickTime header");
+
+        let (prepared, remove_prepared) =
+            prepare_avconvert_source(&source).expect("stage QuickTime source");
+        assert!(remove_prepared);
+        assert_eq!(
+            prepared.extension().and_then(|value| value.to_str()),
+            Some("mov")
+        );
+        assert_eq!(
+            std::fs::read(&prepared).expect("read staged source"),
+            std::fs::read(&source).expect("read original source")
+        );
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(prepared);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_avconvert_normalizes_extensionless_quicktime_fixture() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/quicktime-screen-recording.mov");
+        let staged_source =
+            std::env::temp_dir().join(format!("buzz-avconvert-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::copy(fixture, &staged_source).expect("stage extensionless QuickTime fixture");
+
+        let video =
+            transcode_with_avconvert(&staged_source, None).expect("convert QuickTime fixture");
+        let _ = std::fs::remove_file(staged_source);
+        let converted = std::env::temp_dir().join(format!(
+            "buzz-avconvert-fixture-output-{}.mp4",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&converted, &video).expect("write converted fixture");
+        validate_avconvert_output(&converted).expect("relay rejected avconvert output");
+        let _ = std::fs::remove_file(converted);
+    }
 
     #[test]
     fn test_is_video_file_mp4() {
