@@ -658,6 +658,8 @@ pub async fn cmd_send_message(
         media_tags.push(crate::client::build_imeta_tag(&desc));
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
+        } else if desc.mime_type.starts_with("audio/") {
+            media_content.push_str("\n[audio attachment](");
         } else {
             media_content.push_str("\n![image](");
         }
