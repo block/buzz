@@ -73,6 +73,9 @@ grep -q '^APP_DISPLAY_NAME = Buzz (Fix_Thing-2)$' "$ios" \
 grep -q '^label=Fix_Thing-2$' "$android" \
   && pass "Android label carries the branch label" \
   || fail "Android label wrong: $(cat "$android")"
+grep -q '^appName=Buzz (Fix_Thing-2)$' "$android" \
+  && pass "Android app name defaults to the branch-labelled name" \
+  || fail "Android app name wrong: $(cat "$android")"
 grep -q '^applicationIdSuffix=\.feature_work_1$' "$android" \
   && pass "Android applicationIdSuffix keys to the worktree directory name" \
   || fail "Android applicationIdSuffix wrong: $(cat "$android")"
@@ -120,6 +123,32 @@ grep -q '^applicationIdSuffix=\.w_2fast$' "$wt2/mobile/android/worktree.properti
   && pass "digit-leading worktree dir yields a valid Android package segment" \
   || fail "digit-leading dir segment wrong: $(cat "$wt2/mobile/android/worktree.properties")"
 
+# ── Explicit Android debug identity: readable and isolated ───────────────────
+BUZZ_ANDROID_DEBUG_APP_NAME="Buzz Huddles" \
+  BUZZ_ANDROID_DEBUG_ID_SUFFIX=".huddles_829c" \
+  "$wt/scripts/mobile-worktree-overrides.sh" > /dev/null
+grep -q '^appName=Buzz Huddles$' "$android" \
+  && pass "explicit Android debug app name is persisted" \
+  || fail "explicit Android debug app name wrong: $(cat "$android")"
+grep -q '^applicationIdSuffix=\.huddles_829c$' "$android" \
+  && pass "explicit Android debug suffix is persisted" \
+  || fail "explicit Android debug suffix wrong: $(cat "$android")"
+grep -q '^APP_DISPLAY_NAME = Buzz (' "$ios" \
+  && ! grep -q 'Buzz Huddles' "$ios" \
+  && pass "Android debug overrides do not change the iOS identity" \
+  || fail "Android debug overrides must not change iOS identity: $(cat "$ios")"
+
+if BUZZ_ANDROID_DEBUG_ID_SUFFIX=".Huddles" "$wt/scripts/mobile-worktree-overrides.sh" >/dev/null 2>&1; then
+  fail "invalid explicit Android debug suffix must be rejected"
+else
+  pass "invalid explicit Android debug suffix is rejected"
+fi
+if BUZZ_ANDROID_DEBUG_APP_NAME=$'Buzz Huddles\nInjected' "$wt/scripts/mobile-worktree-overrides.sh" >/dev/null 2>&1; then
+  fail "unsafe explicit Android debug app name must be rejected"
+else
+  pass "unsafe explicit Android debug app name is rejected"
+fi
+
 # ── Tracked build files: overrides are debug-only, release stays production ──
 debug_xcconfig="$repo_root/mobile/ios/Flutter/Debug.xcconfig"
 release_xcconfig="$repo_root/mobile/ios/Flutter/Release.xcconfig"
@@ -158,6 +187,9 @@ grep -q 'resValue("string", "app_name", "Buzz")' "$gradle" \
 grep -q 'worktreeLabel.matches' "$gradle" \
   && pass "Gradle validates the worktree label before use" \
   || fail "Gradle must validate the worktree label against a safe pattern"
+grep -q 'worktreeAppName.matches' "$gradle" \
+  && pass "Gradle validates the explicit Android app name before use" \
+  || fail "Gradle must validate the explicit Android app name against a safe pattern"
 grep -q 'AppOverrides.properties' "$gradle" \
   && grep -q 'debugAppName' "$gradle" \
   && grep -q 'debugIdSuffix' "$gradle" \

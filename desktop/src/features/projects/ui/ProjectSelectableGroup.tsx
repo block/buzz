@@ -10,6 +10,7 @@ export function ProjectSelectableGroup({
   contentClassName,
   count,
   groupKey,
+  headerClassName,
   headerTestId,
   icon,
   items,
@@ -21,6 +22,7 @@ export function ProjectSelectableGroup({
   contentClassName?: string;
   count: number;
   groupKey: string;
+  headerClassName?: string;
   headerTestId: string;
   icon: React.ReactNode;
   items: ProjectSelectionItem[];
@@ -36,6 +38,7 @@ export function ProjectSelectableGroup({
     ).length ?? 0;
   const allSelected = items.length > 0 && selectedCount === items.length;
   const partiallySelected = selectedCount > 0 && !allSelected;
+  const showSelectControl = allSelected || partiallySelected;
 
   return (
     <section
@@ -44,34 +47,50 @@ export function ProjectSelectableGroup({
       data-testid={testId}
     >
       <div
-        className="group/header mx-2 flex h-9 items-center gap-1.5 rounded-md bg-muted/40 px-2 text-xs text-muted-foreground"
+        className={cn(
+          "group/header mx-2 flex h-9 items-center gap-1.5 rounded-md bg-muted/40 px-2 text-xs text-muted-foreground",
+          headerClassName,
+        )}
         data-testid={headerTestId}
       >
-        {selection && items.length > 0 ? (
+        <span
+          className="relative flex h-4 w-4 shrink-0 items-center justify-center"
+          data-testid="project-group-leading-icon"
+        >
           <span
             className={cn(
-              "flex shrink-0 opacity-0 transition-opacity group-focus-within/header:opacity-100 group-hover/header:opacity-100",
-              (allSelected || partiallySelected) && "opacity-100",
+              "flex items-center justify-center transition-opacity",
+              selection &&
+                "group-focus-within/header:opacity-0 group-hover/header:opacity-0",
+              showSelectControl && "opacity-0",
             )}
+            data-testid="project-group-icon"
           >
-            <ProjectEntitySelectControl
-              checked={allSelected}
-              indeterminate={partiallySelected}
-              label={`${allSelected ? "Clear" : "Select"} all ${label}`}
-              onToggle={() => selection.toggleGroup(items)}
-              testId="projects-group-select"
-            />
+            {icon}
           </span>
-        ) : null}
+          {selection && items.length > 0 ? (
+            <span
+              className={cn(
+                "absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-focus-within/header:opacity-100 group-hover/header:opacity-100",
+                showSelectControl && "opacity-100",
+              )}
+            >
+              <ProjectEntitySelectControl
+                checked={allSelected}
+                indeterminate={partiallySelected}
+                label={`${allSelected ? "Clear" : "Select"} all ${label}`}
+                onToggle={() => selection.toggleGroup(items)}
+                testId="projects-group-select"
+              />
+            </span>
+          ) : null}
+        </span>
         <button
           aria-expanded={expanded}
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left"
           onClick={() => setExpanded((current) => !current)}
           type="button"
         >
-          <span className="flex h-4 w-4 shrink-0 items-center justify-center opacity-80">
-            {icon}
-          </span>
           <span
             className="min-w-0 truncate font-medium text-foreground/80"
             data-testid={labelTestId}

@@ -1,6 +1,7 @@
 import 'dart:async';
-import 'dart:math' show max, min;
+import 'dart:math' show cos, max, min, pi;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -9,14 +10,19 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/emoji/emoji_burst.dart';
+import '../../shared/huddle/huddle.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -44,11 +50,16 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
+import 'emoji_picker.dart';
 import 'ime_metrics_settle_observer.dart';
 import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
+import 'local_message_send_animation_provider.dart';
+import 'local_message_send_transition.dart';
+import 'mobile_huddle_controller.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
+import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
@@ -56,6 +67,7 @@ import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
+import 'recent_emoji_provider.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'small_avatar.dart';
@@ -65,6 +77,12 @@ import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';
+part 'channel_detail_page/huddle_sheet.dart';
+part 'channel_detail_page/huddle_call_avatar.dart';
+part 'channel_detail_page/huddle_call_participants.dart';
+part 'channel_detail_page/huddle_call_controls.dart';
+part 'channel_detail_page/huddle_drawer.dart';
+part 'channel_detail_page/huddle_reactions.dart';
 part 'channel_detail_page/message_bubble.dart';
 part 'channel_detail_page/banners.dart';
 part 'channel_detail_page/app_bar.dart';
@@ -158,6 +176,8 @@ class ChannelDetailPage extends HookConsumerWidget {
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
+    final huddleLifecycle =
+        ref.watch(huddleLifecycleProvider(channel.id)).value ?? const [];
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
     final channelsNotifier = ref.read(channelsProvider.notifier);
@@ -264,6 +284,9 @@ class ChannelDetailPage extends HookConsumerWidget {
       context,
       isDm: resolvedChannel.isDm,
     );
+    final usesNativeIosGlassBackButton =
+        Navigator.canPop(context) &&
+        Theme.of(context).platform == TargetPlatform.iOS;
     final readTimestamp = _channelReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
@@ -321,34 +344,60 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        leading: usesNativeIosGlassBackButton
+            ? IosGlassNavigationButton(
+                key: const ValueKey('channel-ios-glass-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back',
+                onPressed: () => Navigator.of(context).maybePop(),
+                width: iosGlassChannelHeaderLeadingWidth,
+                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                nativeViewSuppressed: messageActionBackdropActive,
+              )
+            : null,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
-        title: resolvedChannel.isDm
-            ? _DmAppBarTitle(
-                channel: resolvedChannel,
-                currentPubkey: currentPubkey,
-              )
-            : _ChannelAppBarTitle(
-                channel: resolvedChannel,
-                onTap: () async {
-                  final shouldClose = await showChannelDetailsPage(
-                    context: context,
-                    channel: resolvedChannel,
-                    currentPubkey: currentPubkey,
-                    onMemberTap: showUserProfileSheet,
-                    sectionId: ref
-                        .read(channelSectionsProvider)
-                        .store
-                        .assignments[resolvedChannel.id],
-                  );
-                  if (shouldClose == true && context.mounted) {
-                    Navigator.of(context).pop();
-                  }
-                },
-              ),
+        title: Padding(
+          padding: EdgeInsets.only(
+            left: usesNativeIosGlassBackButton
+                ? iosGlassChannelHeaderTitleSpacing
+                : 0,
+          ),
+          child: resolvedChannel.isDm
+              ? _DmAppBarTitle(
+                  channel: resolvedChannel,
+                  currentPubkey: currentPubkey,
+                )
+              : _ChannelAppBarTitle(
+                  channel: resolvedChannel,
+                  onTap: () async {
+                    final shouldClose = await showChannelDetailsPage(
+                      context: context,
+                      channel: resolvedChannel,
+                      currentPubkey: currentPubkey,
+                      onMemberTap: showUserProfileSheet,
+                      sectionId: ref
+                          .read(channelSectionsProvider)
+                          .store
+                          .assignments[resolvedChannel.id],
+                    );
+                    if (shouldClose == true && context.mounted) {
+                      Navigator.of(context).pop();
+                    }
+                  },
+                ),
+        ),
         actions: resolvedChannel.isDm
             ? [
+                if (showsComposer)
+                  _HuddleButton(
+                    channel: resolvedChannel,
+                    events: [
+                      ...messagesState.value ?? const [],
+                      ...huddleLifecycle,
+                    ],
+                  ),
                 if (_showsMembersAction(resolvedChannel))
                   _MembersButton(
                     channelId: resolvedChannel.id,
@@ -375,7 +424,16 @@ class ChannelDetailPage extends HookConsumerWidget {
                   icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
                 ),
               ]
-            : const [],
+            : [
+                if (showsComposer)
+                  _HuddleButton(
+                    channel: resolvedChannel,
+                    events: [
+                      ...messagesState.value ?? const [],
+                      ...huddleLifecycle,
+                    ],
+                  ),
+              ],
       ),
       body: Stack(
         fit: StackFit.expand,

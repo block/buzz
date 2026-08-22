@@ -9,7 +9,10 @@ import {
 } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  isChannelReferenceOpenable,
+  useChannelReference,
+} from "@/features/channels/openChannelDirectory";
 import {
   type ProjectRepoUnavailableReason,
   projectRepoUnavailablePresentation,
@@ -76,12 +79,10 @@ function AccessRestrictedDescription({
   ownerName?: string;
 }) {
   const { goChannel } = useAppNavigation();
-  const channelsQuery = useChannelsQuery();
-  const channel = channelsQuery.data?.find(
-    (candidate) => candidate.id === accessChannelId,
-  );
+  const channel = useChannelReference(accessChannelId);
+  const isOpenable = isChannelReferenceOpenable(channel);
 
-  if (!channel) {
+  if (!isOpenable) {
     return (
       <>
         Repository access is granted through a channel you can’t see. Ask{" "}

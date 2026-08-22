@@ -295,8 +295,9 @@ export function ProjectAgentChatPanel({
             toolbarExtraActions={
               <>
                 <AgentContextPayloadPreview
+                  iconOnly
                   payload={contextPayload}
-                  triggerLabel="Context"
+                  triggerLabel="Preview message context"
                 />
                 {conversation ? (
                   <Button

@@ -263,7 +263,7 @@ export function ReadmePanel({
     return (
       <section className="overflow-hidden">
         {header}
-        <div className="p-6 text-sm text-muted-foreground">
+        <div className="px-8 py-6 text-sm text-muted-foreground">
           {fileContent.error
             ? "Could not load this README. Try again after refreshing the repository."
             : gitDataState === "empty"
@@ -283,11 +283,13 @@ export function ReadmePanel({
   return (
     <section className="overflow-hidden">
       {header}
-      <div className="p-4">
+      <div className="min-w-0 px-8 py-6">
         {isMarkdown ? (
           <Markdown
+            blockCode
             className="text-sm"
             content={readmeContent}
+            hardLineBreaks={false}
             interactive={false}
           />
         ) : language ? (

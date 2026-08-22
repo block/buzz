@@ -6,6 +6,7 @@ import {
   buildProjectSelectionAgentContext,
   buildProjectsOverviewAgentContext,
   projectDetailAgentContextBlock,
+  splitProjectDetailAgentContext,
   stripProjectDetailAgentContext,
   untrustedPromptValue,
   withProjectSelectionAgentContext,
@@ -215,8 +216,44 @@ test("selected project context enforces a final serialization budget", () => {
 });
 
 test("strips hidden page context from the displayed user message", () => {
-  const content = `Explain this file${projectDetailAgentContextBlock(
+  const payload = projectDetailAgentContextBlock(
     buildProjectDetailAgentContext(base),
-  )}`;
+  );
+  const content = `Explain this file${payload}`;
   assert.equal(stripProjectDetailAgentContext(content), "Explain this file");
+  assert.deepEqual(splitProjectDetailAgentContext(content), {
+    context: payload.trim(),
+    message: "Explain this file",
+  });
+});
+
+test("leaves ordinary messages unchanged without inventing context", () => {
+  assert.deepEqual(splitProjectDetailAgentContext("A normal message"), {
+    context: null,
+    message: "A normal message",
+  });
+});
+
+test("splits only the final appended context marker", () => {
+  const userMessage =
+    "Discuss this literal example:\n---\nCurrent Buzz project page:\nnot appended";
+  const payload = projectDetailAgentContextBlock(
+    buildProjectDetailAgentContext(base),
+  );
+  assert.deepEqual(splitProjectDetailAgentContext(`${userMessage}${payload}`), {
+    context: payload.trim(),
+    message: userMessage,
+  });
+});
+
+test("splits workspace repository context for the shared conversation view", () => {
+  const payload =
+    '\n---\nWorkspace repositories:\n- "Buzz" (address: "owner:buzz")';
+  assert.deepEqual(
+    splitProjectDetailAgentContext(`Compare the repos${payload}`),
+    {
+      context: payload.trim(),
+      message: "Compare the repos",
+    },
+  );
 });

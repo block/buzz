@@ -31,5 +31,10 @@ export function canStartHuddleInChannel({
     );
   }
 
-  return channel.visibility === "open" || selfMember !== null;
+  // `channel.isMember` and the roster's self entry derive from the same
+  // kind:39002 event; either satisfies the private-channel gate, so callers
+  // that no longer fetch the roster eagerly keep huddle access.
+  return (
+    channel.visibility === "open" || channel.isMember || selfMember !== null
+  );
 }

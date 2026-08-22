@@ -1,8 +1,14 @@
 import * as React from "react";
 
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
+import { cn } from "@/shared/lib/cn";
 import { InlineChip } from "@/shared/ui/InlineChip";
-import type { InlineChipIconKind } from "@/shared/ui/mentionChip";
+import {
+  inlineChipIconClasses,
+  type InlineChipIconKind,
+  truncateInlineChipLabel,
+  WRAPPING_INLINE_CHIP_CLASSES,
+} from "@/shared/ui/mentionChip";
 
 import {
   MediaContextMenu,
@@ -60,6 +66,35 @@ function useBuzzLinkContextMenu({
   return { contextMenu, onContextMenuCapture };
 }
 
+function wrappingChipContent(
+  children: React.ReactNode,
+  icon: InlineChipIconKind,
+): React.ReactNode {
+  if (typeof children !== "string" || children.length === 0) return children;
+
+  const separatorIndex = children.search(/[-\s]/u);
+  const leadingEnd =
+    separatorIndex < 0
+      ? Array.from(children)[0]?.length
+      : separatorIndex + (children[separatorIndex] === "-" ? 1 : 0);
+  if (!leadingEnd) return children;
+
+  return (
+    <>
+      <span
+        aria-hidden="true"
+        className={cn(
+          "inline-chip-leading-fragment",
+          inlineChipIconClasses(icon),
+        )}
+      >
+        {children.slice(0, leadingEnd)}
+      </span>
+      {children.slice(leadingEnd)}
+    </>
+  );
+}
+
 export function BuzzLinkChip({
   children,
   className,
@@ -67,28 +102,52 @@ export function BuzzLinkChip({
   icon: Icon,
   interactive,
   onOpenLink,
+  wrapping = false,
   ...props
-}: Omit<React.ComponentPropsWithoutRef<"button">, "onClick"> & {
+}: Omit<React.ComponentPropsWithoutRef<"span">, "onClick"> & {
   href?: string;
   icon: InlineChipIconKind;
   interactive: boolean;
   onOpenLink: () => void;
+  wrapping?: boolean;
 }) {
   const { contextMenu, onContextMenuCapture } = useBuzzLinkContextMenu({
     href,
     interactive,
     onOpenLink,
   });
+  const visibleChildren =
+    wrapping && typeof children === "string"
+      ? truncateInlineChipLabel(children)
+      : children;
+  const content = wrapping
+    ? wrappingChipContent(visibleChildren, Icon)
+    : visibleChildren;
+  const chipClassName = cn(className, wrapping && WRAPPING_INLINE_CHIP_CLASSES);
+  const onKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLSpanElement>) => {
+      props.onKeyDown?.(event);
+      if (
+        event.defaultPrevented ||
+        (event.key !== "Enter" && event.key !== " ")
+      ) {
+        return;
+      }
+      event.preventDefault();
+      onOpenLink();
+    },
+    [onOpenLink, props.onKeyDown],
+  );
 
   if (!interactive) {
     return (
       <InlineChip
-        {...(props as React.HTMLAttributes<HTMLSpanElement>)}
+        {...props}
         data-buzz-link=""
-        className={className}
+        className={chipClassName}
         icon={Icon}
       >
-        {children}
+        {content}
       </InlineChip>
     );
   }
@@ -97,15 +156,17 @@ export function BuzzLinkChip({
     <>
       <InlineChip
         {...props}
-        as="button"
         data-buzz-link=""
-        className={className}
+        className={chipClassName}
         icon={Icon}
         interactive
+        role="button"
+        tabIndex={0}
         onClick={onOpenLink}
         onContextMenuCapture={onContextMenuCapture}
+        onKeyDown={onKeyDown}
       >
-        {children}
+        {content}
       </InlineChip>
       {contextMenu}
     </>

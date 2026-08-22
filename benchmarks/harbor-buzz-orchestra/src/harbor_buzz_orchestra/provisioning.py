@@ -28,6 +28,16 @@ class DirectoryIdentity:
     name: str
     role: str
     pubkey: str
+    identity_id: str = ""
+    about: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureActor:
+    """A private signer for task-declared relay events."""
+
+    identity_id: str
+    credential: AgentCredential
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +61,7 @@ class TrialHandle:
     # Additive Buzz-native task context. Directory entries contain no secrets.
     task_name: str = ""
     directory: tuple[DirectoryIdentity, ...] = ()
+    fixture_actors: tuple[FixtureActor, ...] = ()
 
 
 @runtime_checkable
