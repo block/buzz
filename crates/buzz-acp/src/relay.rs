@@ -125,7 +125,15 @@ use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::HOST, HeaderValue, Request},
+        Message,
+    },
+    MaybeTlsStream, WebSocketStream,
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -388,20 +396,36 @@ impl RestClient {
         path: &str,
         body_bytes: &[u8],
     ) -> Result<reqwest::Response, RelayError> {
-        let url = format!("{}{}", self.base_url, path);
+        let request_url = format!("{}{}", self.base_url, path);
+        let canonical_relay_url = std::env::var("BUZZ_CANONICAL_RELAY_URL").ok();
+        let auth_base_url =
+            resolve_nip98_http_base_url(&self.base_url, canonical_relay_url.as_deref());
+        let auth_url = format!("{auth_base_url}{path}");
+        let canonical_authority = canonical_relay_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(canonical_relay_authority)
+            .transpose()?;
         let body_owned = body_bytes.to_vec();
         let auth_tag_header = self.auth_tag_json.clone();
         self.request_with_retry("POST", path, || {
             // NIP-98 is re-signed each attempt (fresh created_at).
-            // sign_nip98 is infallible in practice (key is always valid).
+            // A restricted preview can dial an edge alias while the relay's
+            // tenant boundary remains the canonical community host. Sign for
+            // that canonical host, but send over the configured dial URL.
             let auth = self
-                .nip98_header("POST", &url, Some(&body_owned))
+                .nip98_header("POST", &auth_url, Some(&body_owned))
                 .unwrap_or_default();
             let mut req = self
                 .http
-                .post(&url)
+                .post(&request_url)
                 .header("Authorization", auth)
                 .header("Content-Type", "application/json");
+            // Keep the TCP request on the private service while selecting the
+            // same host-derived community as the canonical edge URL. NIP-98
+            // already signs auth_url for this authority.
+            req = with_canonical_http_host(req, canonical_authority.as_deref());
             if let Some(ref tag) = auth_tag_header {
                 req = req.header("x-auth-tag", tag);
             }
@@ -3457,6 +3481,94 @@ fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
     })
 }
 
+fn resolve_nip42_relay_url<'a>(dial_url: &'a str, canonical_url: Option<&'a str>) -> &'a str {
+    canonical_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(dial_url)
+}
+
+fn canonical_relay_authority(canonical_url: &str) -> Result<String, RelayError> {
+    let canonical = canonical_url
+        .parse::<url::Url>()
+        .map_err(|e| RelayError::Http(format!("invalid canonical relay URL: {e}")))?;
+    if !matches!(canonical.scheme(), "ws" | "wss") {
+        return Err(RelayError::Http(format!(
+            "invalid canonical relay URL scheme: {}",
+            canonical.scheme()
+        )));
+    }
+    if !canonical.username().is_empty() || canonical.password().is_some() {
+        return Err(RelayError::Http(
+            "canonical relay URL must not contain credentials".into(),
+        ));
+    }
+
+    let host = match canonical.host() {
+        Some(url::Host::Domain(host)) => host.to_string(),
+        Some(url::Host::Ipv4(host)) => host.to_string(),
+        Some(url::Host::Ipv6(host)) => format!("[{host}]"),
+        None => {
+            return Err(RelayError::Http(
+                "canonical relay URL must contain a host".into(),
+            ))
+        }
+    };
+    let default_port = match canonical.scheme() {
+        "ws" => 80,
+        "wss" => 443,
+        _ => unreachable!("canonical scheme validated above"),
+    };
+    Ok(match canonical.port() {
+        Some(port) if port != default_port => format!("{host}:{port}"),
+        _ => host,
+    })
+}
+
+fn with_canonical_http_host(
+    request: reqwest::RequestBuilder,
+    canonical_authority: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match canonical_authority {
+        Some(authority) => request.header(reqwest::header::HOST, authority),
+        None => request,
+    }
+}
+
+/// Build the WebSocket upgrade request while keeping transport routing and
+/// community authority separate.
+///
+/// `BUZZ_RELAY_URL` remains the URI used by `connect_async` for DNS and the TCP
+/// connection. When a canonical relay URL is configured, only the HTTP `Host`
+/// header is replaced with that URL's authority so host-bound relays select the
+/// same community they expose at the edge.
+fn relay_connect_request(
+    dial_url: &str,
+    canonical_url: Option<&str>,
+) -> Result<Request<()>, RelayError> {
+    let parsed_dial = dial_url
+        .parse::<url::Url>()
+        .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+    let mut request = parsed_dial
+        .as_str()
+        .into_client_request()
+        .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+
+    let Some(canonical_url) = canonical_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(request);
+    };
+
+    let authority = canonical_relay_authority(canonical_url)?;
+    let host_header = HeaderValue::from_str(&authority)
+        .map_err(|e| RelayError::Http(format!("invalid canonical relay authority: {e}")))?;
+    request.headers_mut().insert(HOST, host_header);
+
+    Ok(request)
+}
+
 /// Build and send a NIP-42 AUTH response event.
 ///
 /// If `auth_tag` is provided (NIP-OA owner attestation), it is included in the
@@ -3468,13 +3580,18 @@ async fn send_auth_response(
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
 ) -> Result<(), RelayError> {
-    let relay_nostr_url = RelayUrl::parse(relay_url)
+    // A restricted preview may dial an edge alias while ingress binds that
+    // request to the canonical community host. NIP-42 must be signed for the
+    // canonical host the relay verifies, not necessarily the network dial URL.
+    let canonical_url = std::env::var("BUZZ_CANONICAL_RELAY_URL").ok();
+    let nip42_relay_url = resolve_nip42_relay_url(relay_url, canonical_url.as_deref());
+    let relay_nostr_url = RelayUrl::parse(nip42_relay_url)
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
     let auth_event = if let Some(tag) = auth_tag {
         // Cannot use EventBuilder::auth() shortcut — it doesn't accept extra tags.
         let tags = vec![
-            nostr::Tag::parse(["relay", relay_url])
+            nostr::Tag::parse(["relay", nip42_relay_url])
                 .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
             nostr::Tag::parse(["challenge", challenge])
                 .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
@@ -3503,6 +3620,14 @@ pub(crate) fn relay_ws_to_http(url: &str) -> String {
         .replace("ws://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+fn resolve_nip98_http_base_url(dial_base_url: &str, canonical_relay_url: Option<&str>) -> String {
+    canonical_relay_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(relay_ws_to_http)
+        .unwrap_or_else(|| dial_base_url.trim_end_matches('/').to_string())
 }
 
 /// Build the subscription ID for a channel: `ch-<uuid>`.
@@ -3858,11 +3983,10 @@ async fn do_connect(
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
 ) -> Result<(WsStream, VecDeque<RelayMessage>), RelayError> {
-    let parsed = relay_url
-        .parse::<url::Url>()
-        .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+    let canonical_url = std::env::var("BUZZ_CANONICAL_RELAY_URL").ok();
+    let request = relay_connect_request(relay_url, canonical_url.as_deref())?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
@@ -4025,6 +4149,131 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nip42_uses_canonical_relay_url_when_edge_alias_is_configured() {
+        assert_eq!(
+            resolve_nip42_relay_url("wss://preview.relay.example", Some(" wss://relay.example ")),
+            "wss://relay.example"
+        );
+    }
+
+    #[test]
+    fn nip42_falls_back_to_dial_url_without_canonical_override() {
+        assert_eq!(
+            resolve_nip42_relay_url("wss://relay.example.com", None),
+            "wss://relay.example.com"
+        );
+        assert_eq!(
+            resolve_nip42_relay_url("wss://relay.example.com", Some("  ")),
+            "wss://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn nip98_uses_canonical_http_url_when_edge_alias_is_configured() {
+        assert_eq!(
+            resolve_nip98_http_base_url(
+                "https://preview.relay.example",
+                Some(" wss://relay.example/ ")
+            ),
+            "https://relay.example"
+        );
+    }
+
+    #[test]
+    fn nip98_falls_back_to_http_dial_url_without_canonical_override() {
+        assert_eq!(
+            resolve_nip98_http_base_url("https://preview.relay.example/", None),
+            "https://preview.relay.example"
+        );
+        assert_eq!(
+            resolve_nip98_http_base_url("http://localhost:3000", Some("  ")),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn http_request_dials_private_url_with_canonical_host() {
+        let authority = canonical_relay_authority("wss://relay.example")
+            .expect("canonical authority should be valid");
+        let request = with_canonical_http_host(
+            reqwest::Client::new().post("http://buzz:3000/query"),
+            Some(&authority),
+        )
+        .build()
+        .expect("HTTP request should be valid");
+
+        assert_eq!(request.url().as_str(), "http://buzz:3000/query");
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::HOST)
+                .and_then(|value| value.to_str().ok()),
+            Some("relay.example")
+        );
+    }
+
+    #[test]
+    fn websocket_request_dials_private_url_with_canonical_host() {
+        let request =
+            relay_connect_request("ws://buzz:3000", Some(" wss://relay.example/relay/path "))
+                .expect("request should be valid");
+
+        assert_eq!(request.uri(), "ws://buzz:3000/");
+        assert_eq!(
+            request
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok()),
+            Some("relay.example")
+        );
+    }
+
+    #[test]
+    fn websocket_request_preserves_dial_host_without_canonical_override() {
+        let request =
+            relay_connect_request("ws://buzz:3000", None).expect("request should be valid");
+
+        assert_eq!(request.uri(), "ws://buzz:3000/");
+        assert_eq!(
+            request
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok()),
+            Some("buzz:3000")
+        );
+    }
+
+    #[test]
+    fn websocket_request_keeps_non_default_canonical_port() {
+        let request = relay_connect_request("ws://relay:3000", Some("wss://relay.example:8443"))
+            .expect("request should be valid");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok()),
+            Some("relay.example:8443")
+        );
+    }
+
+    #[test]
+    fn websocket_request_rejects_non_websocket_canonical_url() {
+        let err = relay_connect_request("ws://relay:3000", Some("https://relay.example"))
+            .expect_err("non-WebSocket canonical URL should fail closed");
+
+        assert!(matches!(err, RelayError::Http(message) if message.contains("scheme")));
+    }
+
+    #[test]
+    fn websocket_request_rejects_canonical_credentials() {
+        let err = relay_connect_request("ws://relay:3000", Some("wss://user:secret@relay.example"))
+            .expect_err("canonical credentials should fail closed");
+
+        assert!(matches!(err, RelayError::Http(message) if message.contains("credentials")));
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
