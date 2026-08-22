@@ -39,10 +39,10 @@ pub(crate) async fn enforce_http_admission(
     {
         Ok(()) => Ok(()),
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota", "limit_type" => LimitType::ApiCalls.key_suffix()).increment(1);
             Err(api_error(
                 StatusCode::TOO_MANY_REQUESTS,
-                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+                &crate::connection::quota_rejection_reason(&LimitType::ApiCalls, reset_in_secs),
             ))
         }
         Err(crate::admission::AdmissionError::Unavailable) => {

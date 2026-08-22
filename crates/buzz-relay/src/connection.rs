@@ -15,6 +15,7 @@ use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use buzz_auth::{generate_challenge, AuthContext, LimitType};
+use buzz_core::kind::{event_kind_u32, is_ephemeral};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
@@ -683,11 +684,16 @@ async fn enforce_ws_admission(
         ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
         _ => None,
     };
-    if !send_admission_result(conn, ws_result, sub_id) {
+    if !send_admission_result(conn, ws_result, sub_id, LimitType::WsEvents) {
         return false;
     }
 
-    if is_event {
+    // The Messages budget covers durable writes only. Ephemeral kinds
+    // (20000–29999) are never persisted — buzz-db rejects them with
+    // `EphemeralEventRejected` — so they are admitted on the WsEvents
+    // budget above alone, mirroring the `is_ephemeral` gate the EVENT
+    // handler already applies for scope checks.
+    if event_bills_messages(msg) {
         let message_limit = if is_agent {
             limits.agent_standard_messages_per_min
         } else {
@@ -702,7 +708,7 @@ async fn enforce_ws_admission(
             message_limit,
         )
         .await;
-        if !send_admission_result(conn, message_result, None) {
+        if !send_admission_result(conn, message_result, None, LimitType::Messages) {
             return false;
         }
     }
@@ -710,18 +716,43 @@ async fn enforce_ws_admission(
     true
 }
 
+/// Whether a client frame bills the `Messages` (durable-write) budget.
+///
+/// Only EVENT frames carrying a non-ephemeral kind do. Ephemeral kinds
+/// (20000–29999) are never persisted, so they ride on `WsEvents` alone.
+fn event_bills_messages(msg: &ClientMessage) -> bool {
+    match msg {
+        ClientMessage::Event(event) => !is_ephemeral(event_kind_u32(event)),
+        _ => false,
+    }
+}
+
+/// Rejection reason for a quota denial, naming which budget was exhausted.
+///
+/// Keeps the `rate-limited:` prefix and the `retry in {N}s` hint that all
+/// clients parse by substring; the `({suffix})` discriminator sits between
+/// them so log readers and the rejection metric can tell WsEvents, Messages,
+/// and ApiCalls denials apart.
+pub(crate) fn quota_rejection_reason(limit_type: &LimitType, reset_in_secs: u64) -> String {
+    format!(
+        "rate-limited: quota exceeded ({}); retry in {reset_in_secs}s",
+        limit_type.key_suffix()
+    )
+}
+
 fn send_admission_result(
     conn: &ConnectionState,
     result: Result<(), crate::admission::AdmissionError>,
     sub_id: Option<&str>,
+    limit_type: LimitType,
 ) -> bool {
     match result {
         Ok(()) => true,
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota", "limit_type" => limit_type.key_suffix()).increment(1);
             conn.send(request_rejection_message(
                 sub_id,
-                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+                &quota_rejection_reason(&limit_type, reset_in_secs),
             ));
             false
         }
@@ -845,6 +876,66 @@ mod tests {
         let notice: serde_json::Value =
             serde_json::from_str(&request_rejection_message(None, reason)).expect("parse NOTICE");
         assert_eq!(notice, serde_json::json!(["NOTICE", reason]));
+    }
+
+    fn signed_event(kind: u32) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), "test")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign test event")
+    }
+
+    #[test]
+    fn durable_events_bill_the_messages_budget() {
+        // kind:1 note and kind:9 channel message are durable.
+        assert!(event_bills_messages(&ClientMessage::Event(signed_event(1))));
+        assert!(event_bills_messages(&ClientMessage::Event(signed_event(9))));
+    }
+
+    #[test]
+    fn ephemeral_events_do_not_bill_the_messages_budget() {
+        // Presence (20001), typing (20002), and observer frames (24200) are
+        // range-ephemeral: never persisted, so never billed against Messages.
+        for kind in [20000, 20001, 20002, 24200, 29999] {
+            assert!(
+                !event_bills_messages(&ClientMessage::Event(signed_event(kind))),
+                "kind {kind} is ephemeral and must not bill Messages"
+            );
+        }
+        // Boundary: first kind past the ephemeral range is durable again.
+        assert!(event_bills_messages(&ClientMessage::Event(signed_event(
+            30000
+        ))));
+    }
+
+    #[test]
+    fn non_event_frames_do_not_bill_the_messages_budget() {
+        assert!(!event_bills_messages(&ClientMessage::Req {
+            sub_id: "sub".to_owned(),
+            filters: vec![Filter::new()],
+        }));
+        assert!(!event_bills_messages(&ClientMessage::Count {
+            sub_id: "sub".to_owned(),
+            filters: vec![Filter::new()],
+        }));
+        assert!(!event_bills_messages(&ClientMessage::Close(
+            "sub".to_owned()
+        )));
+    }
+
+    #[test]
+    fn quota_rejection_text_names_the_limit_type_and_keeps_the_retry_hint() {
+        // Clients parse the `retry in {N}s` hint by substring; the limit_type
+        // discriminator must not disturb that or the `rate-limited:` prefix.
+        for (limit_type, tag) in [
+            (LimitType::Messages, "msg"),
+            (LimitType::WsEvents, "ws"),
+            (LimitType::ApiCalls, "api"),
+        ] {
+            let text = quota_rejection_reason(&limit_type, 7);
+            assert!(text.starts_with("rate-limited:"));
+            assert!(text.contains(&format!("({tag})")));
+            assert!(text.contains("retry in 7s"));
+        }
     }
 
     #[tokio::test]

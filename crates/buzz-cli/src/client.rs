@@ -125,9 +125,29 @@ const RETRY_MAX_ATTEMPTS: u32 = 3;
 /// `RETRY_BASE_SECS[i]` is the ceiling for attempt `i` before attempt `i+1`.
 const RETRY_BASE_SECS: [f64; 2] = [0.5, 1.5];
 
-/// Maximum seconds to honour a relay-provided `retry in Ns` hint from a 429.
-/// Defensive cap against pathological hints; real relay hints observed up to ~24 s.
-const RETRY_IN_MAX_SECS: u64 = 30;
+/// Bounds for honouring a relay-provided `retry in Ns` hint from a 429.
+///
+/// The floor exists because the hint is a *window TTL*, not a suggestion:
+/// retrying before it expires is guaranteed to be denied again, and each denied
+/// attempt still costs a counter increment at the relay. A `retry in 0s` hint
+/// (or any sub-second value) would otherwise sleep zero and retry instantly,
+/// turning the client into the storm the hint is trying to prevent.
+///
+/// The ceiling is a defensive cap against a pathological hint. It must exceed
+/// the relay's longest quota window, or the client wakes inside a window it was
+/// told to sit out: hints of 51s have been observed in production against a 60s
+/// window, so a 30s cap guaranteed a wasted attempt. Sleeps happen between
+/// requests, so this is independent of the per-request `BUZZ_TIMEOUT_SECS`.
+const RETRY_IN_MIN_SECS: u64 = 1;
+const RETRY_IN_MAX_SECS: u64 = 90;
+
+/// Clamp a relay `retry in Ns` hint into the honoured range.
+///
+/// Pure and total, so both call sites share one policy and the endpoints are
+/// directly testable.
+fn clamp_retry_hint_secs(secs: u64) -> Duration {
+    Duration::from_secs(secs.clamp(RETRY_IN_MIN_SECS, RETRY_IN_MAX_SECS))
+}
 
 /// Returns a full-jitter delay for attempt `i`: a random duration in `[0, RETRY_BASE_SECS[i])`.
 fn jitter_delay(attempt: u32) -> Duration {
@@ -631,7 +651,8 @@ impl BuzzClient {
     ///   failures and mid-body TCP drops.
     /// - `Err(CliError::Relay { status: 429 | 502 | 503 | 504, .. })` — transient relay
     ///   or proxy errors. For 429 the `retry in Ns` hint from the body is used as the
-    ///   delay (capped at `RETRY_IN_MAX_SECS`); all others use exponential jitter.
+    ///   delay (clamped to `[RETRY_IN_MIN_SECS, RETRY_IN_MAX_SECS]`); all others use
+    ///   exponential jitter.
     ///
     /// Use this variant for all operations (reads, writes, uploads); the retry boundary
     /// covers the entire operation including response body transfer.
@@ -659,7 +680,7 @@ impl BuzzClient {
                             }
                             CliError::Relay { status: 429, body } => {
                                 let d = parse_retry_hint_text(body)
-                                    .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
+                                    .map(clamp_retry_hint_secs)
                                     .unwrap_or_else(|| jitter_delay(attempt));
                                 Some(d)
                             }
@@ -943,7 +964,7 @@ impl BuzzClient {
                             // timeout/body-loss after the relay may have acted).
                             if !is_last {
                                 let delay = parse_retry_hint_text(msg)
-                                    .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
+                                    .map(clamp_retry_hint_secs)
                                     .unwrap_or_else(|| jitter_delay(attempt));
                                 tokio::time::sleep(delay).await;
                                 continue;
@@ -1442,8 +1463,9 @@ mod retry_tests {
     use std::time::Duration;
 
     use super::{
-        env_duration_secs, is_moderation_kind, jitter_delay, parse_retry_hint_text,
-        parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS,
+        clamp_retry_hint_secs, env_duration_secs, is_moderation_kind, jitter_delay,
+        parse_retry_hint_text, parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS,
+        RETRY_IN_MIN_SECS, RETRY_MAX_ATTEMPTS,
     };
 
     // ---- parse_retry_in_secs ----
@@ -1460,10 +1482,61 @@ mod retry_tests {
         assert_eq!(parse_retry_in_secs(body), Some(3));
     }
 
+    /// A `retry in 0s` hint parses as `Some(0)`: the parser reports what the
+    /// relay said, faithfully. Turning 0 into a zero-length sleep is the
+    /// clamp's job to prevent, not the parser's — see
+    /// `clamp_retry_hint_secs_floors_zero_and_caps_pathological`.
     #[test]
     fn parse_retry_in_zero_seconds() {
         let body = r#"{"error":"retry in 0s"}"#;
         assert_eq!(parse_retry_in_secs(body), Some(0));
+    }
+
+    // ---- clamp_retry_hint_secs ----
+
+    /// The clamp is what stands between a relay hint and a retry storm.
+    ///
+    /// Endpoints are asserted exactly, in both directions:
+    ///
+    /// * A `retry in 0s` hint previously produced `Duration::from_secs(0)` — an
+    ///   instant retry into a window the relay had just closed, which is the
+    ///   storm the hint exists to prevent. It must now floor to a real sleep.
+    /// * A hint above the cap must be capped, and the cap must sit above the
+    ///   relay's longest quota window. The old 30s cap was *below* the 51s
+    ///   hints observed in production against a 60s window, so it guaranteed a
+    ///   wasted attempt. Asserting `>= 60` pins the property (outlasts the
+    ///   window) rather than the number, so retuning the cap does not
+    ///   silently reintroduce the defect.
+    #[test]
+    fn clamp_retry_hint_secs_floors_zero_and_caps_pathological() {
+        assert_eq!(
+            clamp_retry_hint_secs(0),
+            Duration::from_secs(RETRY_IN_MIN_SECS),
+            "a `retry in 0s` hint must never sleep zero and retry instantly"
+        );
+        assert_eq!(
+            clamp_retry_hint_secs(u64::MAX),
+            Duration::from_secs(RETRY_IN_MAX_SECS),
+            "a pathological hint must be capped"
+        );
+
+        // Values inside the range pass through untouched, including the 51s
+        // hint that the previous 30s cap silently truncated.
+        for secs in [RETRY_IN_MIN_SECS, 2, 24, 51, RETRY_IN_MAX_SECS] {
+            assert_eq!(
+                clamp_retry_hint_secs(secs),
+                Duration::from_secs(secs),
+                "a {secs}s hint is within range and must be honoured exactly"
+            );
+        }
+
+        const { assert!(RETRY_IN_MIN_SECS > 0) };
+        const {
+            assert!(
+                RETRY_IN_MAX_SECS >= 60,
+                "the cap must outlast the relay's longest quota window"
+            )
+        };
     }
 
     #[test]

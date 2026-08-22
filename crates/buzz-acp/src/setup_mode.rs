@@ -74,7 +74,7 @@ use crate::{
     author_allowed,
     config::Config,
     event_mentions_agent, filter,
-    relay::{HarnessRelay, RelayEventPublisher},
+    relay::{HarnessRelay, RestClient},
 };
 
 // ── Payload ───────────────────────────────────────────────────────────────────
@@ -380,7 +380,6 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
     }
 
-    let publisher = relay.event_publisher();
     let rest_client = relay.rest_client();
 
     let channel_info = crate::pool::ChannelInfoResolver::new(channel_info_map, rest_client.clone());
@@ -450,19 +449,27 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         .await
         .is_some();
 
-        // Pure gate: author gate verdict + event-id dedup.
+        // Pure gate: author gate verdict + event-id dedup check.
         if !should_nudge_for_event(
             buzz_event.event.id,
             allowed,
             filter_matched,
-            &mut nudged_event_ids,
+            &nudged_event_ids,
         ) {
             continue;
         }
 
-        // Build and publish the setup nudge.
-        if let Err(e) = publish_setup_nudge(
-            &publisher,
+        // Build and publish the setup nudge over the HTTP bridge.
+        //
+        // The nudge is a durable kind:9 message. It must not ride the WS
+        // publish path: that path silently discards non-observer publishes
+        // while the rate-limit gate is armed and while disconnected, reporting
+        // success to the caller either way. For an ephemeral typing indicator
+        // that is correct; for a user-visible reply it is permanent data loss
+        // logged as "nudge published". `submit_event` surfaces the relay's
+        // actual response instead.
+        match publish_setup_nudge(
+            &rest_client,
             &config.keys,
             buzz_event.channel_id,
             &buzz_event.event,
@@ -470,13 +477,21 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         )
         .await
         {
-            tracing::warn!("setup-mode: failed to publish nudge: {e}");
-        } else {
-            tracing::info!(
-                channel_id = %buzz_event.channel_id,
-                event_id = %buzz_event.event.id,
-                "setup-mode: nudge published"
-            );
+            Err(e) => {
+                // Dedup is NOT recorded: the nudge was not delivered, so a
+                // later retry for this event must still be allowed. Recording
+                // before the send is what made a dropped nudge permanent.
+                tracing::warn!("setup-mode: failed to publish nudge: {e}");
+            }
+            Ok(()) => {
+                // Record dedup only after the relay accepted the nudge.
+                nudged_event_ids.insert(buzz_event.event.id);
+                tracing::info!(
+                    channel_id = %buzz_event.channel_id,
+                    event_id = %buzz_event.event.id,
+                    "setup-mode: nudge published"
+                );
+            }
         }
     }
 
@@ -487,8 +502,14 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 ///
 /// Callers compute the async gates (`author_allowed`, `filter::match_event`)
 /// up-front, then pass the boolean results here. This helper handles
-/// everything that is synchronous and stateful: the author gate verdict
-/// and event-id dedup.
+/// everything that is synchronous: the author gate verdict and the dedup
+/// *check*.
+///
+/// Recording the dedup entry is deliberately NOT done here. The caller inserts
+/// the event id only after the relay has accepted the nudge, so a nudge that
+/// fails to send can still be retried. Inserting at check time — as this
+/// function used to — made any dropped nudge permanently un-retryable, because
+/// the event was marked as nudged before anything was delivered.
 ///
 /// Returns `true` when the event should produce a nudge.
 #[must_use]
@@ -496,7 +517,7 @@ pub(crate) fn should_nudge_for_event(
     event_id: EventId,
     author_allowed: bool,
     filter_matched: bool,
-    nudged_event_ids: &mut HashSet<EventId>,
+    nudged_event_ids: &HashSet<EventId>,
 ) -> bool {
     if !author_allowed {
         tracing::debug!("setup-mode: event filtered by author gate");
@@ -505,7 +526,7 @@ pub(crate) fn should_nudge_for_event(
     if !filter_matched {
         return false;
     }
-    if !nudged_event_ids.insert(event_id) {
+    if nudged_event_ids.contains(&event_id) {
         tracing::debug!(%event_id, "setup-mode: skipping already-nudged event");
         return false;
     }
@@ -592,8 +613,14 @@ async fn handle_setup_membership(
 ///
 /// Threading: flat reply to the thread root if one exists; otherwise reply
 /// to the triggering event itself. P-tags the asker.
+///
+/// Published over the HTTP bridge rather than the WS publish path. The nudge
+/// is a durable kind:9 message, and the WS path is documented to carry only
+/// ephemeral kinds: it drops non-observer publishes while rate-gated or
+/// disconnected and still returns `Ok`. Going through `submit_event` means a
+/// failure is actually reported to the caller.
 async fn publish_setup_nudge(
-    publisher: &RelayEventPublisher,
+    rest_client: &RestClient,
     keys: &nostr::Keys,
     channel_id: Uuid,
     triggering_event: &nostr::Event,
@@ -637,8 +664,8 @@ async fn publish_setup_nudge(
         .sign_with_keys(keys)
         .map_err(|e| anyhow::anyhow!("failed to sign setup nudge: {e}"))?;
 
-    publisher
-        .publish_event(signed)
+    rest_client
+        .submit_event(&signed)
         .await
         .map_err(|e| anyhow::anyhow!("failed to publish setup nudge: {e}"))?;
 
@@ -1000,13 +1027,13 @@ mod tests {
     #[test]
     fn test_non_allowlisted_author_returns_no_nudge() {
         // author_allowed = false → should return false regardless of other args.
-        let mut dedup: HashSet<EventId> = HashSet::new();
+        let dedup: HashSet<EventId> = HashSet::new();
         let event_id = fake_event_id(0xAA);
 
         let result = should_nudge_for_event(
             event_id, false, // author NOT allowed
             true,  // filter matched — would otherwise nudge
-            &mut dedup,
+            &dedup,
         );
 
         assert!(!result, "non-allowlisted author must not produce a nudge");
@@ -1017,29 +1044,247 @@ mod tests {
         );
     }
 
+    /// Dedup suppresses a replay only once the send has been recorded.
+    ///
+    /// The gate now *checks* the dedup set without mutating it; the caller
+    /// records the id after the relay accepts the nudge. So a replay is
+    /// accepted until that recording happens, and rejected afterwards.
     #[test]
     fn test_same_event_id_twice_nudges_exactly_once() {
-        // The first call with a given event-id should return true; the second
-        // call with the identical id must return false (replay dedup).
         let mut dedup: HashSet<EventId> = HashSet::new();
         let event_id = fake_event_id(0xBB);
 
         let first = should_nudge_for_event(
             event_id, true, // allowed
             true, // matched
-            &mut dedup,
+            &dedup,
         );
         assert!(first, "first occurrence must be accepted");
+
+        // The caller records the id only after a successful publish.
+        dedup.insert(event_id);
 
         // Simulate reconnect replay: same event arrives again.
         let second = should_nudge_for_event(
             event_id, true, // allowed
             true, // matched
-            &mut dedup,
+            &dedup,
         );
         assert!(
             !second,
-            "replay of the same event-id must be rejected (dedup)"
+            "replay of the same event-id must be rejected once recorded"
+        );
+    }
+
+    /// A nudge that failed to send stays retryable.
+    ///
+    /// This is the F9/F11 regression: dedup used to be recorded by the gate
+    /// itself, before the publish was attempted. Combined with a WS publish
+    /// path that silently drops durable events while rate-gated or
+    /// disconnected, that made a dropped nudge permanent — the user never got
+    /// a reply, and the retry was suppressed by an entry recorded for a
+    /// message that was never delivered. The caller must leave the set
+    /// untouched on failure.
+    #[test]
+    fn test_failed_nudge_remains_retryable() {
+        let mut dedup: HashSet<EventId> = HashSet::new();
+        let event_id = fake_event_id(0xCC);
+
+        assert!(
+            should_nudge_for_event(event_id, true, true, &dedup),
+            "first attempt must be accepted"
+        );
+
+        // Publish fails: the caller records nothing.
+        assert!(
+            dedup.is_empty(),
+            "the gate must not record dedup on its own — recording is the \
+             caller's job, after the relay accepts the nudge"
+        );
+
+        assert!(
+            should_nudge_for_event(event_id, true, true, &dedup),
+            "a nudge that was never delivered must still be retryable"
+        );
+
+        // Now it succeeds and the caller records it.
+        dedup.insert(event_id);
+        assert!(
+            !should_nudge_for_event(event_id, true, true, &dedup),
+            "once delivered, the replay must be suppressed"
+        );
+    }
+
+    // ── nudge transport tests ─────────────────────────────────────────────────
+    //
+    // The dedup tests above are pure: they prove the gate stopped recording,
+    // but they cannot see which transport the nudge rides. That distinction is
+    // the other half of the fix, and reverting `publish_setup_nudge` to the WS
+    // publisher leaves every pure test green.
+    //
+    // These drive `publish_setup_nudge` against a real socket so the transport
+    // is observable: the request must arrive over HTTP, and a relay refusal
+    // must come back as `Err` rather than being swallowed.
+
+    /// A one-shot HTTP server that records the request line and body, and
+    /// replies with `status`. Returns the bound base URL and a handle to the
+    /// captured request.
+    async fn capturing_bridge(
+        status: &'static str,
+        body: &'static str,
+    ) -> (
+        String,
+        std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let server_captured = captured.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 16384];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                server_captured
+                    .lock()
+                    .await
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (base_url, captured, server)
+    }
+
+    fn test_rest_client(base_url: String) -> crate::relay::RestClient {
+        crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    fn trigger_event(keys: &nostr::Keys) -> nostr::Event {
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "how do I set you up?",
+        )
+        .tags([])
+        .sign_with_keys(keys)
+        .expect("sign trigger event")
+    }
+
+    fn test_payload() -> SetupPayload {
+        SetupPayload {
+            agent_name: "Fizz".into(),
+            agent_pubkey: "aabbccddeeff0011".into(),
+            requirements: vec![],
+        }
+    }
+
+    /// The nudge goes out over the HTTP bridge, as a durable kind:9.
+    ///
+    /// This is the transport half of F9/F11. `publish_event` (the WS path)
+    /// returns `Ok` as soon as the command is queued and never touches a
+    /// socket in-process, so if this fix were reverted no HTTP request would
+    /// arrive and this test fails on the request count.
+    #[tokio::test]
+    async fn nudge_is_published_over_the_http_bridge() {
+        let (base_url, captured, server) = capturing_bridge("200 OK", "{}").await;
+        let keys = nostr::Keys::generate();
+        let trigger = trigger_event(&keys);
+
+        publish_setup_nudge(
+            &test_rest_client(base_url),
+            &keys,
+            Uuid::new_v4(),
+            &trigger,
+            &test_payload(),
+        )
+        .await
+        .expect("a 200 from the bridge must be reported as success");
+
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 1, "the nudge must reach the HTTP bridge");
+        let request = &requests[0];
+        assert!(
+            request.starts_with("POST /events "),
+            "nudge must POST to the events endpoint, got: {}",
+            request.lines().next().unwrap_or_default()
+        );
+        assert!(
+            request.contains(&format!("\"kind\":{KIND_STREAM_MESSAGE}")),
+            "the nudge is a durable kind:{KIND_STREAM_MESSAGE} message"
+        );
+        server.abort();
+    }
+
+    /// A relay refusal is surfaced to the caller, not swallowed.
+    ///
+    /// This is what makes the dedup-after-`Ok` ordering meaningful: the caller
+    /// can only decline to record the dedup entry if the failure is actually
+    /// reported. The WS path returned `Ok` for a dropped publish, which is why
+    /// a rate-gated nudge was lost while being logged as "nudge published".
+    #[tokio::test]
+    async fn a_refused_nudge_is_reported_as_an_error() {
+        // 403 is non-retriable, so the retry ladder returns immediately.
+        let (base_url, captured, server) = capturing_bridge("403 Forbidden", "denied").await;
+        let keys = nostr::Keys::generate();
+        let trigger = trigger_event(&keys);
+
+        let result = publish_setup_nudge(
+            &test_rest_client(base_url),
+            &keys,
+            Uuid::new_v4(),
+            &trigger,
+            &test_payload(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a relay refusal must be an Err — reporting Ok is the data-loss bug"
+        );
+        assert_eq!(captured.lock().await.len(), 1, "the attempt was made");
+        server.abort();
+    }
+
+    /// With no relay listening at all, the nudge fails rather than reporting
+    /// success. This is the disconnected case: the WS path accepted the
+    /// publish into a queue nobody was draining and told the caller `Ok`.
+    #[tokio::test]
+    async fn a_nudge_with_no_relay_listening_fails() {
+        // Bind and immediately drop the listener so the port is closed.
+        let base_url = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind to claim a port");
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let keys = nostr::Keys::generate();
+        let trigger = trigger_event(&keys);
+
+        let result = publish_setup_nudge(
+            &test_rest_client(base_url),
+            &keys,
+            Uuid::new_v4(),
+            &trigger,
+            &test_payload(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a nudge that never reached a relay must not be reported as published"
         );
     }
 
