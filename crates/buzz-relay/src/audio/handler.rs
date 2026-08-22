@@ -948,6 +948,35 @@ async fn handle_active_audio_connection(
                     },
                 )
                 .await;
+
+                // Converge the event projection with the archive just written.
+                // Clients build their channel list from kind:39000, so without
+                // this republish the database says archived while every client
+                // — including a fresh install on a new machine — keeps showing
+                // the huddle channel indefinitely. Nothing repairs it later:
+                // the ephemeral reaper's UPDATE filters `archived_at IS NULL`,
+                // so a row archived here is never picked up, and kind:39000 is
+                // replaceable, so the stale event is what future clients sync.
+                // See https://github.com/block/buzz/issues/4879.
+                if let Err(e) = crate::handlers::side_effects::emit_group_discovery_events(
+                    &tenant, &state, channel_id,
+                )
+                .await
+                {
+                    error!(
+                        channel_id = %channel_id,
+                        "huddle auto-archive discovery update failed: {e}"
+                    );
+                }
+
+                // Close live subscriptions so connected clients drop the
+                // archived channel immediately, mirroring the reaper. Offline
+                // clients are caught by the archived skip in discover_channels
+                // on reconnect.
+                crate::handlers::side_effects::evict_all_channel_subscriptions(
+                    &tenant, &state, channel_id,
+                )
+                .await;
             }
         }
     } else {
