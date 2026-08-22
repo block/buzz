@@ -63,6 +63,38 @@ function hardBreakLineBounds($from: ResolvedPos) {
 }
 
 /**
+ * Force a synchronous repaint of the editor's contentEditable element.
+ *
+ * Stock Tiptap's `Shift-Enter` hard-break command has a documented
+ * workaround: when the new break lands at the very end of its parent (no
+ * node after it), it inserts an extra default-type node and jumps the
+ * selection there — some engines won't otherwise reposition/repaint a
+ * caret past a trailing <br>. Two consecutive Shift+Enters at end-of-line
+ * hit that workaround twice in a row. In Buzz's Tauri WebView the first
+ * jump's caret glyph isn't reliably erased before the second jump paints
+ * its own, leaving a "ghost" caret rendered one line up (#3219). Toggling
+ * a paint-affecting style with a forced layout read in between is the
+ * standard way to make an engine discard a stale compositor layer and
+ * repaint, without altering any visible layout — the style is restored
+ * before the next task runs.
+ */
+function nudgeCaretRepaint(dom: HTMLElement) {
+  const previousTransform = dom.style.transform;
+  dom.style.transform = "translateZ(0)";
+  // Forces a synchronous layout flush so the browser can't coalesce this
+  // write with the one below and skip the repaint.
+  void dom.offsetHeight;
+  dom.style.transform = previousTransform;
+}
+
+function requestCaretRepaint(editor: Editor) {
+  window.requestAnimationFrame(() => {
+    if (!editor.view.dom.isConnected) return;
+    nudgeCaretRepaint(editor.view.dom as HTMLElement);
+  });
+}
+
+/**
  * Plain-text edit descriptor returned by autocomplete hooks
  * (mentions / channel links / emoji). Offsets are in plain-text space —
  * see `buildPlainTextProjection`.
@@ -431,7 +463,10 @@ export function useRichTextEditor({
                   // Non-empty → split the paragraph within the blockquote.
                   return ed.chain().splitBlock().focus().run();
                 }
-                // Default: hard break (StarterKit handles it).
+                // Default: hard break (StarterKit handles it). Schedule a
+                // WebView caret-repaint nudge before the break lands — see
+                // requestCaretRepaint above and #3219.
+                requestCaretRepaint(ed);
                 return false;
               },
               ArrowDown: ({ editor: ed }) => {
