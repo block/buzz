@@ -34,6 +34,16 @@ export const KIND_FORUM_COMMENT = 45003;
 export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
+// NIP-MR: an agent's receipt for a mention — mirrors KIND_AGENT_MENTION_ACK in
+// crates/buzz-core/src/kind.rs. Tags: h (channel), e (triggering event), p
+// (mention author), status, and reason when declined. Consumed by
+// pendingMentionAckStore; never rendered as a timeline row.
+export const KIND_AGENT_MENTION_ACK = 44102;
+
+/** `status` tag: the harness queued the mention and a turn is coming. */
+export const MENTION_ACK_STATUS_ACCEPTED = "accepted";
+/** `status` tag: the harness saw the mention and will not act on it. */
+export const MENTION_ACK_STATUS_DECLINED = "declined";
 export const KIND_TYPING_INDICATOR = 20002;
 export const KIND_PRESENCE_UPDATE = 20001;
 export const KIND_HUDDLE_REACTION = 24810;
@@ -105,6 +115,11 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
   KIND_HUDDLE_ENDED, // 48103 — huddle lifecycle overlay
+  // 44102 — NIP-MR agent mention receipts. Live-only on purpose: the pending
+  // mention store is session-scoped (entries are created when *this* client
+  // sends a mention), so backfilling historical acks by `#e` would buy nothing
+  // and cost a query per loaded page.
+  KIND_AGENT_MENTION_ACK,
 ] as const;
 
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
