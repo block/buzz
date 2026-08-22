@@ -112,7 +112,10 @@ export function useInboxThreadContext(
             }
 
             try {
-              const event = await getEventById(eventId);
+              const event = await getEventById(
+                eventId,
+                selectedChannelId ?? undefined,
+              );
               eventsById.set(event.id, event);
               return event;
             } catch {
