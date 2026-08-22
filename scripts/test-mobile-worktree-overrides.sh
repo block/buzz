@@ -7,7 +7,8 @@
 #     display-only label sanitized to [A-Za-z0-9._-].
 #   - the tracked iOS/Android build files keep production identity, only
 #     consume the overrides in debug configurations, and let a developer's
-#     AppOverrides.xcconfig take precedence over the worktree defaults.
+#     AppOverrides.xcconfig / AppOverrides.properties take precedence over the
+#     worktree defaults.
 #   - scripts/mobile-worktree-clean.sh only ever targets suffixed installs,
 #     never the production app ids.
 set -euo pipefail
@@ -72,6 +73,9 @@ grep -q '^APP_DISPLAY_NAME = Buzz (Fix_Thing-2)$' "$ios" \
 grep -q '^label=Fix_Thing-2$' "$android" \
   && pass "Android label carries the branch label" \
   || fail "Android label wrong: $(cat "$android")"
+grep -q '^appName=Buzz (Fix_Thing-2)$' "$android" \
+  && pass "Android app name defaults to the branch-labelled name" \
+  || fail "Android app name wrong: $(cat "$android")"
 grep -q '^applicationIdSuffix=\.feature_work_1$' "$android" \
   && pass "Android applicationIdSuffix keys to the worktree directory name" \
   || fail "Android applicationIdSuffix wrong: $(cat "$android")"
@@ -119,6 +123,32 @@ grep -q '^applicationIdSuffix=\.w_2fast$' "$wt2/mobile/android/worktree.properti
   && pass "digit-leading worktree dir yields a valid Android package segment" \
   || fail "digit-leading dir segment wrong: $(cat "$wt2/mobile/android/worktree.properties")"
 
+# ── Explicit Android debug identity: readable and isolated ───────────────────
+BUZZ_ANDROID_DEBUG_APP_NAME="Buzz Huddles" \
+  BUZZ_ANDROID_DEBUG_ID_SUFFIX=".huddles_829c" \
+  "$wt/scripts/mobile-worktree-overrides.sh" > /dev/null
+grep -q '^appName=Buzz Huddles$' "$android" \
+  && pass "explicit Android debug app name is persisted" \
+  || fail "explicit Android debug app name wrong: $(cat "$android")"
+grep -q '^applicationIdSuffix=\.huddles_829c$' "$android" \
+  && pass "explicit Android debug suffix is persisted" \
+  || fail "explicit Android debug suffix wrong: $(cat "$android")"
+grep -q '^APP_DISPLAY_NAME = Buzz (' "$ios" \
+  && ! grep -q 'Buzz Huddles' "$ios" \
+  && pass "Android debug overrides do not change the iOS identity" \
+  || fail "Android debug overrides must not change iOS identity: $(cat "$ios")"
+
+if BUZZ_ANDROID_DEBUG_ID_SUFFIX=".Huddles" "$wt/scripts/mobile-worktree-overrides.sh" >/dev/null 2>&1; then
+  fail "invalid explicit Android debug suffix must be rejected"
+else
+  pass "invalid explicit Android debug suffix is rejected"
+fi
+if BUZZ_ANDROID_DEBUG_APP_NAME=$'Buzz Huddles\nInjected' "$wt/scripts/mobile-worktree-overrides.sh" >/dev/null 2>&1; then
+  fail "unsafe explicit Android debug app name must be rejected"
+else
+  pass "unsafe explicit Android debug app name is rejected"
+fi
+
 # ── Tracked build files: overrides are debug-only, release stays production ──
 debug_xcconfig="$repo_root/mobile/ios/Flutter/Debug.xcconfig"
 release_xcconfig="$repo_root/mobile/ios/Flutter/Release.xcconfig"
@@ -157,6 +187,14 @@ grep -q 'resValue("string", "app_name", "Buzz")' "$gradle" \
 grep -q 'worktreeLabel.matches' "$gradle" \
   && pass "Gradle validates the worktree label before use" \
   || fail "Gradle must validate the worktree label against a safe pattern"
+grep -q 'worktreeAppName.matches' "$gradle" \
+  && pass "Gradle validates the explicit Android app name before use" \
+  || fail "Gradle must validate the explicit Android app name against a safe pattern"
+grep -q 'AppOverrides.properties' "$gradle" \
+  && grep -q 'debugAppName' "$gradle" \
+  && grep -q 'debugIdSuffix' "$gradle" \
+  && pass "Android developer overrides can replace the debug name and identity" \
+  || fail "Gradle must support debug-only AppOverrides.properties"
 
 # Extract a brace-balanced block: everything from the first line matching $2
 # to the line where its braces close. Unlike a /start/,/}/ awk range, nested
@@ -181,9 +219,10 @@ printf '%s\n' "$sneaky" | extract_block - 'release \{' | grep -q 'worktreeSneaky
   || fail "release-block extractor must not stop at the first nested close brace"
 
 # The worktree suffix/label must only appear inside the debug build type.
-extract_block "$gradle" 'buildTypes \{' | extract_block - 'release \{' | grep -q 'worktree' \
-  && fail "release build type must not reference worktree identity" \
-  || pass "release build type does not reference worktree identity"
+release_block="$(extract_block "$gradle" 'buildTypes \{' | extract_block - 'release \{')"
+printf '%s\n' "$release_block" | grep -Eq 'worktree|debugAppName|debugIdSuffix' \
+  && fail "release build type must not reference debug identity overrides" \
+  || pass "release build type does not reference debug identity overrides"
 
 git -C "$repo_root" check-ignore -q mobile/ios/Flutter/WorktreeOverrides.xcconfig \
   && pass "iOS override file is gitignored" \
@@ -191,6 +230,9 @@ git -C "$repo_root" check-ignore -q mobile/ios/Flutter/WorktreeOverrides.xcconfi
 git -C "$repo_root" check-ignore -q mobile/android/worktree.properties \
   && pass "Android override file is gitignored" \
   || fail "mobile/android/worktree.properties must be gitignored"
+git -C "$repo_root" check-ignore -q mobile/android/AppOverrides.properties \
+  && pass "Android developer override file is gitignored" \
+  || fail "mobile/android/AppOverrides.properties must be gitignored"
 grep -Eq '^\s+\./scripts/mobile-worktree-overrides\.sh$' "$repo_root/Justfile" \
   && pass "just mobile-dev applies the worktree identity" \
   || fail "Justfile mobile-dev must run scripts/mobile-worktree-overrides.sh"

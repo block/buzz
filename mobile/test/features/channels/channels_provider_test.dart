@@ -415,6 +415,129 @@ void main() {
     expect(ephemeral.ttlSeconds, 86400);
   });
 
+  test(
+    'Huddle-linked one-hour private streams stay out of channel lists',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk, ownerPubkey: myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(
+            id: _channelB,
+            name: 'huddle-22222222',
+            ttlSeconds: 3600,
+            visibility: 'private',
+          ),
+        ],
+        huddleStarts: [
+          NostrEvent(
+            id: 'huddle-start',
+            pubkey: myPk,
+            createdAt: now,
+            kind: EventKind.huddleStarted,
+            tags: const [
+              ['h', _channelA],
+            ],
+            content: '{"ephemeral_channel_id":"$_channelB"}',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      expect(channels.map((channel) => channel.id), [_channelA]);
+    },
+  );
+
+  test(
+    'Huddle-linked private streams stay hidden when relay overrides the TTL',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk, ownerPubkey: myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(
+            id: _channelB,
+            name: 'huddle-22222222',
+            ttlSeconds: 60,
+            visibility: 'private',
+          ),
+        ],
+        huddleStarts: [
+          NostrEvent(
+            id: 'huddle-start',
+            pubkey: myPk,
+            createdAt: now,
+            kind: EventKind.huddleStarted,
+            tags: const [
+              ['h', _channelA],
+            ],
+            content: '{"ephemeral_channel_id":"$_channelB"}',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      expect(channels.map((channel) => channel.id), [_channelA]);
+    },
+  );
+
+  test(
+    'forged Huddle links do not hide unrelated one-hour private streams',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk, ownerPubkey: 'actual-owner'),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(
+            id: _channelB,
+            name: 'private-hour-stream',
+            ttlSeconds: 3600,
+            visibility: 'private',
+          ),
+        ],
+        huddleStarts: [
+          NostrEvent(
+            id: 'forged-huddle-start',
+            pubkey: myPk,
+            createdAt: now,
+            kind: EventKind.huddleStarted,
+            tags: const [
+              ['h', _channelA],
+            ],
+            content: '{"ephemeral_channel_id":"$_channelB"}',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      expect(channels.map((channel) => channel.id), contains(_channelB));
+    },
+  );
+
   test('hidden DMs are filtered from the channel list', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk), _membership(_channelB, myPk)],
@@ -665,6 +788,7 @@ NostrEvent _membership(
   String channelId,
   String pubkey, {
   String? additionalPubkey,
+  String? ownerPubkey,
 }) => NostrEvent(
   id: 'mem-$channelId',
   pubkey: 'creator',
@@ -672,7 +796,8 @@ NostrEvent _membership(
   kind: 39002,
   tags: [
     ['d', channelId],
-    ['p', pubkey],
+    if (ownerPubkey != null) ['p', ownerPubkey, '', 'owner'],
+    if (ownerPubkey == null || ownerPubkey != pubkey) ['p', pubkey],
     if (additionalPubkey != null) ['p', additionalPubkey],
   ],
   content: '',
@@ -701,6 +826,7 @@ NostrEvent _meta({
   String channelType = 'stream',
   int createdAt = 1,
   int? ttlSeconds,
+  String visibility = 'open',
   bool archived = false,
 }) => NostrEvent(
   id: 'meta-$id',
@@ -711,7 +837,7 @@ NostrEvent _meta({
     ['d', id],
     ['name', name],
     ['t', channelType],
-    ['public'],
+    [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
     if (archived) ['archived', 'true'],
   ],
@@ -745,6 +871,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required this.memberships,
     required this.metadata,
     this.hiddenDmEvents = const [],
+    this.huddleStarts = const [],
     this.recentMessages = const [],
     this.membershipFailures = 0,
   });
@@ -752,6 +879,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> memberships;
   List<NostrEvent> metadata;
   final List<NostrEvent> hiddenDmEvents;
+  final List<NostrEvent> huddleStarts;
   final List<NostrEvent> recentMessages;
   int membershipFailures;
 
@@ -802,6 +930,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyFilters.add(filter);
+    if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
+      final ids = (filter.tags['#d'] ?? const <String>[]).toSet();
+      return memberships
+          .where((event) => ids.contains(event.getTagValue('d')))
+          .toList();
+    }
     if (filter.kinds.contains(39002) && filter.tags['#p'] != null) {
       if (membershipFailures > 0) {
         membershipFailures--;
@@ -818,6 +952,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
     }
     if (filter.kinds.contains(EventKind.dmVisibility)) {
       return hiddenDmEvents;
+    }
+    if (filter.kinds.contains(EventKind.huddleStarted)) {
+      return huddleStarts;
     }
     if (filter.kinds.contains(39000)) {
       // Metadata query — return all metadata events whose `d` tag matches.

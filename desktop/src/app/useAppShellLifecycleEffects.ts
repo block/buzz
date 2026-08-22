@@ -8,14 +8,14 @@ import { useRelayResumeTriggers } from "@/shared/api/useRelayResumeTriggers";
 type AppShellLifecycleEffectsOptions = {
   desktopBadgeEnabled: boolean;
   homeBadgeCountExcludingHighPriority: number;
-  unreadChannelIds: ReadonlySet<string>;
+  topLevelUnreadChannelIds: ReadonlySet<string>;
   unreadChannelNotificationCount: number;
 };
 
 export function useAppShellLifecycleEffects({
   desktopBadgeEnabled,
   homeBadgeCountExcludingHighPriority,
-  unreadChannelIds,
+  topLevelUnreadChannelIds,
   unreadChannelNotificationCount,
 }: AppShellLifecycleEffectsOptions) {
   // Event-driven reconnect: network online / focus / visibility short-circuit
@@ -82,12 +82,12 @@ export function useAppShellLifecycleEffects({
     void setDesktopAppBadge(
       count
         ? { kind: "count", count }
-        : { kind: unreadChannelIds.size ? "dot" : "none" },
+        : { kind: topLevelUnreadChannelIds.size ? "dot" : "none" },
     );
   }, [
     desktopBadgeEnabled,
     homeBadgeCountExcludingHighPriority,
-    unreadChannelIds,
+    topLevelUnreadChannelIds,
     unreadChannelNotificationCount,
   ]);
 }

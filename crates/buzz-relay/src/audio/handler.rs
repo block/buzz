@@ -121,7 +121,7 @@ fn limit_audio_websocket<F>(ws: WebSocketUpgrade<F>) -> WebSocketUpgrade<F> {
 /// Highest huddle audio protocol version this relay understands. Clients are
 /// allowed to negotiate any version in `1..=CURRENT_PROTOCOL_VERSION`; older
 /// versions stay supported indefinitely for staged rollouts.
-const CURRENT_PROTOCOL_VERSION: u8 = 2;
+const CURRENT_PROTOCOL_VERSION: u8 = 3;
 
 #[derive(Deserialize)]
 struct AuthMsg {
@@ -511,47 +511,75 @@ async fn handle_active_audio_connection(
 
     let admission = if let Some(session) = remote_session.as_ref() {
         room.add_peer_at_index(pubkey_hex.clone(), requested_version, session.peer_index())
-            .map(|(id, audio, ctrl)| (id, session.peer_index(), audio, ctrl))
+            .map(|(id, _mirror_epoch, audio, ctrl, revision)| {
+                // Report the owner-assigned epoch, not the local mirror's:
+                // the mirror never fans out via `broadcast_frame`, so its epoch
+                // is inert. The client's self-entry must match the owner roster.
+                (
+                    id,
+                    session.peer_index(),
+                    session.epoch(),
+                    audio,
+                    ctrl,
+                    revision,
+                )
+            })
     } else {
         room.add_peer(pubkey_hex.clone(), requested_version)
     };
-    let (peer_id, peer_index, audio_rx, peer_ctrl_rx) = match admission {
-        Ok(v) => v,
-        Err(crate::audio::room::AdmissionError::Full) => {
-            warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
-            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"peer index space exhausted"}).to_string().into())).await;
-            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
-            {
-                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+    let (peer_id, peer_index, peer_epoch, audio_rx, peer_ctrl_rx, admission_revision) =
+        match admission {
+            Ok(v) => v,
+            Err(crate::audio::room::AdmissionError::Full) => {
+                warn!(channel_id = %channel_id, "audio room participant capacity reached");
+                let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"room participant capacity reached"}).to_string().into())).await;
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
                     .await;
+                }
+                return;
             }
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::Ended) => {
-            debug!(channel_id = %channel_id, "room ended before admission");
-            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())).await;
-            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
-            {
-                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+            Err(crate::audio::room::AdmissionError::Ended) => {
+                debug!(channel_id = %channel_id, "room ended before admission");
+                let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())).await;
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
                     .await;
+                }
+                return;
             }
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
-            info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
-            let _ = ws_send.send(WsMessage::Text(serde_json::json!({
+            Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
+                info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
+                let _ = ws_send.send(WsMessage::Text(serde_json::json!({
                 "type": "error", "code": "upgrade_required",
                 "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
                 "pinned_version": pinned, "requested_version": requested,
             }).to_string().into())).await;
-            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
-            {
-                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
                     .await;
+                }
+                return;
             }
-            return;
-        }
-    };
+        };
 
     info!(
         channel_id = %channel_id,
@@ -608,24 +636,41 @@ async fn handle_active_audio_connection(
 
     // Remote registration and owner-assigned ingress admission completed above.
 
-    let peers_snapshot: Vec<serde_json::Value> = if let Some(session) = remote_session.as_ref() {
-        session
-            .roster()
-            .peers
-            .iter()
-            .map(|peer| serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index}))
-            .collect()
+    let (peers_snapshot, roster_revision): (Vec<serde_json::Value>, u64) = if let Some(session) =
+        remote_session.as_ref()
+    {
+        (
+                session
+                    .roster()
+                    .peers
+                    .iter()
+                    .map(|peer| {
+                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch})
+                    })
+                    .collect(),
+                session.roster().revision,
+            )
     } else {
-        room.peer_pubkeys()
-            .into_iter()
-            .map(|(pk, idx)| serde_json::json!({"pubkey": pk, "peer_index": idx}))
-            .collect()
+        let snapshot = room.roster_snapshot();
+        (
+                snapshot
+                    .peers
+                    .into_iter()
+                    .map(|peer| {
+                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch})
+                    })
+                    .collect(),
+                snapshot.revision,
+            )
     };
+    debug_assert!(roster_revision >= admission_revision);
 
     let joined_msg = serde_json::json!({
         "type": "joined",
+        "revision": roster_revision,
         "pubkey": pubkey_hex,
         "peer_index": peer_index,
+        "epoch": peer_epoch,
         "peers": peers_snapshot,
     })
     .to_string();
@@ -647,13 +692,22 @@ async fn handle_active_audio_connection(
     }
 
     // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
+    let lifecycle_revision = if remote_session.is_some() {
+        roster_revision
+    } else {
+        admission_revision
+    };
     emit_participant_event(
         &state,
         &tenant,
-        Kind::Custom(48101),
         channel_id,
         parent_id_for_event,
-        &pubkey_hex,
+        ParticipantLifecycle {
+            kind: Kind::Custom(48101),
+            participant_pubkey: &pubkey_hex,
+            roster_revision: Some(lifecycle_revision),
+            admission_id: Some(peer_id),
+        },
     )
     .await;
 
@@ -684,6 +738,7 @@ async fn handle_active_audio_connection(
         data_tx,
         ctrl_tx.clone(),
         fwd_cancel,
+        cancel.clone(),
     ));
 
     // Non-owner path: own the owner's `HuddleControl` stream in a reader task.
@@ -811,32 +866,53 @@ async fn handle_active_audio_connection(
     // AdmissionGuard lock across index recycling AND the is_empty + ended=true
     // check. Ingress mirrors never archive authoritative huddle state; they
     // remove locally and let the owner decide room lifetime.
-    let should_auto_end = if remote_session.is_some() {
-        room.remove_peer(peer_id);
-        false
+    let removal = if remote_session.is_some() {
+        room.remove_peer(peer_id).map(|delta| (delta, false))
     } else {
         room.remove_peer_and_check_ended(peer_id)
-            .map(|(_, ended)| ended)
-            .unwrap_or(false)
     };
+    let removal_revision = if remote_session.is_none() {
+        removal.as_ref().map(|(delta, _)| delta.revision)
+    } else {
+        // The ingress mirror's local revision is not the owner's authoritative
+        // ordering. Omit it rather than publishing a plausible-but-wrong value.
+        None
+    };
+    let should_auto_end = removal.as_ref().map(|(_, ended)| *ended).unwrap_or(false);
 
-    let left_msg = serde_json::json!({
-        "type": "left",
-        "pubkey": pubkey_hex,
-        "peer_index": peer_index,
-    })
-    .to_string();
     if remote_session.is_none() {
-        room.broadcast_control(left_msg);
+        if let Some((delta, _)) = removal {
+            if let Some(left) = delta.left {
+                let left_msg = serde_json::json!({
+                    "type": "left",
+                    "revision": delta.revision,
+                    "pubkey": left.pubkey,
+                    "peer_index": left.peer_index,
+                    "epoch": left.epoch,
+                })
+                .to_string();
+                room.broadcast_control(left_msg);
+            } else {
+                warn!(
+                    channel_id = %channel_id,
+                    revision = delta.revision,
+                    "audio peer removal delta did not include the removed peer"
+                );
+            }
+        }
     }
 
     emit_participant_event(
         &state,
         &tenant,
-        Kind::Custom(48102),
         channel_id,
         parent_id_for_event,
-        &pubkey_hex,
+        ParticipantLifecycle {
+            kind: Kind::Custom(48102),
+            participant_pubkey: &pubkey_hex,
+            roster_revision: removal_revision,
+            admission_id: Some(peer_id),
+        },
     )
     .await;
 
@@ -862,10 +938,14 @@ async fn handle_active_audio_connection(
                 emit_participant_event(
                     &state,
                     &tenant,
-                    Kind::Custom(48103),
                     channel_id,
                     parent_id_for_event,
-                    &pubkey_hex,
+                    ParticipantLifecycle {
+                        kind: Kind::Custom(48103),
+                        participant_pubkey: &pubkey_hex,
+                        roster_revision: None,
+                        admission_id: None,
+                    },
                 )
                 .await;
             }
@@ -928,7 +1008,7 @@ fn remote_rejection_ws_error(reason: &crate::audio::join::RegisterRejection) -> 
     match reason {
         RegisterRejection::RoomFull => serde_json::json!({
             "type": "error", "code": "room_full",
-            "message": "peer index space exhausted"
+            "message": "room participant capacity reached"
         }),
         RegisterRejection::RoomEnded => serde_json::json!({
             "type": "error", "code": "room_ended", "message": "huddle has ended"
@@ -1115,6 +1195,7 @@ async fn audio_forward_loop(
     data_tx: mpsc::Sender<WsMessage>,
     ctrl_tx: mpsc::Sender<WsMessage>,
     cancel: CancellationToken,
+    connection_cancel: CancellationToken,
 ) {
     loop {
         tokio::select! {
@@ -1124,9 +1205,18 @@ async fn audio_forward_loop(
             msg = peer_ctrl_rx.recv() => {
                 match msg {
                     Some(PeerCtrl::Json(json)) => {
-                        let _ = ctrl_tx.try_send(WsMessage::Text(json.into()));
+                        if ctrl_tx.try_send(WsMessage::Text(json.into())).is_err() {
+                            // State-bearing roster control may not be dropped.
+                            // Closing the connection forces admission to replay
+                            // a fresh authoritative snapshot.
+                            connection_cancel.cancel();
+                            break;
+                        }
                     }
-                    Some(PeerCtrl::Close) | None => break,
+                    Some(PeerCtrl::Close) | None => {
+                        connection_cancel.cancel();
+                        break;
+                    }
                 }
             }
             frame = audio_rx.recv() => {
@@ -1251,15 +1341,44 @@ async fn ensure_membership(
     Err("not a member".into())
 }
 
+#[derive(Clone, Copy)]
+struct ParticipantLifecycle<'a> {
+    kind: Kind,
+    participant_pubkey: &'a str,
+    roster_revision: Option<u64>,
+    admission_id: Option<Uuid>,
+}
+
 async fn emit_participant_event(
     state: &AppState,
     tenant: &TenantContext,
-    kind: Kind,
     channel_id: Uuid,
     parent_channel_id: Uuid,
-    participant_pubkey: &str,
+    lifecycle: ParticipantLifecycle<'_>,
 ) {
-    let content = serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}).to_string();
+    let ParticipantLifecycle {
+        kind,
+        participant_pubkey,
+        roster_revision,
+        admission_id,
+    } = lifecycle;
+    let content = match (roster_revision, admission_id) {
+        (Some(revision), Some(admission_id)) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "roster_revision": revision,
+            "admission_id": admission_id.to_string(),
+        }),
+        (Some(revision), None) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "roster_revision": revision,
+        }),
+        (None, Some(admission_id)) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "admission_id": admission_id.to_string(),
+        }),
+        (None, None) => serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}),
+    }
+    .to_string();
 
     let h_tag = match Tag::parse(["h", &parent_channel_id.to_string()]) {
         Ok(t) => t,
@@ -1431,6 +1550,66 @@ mod tests {
         let _ = server.await;
 
         received
+    }
+
+    #[tokio::test]
+    async fn saturated_websocket_control_queue_cancels_the_audio_connection() {
+        let (_audio_tx, audio_rx) = mpsc::channel(1);
+        let (peer_ctrl_tx, peer_ctrl_rx) = mpsc::channel(2);
+        let (data_tx, _data_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        ctrl_tx
+            .try_send(WsMessage::Ping(Bytes::new()))
+            .expect("fill websocket control queue");
+        peer_ctrl_tx
+            .try_send(PeerCtrl::Json("{}".into()))
+            .expect("queue state-bearing control");
+        let task_cancel = CancellationToken::new();
+        let connection_cancel = CancellationToken::new();
+
+        audio_forward_loop(
+            audio_rx,
+            peer_ctrl_rx,
+            data_tx,
+            ctrl_tx,
+            task_cancel,
+            connection_cancel.clone(),
+        )
+        .await;
+
+        assert!(
+            connection_cancel.is_cancelled(),
+            "saturated websocket control must force a fresh roster admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_peer_control_queue_cancels_the_audio_connection() {
+        let (_audio_tx, audio_rx) = mpsc::channel(1);
+        let (peer_ctrl_tx, peer_ctrl_rx) = mpsc::channel(1);
+        let (data_tx, _data_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let task_cancel = CancellationToken::new();
+        let connection_cancel = CancellationToken::new();
+
+        let forward = tokio::spawn(audio_forward_loop(
+            audio_rx,
+            peer_ctrl_rx,
+            data_tx,
+            ctrl_tx,
+            task_cancel,
+            connection_cancel.clone(),
+        ));
+        drop(peer_ctrl_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), forward)
+            .await
+            .expect("forwarder exits when its state-bearing queue closes")
+            .expect("forwarder task completes cleanly");
+        assert!(
+            connection_cancel.is_cancelled(),
+            "lost control state must tear down the WebSocket for a fresh roster"
+        );
     }
 
     #[tokio::test]

@@ -6,8 +6,7 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 
-import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
-import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
+import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -169,6 +168,66 @@ export function useAppNavigation() {
           params: {
             workflowId,
           },
+          search: { pane: "trigger" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goNewWorkflow = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows",
+          search: { pane: "trigger", view: "create" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goNewWorkflowForChannel = React.useCallback(
+    (channelId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows",
+          search: {
+            channel: channelId,
+            pane: "trigger",
+            view: "create",
+          },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goEditWorkflow = React.useCallback(
+    (workflowId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows/$workflowId",
+          params: { workflowId },
+          search: { pane: "trigger", view: "edit" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goDuplicateWorkflow = React.useCallback(
+    (workflowId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows/$workflowId",
+          params: { workflowId },
+          search: { pane: "trigger", view: "duplicate" },
+          state: { workflowEditorHasOrigin: true },
         },
         behavior,
       ),
@@ -187,6 +246,10 @@ export function useAppNavigation() {
          * firing. Used by the Drafts panel "Send message" confirm flow.
          */
         autoSend?: string;
+        /** Navigate even when the destination matches the current href.
+         * Used by desktop-notification activation so a click is never
+         * silently swallowed (block/buzz#3509). */
+        force?: boolean;
         messageId?: string;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
@@ -215,6 +278,7 @@ export function useAppNavigation() {
           },
         },
         {
+          force: options?.force,
           replace: options?.replace,
           resetScroll: options?.messageId ? true : undefined,
         },
@@ -238,6 +302,8 @@ export function useAppNavigation() {
       channelId: string,
       postId: string,
       options?: {
+        /** Navigate even when the destination matches the current href. */
+        force?: boolean;
         replace?: boolean;
         replyId?: string;
       },
@@ -252,6 +318,7 @@ export function useAppNavigation() {
           search: options?.replyId ? { replyId: options.replyId } : {},
         },
         {
+          force: options?.force,
           replace: options?.replace,
           resetScroll: false,
         },
@@ -302,25 +369,23 @@ export function useAppNavigation() {
   );
 
   const openSearchHit = React.useCallback(
-    async (hit: SearchHit) => {
-      cacheSearchHitEvent(hit);
-
-      const destination = await resolveSearchHitDestination(hit);
-      if (!destination) {
-        return false;
-      }
-
-      if (destination.kind === "forum-post") {
-        return goForumPost(destination.channelId, destination.postId, {
-          replyId: destination.replyId,
-        });
-      }
-
-      return goChannel(destination.channelId, {
-        messageId: destination.messageId,
-        threadRootId: destination.threadRootId,
-      });
-    },
+    async (
+      hit: SearchHit,
+      behavior?: {
+        /** Navigate even when the destination matches the current href.
+         * Used by desktop-notification activation so a click is never
+         * silently swallowed (block/buzz#3509). */
+        force?: boolean;
+        /** Stop notification-driven routing when its owning lifecycle ends. */
+        signal?: AbortSignal;
+      },
+    ) =>
+      openSearchHitWithNavigation(hit, {
+        force: behavior?.force,
+        goChannel,
+        goForumPost,
+        signal: behavior?.signal,
+      }),
     [goChannel, goForumPost],
   );
 
@@ -330,9 +395,13 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goDuplicateWorkflow,
+    goEditWorkflow,
     goForumPost,
     goHome,
     goNewMessage,
+    goNewWorkflow,
+    goNewWorkflowForChannel,
     goProject,
     goProjects,
     goPulse,

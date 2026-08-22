@@ -30,6 +30,7 @@ void main() {
     await relaySession.subscribed;
     expect(relaySession.liveFilters.single.kinds, const [39002]);
     expect(relaySession.liveFilters.single.tags['#h'], [_channelId]);
+    expect(relaySession.liveFilters.single.tags['#d'], isNull);
 
     relaySession.emit(_membershipEvent(role: 'member'));
     await _pumpEventQueue();
