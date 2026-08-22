@@ -7,7 +7,7 @@
   "properties": {
     "quickstart": {
       "type": "boolean",
-      "description": "Master toggle for evaluation profile (enables postgresql + redis subcharts and chart-side autogen). Not GitOps-safe."
+      "description": "Intent marker for the evaluation profile. Enable the bundled Postgres, Redis, and MinIO components separately. Not GitOps-safe."
     },
     "image": {
       "type": "object",
@@ -26,7 +26,7 @@
     "replicaCount": {
       "type": "integer",
       "minimum": 1,
-      "description": "Replica count for the relay Deployment. replicaCount > 1 requires Redis (for buzz-pubsub) — enforced by _validate.tpl. Git storage does NOT need ReadWriteMany: git state is object-store-backed and repo names live in Postgres, so ReadWriteOnce is fine per replica."
+      "description": "Replica count for the relay Deployment. replicaCount > 1 requires Redis (for buzz-pubsub) — enforced by _validate.tpl. Git state is object-store-backed; disable git persistence to give each replica independent emptyDir scratch space."
     },
     "relayUrl": {
       "type": "string",
@@ -224,6 +224,7 @@
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
+            "storageClass": { "type": "string" },
             "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
           }
         }

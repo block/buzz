@@ -47,9 +47,8 @@
   1. BUZZ_RELAY_PRIVATE_KEY — relay identity. Rotating it = identity change;
      federation peers will treat the relay as a new identity.
   2. PostgreSQL database{{ if .Values.postgresql.enabled }} ({{ .Release.Name }}-postgresql PVC){{ end }}
-  3. S3 bucket "{{ .Values.s3.bucket }}" — media blobs
-  4. Git PVC ({{ include "buzz.fullname" . }}-git) — repo on-disk state
-  5. Owner private key (held by the operator, NOT the chart) — restore by
+  3. S3 bucket "{{ .Values.s3.bucket }}" — media and Git object-store state
+  4. Owner private key (held by the operator, NOT the chart) — restore by
      re-installing with the same ownerPubkey.
 
 ──────────────────────────────────────────────────────────────────────────────
