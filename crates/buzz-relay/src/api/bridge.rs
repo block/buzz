@@ -108,8 +108,14 @@ pub(crate) fn verify_bridge_auth_with_options(
             ));
         }
 
-        let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
-            .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
+        let pubkey =
+            buzz_auth::verify_nip98_event(&event_json, url, method, body).map_err(|e| {
+                // Log the full AuthError (may include expected Host / signed `u`)
+                // server-side only. Client bodies use client_message() so a
+                // reverse-proxied internal origin is never disclosed to probes.
+                tracing::warn!(error = %e, "NIP-98 auth failed");
+                api_error(StatusCode::UNAUTHORIZED, e.client_message())
+            })?;
 
         return Ok((pubkey, event_id_bytes));
     }
@@ -2574,10 +2580,14 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        assert_eq!(
+            msg, "NIP-98: URL mismatch",
+            "rejection must carry the URL-mismatch signal without embedding \
+             either host URL; got body = {body:?}"
+        );
         assert!(
-            msg.contains("URL mismatch"),
-            "rejection must carry the URL-mismatch signal so callers can \
-             distinguish it from other auth failures; got body = {body:?}"
+            !msg.contains("host-a.example") && !msg.contains("host-b.example"),
+            "client body must not disclose signed or expected hosts; got {msg}"
         );
     }
 
@@ -2708,9 +2718,13 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        assert_eq!(
+            msg, "NIP-98: URL mismatch",
+            "rejection must be a URL mismatch without URL payloads; got body = {body:?}"
+        );
         assert!(
-            msg.contains("URL mismatch"),
-            "rejection must be a URL mismatch; got body = {body:?}"
+            !msg.contains("host-a.example") && !msg.contains('?'),
+            "client body must not echo the signed URL; got {msg}"
         );
     }
 
