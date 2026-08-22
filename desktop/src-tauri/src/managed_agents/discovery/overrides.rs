@@ -3,7 +3,7 @@
 //! of `discovery` (split under the desktop file-size cap) so the override
 //! decisions stay next to the resolution ladder they feed.
 
-use super::{effective_agent_command, known_acp_runtime};
+use super::{effective_agent_command, known_acp_runtime, record_agent_command};
 
 /// Decide whether a user-picked harness command is an explicit per-instance
 /// pin or merely the persona's own runtime restated. Returns the override to
@@ -90,12 +90,21 @@ pub fn update_time_agent_command_override(
 /// record the materialized runtime is the only harness source left after the
 /// override clear, so a stray empty `agent_command` from a non-dialog caller
 /// must not change what the agent runs.
+///
+/// When the edit changes the effective command, `record.agent_args` is
+/// cleared: instance args are harness-specific (e.g. Grok Build's
+/// `agent --always-approve stdio`), win over the harness definition's
+/// defaults at spawn, and are passed verbatim to the new binary — carrying
+/// them across a harness switch crash-loops the agent on flags the new
+/// binary does not understand. Callers that supply replacement args in the
+/// same update write them AFTER this apply, so explicit new args survive.
 pub fn apply_agent_command_update(
     record: &mut crate::managed_agents::types::ManagedAgentRecord,
     personas: &[crate::managed_agents::types::AgentDefinition],
     agent_command: &str,
     harness_override: bool,
 ) {
+    let previous_command = record_agent_command(record, personas);
     record.agent_command_override = update_time_agent_command_override(
         record.persona_id.as_deref(),
         personas,
@@ -104,6 +113,9 @@ pub fn apply_agent_command_update(
     );
     if agent_command.trim().is_empty() && record.persona_id.is_some() {
         record.runtime = None;
+    }
+    if record_agent_command(record, personas) != previous_command {
+        record.agent_args.clear();
     }
 }
 

@@ -647,6 +647,55 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
     assert_eq!(record_agent_command(&record, &personas), "codex-acp");
 }
 
+#[test]
+fn apply_agent_command_update_clears_args_when_command_changes() {
+    // The Lens repro: a record carrying Grok Build's args switches to Oh My
+    // Pi. Instance args win over harness defaults at spawn, so keeping them
+    // would pass `agent --always-approve stdio` to `omp` and crash-loop.
+    let personas = vec![persona_with_runtime("p1", Some("grok"))];
+    let mut record = record_with(Some("grok"), Some("p1"), None);
+    record.agent_args = vec![
+        "agent".to_string(),
+        "--always-approve".to_string(),
+        "stdio".to_string(),
+    ];
+
+    apply_agent_command_update(&mut record, &personas, "omp", true);
+
+    assert_eq!(record_agent_command(&record, &personas), "omp");
+    assert!(
+        record.agent_args.is_empty(),
+        "harness-specific instance args must not survive a command change"
+    );
+}
+
+#[test]
+fn apply_agent_command_update_preserves_args_when_command_unchanged() {
+    // Re-saving the same harness (e.g. a name edit that echoes the command)
+    // must not wipe deliberately customized args.
+    let personas = vec![persona_with_runtime("p1", Some("claude"))];
+    let mut record = record_with(Some("claude"), Some("p1"), None);
+    record.agent_args = vec!["--verbose".to_string()];
+
+    apply_agent_command_update(&mut record, &personas, "claude-agent-acp", false);
+
+    assert_eq!(record.agent_args, vec!["--verbose".to_string()]);
+}
+
+#[test]
+fn apply_agent_command_update_inherit_sentinel_clears_args_on_fallback() {
+    // Choosing Inherit drops the pin; when the persona's command differs from
+    // the pinned one, the pin's args must not leak onto the persona harness.
+    let personas = vec![persona_with_runtime("p1", Some("goose"))];
+    let mut record = record_with(Some("claude"), Some("p1"), Some("codex-acp"));
+    record.agent_args = vec!["--codex-flag".to_string()];
+
+    apply_agent_command_update(&mut record, &personas, "", false);
+
+    assert_eq!(record_agent_command(&record, &personas), "goose");
+    assert!(record.agent_args.is_empty());
+}
+
 // ── probe_codex_acp_version ───────────────────────────────────────────────────
 
 mod forced_discovery;
