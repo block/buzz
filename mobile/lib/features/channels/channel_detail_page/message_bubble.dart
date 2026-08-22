@@ -267,6 +267,13 @@ class _MessageBubble extends HookConsumerWidget {
                                 onMentionTap: (pubkey) =>
                                     showUserProfileSheet(context, pubkey),
                               ),
+                              _MentionAckIndicator(
+                                messageId: message.id,
+                                mentionPubkeys: message.mentionPubkeys,
+                                isOwnMessage:
+                                    currentPubkey != null &&
+                                    currentPubkey!.toLowerCase() == pk,
+                              ),
                             ],
                           ),
                         ),
@@ -295,6 +302,96 @@ class _MessageBubble extends HookConsumerWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Accepted / declined outcome for an agent mention, rendered on the sender's
+/// own message only.
+///
+/// NIP-MR: agents publish kind:44102 acks. Nothing renders until an ack has
+/// actually arrived — there is no timer and no "silent" verdict — so a message
+/// with no ack looks exactly as it did before this widget existed.
+class _MentionAckIndicator extends ConsumerWidget {
+  final String messageId;
+  final List<String> mentionPubkeys;
+  final bool isOwnMessage;
+
+  const _MentionAckIndicator({
+    required this.messageId,
+    required this.mentionPubkeys,
+    required this.isOwnMessage,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Only the sender is told whether their own mention was picked up. Acks for
+    // other people's mentions produce no visible change.
+    if (!isOwnMessage || mentionPubkeys.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final acks = ref.watch(mentionAckStoreProvider);
+    // outcomesFor() applies the authorization rule: an ack counts only when its
+    // SIGNER was actually tagged in this mention.
+    if (acks.isAccepted(messageId, mentionPubkeys)) {
+      return _AckLine(
+        key: ValueKey('mention-ack-accepted-$messageId'),
+        icon: LucideIcons.check,
+        color: context.colors.onSurfaceVariant,
+        text: 'Accepted',
+      );
+    }
+
+    final declines = acks.declines(messageId, mentionPubkeys);
+    if (declines.isEmpty) return const SizedBox.shrink();
+
+    // `reason` is untrusted text from the relay. It is length-clamped at the
+    // parse boundary and rendered here as PLAIN text only — never markdown and
+    // never a link.
+    final reason = declines
+        .map((outcome) => outcome.reason)
+        .firstWhere((reason) => reason != null, orElse: () => null);
+
+    return _AckLine(
+      key: ValueKey('mention-ack-declined-$messageId'),
+      icon: LucideIcons.circleSlash,
+      color: context.colors.error,
+      text: reason == null ? 'Declined' : 'Declined — $reason',
+    );
+  }
+}
+
+class _AckLine extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String text;
+
+  const _AckLine({
+    super.key,
+    required this.icon,
+    required this.color,
+    required this.text,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: Grid.quarter),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: Grid.twelve, color: color),
+          const SizedBox(width: Grid.half),
+          Flexible(
+            child: Text(
+              text,
+              style: context.textTheme.labelSmall?.copyWith(color: color),
+            ),
+          ),
+        ],
       ),
     );
   }
