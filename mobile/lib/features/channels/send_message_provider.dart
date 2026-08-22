@@ -7,6 +7,7 @@ import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
+import 'local_message_send_animation_provider.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
@@ -15,6 +16,8 @@ class SendMessage {
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
+  final void Function(String channelId, String eventId)
+  _markLocalMessageForAnimation;
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
@@ -25,6 +28,8 @@ class SendMessage {
     fetchMembers,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
+    void Function(String channelId, String eventId)?
+    markLocalMessageForAnimation,
     required void Function(String channelId, String eventId)
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
@@ -33,6 +38,8 @@ class SendMessage {
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
+       _markLocalMessageForAnimation =
+           markLocalMessageForAnimation ?? ((_, _) {}),
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
        _isDeliveryValid = isDeliveryValid;
@@ -96,6 +103,7 @@ class SendMessage {
         tags: tags,
         onSigned: (event) {
           localMessage = event;
+          _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
         },
       );
@@ -230,6 +238,9 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .addLocalMessage(event),
+    markLocalMessageForAnimation: (channelId, eventId) => ref
+        .read(localMessageSendAnimationProvider(channelId).notifier)
+        .mark(eventId),
     completeLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .completeLocalMessage(eventId),

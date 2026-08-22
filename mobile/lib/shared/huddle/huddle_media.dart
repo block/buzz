@@ -232,6 +232,13 @@ abstract interface class HuddleMedia {
 
   Future<HuddleMediaCapabilities> discoverCapabilities();
   Future<HuddleMicrophonePermission> requestMicrophonePermission();
+
+  /// Open the OS app-settings screen so the user can grant a microphone
+  /// permission that was previously denied. Returns `true` when the settings
+  /// UI was launched. A no-op-safe fallback returns `false` on platforms that
+  /// cannot open settings (e.g. the plugin is missing).
+  Future<bool> openSystemSettings();
+
   Future<void> prepare();
   Future<void> start();
   Future<void> setMuted(bool muted);
@@ -345,6 +352,21 @@ final class MethodChannelHuddleMedia implements HuddleMedia {
   }
 
   @override
+  Future<bool> openSystemSettings() async {
+    _ensureNotDisposed();
+    try {
+      final opened = await _channel.invokeMethod<bool>('openSystemSettings');
+      return opened ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      // Opening settings is a best-effort recovery affordance; a platform
+      // failure here must not tear down the (already-failed) session.
+      return false;
+    }
+  }
+
+  @override
   Future<void> prepare() async {
     _ensureNotDisposed();
     if (_state.phase != HuddleMediaPhase.idle &&
@@ -374,10 +396,10 @@ final class MethodChannelHuddleMedia implements HuddleMedia {
     try {
       final result = await _channel
           .invokeMapMethod<dynamic, dynamic>('prepare', {
-            'protocolVersion': HuddleWireV2.protocolVersion,
-            'sampleRateHz': HuddleWireV2.sampleRateHz,
-            'channels': HuddleWireV2.channels,
-            'frameSamples': HuddleWireV2.frameSamples,
+            'protocolVersion': HuddleWireV3.protocolVersion,
+            'sampleRateHz': HuddleWireV3.sampleRateHz,
+            'channels': HuddleWireV3.channels,
+            'frameSamples': HuddleWireV3.frameSamples,
           });
       if (result?['audioSessionPrepared'] != true) {
         throw const HuddleMediaError(

@@ -2,14 +2,18 @@ package xyz.block.buzz.mobile
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -19,7 +23,7 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Owns microphone permission, foreground communication routing, and the native
  * realtime Opus engine. PCM remains native; Flutter only handles compressed
- * Huddle v2 packets.
+ * Huddle v3 packets.
  */
 internal class HuddleMediaPlugin(
     private val activity: Activity,
@@ -59,6 +63,7 @@ internal class HuddleMediaPlugin(
         when (call.method) {
             "getCapabilities" -> result.success(capabilities())
             "requestMicrophonePermission" -> requestMicrophonePermission(result)
+            "openSystemSettings" -> openSystemSettings(result)
             "prepare" -> prepare(call.arguments, result)
             "start" -> start(result)
             "setMuted" -> setMuted(call.arguments, result)
@@ -118,16 +123,33 @@ internal class HuddleMediaPlugin(
         return true
     }
 
+    /**
+     * Open this app's Android settings screen so the user can grant a
+     * previously denied microphone permission. Mirrors the iOS recovery path.
+     */
+    private fun openSystemSettings(result: MethodChannel.Result) {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", activity.packageName, null),
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        try {
+            activity.startActivity(intent)
+            result.success(true)
+        } catch (error: ActivityNotFoundException) {
+            result.success(false)
+        }
+    }
+
     private fun prepare(arguments: Any?, result: MethodChannel.Result) {
         val values = arguments as? Map<*, *>
-        if (values?.get("protocolVersion") != 2 ||
+        if (values?.get("protocolVersion") != 3 ||
             values["sampleRateHz"] != 48_000 ||
             values["channels"] != 1 ||
             values["frameSamples"] != 960
         ) {
             result.error(
                 "invalid_configuration",
-                "Expected the fixed Huddle Opus v2 media configuration.",
+                "Expected the fixed Huddle Opus v3 media configuration.",
                 null,
             )
             return

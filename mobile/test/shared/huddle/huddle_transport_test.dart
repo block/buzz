@@ -14,7 +14,7 @@ const _parentChannelId = '11111111-2222-4333-8444-555555555555';
 const _ephemeralChannelId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 void main() {
-  test('authenticates with object JSON and admits a v2 room', () async {
+  test('authenticates with object JSON and admits a v3 room', () async {
     final channel = _ControlledWebSocketChannel();
     final transport = _transport(channel);
     addTearDown(transport.dispose);
@@ -28,7 +28,7 @@ void main() {
     expect(auth, isA<Map<String, dynamic>>());
     expect(auth['type'], 'auth');
     expect(auth['parent_channel_id'], _parentChannelId);
-    expect(auth['protocol_version'], 2);
+    expect(auth['protocol_version'], 3);
 
     channel.emitText(
       jsonEncode({
@@ -66,12 +66,13 @@ void main() {
         emits(
           isA<HuddleRemoteAudioFrame>()
               .having((frame) => frame.peerIndex, 'peer index', 4)
+              .having((frame) => frame.epoch, 'epoch', 0)
               .having((frame) => frame.header.sequence, 'sequence', 9)
               .having((frame) => frame.opusPayload, 'Opus', [0xaa]),
         ),
       );
       channel.emitBinary(
-        Uint8List.fromList([4, 0, 9, 0, 0, 3, 0xc0, 0xd8, 0, 0xaa]),
+        Uint8List.fromList([4, 0, 0, 9, 0, 0, 3, 0xc0, 0xd8, 0, 0xaa]),
       );
       await inbound;
 
@@ -286,6 +287,41 @@ void main() {
     expect(transport.state.peers[4]?.pubkey, 'new');
   });
 
+  test('revisioned joined delta reports same-pubkey epoch reuse', () async {
+    final channel = _ControlledWebSocketChannel();
+    final transport = _transport(channel);
+    addTearDown(transport.dispose);
+    await _connect(
+      channel,
+      transport,
+      revision: 1,
+      peers: const [
+        {'pubkey': 'same', 'peer_index': 4, 'epoch': 2},
+      ],
+    );
+    final events = <HuddlePeerEvent>[];
+    final subscription = transport.peerEvents.listen(events.add);
+    addTearDown(subscription.cancel);
+
+    channel.emitText(
+      jsonEncode({
+        'type': 'joined',
+        'revision': 2,
+        'pubkey': 'same',
+        'peer_index': 4,
+        'epoch': 3,
+        'peers': [
+          {'pubkey': 'same', 'peer_index': 4, 'epoch': 3},
+        ],
+      }),
+    );
+    await _waitForRevision(transport, 2);
+
+    expect(events.single.type, HuddlePeerEventType.replaced);
+    expect(events.single.peer.epoch, 2);
+    expect(events.single.replacement?.epoch, 3);
+  });
+
   test('index replacement is emitted before new media is admitted', () async {
     final channel = _ControlledWebSocketChannel();
     final transport = _transport(channel);
@@ -435,6 +471,58 @@ void main() {
   );
 
   test(
+    'stale-epoch frame is fenced after its index is reused by a new occupant',
+    () async {
+      // Blocker 1 causal race: a frame authored by the prior occupant of an
+      // index can be queued in the relay's data path and delivered *after* the
+      // roster control that reassigns the index. Index-only fencing would
+      // mis-attribute it to the new occupant; the epoch rejects it.
+      final channel = _ControlledWebSocketChannel();
+      final transport = _transport(channel);
+      addTearDown(transport.dispose);
+      await _connect(
+        channel,
+        transport,
+        revision: 1,
+        peers: const [
+          {'pubkey': 'old', 'peer_index': 4, 'epoch': 0},
+        ],
+      );
+      final received = <int>[];
+      final subscription = transport.remoteAudioFrames.listen(
+        (frame) => received.add(frame.header.sequence),
+      );
+      addTearDown(subscription.cancel);
+
+      // 'old' (epoch 0) leaves and 'new' reuses index 4 at epoch 1.
+      channel.emitText(
+        jsonEncode({
+          'type': 'joined',
+          'revision': 2,
+          'pubkey': 'new',
+          'peer_index': 4,
+          'epoch': 1,
+          'peers': [
+            {'pubkey': 'new', 'peer_index': 4, 'epoch': 1},
+          ],
+        }),
+      );
+      await _waitForRevision(transport, 2);
+      expect(transport.state.peers[4]?.pubkey, 'new');
+      expect(transport.state.peers[4]?.epoch, 1);
+
+      // A residual frame from 'old' (epoch 0) arrives after the reassignment.
+      // It must be dropped, not delivered as 'new' audio.
+      channel.emitBinary(_relayFrame(peerIndex: 4, epoch: 0, sequence: 7));
+      // A legitimate 'new' frame (epoch 1) is delivered.
+      channel.emitBinary(_relayFrame(peerIndex: 4, epoch: 1, sequence: 8));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(received, [8]);
+    },
+  );
+
+  test(
     're-admission reports departed and reused peer indexes before new media',
     () async {
       final firstChannel = _ControlledWebSocketChannel();
@@ -496,6 +584,121 @@ void main() {
       expect(events[1].peer.pubkey, 'departed');
     },
   );
+
+  test('re-admission resets same-pubkey slot when its epoch changes', () async {
+    final firstChannel = _ControlledWebSocketChannel();
+    final secondChannel = _ControlledWebSocketChannel();
+    var connection = 0;
+    final transport = HuddleTransport(
+      parameters: HuddleConnectionParameters(
+        relayWebSocketUrl: 'wss://buzz.example',
+        nsec: _privateKey,
+        parentChannelId: _parentChannelId,
+        ephemeralChannelId: _ephemeralChannelId,
+      ),
+      channelFactory: (_) => connection++ == 0 ? firstChannel : secondChannel,
+      connectTimeout: const Duration(seconds: 1),
+      handshakeTimeout: const Duration(seconds: 1),
+    );
+    addTearDown(transport.dispose);
+    await _connect(
+      firstChannel,
+      transport,
+      revision: 1,
+      peers: const [
+        {'pubkey': 'same', 'peer_index': 4, 'epoch': 0},
+      ],
+    );
+    final events = <HuddlePeerEvent>[];
+    final subscription = transport.peerEvents.listen(events.add);
+    addTearDown(subscription.cancel);
+
+    firstChannel.emitError(StateError('relay restarted'));
+    await _waitForPhase(transport, HuddleTransportPhase.failed);
+    final reconnect = transport.connect();
+    await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+    secondChannel.emitText(
+      jsonEncode({'type': 'challenge', 'challenge': 'reconnect'}),
+    );
+    await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+    secondChannel.emitText(
+      jsonEncode({
+        'type': 'joined',
+        'revision': 1,
+        'pubkey': 'self',
+        'peer_index': 3,
+        'epoch': 0,
+        'peers': [
+          {'pubkey': 'same', 'peer_index': 4, 'epoch': 1},
+          {'pubkey': 'self', 'peer_index': 3, 'epoch': 0},
+        ],
+      }),
+    );
+    await reconnect;
+
+    expect(events, hasLength(1));
+    expect(events.single.type, HuddlePeerEventType.replaced);
+    expect(events.single.peer.epoch, 0);
+    expect(events.single.replacement?.epoch, 1);
+  });
+
+  test('re-admission resets same slot even when its epoch is reused', () async {
+    final firstChannel = _ControlledWebSocketChannel();
+    final secondChannel = _ControlledWebSocketChannel();
+    var connection = 0;
+    final transport = HuddleTransport(
+      parameters: HuddleConnectionParameters(
+        relayWebSocketUrl: 'wss://buzz.example',
+        nsec: _privateKey,
+        parentChannelId: _parentChannelId,
+        ephemeralChannelId: _ephemeralChannelId,
+      ),
+      channelFactory: (_) => connection++ == 0 ? firstChannel : secondChannel,
+      connectTimeout: const Duration(seconds: 1),
+      handshakeTimeout: const Duration(seconds: 1),
+    );
+    addTearDown(transport.dispose);
+    await _connect(
+      firstChannel,
+      transport,
+      revision: 9,
+      peers: const [
+        {'pubkey': 'same', 'peer_index': 4, 'epoch': 0},
+      ],
+    );
+    final events = <HuddlePeerEvent>[];
+    final subscription = transport.peerEvents.listen(events.add);
+    addTearDown(subscription.cancel);
+
+    firstChannel.emitError(StateError('relay restarted'));
+    await _waitForPhase(transport, HuddleTransportPhase.failed);
+    final reconnect = transport.connect();
+    await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+    secondChannel.emitText(
+      jsonEncode({'type': 'challenge', 'challenge': 'reconnect'}),
+    );
+    await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+    secondChannel.emitText(
+      jsonEncode({
+        'type': 'joined',
+        'revision': 1,
+        'pubkey': 'self',
+        'peer_index': 3,
+        'epoch': 0,
+        'peers': [
+          {'pubkey': 'same', 'peer_index': 4, 'epoch': 0},
+          {'pubkey': 'self', 'peer_index': 3, 'epoch': 0},
+        ],
+      }),
+    );
+    await reconnect;
+
+    expect(events, hasLength(1));
+    expect(events.single.type, HuddlePeerEventType.replaced);
+    expect(events.single.peer.pubkey, 'same');
+    expect(events.single.replacement?.pubkey, 'same');
+    expect(events.single.replacement?.epoch, 0);
+  });
 
   test('re-admission accepts a lower revision after relay restart', () async {
     final firstChannel = _ControlledWebSocketChannel();
@@ -608,18 +811,22 @@ Future<void> _connect(
   await connect;
 }
 
-Uint8List _relayFrame({required int peerIndex, required int sequence}) {
+Uint8List _relayFrame({
+  required int peerIndex,
+  required int sequence,
+  int epoch = 0,
+}) {
   final header = HuddleAudioHeader(
     sequence: sequence,
     timestamp48k: sequence * 960,
     levelDbov: -30,
     flags: 0,
   );
-  final clientFrame = HuddleWireV2.encodeClientFrame(
+  final clientFrame = HuddleWireV3.encodeClientFrame(
     header,
     Uint8List.fromList([sequence & 0xff]),
   );
-  return Uint8List.fromList([peerIndex, ...clientFrame]);
+  return Uint8List.fromList([peerIndex, epoch, ...clientFrame]);
 }
 
 Future<void> _waitForPhase(

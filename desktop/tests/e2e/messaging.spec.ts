@@ -573,8 +573,11 @@ test("sent link preview media uses the authenticated proxy in compact and rich c
   await expectSmoothCorners(compactThumbnailFrame);
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await page.getByTestId("settings-back-to-app").click();
 
   const richPreview = row.locator(
@@ -636,13 +639,14 @@ test("link preview style defaults to compact and Rich unfurls descriptions", asy
   }
 
   await openSettings(page, "appearance");
-  await expect(page.getByTestId("link-preview-style-trigger")).toHaveText(
-    "Compact",
+  await expect(page.getByTestId("link-preview-style-compact")).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
-  await expect(page.getByTestId("link-preview-style-trigger")).toHaveText(
-    "Rich",
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
   await expect
     .poll(() =>
@@ -694,8 +698,11 @@ test("link preview style defaults to compact and Rich unfurls descriptions", asy
   }
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-compact").click();
+  await expect(page.getByTestId("link-preview-style-compact")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 for (const [pasteShape, wrapUrl] of [
@@ -1561,8 +1568,11 @@ test("mixed link preview image outcomes keep Compact and Rich fallbacks stable",
   ).toHaveCount(0);
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await page.getByTestId("settings-back-to-app").click();
 
   const richCards = row.locator(
@@ -1631,8 +1641,11 @@ test("link preview browser image errors render a fallback", async ({
   ).toHaveCount(0);
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await page.getByTestId("settings-back-to-app").click();
 
   const richCard = row.locator(

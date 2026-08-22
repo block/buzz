@@ -75,7 +75,7 @@ async fn connect_authenticated_audio_socket(
     relay_url: &str,
     keys: &nostr::Keys,
     auth_tag_json: Option<&str>,
-) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String)>), String> {
+) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
     use nostr::JsonUtil;
 
     let ws_url = format!("{relay_url}/huddle/{channel_id}/audio");
@@ -137,6 +137,10 @@ async fn connect_authenticated_audio_socket(
                                             Some((
                                                 peer["peer_index"].as_u64()? as u8,
                                                 peer["pubkey"].as_str()?.to_string(),
+                                                // Absent `epoch` (legacy relay) degrades
+                                                // to 0 so the fence becomes a no-op rather
+                                                // than rejecting every frame.
+                                                peer["epoch"].as_u64().unwrap_or(0) as u8,
                                             ))
                                         })
                                         .collect()
@@ -180,13 +184,22 @@ pub(crate) async fn connect_audio_relay(
     let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
-    let (tts_cancel, tts_active, local_tts_publishers, remote_stt_pipeline) = {
+    let (
+        tts_cancel,
+        tts_active,
+        local_tts_publishers,
+        remote_stt_pipeline,
+        agent_pubkeys,
+        human_floor,
+    ) = {
         let hs = state.huddle()?;
         (
             Arc::clone(&hs.tts_cancel),
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.local_tts_publishers),
             Arc::clone(&hs.remote_stt_pipeline),
+            Arc::clone(&hs.agent_pubkeys),
+            hs.human_floor.clone(),
         )
     };
 
@@ -218,6 +231,8 @@ pub(crate) async fn connect_audio_relay(
             tts_active,
             local_tts_publishers,
             remote_stt_pipeline,
+            agent_pubkeys,
+            human_floor,
             output_device_name,
         })
         .await
@@ -436,11 +451,13 @@ struct AudioRelayPipelineArgs {
     pcm_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
     app_handle: Option<tauri::AppHandle>,
-    initial_peers: Vec<(u8, String)>,
+    initial_peers: Vec<(u8, String, u8)>,
     tts_cancel: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
     local_tts_publishers: super::tts::LocalTtsPublishers,
     remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
+    agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
+    human_floor: super::human_floor::HumanFloor,
     output_device_name: Option<String>,
 }
 
@@ -456,6 +473,8 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         tts_active,
         local_tts_publishers,
         remote_stt_pipeline,
+        agent_pubkeys,
+        human_floor,
         output_device_name,
     } = args;
 
@@ -567,6 +586,8 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         tts_cancel,
         local_tts_publishers,
         remote_stt_pipeline,
+        agent_pubkeys,
+        human_floor,
     ));
 
     // Wait for either task to finish, then abort the survivor.

@@ -47,6 +47,12 @@ final class HuddleSessionState {
   final String? issue;
   final String? error;
 
+  /// Whether the current [HuddleSessionPhase.failed] state was caused by a
+  /// denied microphone permission. On iOS a denied permission is not
+  /// re-prompted, so a blind retry deterministically fails again — the UI
+  /// uses this to offer an OS-settings recovery path instead of a bare retry.
+  final bool microphonePermissionRequired;
+
   const HuddleSessionState({
     required this.phase,
     this.parentChannelId,
@@ -66,6 +72,7 @@ final class HuddleSessionState {
     this.sentFrameCount = 0,
     this.issue,
     this.error,
+    this.microphonePermissionRequired = false,
   });
 
   static const idle = HuddleSessionState(phase: HuddleSessionPhase.idle);
@@ -103,6 +110,7 @@ final class HuddleSessionState {
     int? sentFrameCount,
     Object? issue = _notProvided,
     Object? error = _notProvided,
+    bool? microphonePermissionRequired,
   }) => HuddleSessionState(
     phase: phase ?? this.phase,
     parentChannelId: parentChannelId == _notProvided
@@ -130,6 +138,8 @@ final class HuddleSessionState {
     sentFrameCount: sentFrameCount ?? this.sentFrameCount,
     issue: issue == _notProvided ? this.issue : issue as String?,
     error: error == _notProvided ? this.error : error as String?,
+    microphonePermissionRequired:
+        microphonePermissionRequired ?? this.microphonePermissionRequired,
   );
 }
 
@@ -239,6 +249,9 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
             _fail(
               mediaState.error?.message ?? 'Native Huddle audio failed.',
               generation,
+              microphonePermissionRequired:
+                  mediaState.error?.code ==
+                  HuddleMediaErrorCode.permissionDenied,
             ),
           );
           return;
@@ -301,7 +314,27 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
       );
     } catch (error) {
       if (_isCurrent(generation)) {
-        await _fail(_messageFor(error), generation);
+        await _fail(
+          _messageFor(error),
+          generation,
+          microphonePermissionRequired: _isPermissionDenied(error),
+        );
+      }
+    }
+  }
+
+  /// Open the OS app-settings screen so the user can grant a denied microphone
+  /// permission. Used by the failed-call UI's recovery path — a blind retry
+  /// deterministically fails again on iOS, which never re-prompts once denied.
+  /// Returns `true` when the settings UI was launched. Uses a transient media
+  /// instance because the session's own media was disposed on failure.
+  Future<bool> openMicrophoneSettings() async {
+    final media = _media ?? ref.read(huddleMediaFactoryProvider)();
+    try {
+      return await media.openSystemSettings();
+    } finally {
+      if (!identical(media, _media)) {
+        await media.dispose();
       }
     }
   }
@@ -623,13 +656,18 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     );
   }
 
-  Future<void> _fail(String message, int generation) async {
+  Future<void> _fail(
+    String message,
+    int generation, {
+    bool microphonePermissionRequired = false,
+  }) async {
     if (!_isCurrent(generation)) return;
     final failureGeneration = ++_generation;
     final failedState = state.copyWith(
       phase: HuddleSessionPhase.failed,
       isMuted: true,
       error: message,
+      microphonePermissionRequired: microphonePermissionRequired,
     );
     // Failure teardown follows the same local-first contract as an explicit
     // hangup. Publish the failed state only after capture and transport are
@@ -723,6 +761,10 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     HuddleTransportError() => error.message,
     _ => 'Unable to join the Huddle.',
   };
+
+  bool _isPermissionDenied(Object error) =>
+      error is HuddleMediaError &&
+      error.code == HuddleMediaErrorCode.permissionDenied;
 }
 
 double _speakerLevelFromDbov(int levelDbov) =>

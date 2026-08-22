@@ -60,12 +60,59 @@ test("resolveAgentCardModelLabel — non-inherited agent with a blank resolved m
 // Databricks registry integration
 import { formatAgentModelLabel } from "./formatAgentModelLabel.ts";
 
+test("formatAgentModelLabel — Databricks aliases reuse canonical labels", () => {
+  assert.equal(
+    formatAgentModelLabel("goose-gpt-5-6-sol", "databricks_v2"),
+    "GPT-5.6 Sol",
+  );
+  assert.equal(
+    formatAgentModelLabel("goose-claude-fable-5", "databricks_v2"),
+    "Claude Fable 5",
+  );
+  assert.equal(
+    formatAgentModelLabel("goose-claude-opus-4-8", "databricks_v2"),
+    "Claude Opus 4.8",
+  );
+  assert.equal(
+    formatAgentModelLabel("goose-claude-opus-5", "databricks_v2"),
+    "Claude Opus 5",
+  );
+  assert.equal(
+    formatAgentModelLabel("goose-claude-sonnet-5", "databricks_v2"),
+    "Claude Sonnet 5",
+  );
+  assert.equal(
+    formatAgentModelLabel("goose-kimi-k3", "databricks_v2"),
+    "Kimi K3",
+  );
+});
+
+test("resolveModelLabel — Databricks alias labels stay provider-scoped", () => {
+  assert.equal(
+    resolveModelLabel("goose-gpt-5-6-sol", null, "openai"),
+    "goose-gpt-5-6-sol",
+  );
+});
+
+test("formatAgentModelLabel — bare family IDs remain raw", () => {
+  assert.equal(formatAgentModelLabel("gpt-5"), "gpt-5");
+});
+
 test("formatAgentModelLabel — known Databricks managed ID returns curated name", () => {
   assert.equal(formatAgentModelLabel("databricks-gpt-5-5"), "GPT-5.5");
   assert.equal(
     formatAgentModelLabel("databricks-claude-opus-4-7"),
     "Claude Opus 4.7",
   );
+  assert.equal(
+    formatAgentModelLabel("databricks-claude-opus-5"),
+    "Claude Opus 5",
+  );
+  assert.equal(
+    formatAgentModelLabel("databricks-claude-sonnet-5"),
+    "Claude Sonnet 5",
+  );
+  assert.equal(formatAgentModelLabel("databricks-kimi-k3"), "Kimi K3");
 });
 
 test("formatAgentModelLabel — unknown custom Databricks ID returns raw ID unchanged", () => {

@@ -666,6 +666,50 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testCategoryTrackerDoesNotFlickerBackAtPinnedHeaderBoundary() {
+    let order = ["people", "nature", "flags"]
+
+    // Nature has just become selected. A subsequent layout pass can briefly
+    // report its pinned header a couple of points below the boundary while the
+    // previous header is still pinned. Keep Nature selected through that
+    // transient frame instead of alternating the category rail.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 2, "flags": 400],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerReleasesBoundaryLatchOnRealUpwardScroll() {
+    let order = ["people", "nature", "flags"]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 24, "flags": 424],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerReleasesSelectionWhenOldHeaderIsMissing() {
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: ["people", "nature", "flags"],
+        offsets: ["people": 0, "flags": 400],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "people"
+    )
+  }
+
   func testRemoteEmojiLoaderLimitsConcurrentDownloads() async throws {
     let maximumConcurrentDownloads = 3
     let taskCount = 8

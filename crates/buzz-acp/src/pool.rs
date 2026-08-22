@@ -1657,8 +1657,8 @@ fn workspace_section(cwd: &str) -> Option<String> {
             "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
              files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
              `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
-             here. This is where you already are; do not search `$HOME` or other \
-             directories for them."
+             here. This is where you already are, so start here rather than scanning \
+             `$HOME`. Any specific path the user names is fine to read."
         ))
     } else {
         None
@@ -2619,12 +2619,14 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
+                        log_stop_reason(&source, &StopReason::EndTurn);
                         if let PromptSource::Channel(cid) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
-                            agent.state.mark_channel_delivery_success(
+                            record_channel_delivery_success(
+                                &mut agent,
                                 *cid,
                                 standing_sent,
-                                pending_delivered_event_ids.iter().cloned(),
+                                &pending_delivered_event_ids,
                             );
                         }
                         apply_completed_before_control_signal(
@@ -2663,10 +2665,11 @@ pub async fn run_prompt_task(
 
             if let PromptSource::Channel(cid) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
-                agent.state.mark_channel_delivery_success(
+                record_channel_delivery_success(
+                    &mut agent,
                     *cid,
                     standing_sent,
-                    pending_delivered_event_ids.iter().cloned(),
+                    &pending_delivered_event_ids,
                 );
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
@@ -4085,6 +4088,33 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     }
 }
 
+fn delivery_receipt_line(channel_id: Uuid, event_ids: &HashSet<String>) -> String {
+    let mut event_ids: Vec<&str> = event_ids.iter().map(String::as_str).collect();
+    event_ids.sort_unstable();
+    format!(
+        "turn delivered Buzz events for channel {channel_id}: {}",
+        event_ids.join(",")
+    )
+}
+
+fn record_channel_delivery_success(
+    agent: &mut OwnedAgent,
+    channel_id: Uuid,
+    standing_context_sent: bool,
+    event_ids: &HashSet<String>,
+) {
+    tracing::info!(
+        target: "pool::prompt",
+        "{}",
+        delivery_receipt_line(channel_id, event_ids)
+    );
+    agent.state.mark_channel_delivery_success(
+        channel_id,
+        standing_context_sent,
+        event_ids.iter().cloned(),
+    );
+}
+
 //
 // Two-phase lifecycle visible to users:
 //   👀  "seen"    — event was queued and an agent will handle it
@@ -4707,6 +4737,17 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[test]
+    fn delivery_receipt_line_sorts_event_ids() {
+        let channel_id = Uuid::nil();
+        let event_ids = HashSet::from(["beta".to_string(), "alpha".to_string()]);
+
+        assert_eq!(
+            delivery_receipt_line(channel_id, &event_ids),
+            format!("turn delivered Buzz events for channel {channel_id}: alpha,beta")
+        );
     }
 
     // MINOR (#2884): the permission-mode RPC is gated on agent_supports_mode.

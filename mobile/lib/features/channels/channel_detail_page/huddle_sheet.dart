@@ -542,6 +542,10 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final unavailable =
         session.phase == HuddleSessionPhase.failed &&
         _isUnavailableHuddleError(session.error);
+    final needsMicrophoneSettings =
+        session.phase == HuddleSessionPhase.failed &&
+        !unavailable &&
+        session.microphonePermissionRequired;
     final localPubkey = session.currentPubkey?.toLowerCase();
     final backingMembers =
         ref.watch(channelMembersProvider(invite.ephemeralChannelId)).value ??
@@ -564,6 +568,37 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       localPubkey: localPubkey,
       profile: localPubkey == null ? null : profiles[localPubkey],
     );
+
+    final (retryTooltip, retryIcon, onRetry) = switch (true) {
+      _ when unavailable => (
+        'Start a new Huddle',
+        LucideIcons.headphones,
+        () => unawaited(
+          _startReplacementHuddle(
+            context: context,
+            ref: ref,
+            parentChannelId: invite.parentChannelId,
+          ),
+        ),
+      ),
+      _ when needsMicrophoneSettings => (
+        'Open Settings',
+        LucideIcons.settings,
+        () => unawaited(sessionController.openMicrophoneSettings()),
+      ),
+      _ => (
+        'Try again',
+        LucideIcons.refreshCw,
+        () => unawaited(
+          lifecycleController.join(
+            parentChannelId: invite.parentChannelId,
+            ephemeralChannelId: invite.ephemeralChannelId,
+            startedBy: invite.startedBy,
+            startedEventId: invite.startedEventId,
+          ),
+        ),
+      ),
+    };
 
     return PopScope<void>(
       onPopInvokedWithResult: (didPop, _) {
@@ -616,28 +651,9 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     localPubkey: localPubkey,
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,
                     speakerLevels: session.speakerLevels,
-                    retryTooltip: unavailable
-                        ? 'Start a new Huddle'
-                        : 'Try again',
-                    retryIcon: unavailable
-                        ? LucideIcons.headphones
-                        : LucideIcons.refreshCw,
-                    onRetry: unavailable
-                        ? () => unawaited(
-                            _startReplacementHuddle(
-                              context: context,
-                              ref: ref,
-                              parentChannelId: invite.parentChannelId,
-                            ),
-                          )
-                        : () => unawaited(
-                            lifecycleController.join(
-                              parentChannelId: invite.parentChannelId,
-                              ephemeralChannelId: invite.ephemeralChannelId,
-                              startedBy: invite.startedBy,
-                              startedEventId: invite.startedEventId,
-                            ),
-                          ),
+                    retryTooltip: retryTooltip,
+                    retryIcon: retryIcon,
+                    onRetry: onRetry,
                     onParticipantTap: (pubkey) {
                       final isSelf = pubkey == localPubkey || pubkey.isEmpty;
                       _showHuddleParticipantSpotlight(

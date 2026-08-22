@@ -1,8 +1,8 @@
-import { Hash, MessageSquare } from "lucide-react";
+import { Hash } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useChannelReferences } from "@/features/channels/openChannelDirectory";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   resolveUserLabel,
@@ -15,6 +15,7 @@ import {
   groupDiscussionChannels,
   mergeOriginDiscussionChannel,
 } from "@/features/projects/lib/discussionChannels";
+import { selectionItemFromChannel } from "@/features/projects/lib/projectSelection";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { SearchHit } from "@/shared/api/searchTypes";
@@ -22,7 +23,10 @@ import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown } from "@/shared/ui/markdown";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  ProjectEntityFacepile,
+  ProjectEntityListRow,
+} from "./ProjectEntityListRow";
 import { useProjectConversationPanel } from "./ProjectConversationPanelContext";
 
 // Relay search caps a page at 500. Use the full page and surface a lower-bound
@@ -60,16 +64,63 @@ export function useDiscussionChannels(query: string): {
   };
 }
 
-/** Channel display name, preferring the hit's name, then the channel list,
- * then a short id so private/renamed channels still render something. */
-function useChannelNameLookup(enabled: boolean) {
-  const channelsQuery = useChannelsQuery({ enabled });
+/** Hits are sorted newest first, so the first hit per channel is the one a
+ * click should land on (and the one worth quoting). */
+function useLatestHitByChannel(hits: SearchHit[]) {
+  return React.useMemo(() => {
+    const byChannel = new Map<string, SearchHit>();
+    for (const hit of hits) {
+      if (hit.channelId && !byChannel.has(hit.channelId)) {
+        byChannel.set(hit.channelId, hit);
+      }
+    }
+    return byChannel;
+  }, [hits]);
+}
+
+/**
+ * Shared row-click behavior: land on the latest matching message — in the
+ * side conversation panel when one is mounted — instead of jumping straight
+ * to the channel. Forum content opens in place (the panel renders chat
+ * threads only), and channels with no quotable hit fall back to plain
+ * channel navigation.
+ */
+function openDiscussionHit({
+  channelId,
+  goChannel,
+  latestHit,
+  openSearchHit,
+  panel,
+}: {
+  channelId: string;
+  goChannel: (channelId: string) => unknown;
+  latestHit: SearchHit | undefined;
+  openSearchHit: (hit: SearchHit) => unknown;
+  panel: { openConversation: (hit: SearchHit) => void } | null;
+}) {
+  if (!latestHit) {
+    void goChannel(channelId);
+    return;
+  }
+  const opensForum =
+    latestHit.kind === KIND_FORUM_POST || latestHit.kind === KIND_FORUM_COMMENT;
+  if (!panel || opensForum) {
+    void openSearchHit(latestHit);
+    return;
+  }
+  panel.openConversation(latestHit);
+}
+
+/** Channel display name, preferring the hit's name, then bounded metadata,
+ * then a short id so inaccessible/renamed channels still render something. */
+function useChannelNameLookup(channelIds: readonly string[]) {
+  const { channelsById } = useChannelReferences(channelIds, {
+    enabled: channelIds.length > 0,
+  });
   return React.useCallback(
     (id: string, nameFromHit: string | null) =>
-      nameFromHit ??
-      channelsQuery.data?.find((channel) => channel.id === id)?.name ??
-      id.slice(0, 8),
-    [channelsQuery.data],
+      nameFromHit ?? channelsById.get(id)?.name ?? id.slice(0, 8),
+    [channelsById],
   );
 }
 
@@ -124,7 +175,11 @@ export function DiscussedInChannels({
   const { goChannel, openSearchHit } = useAppNavigation();
   const projectConversationPanel = useProjectConversationPanel();
   const [expanded, setExpanded] = React.useState(false);
-  const channelName = useChannelNameLookup(channels.length > 0);
+  const channelIds = React.useMemo(
+    () => channels.map((channel) => channel.id),
+    [channels],
+  );
+  const channelName = useChannelNameLookup(channelIds);
   const visible = expanded
     ? channels
     : channels.slice(0, COLLAPSED_MENTION_ROWS);
@@ -133,19 +188,10 @@ export function DiscussedInChannels({
     { enabled: visible.length > 0 },
   );
   const profiles = profilesQuery.data?.profiles;
-  // Hits are sorted newest first, so the first hit per channel is the one a
-  // click should land on (and the one worth quoting). The origin channel has
-  // no such hit: the `h` tag proves only the channel, so its row navigates
-  // to the channel without claiming any particular message.
-  const latestHitByChannel = React.useMemo(() => {
-    const byChannel = new Map<string, SearchHit>();
-    for (const hit of hits) {
-      if (hit.channelId && !byChannel.has(hit.channelId)) {
-        byChannel.set(hit.channelId, hit);
-      }
-    }
-    return byChannel;
-  }, [hits]);
+  // The origin channel has no quotable hit: the `h` tag proves only the
+  // channel, so its row navigates to the channel without claiming any
+  // particular message.
+  const latestHitByChannel = useLatestHitByChannel(hits);
   if (channels.length === 0) return null;
 
   const hiddenCount = channels.length - visible.length;
@@ -165,21 +211,14 @@ export function DiscussedInChannels({
         {visible.map((channel) => {
           const latestHit = latestHitByChannel.get(channel.id);
           const name = channelName(channel.id, channel.name);
-          const opensForum =
-            latestHit != null &&
-            (latestHit.kind === KIND_FORUM_POST ||
-              latestHit.kind === KIND_FORUM_COMMENT);
-          const openConversation = () => {
-            if (!latestHit) {
-              void goChannel(channel.id);
-              return;
-            }
-            if (!projectConversationPanel || opensForum) {
-              void openSearchHit(latestHit);
-              return;
-            }
-            projectConversationPanel.openConversation(latestHit);
-          };
+          const openConversation = () =>
+            openDiscussionHit({
+              channelId: channel.id,
+              goChannel,
+              latestHit,
+              openSearchHit,
+              panel: projectConversationPanel,
+            });
           return (
             <div
               className="group relative flex w-full min-w-0 items-start gap-2.5 px-3 py-2 transition-colors hover:bg-muted/30"
@@ -202,7 +241,7 @@ export function DiscussedInChannels({
                 type="button"
               />
               <span className="relative z-10 pt-0.5">
-                <ParticipantFacepile
+                <ProjectEntityFacepile
                   interactive
                   participants={channel.participants}
                   profiles={profiles}
@@ -269,7 +308,7 @@ const NAME_LIST_MAX = 3;
 function DiscussionMessagePreview({ content }: { content: string }) {
   return (
     <Markdown
-      className="inbox-preview-markdown mt-0.5 text-inherit leading-4"
+      className="inbox-preview-markdown mt-0.5 text-inherit leading-6"
       content={discussionSnippet(content)}
       interactive={false}
     />
@@ -325,73 +364,12 @@ function DiscussionNameList({
   );
 }
 
-function ParticipantFacepile({
-  interactive = false,
-  participants,
-  profiles,
-}: {
-  /** Wrap each avatar in a profile popover. Leave off when the facepile is
-   * nested inside another button (nested interactive elements are invalid). */
-  interactive?: boolean;
-  participants: string[];
-  profiles: UserProfileLookup | undefined;
-}) {
-  const shown = participants.slice(0, 4);
-  const overflow = participants.length - shown.length;
-  return (
-    <span className="flex shrink-0 items-center">
-      {shown.map((pubkey, index) => {
-        const label = resolveUserLabel({ profiles, pubkey });
-        if (!interactive) {
-          return (
-            <span
-              className={cn(index > 0 && "-ml-1.5")}
-              key={pubkey}
-              title={label}
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
-            </span>
-          );
-        }
-        return (
-          <UserProfilePopover
-            key={pubkey}
-            pubkey={pubkey}
-            triggerElement="span"
-          >
-            <button
-              className={cn("rounded-full", index > 0 && "-ml-1.5")}
-              title={label}
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
-            </button>
-          </UserProfilePopover>
-        );
-      })}
-      {overflow > 0 ? (
-        <span className="-ml-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-muted text-3xs text-muted-foreground ring-2 ring-background">
-          +{overflow}
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
 /**
  * Full-width channel list for the workspace "Channels" tab: every channel
  * where the repository (or its PRs/issues) is linked in chat, with the
- * people who discussed it there.
+ * people who discussed it there. Clicking a row opens the latest matching
+ * conversation in the side panel (whose header still jumps to the channel)
+ * rather than leaving the project view.
  */
 export function DiscussionChannelsPanel({
   query,
@@ -400,9 +378,17 @@ export function DiscussionChannelsPanel({
   query: string;
   repositoryName: string;
 }) {
-  const { channels, isLoading, isTruncated } = useDiscussionChannels(query);
-  const { goChannel } = useAppNavigation();
-  const channelName = useChannelNameLookup(channels.length > 0);
+  const { channels, hits, isLoading, isTruncated } =
+    useDiscussionChannels(query);
+  const { goChannel, openSearchHit } = useAppNavigation();
+  const projectConversationPanel = useProjectConversationPanel();
+  const latestHitByChannel = useLatestHitByChannel(hits);
+  const channelIds = React.useMemo(
+    () => channels.map((channel) => channel.id),
+    [channels],
+  );
+  const channelName = useChannelNameLookup(channelIds);
+
   const profilesQuery = useUsersBatchQuery(
     channels.flatMap((channel) => channel.participants),
     { enabled: channels.length > 0 },
@@ -414,70 +400,72 @@ export function DiscussionChannelsPanel({
   }
   if (channels.length === 0) {
     return (
-      <p className="px-4 py-6 text-sm text-muted-foreground">
+      <p
+        className="px-4 py-6 text-sm text-muted-foreground"
+        data-testid="project-discussion-channels-panel"
+      >
         No channels reference this repository yet. Paste its link (or a review
         or task link) in a channel and it will show up here.
       </p>
     );
   }
 
+  const rangeItems = channels.map((channel) =>
+    selectionItemFromChannel({
+      channelId: channel.id,
+      people: channel.participants,
+      title: `#${channelName(channel.id, channel.name)}`,
+    }),
+  );
+
   return (
-    <div>
+    <div className="px-4" data-testid="project-discussion-channels-panel">
       <ul data-testid="discussion-channels">
         {channels.map((channel) => {
           const name = channelName(channel.id, channel.name);
+          const latestHit = latestHitByChannel.get(channel.id);
           return (
             <li className="relative" key={channel.id}>
-              <button
-                className="flex min-h-9 w-full min-w-0 items-center gap-2 px-4 py-1.5 text-left transition-colors hover:bg-muted/30"
-                data-testid="project-channel-row"
-                onClick={() => void goChannel(channel.id)}
-                title={`Open #${name}`}
-                type="button"
-              >
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                  <Hash className="h-3.5 w-3.5 text-muted-foreground/70" />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                  #{name}
-                </span>
-                <span
-                  className="hidden w-28 shrink-0 truncate text-right text-xs text-muted-foreground md:block"
-                  data-testid="project-channel-repository"
-                  title={repositoryName}
-                >
-                  {repositoryName}
-                </span>
-                <span
-                  className="flex w-20 shrink-0 justify-end"
-                  data-testid="project-channel-participants"
-                >
-                  <ParticipantFacepile
-                    participants={channel.participants}
-                    profiles={profiles}
-                  />
-                </span>
-                <span
-                  className="flex w-12 shrink-0 items-center justify-end gap-1 text-xs text-muted-foreground"
-                  data-testid="project-channel-message-count"
-                  title={`${channel.messageCount}${isTruncated ? "+" : ""} ${
-                    channel.messageCount === 1 ? "message" : "messages"
-                  }`}
-                >
-                  <MessageSquare className="h-3.5 w-3.5" />
-                  {channel.messageCount}
-                  {isTruncated ? "+" : ""}
-                </span>
-                <span
-                  className="hidden w-20 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground/70 sm:block"
-                  data-testid="project-channel-row-date"
-                  title={new Date(
-                    channel.lastActivityAt * 1_000,
-                  ).toLocaleString()}
-                >
-                  {relativeTime(channel.lastActivityAt)}
-                </span>
-              </button>
+              <ProjectEntityListRow
+                affiliation={repositoryName}
+                affiliationTestId="project-channel-repository"
+                count={channel.messageCount}
+                countSuffix={isTruncated ? "+" : undefined}
+                countTestId="project-channel-message-count"
+                countTitle={`${channel.messageCount}${isTruncated ? "+" : ""} ${
+                  channel.messageCount === 1 ? "message" : "messages"
+                }`}
+                dateSeconds={channel.lastActivityAt}
+                dateTestId="project-channel-row-date"
+                icon={<Hash className="h-3.5 w-3.5 text-muted-foreground/70" />}
+                onClick={() =>
+                  openDiscussionHit({
+                    channelId: channel.id,
+                    goChannel,
+                    latestHit,
+                    openSearchHit,
+                    panel: projectConversationPanel,
+                  })
+                }
+                people={channel.participants}
+                peopleTestId="project-channel-participants"
+                profiles={profiles}
+                selection={{
+                  item: selectionItemFromChannel({
+                    channelId: channel.id,
+                    people: channel.participants,
+                    title: `#${name}`,
+                  }),
+                  rangeItems,
+                }}
+                testId="project-channel-row"
+                title={`#${name}`}
+                titleAttr={
+                  latestHit
+                    ? `Open the latest conversation in #${name}`
+                    : `Open #${name}`
+                }
+              />
             </li>
           );
         })}

@@ -82,6 +82,50 @@ void main() {
     expect(await storage.loadAll(), isEmpty);
   });
 
+  test('serializes overlapping switch and sign-out mutations', () async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final active = Community.create(
+      name: 'Active',
+      relayUrl: 'https://active.example',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final replacement = Community.create(
+      name: 'Replacement',
+      relayUrl: 'https://replacement.example',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    await storage.save(active);
+    await storage.save(replacement);
+    await storage.saveActiveId(active.id);
+    final container = ProviderContainer(
+      overrides: [communityStorageProvider.overrideWithValue(storage)],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    await container.read(communityListProvider.future);
+    final teardown = Completer<void>();
+    container.read(communityTransitionProvider).register(() => teardown.future);
+
+    final switching = container
+        .read(communityListProvider.notifier)
+        .switchCommunity(replacement.id);
+    final signingOut = container.read(authProvider.notifier).signOut();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(await storage.loadActiveId(), active.id);
+    teardown.complete();
+    await Future.wait([switching, signingOut]);
+
+    expect(await storage.loadActiveId(), active.id);
+    expect(
+      (await storage.loadAll()).map((community) => community.id),
+      unorderedEquals([active.id]),
+    );
+    final auth = await container.read(authProvider.future);
+    expect(auth.status, AuthStatus.authenticated);
+    expect(auth.community?.id, active.id);
+  });
+
   test(
     'removes an invalid saved community instead of authenticating',
     () async {

@@ -603,7 +603,7 @@ void main() {
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
-  testWidgets('matches the community and profile avatar circle sizes', (
+  testWidgets('centers the smaller profile avatar beside the community', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -626,7 +626,10 @@ void main() {
     );
 
     expect(tester.getSize(communityAvatar), const Size.square(40));
-    expect(tester.getSize(profileAvatar), const Size.square(40));
+    expect(tester.getSize(profileAvatar), const Size.square(36));
+    final communityRect = tester.getRect(communityAvatar);
+    final profileRect = tester.getRect(profileAvatar);
+    expect(profileRect.center.dy, communityRect.center.dy);
   });
 
   testWidgets('reveals channel content from same-slot reconnect skeletons', (

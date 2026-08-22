@@ -1,5 +1,6 @@
 import AVFoundation
 import Flutter
+import UIKit
 
 /// Foreground-only native seam for iOS Huddle media.
 ///
@@ -66,6 +67,8 @@ final class HuddleMediaPlugin {
       result(capabilities)
     case "requestMicrophonePermission":
       requestMicrophonePermission(result: result)
+    case "openSystemSettings":
+      openSystemSettings(result: result)
     case "prepare":
       prepare(arguments: call.arguments, result: result)
     case "start":
@@ -115,9 +118,28 @@ final class HuddleMediaPlugin {
     }
   }
 
+  /// Open the iOS Settings app on this app's page so the user can grant a
+  /// previously denied microphone permission. iOS never re-prompts once denied,
+  /// so this is the only in-app recovery path.
+  private func openSystemSettings(result: @escaping FlutterResult) {
+    guard let url = URL(string: UIApplication.openSettingsURLString) else {
+      result(false)
+      return
+    }
+    DispatchQueue.main.async {
+      guard UIApplication.shared.canOpenURL(url) else {
+        result(false)
+        return
+      }
+      UIApplication.shared.open(url, options: [:]) { opened in
+        result(opened)
+      }
+    }
+  }
+
   private func prepare(arguments: Any?, result: @escaping FlutterResult) {
     guard let values = arguments as? [String: Any],
-      (values["protocolVersion"] as? NSNumber)?.intValue == 2,
+      (values["protocolVersion"] as? NSNumber)?.intValue == 3,
       (values["sampleRateHz"] as? NSNumber)?.intValue == 48_000,
       (values["channels"] as? NSNumber)?.intValue == 1,
       (values["frameSamples"] as? NSNumber)?.intValue == 960
@@ -125,7 +147,7 @@ final class HuddleMediaPlugin {
       result(
         FlutterError(
           code: "invalid_configuration",
-          message: "Expected the fixed Huddle Opus v2 media configuration.",
+          message: "Expected the fixed Huddle Opus v3 media configuration.",
           details: nil
         )
       )

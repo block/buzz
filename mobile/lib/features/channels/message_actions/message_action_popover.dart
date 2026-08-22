@@ -15,7 +15,7 @@ const _iosNativeMessageActionSurfaceChannel = MethodChannel(
   'buzz/native_message_action_surface',
 );
 
-bool _messageActionsPresentationInFlight = false;
+bool _messageActionPresentationInFlight = false;
 bool? _iosNativeMessageActionSurfaceSupported;
 
 Future<bool> _supportsIosNativeMessageActionSurface() async {
@@ -113,8 +113,8 @@ Future<bool> _showMessageActionsPopover({
   required VoidCallback? restoreComposerFocus,
   required bool shouldRestoreComposerFocus,
 }) async {
-  if (_messageActionsPresentationInFlight) return true;
-  _messageActionsPresentationInFlight = true;
+  if (_messageActionPresentationInFlight) return true;
+  _messageActionPresentationInFlight = true;
 
   try {
     final actions = _buildPopoverMessageActions(
@@ -153,6 +153,16 @@ Future<bool> _showMessageActionsPopover({
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     if (shouldRestoreComposerFocus) composerFocusNode!.unfocus();
 
+    messageActionBackdropActive.value = true;
+    // Give the timeline one frame to replace UIKit glass platform views with
+    // composable Flutter stand-ins before the full-screen blur is presented.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!context.mounted) {
+      messageActionBackdropActive.value = false;
+      snapshot.dispose();
+      return false;
+    }
+
     String? selectedActionId;
     final dialogRoute = RawDialogRoute<String>(
       barrierDismissible: true,
@@ -188,6 +198,7 @@ Future<bool> _showMessageActionsPopover({
       selectedActionId = await popResult;
     } finally {
       if (routePushed) await dialogRoute.completed;
+      messageActionBackdropActive.value = false;
       snapshot.dispose();
       if (context.mounted) onPopoverDismissed?.call();
     }
@@ -204,7 +215,7 @@ Future<bool> _showMessageActionsPopover({
     }
     return true;
   } finally {
-    _messageActionsPresentationInFlight = false;
+    _messageActionPresentationInFlight = false;
   }
 }
 
@@ -640,10 +651,8 @@ class _MessageActionsPopover extends HookWidget {
             children: [
               Positioned.fill(
                 child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(
-                    sigmaX: defaultTargetPlatform == TargetPlatform.iOS ? 4 : 8,
-                    sigmaY: defaultTargetPlatform == TargetPlatform.iOS ? 4 : 8,
-                  ),
+                  key: const ValueKey('message-actions-backdrop-filter'),
+                  filter: _messageActionBackdropFilter,
                   child: AnimatedBuilder(
                     animation: animation,
                     builder: (context, child) {
@@ -653,7 +662,7 @@ class _MessageActionsPopover extends HookWidget {
                       return ColoredBox(
                         key: const ValueKey('message-actions-background'),
                         color: context.colors.inverseSurface.withValues(
-                          alpha: 0.14 * opacity,
+                          alpha: _messageActionBackdropTintOpacity * opacity,
                         ),
                       );
                     },
@@ -774,226 +783,6 @@ class _MessageActionsPopover extends HookWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _MessageActionPreviewVisibility extends HookWidget {
-  final bool visible;
-  final ValueChanged<bool>? onChanged;
-  final Widget child;
-  const _MessageActionPreviewVisibility({
-    required this.visible,
-    required this.onChanged,
-    required this.child,
-  });
-  @override
-  Widget build(BuildContext context) {
-    useEffect(() {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) onChanged?.call(visible);
-      });
-      return null;
-    }, [visible, onChanged]);
-    return child;
-  }
-}
-
-class _LiftedMessagePreview extends StatelessWidget {
-  final ui.Image anchorSnapshot;
-
-  const _LiftedMessagePreview({required this.anchorSnapshot});
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      key: const ValueKey('message-action-preview'),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(Radii.md),
-        border: Border.all(
-          color: context.colors.outlineVariant.withValues(alpha: 0.7),
-          width: 0.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.18),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(_messageActionPreviewInset),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(Radii.xs),
-          child: RawImage(
-            image: anchorSnapshot,
-            fit: BoxFit.fill,
-            filterQuality: FilterQuality.medium,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MessageActionSurface extends StatelessWidget {
-  final List<_PopoverMessageAction> actions;
-  final ValueChanged<String> onSelected;
-
-  const _MessageActionSurface({
-    required this.actions,
-    required this.onSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final menuLayout = _MessageActionSurfaceLayout.from(context, actions);
-    return Material(
-      key: const ValueKey('message-action-surface'),
-      color: context.colors.surface,
-      surfaceTintColor: Colors.transparent,
-      elevation: 10,
-      shadowColor: Colors.black.withValues(alpha: 0.22),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Radii.dialog),
-        side: BorderSide(
-          color: context.colors.outlineVariant.withValues(alpha: 0.55),
-          width: 0.5,
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            vertical: _messageActionVerticalInset,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (var index = 0; index < actions.length; index++) ...[
-                if (index > 0 &&
-                    actions[index - 1].group != actions[index].group)
-                  Divider(
-                    key: ValueKey(
-                      'message-action-divider-${actions[index].group.name}',
-                    ),
-                    height: _messageActionSeparatorHeight,
-                    thickness: _messageActionSeparatorHeight,
-                    indent: Grid.xs,
-                    endIndent: Grid.xs,
-                  ),
-                _MessageActionRow(
-                  action: actions[index],
-                  height: menuLayout.rowHeight,
-                  onSelected: onSelected,
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MessageActionRow extends StatelessWidget {
-  final _PopoverMessageAction action;
-  final double height;
-  final ValueChanged<String> onSelected;
-
-  const _MessageActionRow({
-    required this.action,
-    required this.height,
-    required this.onSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final foreground = action.destructive
-        ? context.colors.error
-        : context.colors.onSurface;
-    return Semantics(
-      button: true,
-      label: action.title,
-      excludeSemantics: true,
-      child: InkWell(
-        key: ValueKey('message-action-${action.id}'),
-        onTap: () {
-          unawaited(HapticFeedback.lightImpact());
-          onSelected(action.id);
-        },
-        child: SizedBox(
-          height: height,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 32,
-                  child: Center(
-                    child: Icon(action.icon, size: 22, color: foreground),
-                  ),
-                ),
-                const SizedBox(width: Grid.twelve),
-                Expanded(
-                  child: Text(
-                    action.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.bodyLarge?.copyWith(
-                      color: foreground,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MessageActionSurfaceLayout {
-  final double rowHeight, preferredHeight;
-
-  const _MessageActionSurfaceLayout({
-    required this.rowHeight,
-    required this.preferredHeight,
-  });
-
-  factory _MessageActionSurfaceLayout.from(
-    BuildContext context,
-    List<_PopoverMessageAction> actions,
-  ) {
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: 'Message action',
-        style: context.textTheme.bodyLarge,
-      ),
-      textDirection: Directionality.of(context),
-      textScaler: MediaQuery.textScalerOf(context),
-      maxLines: 1,
-    )..layout();
-    final rowHeight = math.max(
-      _messageActionRowHeight,
-      textPainter.height + (_messageActionRowVerticalPadding * 2),
-    );
-    textPainter.dispose();
-
-    var separatorCount = 0;
-    for (var index = 1; index < actions.length; index++) {
-      if (actions[index - 1].group != actions[index].group) separatorCount += 1;
-    }
-    final preferredHeight =
-        (_messageActionVerticalInset * 2) +
-        (actions.length * rowHeight) +
-        (separatorCount * _messageActionSeparatorHeight);
-    return _MessageActionSurfaceLayout(
-      rowHeight: rowHeight,
-      preferredHeight: preferredHeight,
     );
   }
 }

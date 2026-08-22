@@ -7,20 +7,15 @@ export const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
 export const DEFAULT_FONT_SIZE: FontSize = "default";
 
 /**
- * Virtual rem sizes used by typography tokens. Keeping the real root at 16px
- * prevents a text preference from also resizing rem-based layout geometry.
+ * Root attribute that selects the type scale. The 13 / 14 / 15px contract and
+ * the virtual typography rem it drives live in `styles/globals/typography.css`;
+ * this module only records the user's choice. Cmd +/- zoom is a separate dial
+ * (`useWebviewZoomShortcuts`) that scales the real root font-size.
  */
-const TYPE_REM_SIZE_PX: Record<FontSize, number> = {
-  smaller: 13 / 0.875,
-  default: 14 / 0.875,
-  larger: 15 / 0.875,
-};
-
-const TYPE_REM_PROPERTY = "--buzz-type-rem";
+const FONT_SIZE_ATTRIBUTE = "data-font-size";
 
 const listeners = new Set<() => void>();
 let fontSize: FontSize = DEFAULT_FONT_SIZE;
-let textZoomFactor = 1;
 let listeningForStorageChanges = false;
 
 export function parseFontSize(value: string | null | undefined): FontSize {
@@ -39,16 +34,8 @@ function readStoredFontSize(): FontSize {
   }
 }
 
-function typeRemSizePx(size: FontSize): number {
-  return (
-    Math.round(TYPE_REM_SIZE_PX[size] * textZoomFactor * 1_000_000) / 1_000_000
-  );
-}
-
 function applyFontSize(size: FontSize): void {
-  const root = globalThis.document?.documentElement;
-  root?.setAttribute("data-font-size", size);
-  root?.style.setProperty(TYPE_REM_PROPERTY, `${typeRemSizePx(size)}px`);
+  globalThis.document?.documentElement?.setAttribute(FONT_SIZE_ATTRIBUTE, size);
 }
 
 function notifyListeners(): void {
@@ -78,13 +65,6 @@ function listenForStorageChanges(): void {
 export function initializeFontSizePreference(): void {
   applyStoredFontSize();
   listenForStorageChanges();
-}
-
-/** Combine Cmd +/- zoom with the selected app-wide type scale. */
-export function applyTextZoomFactor(zoomFactor: number): void {
-  if (!Number.isFinite(zoomFactor) || zoomFactor <= 0) return;
-  textZoomFactor = zoomFactor;
-  applyFontSize(fontSize);
 }
 
 function subscribe(listener: () => void): () => void {

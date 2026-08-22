@@ -359,7 +359,7 @@ test("Buzz PR metadata includes repository identity and trusted root context", a
   );
   assert.equal(result?.siteName, "Buzz Desktop");
   assert.equal(result?.title, "Restore entity cards");
-  assert.equal(result?.description, "Open · fix/cards → release · 1234567");
+  assert.equal(result?.description, null);
   assert.equal(result?.faviconDataUrl, null);
   assert.equal(result?.imageDataUrl, null);
 });

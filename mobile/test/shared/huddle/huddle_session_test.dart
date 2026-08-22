@@ -45,6 +45,7 @@ void main() {
 
     final remote = HuddleRemoteAudioFrame(
       peerIndex: 1,
+      epoch: 0,
       header: const HuddleAudioHeader(
         sequence: 3,
         timestamp48k: 960,
@@ -149,8 +150,8 @@ void main() {
     transport.emitRemote(_remoteFrame(peerIndex: 1, sequence: 1));
     transport.emitRemote(_remoteFrame(peerIndex: 1, sequence: 2));
     transport.emitReplacement(
-      const HuddlePeer(pubkey: 'desktop', peerIndex: 1),
-      const HuddlePeer(pubkey: 'new', peerIndex: 1),
+      const HuddlePeer(pubkey: 'desktop', peerIndex: 1, epoch: 0),
+      const HuddlePeer(pubkey: 'new', peerIndex: 1, epoch: 1),
     );
     await Future<void>.delayed(Duration.zero);
     expect(media.removedPeers, [1]);
@@ -223,9 +224,30 @@ void main() {
     final state = container.read(huddleSessionProvider);
     expect(state.phase, HuddleSessionPhase.failed);
     expect(state.error, contains('Microphone permission'));
+    expect(state.microphonePermissionRequired, isTrue);
     expect(state.wasAdmitted, isFalse);
     expect(transport.connectCalls, 0);
   });
+
+  test(
+    'openMicrophoneSettings delegates to the media settings launcher',
+    () async {
+      final media = _FakeMedia(permission: HuddleMicrophonePermission.denied);
+      final transport = _FakeTransport();
+      final container = ProviderContainer(
+        overrides: [
+          huddleMediaFactoryProvider.overrideWithValue(() => media),
+          huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(huddleSessionProvider.notifier).join(_parameters());
+      // The failed join disposed its media, so recovery uses a transient one.
+      final notifier = container.read(huddleSessionProvider.notifier);
+      expect(await notifier.openMicrophoneSettings(), isTrue);
+    },
+  );
 
   test(
     'native failure releases media and transport before publishing failure',
@@ -296,8 +318,10 @@ void main() {
 HuddleRemoteAudioFrame _remoteFrame({
   required int peerIndex,
   required int sequence,
+  int epoch = 0,
 }) => HuddleRemoteAudioFrame(
   peerIndex: peerIndex,
+  epoch: epoch,
   header: HuddleAudioHeader(
     sequence: sequence,
     timestamp48k: sequence * 960,
@@ -392,6 +416,15 @@ final class _FakeMedia implements HuddleMedia {
   @override
   Future<HuddleMicrophonePermission> requestMicrophonePermission() async =>
       permission;
+
+  var openSettingsCalls = 0;
+  bool openSettingsResult = true;
+
+  @override
+  Future<bool> openSystemSettings() async {
+    openSettingsCalls += 1;
+    return openSettingsResult;
+  }
 
   @override
   Future<void> prepare() async {
@@ -525,8 +558,8 @@ final class _FakeTransport implements HuddleTransportClient {
       phase: HuddleTransportPhase.connected,
       localPeerIndex: 2,
       peers: const {
-        1: HuddlePeer(pubkey: 'desktop', peerIndex: 1),
-        2: HuddlePeer(pubkey: 'mobile', peerIndex: 2),
+        1: HuddlePeer(pubkey: 'desktop', peerIndex: 1, epoch: 0),
+        2: HuddlePeer(pubkey: 'mobile', peerIndex: 2, epoch: 0),
       },
     );
     _states.add(_state);

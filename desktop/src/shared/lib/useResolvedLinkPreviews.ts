@@ -12,10 +12,6 @@ import { eventToProjectPullRequest } from "@/features/projects/projectPullReques
 import {
   KIND_GIT_ISSUE,
   KIND_GIT_PULL_REQUEST,
-  KIND_GIT_STATUS_CLOSED,
-  KIND_GIT_STATUS_DRAFT,
-  KIND_GIT_STATUS_MERGED,
-  KIND_GIT_STATUS_OPEN,
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
@@ -244,13 +240,6 @@ export async function loadLinkPreviewMetadata(
 ): Promise<LinkPreviewMetadata | null> {
   return (await metadataLoader.load(href)).metadata;
 }
-const ENTITY_STATUS_KINDS = [
-  KIND_GIT_STATUS_OPEN,
-  KIND_GIT_STATUS_MERGED,
-  KIND_GIT_STATUS_CLOSED,
-  KIND_GIT_STATUS_DRAFT,
-];
-
 type EntityEventFetcher = (
   filter: Parameters<typeof relayClient.fetchEvents>[0],
 ) => Promise<RelayEvent[]>;
@@ -279,9 +268,6 @@ export async function fetchBuzzEntityMetadata(
       "#d": [dtag],
       limit: 1,
     });
-    // Repository maps are only needed to resolve a project's repository read
-    // models, which the card does not show — empty maps still validate the
-    // announcement envelope and resolve name/description.
     const project = projectEvents
       .map((event) => eventToExplicitProject(event, new Map(), new Map()))
       .find((candidate) => candidate?.projectAddress === projectAddress);
@@ -347,39 +333,30 @@ export async function fetchBuzzEntityMetadata(
   });
   if (!root) return null;
 
-  const trustedAuthors = [...new Set([root.pubkey.toLowerCase(), owner])];
-  const statusEvents = await fetchEvents({
-    kinds: ENTITY_STATUS_KINDS,
-    authors: trustedAuthors,
-    "#e": [id],
-    limit: 20,
-  });
-  if (type === "issue") {
-    const issue = eventToProjectIssue(root, statusEvents);
-    return {
-      ...base,
-      title: issue.title,
-      description: compactMetadata([issue.status, ...issue.labels.slice(0, 2)]),
-    };
-  }
-
-  const pullRequest = eventToProjectPullRequest(root, [], [], statusEvents);
-  const source = pullRequest.branchName;
-  const target = pullRequest.targetBranch ?? repository.defaultBranch;
+  const title =
+    type === "issue"
+      ? eventToProjectIssue(root).title
+      : eventToProjectPullRequest(root).title;
   return {
     ...base,
-    title: pullRequest.title,
-    description: compactMetadata([
-      pullRequest.status,
-      source ? `${source} → ${target}` : null,
-      pullRequest.commit?.slice(0, 7),
-    ]),
+    title,
+    // Issue and PR bodies are markdown and often begin with headings. Keep
+    // their fetched subject as tooltip/card context without fetching or
+    // flattening body/status metadata into an unrendered description string.
+    description: null,
   };
 }
 
 const entityMetadataLoader = createMetadataLoader({
   fetcher: fetchBuzzEntityMetadata,
 });
+
+/** Share deduplicated relay-native entity metadata across cards and inline tooltips. */
+export async function loadBuzzEntityMetadata(
+  href: string,
+): Promise<LinkPreviewMetadata | null> {
+  return (await entityMetadataLoader.load(href)).metadata;
+}
 
 /** Clear ephemeral metadata when the active relay/community changes. */
 export function resetLinkPreviewMetadataCache(): void {

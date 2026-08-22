@@ -121,7 +121,7 @@ fn limit_audio_websocket<F>(ws: WebSocketUpgrade<F>) -> WebSocketUpgrade<F> {
 /// Highest huddle audio protocol version this relay understands. Clients are
 /// allowed to negotiate any version in `1..=CURRENT_PROTOCOL_VERSION`; older
 /// versions stay supported indefinitely for staged rollouts.
-const CURRENT_PROTOCOL_VERSION: u8 = 2;
+const CURRENT_PROTOCOL_VERSION: u8 = 3;
 
 #[derive(Deserialize)]
 struct AuthMsg {
@@ -511,47 +511,75 @@ async fn handle_active_audio_connection(
 
     let admission = if let Some(session) = remote_session.as_ref() {
         room.add_peer_at_index(pubkey_hex.clone(), requested_version, session.peer_index())
-            .map(|(id, audio, ctrl, revision)| (id, session.peer_index(), audio, ctrl, revision))
+            .map(|(id, _mirror_epoch, audio, ctrl, revision)| {
+                // Report the owner-assigned epoch, not the local mirror's:
+                // the mirror never fans out via `broadcast_frame`, so its epoch
+                // is inert. The client's self-entry must match the owner roster.
+                (
+                    id,
+                    session.peer_index(),
+                    session.epoch(),
+                    audio,
+                    ctrl,
+                    revision,
+                )
+            })
     } else {
         room.add_peer(pubkey_hex.clone(), requested_version)
     };
-    let (peer_id, peer_index, audio_rx, peer_ctrl_rx, admission_revision) = match admission {
-        Ok(v) => v,
-        Err(crate::audio::room::AdmissionError::Full) => {
-            warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
-            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"peer index space exhausted"}).to_string().into())).await;
-            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
-            {
-                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+    let (peer_id, peer_index, peer_epoch, audio_rx, peer_ctrl_rx, admission_revision) =
+        match admission {
+            Ok(v) => v,
+            Err(crate::audio::room::AdmissionError::Full) => {
+                warn!(channel_id = %channel_id, "audio room participant capacity reached");
+                let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"room participant capacity reached"}).to_string().into())).await;
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
                     .await;
+                }
+                return;
             }
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::Ended) => {
-            debug!(channel_id = %channel_id, "room ended before admission");
-            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())).await;
-            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
-            {
-                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+            Err(crate::audio::room::AdmissionError::Ended) => {
+                debug!(channel_id = %channel_id, "room ended before admission");
+                let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())).await;
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
                     .await;
+                }
+                return;
             }
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
-            info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
-            let _ = ws_send.send(WsMessage::Text(serde_json::json!({
+            Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
+                info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
+                let _ = ws_send.send(WsMessage::Text(serde_json::json!({
                 "type": "error", "code": "upgrade_required",
                 "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
                 "pinned_version": pinned, "requested_version": requested,
             }).to_string().into())).await;
-            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
-            {
-                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
                     .await;
+                }
+                return;
             }
-            return;
-        }
-    };
+        };
 
     info!(
         channel_id = %channel_id,
@@ -608,32 +636,33 @@ async fn handle_active_audio_connection(
 
     // Remote registration and owner-assigned ingress admission completed above.
 
-    let (peers_snapshot, roster_revision): (Vec<serde_json::Value>, u64) =
-        if let Some(session) = remote_session.as_ref() {
-            (
+    let (peers_snapshot, roster_revision): (Vec<serde_json::Value>, u64) = if let Some(session) =
+        remote_session.as_ref()
+    {
+        (
                 session
                     .roster()
                     .peers
                     .iter()
                     .map(|peer| {
-                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index})
+                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch})
                     })
                     .collect(),
                 session.roster().revision,
             )
-        } else {
-            let snapshot = room.roster_snapshot();
-            (
+    } else {
+        let snapshot = room.roster_snapshot();
+        (
                 snapshot
                     .peers
                     .into_iter()
                     .map(|peer| {
-                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index})
+                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch})
                     })
                     .collect(),
                 snapshot.revision,
             )
-        };
+    };
     debug_assert!(roster_revision >= admission_revision);
 
     let joined_msg = serde_json::json!({
@@ -641,6 +670,7 @@ async fn handle_active_audio_connection(
         "revision": roster_revision,
         "pubkey": pubkey_hex,
         "peer_index": peer_index,
+        "epoch": peer_epoch,
         "peers": peers_snapshot,
     })
     .to_string();
@@ -858,6 +888,7 @@ async fn handle_active_audio_connection(
                     "revision": delta.revision,
                     "pubkey": left.pubkey,
                     "peer_index": left.peer_index,
+                    "epoch": left.epoch,
                 })
                 .to_string();
                 room.broadcast_control(left_msg);
@@ -977,7 +1008,7 @@ fn remote_rejection_ws_error(reason: &crate::audio::join::RegisterRejection) -> 
     match reason {
         RegisterRejection::RoomFull => serde_json::json!({
             "type": "error", "code": "room_full",
-            "message": "peer index space exhausted"
+            "message": "room participant capacity reached"
         }),
         RegisterRejection::RoomEnded => serde_json::json!({
             "type": "error", "code": "room_ended", "message": "huddle has ended"

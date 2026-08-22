@@ -10,17 +10,17 @@ const _parentChannelId = '11111111-2222-4333-8444-555555555555';
 const _ephemeralChannelId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 void main() {
-  group('HuddleWireV2', () {
-    test('encodes the desktop-compatible big-endian v2 golden frame', () {
+  group('HuddleWireV3', () {
+    test('encodes the desktop-compatible big-endian v3 golden frame', () {
       const header = HuddleAudioHeader(
         sequence: 0x1234,
         timestamp48k: 0x01020304,
         levelDbov: -42,
-        flags: HuddleWireV2.dtxFlag,
+        flags: HuddleWireV3.dtxFlag,
       );
 
       expect(
-        HuddleWireV2.encodeClientFrame(
+        HuddleWireV3.encodeClientFrame(
           header,
           Uint8List.fromList([0xaa, 0xbb]),
         ),
@@ -29,9 +29,10 @@ void main() {
     });
 
     test('decodes peer prefix, v2 header, and Opus payload', () {
-      final frame = HuddleWireV2.decodeRelayFrame(
+      final frame = HuddleWireV3.decodeRelayFrame(
         Uint8List.fromList([
           0x07,
+          0x00,
           0x12,
           0x34,
           0x01,
@@ -46,6 +47,7 @@ void main() {
       );
 
       expect(frame.peerIndex, 7);
+      expect(frame.epoch, 0);
       expect(frame.header.sequence, 0x1234);
       expect(frame.header.timestamp48k, 0x01020304);
       expect(frame.header.levelDbov, -42);
@@ -82,21 +84,21 @@ void main() {
       );
 
       expect(
-        () => HuddleWireV2.encodeClientFrame(header, Uint8List(0)),
+        () => HuddleWireV3.encodeClientFrame(header, Uint8List(0)),
         throwsA(isA<HuddleWireException>()),
       );
       expect(
-        () => HuddleWireV2.encodeClientFrame(
+        () => HuddleWireV3.encodeClientFrame(
           header,
-          Uint8List(HuddleWireV2.maxBinaryFrameLength),
+          Uint8List(HuddleWireV3.maxBinaryFrameLength),
         ),
         throwsA(isA<HuddleWireException>()),
       );
     });
   });
 
-  group('HuddleAuthV2', () {
-    test('uses the base relay URL and fixed v2 auth envelope', () {
+  group('HuddleAuthV3', () {
+    test('uses the base relay URL and fixed v3 auth envelope', () {
       final parameters = HuddleConnectionParameters(
         relayWebSocketUrl: 'wss://buzz.example',
         nsec: _privateKey,
@@ -104,7 +106,7 @@ void main() {
         ephemeralChannelId: _ephemeralChannelId,
       );
 
-      final auth = HuddleAuthV2.buildMessage(
+      final auth = HuddleAuthV3.buildMessage(
         parameters: parameters,
         challenge: 'relay-challenge',
         createdAt: 1_700_000_000,
@@ -115,7 +117,7 @@ void main() {
           .toList();
 
       expect(auth['type'], 'auth');
-      expect(auth['protocol_version'], 2);
+      expect(auth['protocol_version'], 3);
       expect(auth['parent_channel_id'], _parentChannelId);
       expect(event['kind'], 22242);
       expect(tags[0], ['relay', 'wss://buzz.example']);

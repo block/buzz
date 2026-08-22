@@ -18,10 +18,9 @@
 //!   → cancel flag: a 10 ms barge-in monitor thread silences the player and
 //!     releases tts_active on the flag's rising edge (~15 ms flag-to-silence,
 //!     even mid-sentence while the worker is blocked in synth_chunk); the
-//!     worker then consumes the flag — drain queue + clear + play (un-pause).
-//!     Monitor clears and worker player mutations are serialized through the
-//!     `player_ops` mutex, with the flag re-checked under the lock — see the
-//!     monitor block in `tts_worker` for the race this closes.
+//!     worker then consumes the flag and drains stale text. Every Player
+//!     operation is serialized by `PlaybackCoordinator`; cancellation swaps in
+//!     a fresh queue and drops the old Player after releasing the coordinator.
 //! ```
 //!
 //! Lookahead pipelining spans *items*, not just sentences within one item:
@@ -47,6 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::human_floor::HumanFloor;
 use super::pocket::{
     load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
@@ -54,6 +54,10 @@ use super::preprocessing::preprocess_for_tts;
 
 #[path = "tts_voice_transition.rs"]
 mod voice_transition;
+use super::tts_playback::*;
+#[path = "tts_append.rs"]
+mod append;
+use append::*;
 use voice_transition::*;
 #[path = "tts_startup.rs"]
 mod startup;
@@ -108,10 +112,26 @@ const SYNTH_STEPS: usize = 1;
 /// the leading waveform is important.
 const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
 
-/// Length of the zero-sample cushion prepended when playback is idle, so the
-/// OS audio device / rodio mixer has a fully-quiet ramp-up window before the
-/// real onset hits. Continuously queued chunks receive no synthetic padding.
-const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
+/// rodio 0.22.2 bootstraps `UniformSourceIterator` when a source is added to
+/// the mixer (`conversions/uniform.rs:49-66`). Its empty queue's 512-sample
+/// span (`queue.rs::SourcesQueueInput::new`) can therefore retain placeholder
+/// format metadata until the next span. The lead-in covers that whole span,
+/// rounded up to the next millisecond, while preserving the product's existing
+/// 20 ms quiet ramp-up. Continuously queued chunks receive no synthetic padding.
+const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1_000;
+const PRODUCT_RAMP_UP_MS: usize = 20;
+const PRODUCT_RAMP_UP_SAMPLES: usize = PRODUCT_RAMP_UP_MS * SAMPLES_PER_MS;
+const RODIO_ADD_BOOTSTRAP_SPAN_SAMPLES: usize = 512;
+const RODIO_ADD_BOOTSTRAP_CUSHION_MS: usize =
+    RODIO_ADD_BOOTSTRAP_SPAN_SAMPLES.div_ceil(SAMPLES_PER_MS);
+const SENTENCE_LEAD_IN_SAMPLES: usize = {
+    let bootstrap_cushion = RODIO_ADD_BOOTSTRAP_CUSHION_MS * SAMPLES_PER_MS;
+    if PRODUCT_RAMP_UP_SAMPLES > bootstrap_cushion {
+        PRODUCT_RAMP_UP_SAMPLES
+    } else {
+        bootstrap_cushion
+    }
+};
 
 type WorkerControlState = (
     Arc<AtomicBool>,
@@ -142,6 +162,7 @@ pub struct TtsPipeline {
     /// Kept alive here so the Arc isn't dropped — the worker holds a clone.
     #[allow(dead_code)]
     cancel: Arc<AtomicBool>,
+    human_floor: HumanFloor,
     /// Internal cancellation used only for voice changes. Kept separate so a
     /// concurrent human barge-in always clears every queued message.
     voice_cancel: Arc<AtomicBool>,
@@ -177,6 +198,7 @@ impl TtsPipeline {
         model_dir: PathBuf,
         tts_active: Arc<AtomicBool>,
         cancel: Arc<AtomicBool>,
+        human_floor: HumanFloor,
         voice: &str,
         output_device: Option<String>,
         activity_app: Option<tauri::AppHandle>,
@@ -188,6 +210,7 @@ impl TtsPipeline {
 
         let shutdown_worker = Arc::clone(&shutdown);
         let cancel_worker = Arc::clone(&cancel);
+        let worker_human_floor = human_floor.clone();
         let voice_cancel = Arc::new(AtomicBool::new(false));
         let worker_voice_cancel = Arc::clone(&voice_cancel);
         let tts_active_worker = Arc::clone(&tts_active);
@@ -221,6 +244,7 @@ impl TtsPipeline {
                         worker_voice_change_ack,
                     ),
                     text_rx,
+                    worker_human_floor,
                     (
                         tts_active_worker,
                         shutdown_worker,
@@ -244,6 +268,7 @@ impl TtsPipeline {
             tts_active,
             shutdown,
             cancel,
+            human_floor,
             voice_cancel,
             voice,
             voice_generation,
@@ -272,10 +297,33 @@ impl Drop for TtsPipeline {
 
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
+fn authorize_or_defer_queued_text(
+    human_floor: &HumanFloor,
+    deferred_text: &mut VecDeque<QueuedText>,
+    queued_text: QueuedText,
+) -> Result<QueuedText, HumanFloorAuthorization> {
+    match human_floor.authorization(queued_text.floor_epoch) {
+        HumanFloorAuthorization::Blocked => {
+            deferred_text.push_front(queued_text);
+            Err(HumanFloorAuthorization::Blocked)
+        }
+        HumanFloorAuthorization::Stale => {
+            eprintln!(
+                "buzz-desktop: tts stage=queue status=dropped reason=barge_in route_id={}",
+                queued_text.route_id
+            );
+            Err(HumanFloorAuthorization::Stale)
+        }
+        HumanFloorAuthorization::Permitted => Ok(queued_text),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tts_worker(
     model_dir: PathBuf,
     voice_state: WorkerVoiceState,
     text_rx: mpsc::Receiver<QueuedText>,
+    human_floor: HumanFloor,
     control_state: WorkerControlState,
     output_device: Option<String>,
     activity_app: Option<tauri::AppHandle>,
@@ -348,7 +396,6 @@ fn tts_worker(
 
     // ── 3. Initialise rodio output device ─────────────────────────────────────
     use rodio::buffer::SamplesBuffer;
-    use rodio::Player;
 
     let sink_handle = match super::audio_output::open_output_sink_by_name(output_device.as_deref())
     {
@@ -376,28 +423,25 @@ fn tts_worker(
         }
     };
 
-    // Single persistent Player for the lifetime of the worker — all sentence
-    // buffers from all text items append here, and rodio plays them gaplessly.
-    // Persistence is what enables cross-item pipelining: the worker never
-    // waits for one item to drain before synthesizing the next.
-    //
-    // Shared (Arc) with the barge-in monitor thread below, which needs to
-    // silence it while this thread is blocked inside `synth_chunk`.
-    let player = Arc::new(Player::connect_new(sink_handle.mixer()));
-    playback_probe.install(Arc::clone(&player));
+    // One coordinator owns the current Player, floor state, and every operation.
+    // It was allocated with the huddle state so onset and playback share the
+    // same serialization boundary even before the TTS worker starts.
+    let playback = human_floor.playback();
+    playback.bind_mixer(sink_handle.mixer());
+    playback_probe.install(Arc::clone(&playback));
 
     // Prime the audio output stream with a short silent buffer.
     // On macOS, CoreAudio initializes the output device lazily on first use.
     // Without this, the first real append races against device startup and
-    // player.empty() returns true before audio has started draining — causing
+    // playback.empty() returns true before audio has started draining — causing
     // the first TTS message to be truncated after a few words.
     {
         let silence = vec![0.0f32; SAMPLE_RATE as usize / 10]; // 100ms of silence
-        player.append(SamplesBuffer::new(channels, rate, silence));
+        playback.append_untracked(SamplesBuffer::new(channels, rate, silence));
         // Wait for the silent buffer to drain — this ensures the output stream
         // is fully initialized before the first real utterance.
         let deadline = std::time::Instant::now() + AUDIO_PRIME_TIMEOUT;
-        while !player.empty() {
+        while !playback.empty() {
             if std::time::Instant::now() >= deadline {
                 eprintln!("buzz-desktop: tts stage=startup status=failed reason=output_prime");
                 let _ = startup_tx.send(Err(
@@ -413,16 +457,14 @@ fn tts_worker(
     }
     eprintln!("buzz-desktop: tts stage=startup status=ready");
 
-    let player_ops = Arc::clone(&playback_probe.player_ops);
     let activity_frames = Arc::new(Mutex::new(VecDeque::<TtsSpeakerActivityFrame>::new()));
     let monitor_stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_tts_monitor(TtsMonitorState {
-        player: Arc::clone(&player),
+        playback: Arc::clone(&playback),
         cancel: Arc::clone(&cancel),
         voice_cancel: Arc::clone(&voice_cancel),
         tts_active: Arc::clone(&tts_active),
         stop: Arc::clone(&monitor_stop),
-        player_ops: Arc::clone(&player_ops),
         activity_frames: Arc::clone(&activity_frames),
         active_speaker: Arc::clone(&active_speaker),
         speaker_cancel: Arc::clone(&speaker_cancel),
@@ -446,78 +488,42 @@ fn tts_worker(
     // EXPERIMENTAL (latency bench): `Some(emit_frames)` = stream PCM deltas
     // out of Pocket as they are generated (see tts_streaming.rs).
     let tts_streaming = streaming_emit_frames();
-    // `first_append` = "no audio queued since the player last went idle".
-    // Flipped by `build_sentence_append_buffer` on the first real append; the
-    // idle branch below uses it to decide when to drop `tts_active` and to
-    // arm a fresh lead-in cushion for the next utterance.
-    let mut first_append = true;
     let mut last_route_id = 0;
     let mut deferred_text = VecDeque::new();
+    let append_context = TtsAppendContext {
+        playback: &playback,
+        #[cfg(test)]
+        human_floor: &human_floor,
+        cancel: &cancel,
+        voice_cancel: &voice_cancel,
+        shutdown: &shutdown,
+        tts_active: &tts_active,
+        speaker_generations: &speaker_generations,
+        active_speaker: &active_speaker,
+        activity_frames: &activity_frames,
+        broadcasters: &broadcasters,
+        channels,
+        rate,
+    };
     let append_audio = |prepared: PreparedModelAudio,
                         route_id: u64,
                         speaker_pubkey: Option<&str>,
-                        speaker_generation: u64| {
-        let _ops = lock_player_ops(&player_ops);
-        if cancel.load(Ordering::Acquire)
-            || voice_cancel.load(Ordering::Acquire)
-            || shutdown.load(Ordering::Acquire)
-        {
-            broadcasters.cancel_all();
-            let reason = if shutdown.load(Ordering::Acquire) {
-                "shutdown"
-            } else if cancel.load(Ordering::Acquire) {
-                "barge_in"
-            } else {
-                "voice_switch"
-            };
-            eprintln!(
-                "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
-            );
-            return false;
-        }
-        let speaker_is_current = speaker_pubkey.is_none_or(|pubkey| {
-            current_speaker_generation(&speaker_generations, pubkey) == speaker_generation
-        });
-        if !speaker_is_current {
-            eprintln!(
-                "buzz-desktop: tts stage=synthesis status=cancelled reason=speaker_removed route_id={route_id}"
-            );
-            return false;
-        }
-        if let Some(pubkey) = speaker_pubkey {
-            let mut active = active_speaker
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if player.empty() {
-                active.take();
-            }
-            if active
-                .as_deref()
-                .is_some_and(|current| !current.eq_ignore_ascii_case(pubkey))
-            {
-                return false;
-            }
-            active.get_or_insert_with(|| pubkey.to_ascii_lowercase());
-        }
-        if let Some(pubkey) = speaker_pubkey {
-            activity_frames
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .extend(build_tts_speaker_activity_frames(
-                    &prepared.buffer,
-                    pubkey,
-                    SAMPLE_RATE as usize,
-                ));
-            broadcasters.publish(pubkey, speaker_generation, prepared.buffer.clone());
-        }
-        player.append(SamplesBuffer::new(channels, rate, prepared.buffer));
-        eprintln!(
-            "buzz-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={} sample_count={}",
-            prepared.chunk_index, prepared.sample_count
-        );
-        // Set this only after append so STT remains open during synthesis.
-        tts_active.store(true, Ordering::Release);
-        true
+                        speaker_generation: u64,
+                        floor_epoch: u64| {
+        let broadcast_samples = speaker_pubkey.map(|_| prepared.buffer.clone());
+        append_worker_audio(
+            &append_context,
+            prepared,
+            route_id,
+            speaker_pubkey,
+            speaker_generation,
+            floor_epoch,
+            || {
+                if let (Some(pubkey), Some(samples)) = (speaker_pubkey, broadcast_samples) {
+                    broadcasters.publish(pubkey, speaker_generation, samples);
+                }
+            },
+        )
     };
 
     loop {
@@ -528,9 +534,8 @@ fn tts_worker(
             &speaker_generations,
             &tts_active,
             (&text_rx, &mut deferred_text, &mut no_current_text),
-            Some((&player, &player_ops)),
+            Some(&playback),
         ) {
-            first_append = true;
             continue;
         }
         if cancel.load(Ordering::Acquire)
@@ -546,14 +551,13 @@ fn tts_worker(
             (&text_rx, &mut deferred_text, &mut no_current_text),
             &voice_change_ack,
             None,
-            Some((&player, &player_ops)),
+            Some(&playback),
         ) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
             // Cancel consumed: queued audio cleared, queue drained. The next
             // append starts a new utterance and needs its own lead-in cushion.
-            first_append = true;
             continue;
         }
 
@@ -580,7 +584,7 @@ fn tts_worker(
                     // Nothing queued. If playback has also finished, the agent
                     // has gone quiet — release the mic gate and reset the
                     // lead-in so the next utterance gets a fresh cushion.
-                    if player.empty() && !first_append {
+                    playback.release_if_drained(|| {
                         tts_active.store(false, Ordering::Release);
                         active_speaker
                             .lock()
@@ -589,8 +593,7 @@ fn tts_worker(
                         eprintln!(
                             "buzz-desktop: tts stage=player status=drained route_id={last_route_id}"
                         );
-                        first_append = true;
-                    }
+                    });
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -613,12 +616,11 @@ fn tts_worker(
             (&text_rx, &mut deferred_text, &mut queued_text),
             &voice_change_ack,
             pending_route_id,
-            Some((&player, &player_ops)),
+            Some(&playback),
         ) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
-            first_append = true;
             continue;
         }
         let Some(queued_text) = queued_text else {
@@ -638,7 +640,7 @@ fn tts_worker(
             );
             continue;
         }
-        if !player.empty()
+        if !playback.empty()
             && queued_text
                 .speaker_pubkey
                 .as_deref()
@@ -654,7 +656,19 @@ fn tts_worker(
             thread::sleep(RECV_TIMEOUT);
             continue;
         }
-        let requested_voice = queued_text.voice_reference.unwrap_or_else(|| {
+        let mut queued_text =
+            match authorize_or_defer_queued_text(&human_floor, &mut deferred_text, queued_text) {
+                Ok(queued_text) => queued_text,
+                Err(HumanFloorAuthorization::Blocked) => {
+                    thread::sleep(RECV_TIMEOUT);
+                    continue;
+                }
+                Err(HumanFloorAuthorization::Stale) => continue,
+                Err(HumanFloorAuthorization::Permitted) => {
+                    unreachable!("permitted text is returned")
+                }
+            };
+        let requested_voice = queued_text.voice_reference.take().unwrap_or_else(|| {
             selected_voice
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -663,6 +677,7 @@ fn tts_worker(
         let raw_text = queued_text.text;
         let speaker_pubkey = queued_text.speaker_pubkey;
         let speaker_generation = queued_text.speaker_generation;
+        let floor_epoch = queued_text.floor_epoch;
         let route_id = queued_text.route_id;
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
@@ -670,18 +685,14 @@ fn tts_worker(
         // release stale ownership before doing any potentially slow voice or
         // synthesis work. Serialize the drain decision with Stop and append so
         // those paths observe one coherent utterance boundary.
-        {
-            let _ops = lock_player_ops(&player_ops);
-            if player.empty() && !first_append {
-                tts_active.store(false, Ordering::Release);
-                active_speaker
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .take();
-                eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
-                first_append = true;
-            }
-        }
+        playback.release_if_drained(|| {
+            tts_active.store(false, Ordering::Release);
+            active_speaker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
+        });
 
         // From this point until the item finishes, an empty player can mean a
         // voice-preparation or synthesis gap rather than a drained utterance.
@@ -753,9 +764,8 @@ fn tts_worker(
                 (&text_rx, &mut deferred_text, &mut no_current_text),
                 &voice_change_ack,
                 Some(route_id),
-                Some((&player, &player_ops)),
+                Some(&playback),
             ) {
-                first_append = true;
                 synthesis_outcome = "cancelled";
                 break;
             }
@@ -775,8 +785,7 @@ fn tts_worker(
                     emit_frames,
                     (&cancel, &voice_cancel, &shutdown),
                     StreamingPlayback {
-                        player: &player,
-                        first_append: &mut first_append,
+                        playback: &playback,
                         route_id,
                     },
                     &mut |prepared| {
@@ -785,6 +794,7 @@ fn tts_worker(
                             route_id,
                             speaker_pubkey.as_deref(),
                             speaker_generation,
+                            floor_epoch,
                         ) {
                             return false;
                         }
@@ -834,9 +844,8 @@ fn tts_worker(
                     (&text_rx, &mut deferred_text, &mut no_current_text),
                     &voice_change_ack,
                     Some(route_id),
-                    Some((&player, &player_ops)),
+                    Some(&playback),
                 ) {
-                    first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
                 }
@@ -860,25 +869,21 @@ fn tts_worker(
                     // synthesis that completed after cancellation so stale audio
                     // never reaches the player, while keeping buzz-voice's
                     // extracted April engine API unchanged.
-                    first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
                 }
                 match synthesis {
                     Ok(samples) if !samples.is_empty() => {
-                        if let Some(prepared) = playback_audio.push(
-                            samples,
-                            chunk_index,
-                            &mut first_append,
-                            player.empty(),
-                        ) {
+                        if let Some(prepared) = playback
+                            .prepare_audio(|empty| playback_audio.push(samples, chunk_index, empty))
+                        {
                             if !append_audio(
                                 prepared,
                                 route_id,
                                 speaker_pubkey.as_deref(),
                                 speaker_generation,
+                                floor_epoch,
                             ) {
-                                first_append = true;
                                 synthesis_outcome = "cancelled";
                                 break 'playback_chunks;
                             }
@@ -900,14 +905,14 @@ fn tts_worker(
                     }
                 }
             }
-            if let Some(prepared) = playback_audio.finish(&mut first_append, player.empty()) {
+            if let Some(prepared) = playback.prepare_audio(|empty| playback_audio.finish(empty)) {
                 if !append_audio(
                     prepared,
                     route_id,
                     speaker_pubkey.as_deref(),
                     speaker_generation,
+                    floor_epoch,
                 ) {
-                    first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
                 }
@@ -927,8 +932,8 @@ fn tts_worker(
         }
     }
 
-    // Stop the barge-in monitor before exiting — it holds a Player clone,
-    // and an orphaned monitor would keep ticking against a dead pipeline.
+    // Stop the barge-in monitor before exiting so an orphaned monitor cannot
+    // keep ticking against a dead pipeline.
     monitor_stop.store(true, Ordering::Release);
     if let Ok(handle) = monitor {
         let _ = handle.join();

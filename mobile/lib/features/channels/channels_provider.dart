@@ -256,8 +256,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       if (channel.isDm && hiddenDmIds.contains(channel.id)) continue;
       if (huddleBackingIds.contains(channel.id) &&
           channel.isStream &&
-          channel.isPrivate &&
-          channel.ttlSeconds == 3600) {
+          channel.isPrivate) {
         continue;
       }
       // Ephemeral (TTL) channels are surfaced in the list with an

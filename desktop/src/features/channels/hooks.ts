@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 import {
   addChannelMembers,
@@ -31,16 +36,23 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
-import type { OpenDmInput } from "@/shared/api/tauriChannels";
+import type {
+  GetChannelsPayload,
+  OpenDmInput,
+} from "@/shared/api/tauriChannels";
+import { mergeConcurrentChannelRecency } from "@/features/channels/lib/channelRecencyMerge";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
   inspectChannelSnapshot,
   type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import {
+  CHANNEL_MEMBERS_STALE_TIME_MS,
+  channelMembersQueryKey,
+} from "@/features/channels/rosterFreshness";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -60,15 +72,13 @@ export const channelsFocusRefetchPolicy = {
 const channelsSnapshotPairKey = ["channels", "_snapshot-pair"] as const;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
-const channelMembersQueryKey = (channelId: string) =>
-  ["channels", channelId, "members"] as const;
 const channelTypeOrder = {
   stream: 0,
   forum: 1,
   dm: 2,
 } as const;
 
-function sortChannels(channels: Channel[]) {
+export function sortChannels(channels: Channel[]) {
   const uniqueChannels = new Map<string, Channel>();
 
   for (const channel of channels) {
@@ -312,6 +322,113 @@ export function requireFullChannelList(channels: Channel[] | null): Channel[] {
   return channels;
 }
 
+export type RefreshChannelsQueryOptions = {
+  queryClient: QueryClient;
+  initialSnapshotPair: ChannelSnapshot | null;
+  relayUrl: string | null;
+  ownerPubkey: string | null;
+  fetchChannels?: (knownHash: string | null) => Promise<GetChannelsPayload>;
+  persistSnapshot?: typeof writeChannelSnapshot;
+};
+
+/**
+ * Revalidates the channel query while preserving live recency updates that land
+ * during the request. Exported so the production query/cache interleaving can
+ * be regression-tested without replacing it with a helper-only simulation.
+ */
+export async function refreshChannelsQuery({
+  queryClient,
+  initialSnapshotPair,
+  relayUrl,
+  ownerPubkey,
+  fetchChannels = getChannels,
+  persistSnapshot = writeChannelSnapshot,
+}: RefreshChannelsQueryOptions): Promise<Channel[]> {
+  // Revalidation uses only an authoritative list/hash pair. The displayed
+  // channels cache is intentionally ignored because successful mutations
+  // patch it before the relay's list/hash has necessarily caught up.
+  const cachedPair =
+    queryClient.getQueryData<ChannelSnapshot>(channelsSnapshotPairKey) ??
+    initialSnapshotPair;
+  const knownHash = cachedPair?.hash ?? null;
+
+  const channelsAtRequestStart =
+    queryClient.getQueryData<Channel[]>(channelsQueryKey);
+  const payload = await fetchChannels(knownHash);
+
+  // A not-modified response is usable only when it echoes the exact hash
+  // that described the available list. Any other hash/list pairing fails
+  // slow-never-wrong by retrying without a hash.
+  const hasMatchingNotModifiedResponse =
+    payload.channels === null &&
+    knownHash !== null &&
+    payload.hash === knownHash;
+  const pairChannels =
+    payload.channels ??
+    (hasMatchingNotModifiedResponse ? cachedPair?.channels : undefined);
+
+  if (!pairChannels) {
+    // Missing cache or a mismatched not-modified response: discard the hash
+    // and fetch a complete authoritative list before updating persistence.
+    const full = await fetchChannels(null);
+    const authoritativeChannels = sortChannels(
+      applyLastMessages(
+        requireFullChannelList(full.channels),
+        full.lastMessages,
+      ),
+    );
+    const displayedAtSettlement =
+      queryClient.getQueryData<Channel[]>(channelsQueryKey);
+    const sorted = sortChannels(
+      mergeConcurrentChannelRecency(
+        authoritativeChannels,
+        displayedAtSettlement,
+        channelsAtRequestStart,
+      ),
+    );
+    const pair = { channels: authoritativeChannels, hash: full.hash };
+    queryClient.setQueryData(channelsSnapshotPairKey, pair);
+    if (relayUrl && ownerPubkey) {
+      persistSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
+    }
+    return sorted;
+  }
+
+  const authoritativeChannels = sortChannels(
+    applyLastMessages(pairChannels, payload.lastMessages),
+  );
+  const pair = {
+    channels: authoritativeChannels,
+    hash: payload.hash,
+  };
+  queryClient.setQueryData(channelsSnapshotPairKey, pair);
+  // Merge against the displayed cache at settlement so a newer live
+  // timestamp cannot be rolled back by an older request result. This is
+  // required for both full-list and matching not-modified responses.
+  const displayedAtSettlement =
+    queryClient.getQueryData<Channel[]>(channelsQueryKey);
+  const refreshedForDisplay =
+    payload.channels === null
+      ? sortChannels(
+          applyLastMessages(
+            displayedAtSettlement ?? authoritativeChannels,
+            payload.lastMessages,
+          ),
+        )
+      : authoritativeChannels;
+  const sorted = sortChannels(
+    mergeConcurrentChannelRecency(
+      refreshedForDisplay,
+      displayedAtSettlement,
+      channelsAtRequestStart,
+    ),
+  );
+  if (relayUrl && ownerPubkey) {
+    persistSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
+  }
+  return sorted;
+}
+
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
@@ -351,75 +468,13 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
       relayUrl !== null &&
       canFetchChannelsForIdentity(ownerPubkey, identityQuery.isError),
     queryKey: channelsQueryKey,
-    queryFn: async () => {
-      // Revalidation uses only an authoritative list/hash pair. The displayed
-      // channels cache is intentionally ignored because successful mutations
-      // patch it before the relay's list/hash has necessarily caught up.
-      const cachedPair =
-        queryClient.getQueryData<ChannelSnapshot>(channelsSnapshotPairKey) ??
-        initialSnapshotPair;
-      const knownHash = cachedPair?.hash ?? null;
-
-      const payload = await getChannels(knownHash);
-
-      // A not-modified response is usable only when it echoes the exact hash
-      // that described the available list. Any other hash/list pairing fails
-      // slow-never-wrong by retrying without a hash.
-      const hasMatchingNotModifiedResponse =
-        payload.channels === null &&
-        knownHash !== null &&
-        payload.hash === knownHash;
-      const pairChannels =
-        payload.channels ??
-        (hasMatchingNotModifiedResponse ? cachedPair?.channels : undefined);
-
-      if (!pairChannels) {
-        // Missing cache or a mismatched not-modified response: discard the hash
-        // and fetch a complete authoritative list before updating persistence.
-        const full = await getChannels(null);
-        const sorted = sortChannels(
-          applyLastMessages(
-            requireFullChannelList(full.channels),
-            full.lastMessages,
-          ),
-        );
-        const pair = { channels: sorted, hash: full.hash };
-        queryClient.setQueryData(channelsSnapshotPairKey, pair);
-        if (relayUrl && ownerPubkey) {
-          writeChannelSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
-        }
-        return sorted;
-      }
-
-      const authoritativeChannels = sortChannels(
-        applyLastMessages(pairChannels, payload.lastMessages),
-      );
-      const pair = {
-        channels: authoritativeChannels,
-        hash: payload.hash,
-      };
-      queryClient.setQueryData(channelsSnapshotPairKey, pair);
-      // A matching not-modified result must merge timestamps into whatever is
-      // displayed at completion time. Reading through setQueryData avoids
-      // clobbering an optimistic mutation that landed while the request ran.
-      const sorted =
-        payload.channels === null
-          ? (queryClient.setQueryData<Channel[]>(
-              channelsQueryKey,
-              (displayedChannels) =>
-                sortChannels(
-                  applyLastMessages(
-                    displayedChannels ?? authoritativeChannels,
-                    payload.lastMessages,
-                  ),
-                ),
-            ) ?? authoritativeChannels)
-          : authoritativeChannels;
-      if (relayUrl && ownerPubkey) {
-        writeChannelSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
-      }
-      return sorted;
-    },
+    queryFn: () =>
+      refreshChannelsQuery({
+        queryClient,
+        initialSnapshotPair,
+        relayUrl,
+        ownerPubkey,
+      }),
     // Paint the complete persisted list immediately. `initialDataUpdatedAt: 0`
     // deliberately keeps it stale so every boot still validates against the
     // relay; queryFn reads the matching hash from the same atomic document.
@@ -574,7 +629,7 @@ export function useChannelMembersQuery(
 
       return getChannelMembers(channelId);
     },
-    staleTime: 30_000,
+    staleTime: CHANNEL_MEMBERS_STALE_TIME_MS,
   });
 }
 
@@ -738,32 +793,6 @@ export function useDeleteChannelMutation(channelId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);
     },
-  });
-}
-
-/**
- * Whether the signed-in identity may add *another* identity to this channel,
- * per {@link canAddChannelMembers}. Both queries are the ones the channel UI
- * already holds, so this shares their cache rather than fetching again.
- */
-export function useCanAddChannelMembers(channelId: string | null) {
-  const channelsQuery = useChannelsQuery();
-  const membersQuery = useChannelMembersQuery(channelId);
-  const identityQuery = useIdentityQuery();
-
-  const channel =
-    channelsQuery.data?.find((candidate) => candidate.id === channelId) ?? null;
-  const selfPubkey = identityQuery.data?.pubkey ?? null;
-  const selfRole = selfPubkey
-    ? (membersQuery.data?.find(
-        (member) => member.pubkey.toLowerCase() === selfPubkey.toLowerCase(),
-      )?.role ?? null)
-    : null;
-
-  return canAddChannelMembers({
-    channelType: channel?.channelType,
-    visibility: channel?.visibility,
-    selfRole,
   });
 }
 

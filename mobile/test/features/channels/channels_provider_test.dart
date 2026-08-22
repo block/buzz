@@ -457,6 +457,47 @@ void main() {
   );
 
   test(
+    'Huddle-linked private streams stay hidden when relay overrides the TTL',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk, ownerPubkey: myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(
+            id: _channelB,
+            name: 'huddle-22222222',
+            ttlSeconds: 60,
+            visibility: 'private',
+          ),
+        ],
+        huddleStarts: [
+          NostrEvent(
+            id: 'huddle-start',
+            pubkey: myPk,
+            createdAt: now,
+            kind: EventKind.huddleStarted,
+            tags: const [
+              ['h', _channelA],
+            ],
+            content: '{"ephemeral_channel_id":"$_channelB"}',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      expect(channels.map((channel) => channel.id), [_channelA]);
+    },
+  );
+
+  test(
     'forged Huddle links do not hide unrelated one-hour private streams',
     () async {
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;

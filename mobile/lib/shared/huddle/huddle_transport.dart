@@ -64,7 +64,16 @@ final class HuddlePeer {
   final String pubkey;
   final int peerIndex;
 
-  const HuddlePeer({required this.pubkey, required this.peerIndex});
+  /// Occupancy epoch of `peerIndex` for this pubkey. Advances each time the
+  /// index is reused by another occupancy; media frames are fenced against it
+  /// so a prior occupant's in-flight audio cannot be mis-attributed after reuse.
+  final int epoch;
+
+  const HuddlePeer({
+    required this.pubkey,
+    required this.peerIndex,
+    required this.epoch,
+  });
 }
 
 enum HuddlePeerEventType { joined, left, replaced }
@@ -106,7 +115,7 @@ final class HuddleTransportState {
 ///
 /// This socket intentionally does not reuse [RelaySocket]: the main Nostr
 /// connection speaks JSON arrays and ignores binary messages, while Huddle
-/// audio uses JSON objects for its handshake/control plane and binary Opus v2
+/// audio uses JSON objects for its handshake/control plane and binary Opus v3
 /// frames for media. [connect] completes only after the relay's `joined`
 /// response, making authentication and room admission observable to callers.
 abstract interface class HuddleTransportClient {
@@ -286,7 +295,7 @@ final class HuddleTransport implements HuddleTransportClient {
     }
 
     try {
-      channel.sink.add(HuddleWireV2.encodeClientFrame(header, opusPayload));
+      channel.sink.add(HuddleWireV3.encodeClientFrame(header, opusPayload));
     } catch (error) {
       throw HuddleTransportError(
         code: HuddleTransportErrorCode.sendFailed,
@@ -400,7 +409,7 @@ final class HuddleTransport implements HuddleTransportClient {
     }
 
     try {
-      final auth = HuddleAuthV2.buildMessage(
+      final auth = HuddleAuthV3.buildMessage(
         parameters: parameters,
         challenge: challenge,
       );
@@ -434,11 +443,13 @@ final class HuddleTransport implements HuddleTransportClient {
 
     final pubkey = message['pubkey'];
     final peerIndex = message['peer_index'];
+    final epoch = _parseEpoch(message['epoch']);
     if (pubkey is! String ||
         pubkey.isEmpty ||
         peerIndex is! int ||
         peerIndex < 0 ||
-        peerIndex > 255) {
+        peerIndex > 255 ||
+        epoch == null) {
       _handleProtocolProblem('Malformed Huddle joined message.', generation);
       return;
     }
@@ -488,10 +499,14 @@ final class HuddleTransport implements HuddleTransportClient {
         (candidate) => candidate.pubkey.toLowerCase() == pubkey.toLowerCase(),
       );
       if (!selfPresent) {
-        peers[peerIndex] = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
+        peers[peerIndex] = HuddlePeer(
+          pubkey: pubkey,
+          peerIndex: peerIndex,
+          epoch: epoch,
+        );
       }
     }
-    final peer = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
+    final peer = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex, epoch: epoch);
     if (!initialAdmission || revision == null) {
       peers[peerIndex] = peer;
     }
@@ -500,7 +515,7 @@ final class HuddleTransport implements HuddleTransportClient {
     }
     if (!initialAdmission &&
         replaced != null &&
-        replaced.pubkey != peer.pubkey) {
+        !_sameOccupancy(replaced, peer)) {
       _purgeAudioIngress({peerIndex});
     }
 
@@ -515,7 +530,7 @@ final class HuddleTransport implements HuddleTransportClient {
       ),
     );
     if (!initialAdmission) {
-      if (replaced != null && replaced.pubkey != peer.pubkey) {
+      if (replaced != null && !_sameOccupancy(replaced, peer)) {
         _peerController.add(
           HuddlePeerEvent(
             type: HuddlePeerEventType.replaced,
@@ -547,13 +562,20 @@ final class HuddleTransport implements HuddleTransportClient {
     final removedOrReplacedIndices = <int>{};
     for (final entry in previous.entries) {
       final replacement = current[entry.key];
-      if (replacement == null || replacement.pubkey != entry.value.pubkey) {
+      // A fresh socket admission may follow a relay restart that reused the
+      // same pubkey/index/epoch while resetting its Opus sequence. Native
+      // playout survives reconnects, so every re-admitted remote slot must
+      // reset that prior decoder and jitter state.
+      if (replacement == null) {
+        removedOrReplacedIndices.add(entry.key);
+        _peerController.add(
+          HuddlePeerEvent(type: HuddlePeerEventType.left, peer: entry.value),
+        );
+      } else {
         removedOrReplacedIndices.add(entry.key);
         _peerController.add(
           HuddlePeerEvent(
-            type: replacement == null
-                ? HuddlePeerEventType.left
-                : HuddlePeerEventType.replaced,
+            type: HuddlePeerEventType.replaced,
             peer: entry.value,
             replacement: replacement,
           ),
@@ -630,7 +652,7 @@ final class HuddleTransport implements HuddleTransportClient {
     final removedOrReplacedIndices = <int>{};
     for (final entry in previous.entries) {
       final replacement = peers[entry.key];
-      if (replacement == null || replacement.pubkey != entry.value.pubkey) {
+      if (replacement == null || !_sameOccupancy(replacement, entry.value)) {
         removedOrReplacedIndices.add(entry.key);
       }
     }
@@ -641,7 +663,7 @@ final class HuddleTransport implements HuddleTransportClient {
         _peerController.add(
           HuddlePeerEvent(type: HuddlePeerEventType.left, peer: entry.value),
         );
-      } else if (replacement.pubkey != entry.value.pubkey) {
+      } else if (!_sameOccupancy(replacement, entry.value)) {
         _peerController.add(
           HuddlePeerEvent(
             type: HuddlePeerEventType.replaced,
@@ -725,17 +747,37 @@ final class HuddleTransport implements HuddleTransportClient {
       if (candidate is! Map) return null;
       final pubkey = candidate['pubkey'];
       final peerIndex = candidate['peer_index'];
+      final epoch = _parseEpoch(candidate['epoch']);
       if (pubkey is! String ||
           pubkey.isEmpty ||
           peerIndex is! int ||
           peerIndex < 0 ||
           peerIndex > 255 ||
+          epoch == null ||
           peers.containsKey(peerIndex)) {
         return null;
       }
-      peers[peerIndex] = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
+      peers[peerIndex] = HuddlePeer(
+        pubkey: pubkey,
+        peerIndex: peerIndex,
+        epoch: epoch,
+      );
     }
     return peers;
+  }
+
+  static bool _sameOccupancy(HuddlePeer left, HuddlePeer right) =>
+      left.pubkey == right.pubkey && left.epoch == right.epoch;
+
+  /// Parse an optional wire `epoch` field. A current relay always sends it; a
+  /// missing value defaults to `0` so the fence degrades to a no-op against a
+  /// legacy relay rather than rejecting every frame. A present-but-malformed
+  /// value (wrong type or out of the `u8` range) is a protocol error and
+  /// yields `null`, mirroring `peer_index` strictness.
+  static int? _parseEpoch(Object? raw) {
+    if (raw == null) return 0;
+    if (raw is! int || raw < 0 || raw > 255) return null;
+    return raw;
   }
 
   void _handleRelayError(Map<String, dynamic> message, int generation) {
@@ -764,10 +806,13 @@ final class HuddleTransport implements HuddleTransportClient {
       return;
     }
     try {
-      final frame = HuddleWireV2.decodeRelayFrame(bytes);
+      final frame = HuddleWireV3.decodeRelayFrame(bytes);
       // The authoritative control roster owns the routing table. Packets from
       // absent/recycled slots are stale and must never allocate playback state.
-      if (!_state.peers.containsKey(frame.peerIndex)) return;
+      // The epoch fences the reuse race: an in-flight frame authored by a
+      // departed occupant that arrives after its index is reassigned carries
+      // the old epoch and is dropped rather than mis-attributed.
+      if (!_isCurrentOccupant(frame.peerIndex, frame.epoch)) return;
       if (_audioIngress.length == _audioIngressCapacity) {
         _audioIngress.removeFirst();
       }
@@ -782,6 +827,15 @@ final class HuddleTransport implements HuddleTransportClient {
         ),
       );
     }
+  }
+
+  /// Whether `peerIndex` is currently occupied at exactly `epoch`. A frame is
+  /// deliverable only when both match the authoritative roster: an absent slot
+  /// is stale, and a slot reused by a later occupant has advanced its epoch, so
+  /// a departed occupant's in-flight frame is fenced rather than mis-attributed.
+  bool _isCurrentOccupant(int peerIndex, int epoch) {
+    final occupant = _state.peers[peerIndex];
+    return occupant != null && occupant.epoch == epoch;
   }
 
   void _purgeAudioIngress(Set<int> peerIndices) {
@@ -800,7 +854,8 @@ final class HuddleTransport implements HuddleTransportClient {
       // Control and media are handled by the same socket callback, but queued
       // media drains on later event-loop turns. Revalidate here so a removal
       // or index replacement wins over every frame queued before that control.
-      if (_state.peers.containsKey(frame.peerIndex)) {
+      // The epoch check rejects a frame whose slot was reused after it queued.
+      if (_isCurrentOccupant(frame.peerIndex, frame.epoch)) {
         _audioController.add(frame);
         break;
       }
