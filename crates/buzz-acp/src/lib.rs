@@ -106,6 +106,298 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Applies this harness's kind:10100 `channel_ids` changes one at a time.
+///
+/// Membership deltas must be applied strictly in order and strictly one at a
+/// time. kind:10100 is replaceable and read-modify-written, so two concurrent
+/// appliers would both start from the pre-change profile and the later write
+/// would drop the earlier channel; two out-of-order appliers for the *same*
+/// channel would settle on the wrong answer (an add landing after its own
+/// remove leaves the agent advertising a channel it left). A single worker
+/// draining an ordered queue gives both properties.
+struct ProfileChannelUpdater {
+    tx: tokio::sync::mpsc::UnboundedSender<(Uuid, bool)>,
+}
+
+impl ProfileChannelUpdater {
+    fn spawn(rest_client: relay::RestClient, keys: nostr::Keys) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Uuid, bool)>();
+        tokio::spawn(async move {
+            // The relay breaks a same-second replaceable tie by lowest event id
+            // and rolls the loser back while still reporting the write as
+            // accepted, so never sign two of these inside one second.
+            let mut last_published_secs = 0u64;
+            // Deltas from a publish that failed. The queue is the only copy, so
+            // they are carried into the next attempt rather than dropped: a
+            // peer's future timestamp or a backwards clock step would otherwise
+            // leave `channel_ids` wrong indefinitely behind a single warn line.
+            let mut deltas: Vec<(Uuid, bool)> = Vec::new();
+            // Set while `deltas` holds work from a failed publish. Waiting only
+            // on `rx` would mean the retry never happens until the *next*
+            // membership change arrives — and membership churn is rare enough
+            // that "next change" can be never for the life of the process,
+            // leaving the agent absent from every `@mention` picker behind a
+            // single warn line.
+            let mut retry_delay: Option<std::time::Duration> = None;
+            loop {
+                let received = match retry_delay {
+                    None => match rx.recv().await {
+                        Some(delta) => Some(delta),
+                        None => break,
+                    },
+                    Some(delay) => tokio::select! {
+                        queued = rx.recv() => match queued {
+                            Some(delta) => Some(delta),
+                            None => break,
+                        },
+                        _ = tokio::time::sleep(delay) => None,
+                    },
+                };
+                // Coalesce everything already queued into a single publish.
+                // Membership churn arrives in bursts — a bulk invite queues one
+                // delta per channel within a few milliseconds — and each write
+                // needs its own second, so publishing them one at a time would
+                // demand more distinct seconds than the burst spans. Applying
+                // them together needs exactly one.
+                if let Some(first) = received {
+                    deltas.push(first);
+                }
+                while let Ok(next) = rx.try_recv() {
+                    deltas.push(next);
+                }
+                if deltas.is_empty() {
+                    retry_delay = None;
+                    continue;
+                }
+                match apply_profile_channel_delta(&rest_client, &keys, &deltas, last_published_secs)
+                    .await
+                {
+                    Ok(Some(published_secs)) => {
+                        last_published_secs = published_secs;
+                        deltas.clear();
+                        retry_delay = None;
+                    }
+                    Ok(None) => {
+                        deltas.clear();
+                        retry_delay = None;
+                    }
+                    Err(e) => {
+                        let next = retry_delay
+                            .map(|delay| (delay * 2).min(MAX_PROFILE_RETRY_DELAY))
+                            .unwrap_or(BASE_PROFILE_RETRY_DELAY);
+                        retry_delay = Some(next);
+                        tracing::warn!(
+                            "failed to republish agent profile, retrying in {next:?}: {e}"
+                        );
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Queue a membership change. Unbounded because dropping a delta would
+    /// leave the profile permanently stale, and membership churn is rare.
+    fn record(&self, channel_id: Uuid, joined: bool) {
+        if self.tx.send((channel_id, joined)).is_err() {
+            tracing::warn!("profile channel updater stopped; skipping republish");
+        }
+    }
+}
+
+/// How far ahead of local time a republish may stamp its `created_at`.
+///
+/// Bounds how much peer clock skew we will out-bid before giving up loudly.
+const MAX_PROFILE_PUBLISH_SKEW_SECS: u64 = 5;
+
+/// First retry delay after a failed profile republish.
+const BASE_PROFILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ceiling for the profile-republish retry backoff. A stale `channel_ids` keeps
+/// the agent out of `@mention` pickers, so this stays low enough to self-heal
+/// within a work session.
+const MAX_PROFILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Apply one membership change to this agent's self-declared `channel_ids`.
+///
+/// `channel_ids` is a field desktop's @mention picker reads to decide whether
+/// an agent is invocable in a channel, and nothing kept it in sync. An agent
+/// invited to a new channel subscribed immediately but stayed absent from that
+/// channel's picker until an operator republished the profile by hand.
+///
+/// The update is a delta, not a rewrite from this harness's subscription set.
+/// That set is narrowed by `channels_override`, by rule matching, and by any
+/// channel whose startup subscribe failed — publishing it wholesale would
+/// delete every channel this process happens not to serve, and two harnesses
+/// sharing a pubkey with different overrides would flap the field against each
+/// other.
+///
+/// The profile is read-modify-written so fields this harness does not own
+/// (`display_name`, `capabilities`, `channel_add_policy`) survive. A missing
+/// profile is left missing: creating one is the deploy tooling's job, and a
+/// partial profile invented here would read as a downgrade to clients. The
+/// human-readable `channels` array is deliberately untouched — nothing gates on
+/// it, and naming a just-joined channel would cost another round trip.
+/// Returns the second the new profile was published in, or `None` when nothing
+/// needed publishing.
+async fn apply_profile_channel_delta(
+    rest_client: &relay::RestClient,
+    keys: &nostr::Keys,
+    deltas: &[(Uuid, bool)],
+    last_published_secs: u64,
+) -> Result<Option<u64>, relay::RelayError> {
+    use buzz_core::kind::KIND_AGENT_PROFILE;
+    use nostr::{EventBuilder, Kind};
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(KIND_AGENT_PROFILE as u16))
+        .author(keys.public_key())
+        .limit(1);
+    let existing = rest_client.query(&[filter]).await?;
+    let existing_event = existing.as_array().and_then(|events| events.first());
+    // Anyone may have published this profile — deploy tooling, `buzz channels
+    // set-add-policy`, another harness. Treat its `created_at` as a floor so
+    // our write cannot collide with theirs in the same second either.
+    let last_published_secs = last_published_secs.max(
+        existing_event
+            .and_then(|event| event.get("created_at"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    );
+    let content = existing_event
+        .and_then(|event| event.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let Ok(serde_json::Value::Object(mut profile)) =
+        serde_json::from_str::<serde_json::Value>(content)
+    else {
+        tracing::debug!("no kind:10100 profile to update — skipping republish");
+        return Ok(None);
+    };
+
+    let mut ids: Vec<String> = profile
+        .get("channel_ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Applied in queue order, so a join/leave/rejoin of one channel settles on
+    // the last observed state rather than on whichever delta happens to win.
+    let mut changed = false;
+    for (channel_id, joined) in deltas {
+        let target = channel_id.to_string();
+        let had = ids.iter().any(|id| id == &target);
+        if *joined == had {
+            tracing::debug!(channel_id = %channel_id, "profile channel_ids already current");
+            continue;
+        }
+        if *joined {
+            ids.push(target);
+        } else {
+            ids.retain(|id| id != &target);
+        }
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    ids.sort();
+    ids.dedup();
+    profile.insert(
+        "channel_ids".to_string(),
+        serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()),
+    );
+
+    // Never sign two of these inside one second — see `ProfileChannelUpdater`.
+    //
+    // The floor is seeded from the stored profile's `created_at`, which any
+    // peer can set: deploy tooling, `buzz channels set-add-policy`, or another
+    // harness on a skewed clock. Sleeping until the wall clock passes it would
+    // park the single worker — and grow its unbounded queue — for the whole
+    // skew, and giving up on that sleep would silently sign a losing
+    // `created_at` with nothing to requeue the delta. Stamp the timestamp past
+    // the floor instead: it wins the LWW compare without waiting at all.
+    let now = unix_secs_now();
+    let created_at = now.max(last_published_secs + 1);
+    let lead = created_at.saturating_sub(now);
+    // Relays reject timestamps too far in the future, so a wildly skewed peer
+    // is unwinnable. Fail loudly rather than publishing an event that cannot
+    // land — the worker logs it and leaves its own clock untouched.
+    //
+    // Only a peer can reach this. Our own writes cannot, because of the sleep
+    // below: it hands the lead back before returning, so each publish starts
+    // from `now` again instead of the stamps ratcheting a second higher every
+    // time and eventually tripping this guard on the harness's own traffic.
+    if lead > MAX_PROFILE_PUBLISH_SKEW_SECS {
+        return Err(relay::RelayError::Http(format!(
+            "stored agent profile is timestamped {lead}s ahead of local time; refusing to republish"
+        )));
+    }
+    // Publishing is capped at one per second by the distinct-`created_at`
+    // requirement. Sleeping here rather than returning an error is what keeps
+    // that a rate limit instead of a data loss: the queue is the only copy of
+    // these deltas, and the worker has no requeue path.
+    if lead > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(lead)).await;
+    }
+
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_AGENT_PROFILE as u16),
+        serde_json::Value::Object(profile).to_string(),
+    )
+    .tags([])
+    .custom_created_at(nostr::Timestamp::from_secs(created_at))
+    .sign_with_keys(keys)
+    .map_err(|e| relay::RelayError::Http(format!("profile sign error: {e}")))?;
+    // `submit_event` awaits the relay's response, unlike the socket publisher,
+    // which returns as soon as the command is queued. The next delta reads the
+    // profile back, so the write has to be durable before this returns.
+    let response = rest_client.submit_event(&event).await?;
+    // A 200 does not mean the profile changed. Two distinct failures hide
+    // behind one:
+    //
+    // - `accepted: false` — the relay refused the event outright.
+    // - `accepted: true` with a `duplicate:` message — the write was stored
+    //   and then rolled back because a peer's copy won the replaceable
+    //   compare (`Db::replace_addressable_event` reports `was_inserted =
+    //   false`, and the ingest path maps that to accepted-plus-duplicate).
+    //
+    // The second is the one this design actually invites, and reading only
+    // `accepted` misses it: the worker would record a publish that never
+    // landed and clear the deltas, which are its only copy.
+    let accepted = response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false);
+    let message = response
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !accepted || message.starts_with("duplicate:") {
+        let detail = if message.is_empty() {
+            "relay did not accept the profile update"
+        } else {
+            message
+        };
+        return Err(relay::RelayError::Http(format!(
+            "profile channel_ids update did not land: {detail}"
+        )));
+    }
+    Ok(Some(created_at))
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -2025,6 +2317,8 @@ async fn tokio_main() -> Result<()> {
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
+    let profile_channel_updater =
+        ProfileChannelUpdater::spawn(relay.rest_client(), config.keys.clone());
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
@@ -2682,6 +2976,10 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 membership_newest_ts.insert(ch, ts);
 
+                                // `Some(joined)` once we know this agent's served
+                                // channel set includes/excludes `ch`; `None` when
+                                // the notification does not apply to us.
+                                let mut profile_channel_delta: Option<bool> = None;
                                 if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
@@ -2689,18 +2987,21 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
+                                        profile_channel_delta = Some(true);
                                     } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            profile_channel_delta = Some(true);
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
+                                    profile_channel_delta = Some(false);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -2742,6 +3043,16 @@ async fn tokio_main() -> Result<()> {
                                             "cleaned up after membership removal"
                                         );
                                     }
+                                }
+                                // The set of channels this agent serves just
+                                // changed. Refresh the self-declared copy in
+                                // kind:10100 so discovery surfaces track it
+                                // without an operator republishing by hand.
+                                // Queued rather than applied here: the update
+                                // is a relay round trip, and the deltas must
+                                // land in the order they were observed.
+                                if let Some(joined) = profile_channel_delta {
+                                    profile_channel_updater.record(ch, joined);
                                 }
                                 continue;
                             }

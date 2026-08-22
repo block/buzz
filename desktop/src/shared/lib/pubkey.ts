@@ -9,6 +9,17 @@ export function normalizePubkey(pubkey: string): string {
 }
 
 /**
+ * Set of normalised pubkeys from anything carrying one — members, agents,
+ * profiles. Membership tests against a raw list are the usual place a
+ * case difference turns into a silent miss.
+ */
+export function normalizePubkeySet(
+  items: readonly { pubkey: string }[] | undefined,
+): Set<string> {
+  return new Set((items ?? []).map((item) => normalizePubkey(item.pubkey)));
+}
+
+/**
  * The ONE canonical compact display form for a pubkey: `abcd1234…wxyz`.
  *
  * A truncated pubkey is a recognition aid, never an identity proof — vanity
