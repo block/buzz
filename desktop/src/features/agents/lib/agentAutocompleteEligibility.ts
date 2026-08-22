@@ -22,6 +22,14 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   );
 }
 
+/**
+ * `sharesChannel` lets a caller assert the shared channel from authoritative
+ * state — relay membership — instead of the agent's self-declared
+ * `channelIds`. That array is a kind:10100 field nothing republishes when
+ * membership changes, so an agent invited to a new channel stays absent from
+ * its picker until someone reissues the profile by hand. Membership is
+ * maintained by the relay and cannot drift. `respondTo` is still enforced.
+ */
 export function relayAgentIsSharedWithUser(
   agent: Pick<
     RelayAgent,
@@ -29,6 +37,7 @@ export function relayAgentIsSharedWithUser(
   >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
+  sharesChannel = false,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
@@ -55,21 +64,30 @@ export function relayAgentIsSharedWithUser(
 
   return (
     agent.respondTo === "anyone" &&
-    agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
+    (sharesChannel ||
+      agent.channelIds.some((channelId) => sharedChannelIds.has(channelId)))
   );
 }
 
 export function relayAgentCanRespondInChannel(
   agent: Pick<
     RelayAgent,
-    "channelIds" | "ownerPubkey" | "respondTo" | "respondToAllowlist"
+    "channelIds" | "ownerPubkey" | "pubkey" | "respondTo" | "respondToAllowlist"
   >,
   channelId: string,
   currentPubkey?: string | null,
+  channelMemberPubkeys?: ReadonlySet<string>,
 ) {
+  const isChannelMember =
+    channelMemberPubkeys?.has(normalizePubkey(agent.pubkey)) === true;
   return (
-    agent.channelIds.includes(channelId) &&
-    relayAgentIsSharedWithUser(agent, new Set([channelId]), currentPubkey)
+    (isChannelMember || agent.channelIds.includes(channelId)) &&
+    relayAgentIsSharedWithUser(
+      agent,
+      new Set([channelId]),
+      currentPubkey,
+      isChannelMember,
+    )
   );
 }
 
@@ -80,6 +98,7 @@ export type AgentEligibilityScope =
   | { type: "managed-only" };
 
 export function getMentionableAgentPubkeys({
+  channelMemberPubkeys,
   currentPubkey,
   eligibilityScope,
   managedAgentPubkeys,
@@ -87,6 +106,7 @@ export function getMentionableAgentPubkeys({
   sharedChannelIds,
   phase = "publish",
 }: {
+  channelMemberPubkeys?: ReadonlySet<string>;
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
   phase?: "prepare" | "publish";
@@ -133,6 +153,7 @@ export function getMentionableAgentPubkeys({
                   agent,
                   eligibilityScope.channelId,
                   currentPubkey,
+                  channelMemberPubkeys,
                 );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));

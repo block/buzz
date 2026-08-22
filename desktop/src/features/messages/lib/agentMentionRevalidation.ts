@@ -30,6 +30,7 @@ type DirectoryResult<T> = {
 export async function revalidateAgentMentionPubkeys({
   pubkeys,
   agentPubkeys,
+  channelMemberPubkeys,
   currentPubkey,
   eligibilityScope,
   sharedChannelIds,
@@ -40,6 +41,7 @@ export async function revalidateAgentMentionPubkeys({
   phase?: "prepare" | "publish";
   pubkeys: readonly string[];
   agentPubkeys: ReadonlySet<string>;
+  channelMemberPubkeys?: ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
   sharedChannelIds: ReadonlySet<string>;
@@ -66,6 +68,7 @@ export async function revalidateAgentMentionPubkeys({
     ),
   );
   const mentionablePubkeys = getMentionableAgentPubkeys({
+    channelMemberPubkeys,
     currentPubkey,
     eligibilityScope,
     phase,
@@ -97,6 +100,7 @@ export async function revalidateAgentMentionPubkeys({
 
 export function useAgentMentionRevalidation({
   agentPubkeys,
+  channelMemberPubkeys,
   getSelectedAgentPubkeys,
   currentPubkey,
   eligibilityScope,
@@ -104,6 +108,7 @@ export function useAgentMentionRevalidation({
   refetchManagedAgents,
 }: {
   agentPubkeys: ReadonlySet<string>;
+  channelMemberPubkeys?: ReadonlySet<string>;
   getSelectedAgentPubkeys: () => ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
@@ -132,6 +137,7 @@ export function useAgentMentionRevalidation({
           ...(options.intendedAgentPubkeys ?? []).map(normalizePubkey),
         ]),
         phase: options.phase,
+        channelMemberPubkeys,
         currentPubkey,
         eligibilityScope: scope,
         sharedChannelIds,
@@ -145,6 +151,7 @@ export function useAgentMentionRevalidation({
     },
     [
       agentPubkeys,
+      channelMemberPubkeys,
       currentPubkey,
       eligibilityScope,
       getSelectedAgentPubkeys,
