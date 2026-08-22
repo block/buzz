@@ -25,6 +25,11 @@ import {
 } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
 import {
+  channelHeadCacheScope,
+  consumeHydratedChannel,
+} from "@/features/messages/lib/channelHeadCache";
+import { storeChannelHeadCache } from "@/shared/api/tauriChannelHeadCache";
+import {
   mergeMessages,
   mergeTimelineCacheMessages,
 } from "@/features/messages/lib/messageMerge";
@@ -257,18 +262,26 @@ export function reconcileFetchedChannelWindow(
     emptyChannelWindowStore();
   const next = replaceNewestChannelWindow(current, page);
   queryClient.setQueryData(windowKey, next);
+  const scope = channelHeadCacheScope(queryClient);
+  if (scope) {
+    void storeChannelHeadCache(scope, channelId, events).catch((error) => {
+      console.warn("Failed to persist channel head", channelId, error);
+    });
+  }
   return reconcileChannelWindowMessages(next, previousMessages);
 }
 
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
-
   return useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
     queryKey,
     queryFn: async ({ signal }) => {
       if (!channel) throw new Error("No channel selected.");
+      if (consumeHydratedChannel(queryClient, channel.id)) {
+        return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      }
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const events = await getChannelWindowEvents(channel.id);

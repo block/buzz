@@ -351,7 +351,7 @@ export function useUsersBatchQuery(
         const entry = queryClient.getQueryData<UsersBatchEntry>(
           usersBatchEntryKey(pubkey),
         );
-        if (entry && now - entry.fetchedAt < 60_000) {
+        if (entry && now - entry.fetchedAt < 10 * 60_000) {
           if (entry.summary) profiles[pubkey] = entry.summary;
           else missing.push(pubkey);
         } else {
@@ -384,7 +384,7 @@ export function useUsersBatchQuery(
         relayUrl,
         normalizedPubkeys,
       ),
-    staleTime: 60_000,
+    staleTime: 10 * 60_000,
     gcTime: 5 * 60 * 1_000,
   });
 

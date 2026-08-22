@@ -13889,6 +13889,59 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "fetch_persona_catalog":
         return mockPersonaCatalogPublications();
+      case "channel_head_cache_load": {
+        const args = payload as {
+          scope: { pubkey: string; relayUrl: string };
+          limit: number;
+        };
+        const key = `buzz-e2e-channel-head:${args.scope.pubkey.toLowerCase()}:${args.scope.relayUrl.toLowerCase().replace(/\/$/, "")}`;
+        const entries = JSON.parse(
+          window.localStorage.getItem(key) ?? "[]",
+        ) as Array<{
+          channelId: string;
+          events: RelayEvent[];
+          savedAt: number;
+          lastVisitedAt: number;
+        }>;
+        return entries
+          .sort((left, right) => right.lastVisitedAt - left.lastVisitedAt)
+          .slice(0, args.limit);
+      }
+      case "channel_head_cache_store": {
+        const args = payload as {
+          scope: { pubkey: string; relayUrl: string };
+          channelId: string;
+          events: RelayEvent[];
+        };
+        const key = `buzz-e2e-channel-head:${args.scope.pubkey.toLowerCase()}:${args.scope.relayUrl.toLowerCase().replace(/\/$/, "")}`;
+        const entries = JSON.parse(
+          window.localStorage.getItem(key) ?? "[]",
+        ) as Array<{
+          channelId: string;
+          events: RelayEvent[];
+          savedAt: number;
+          lastVisitedAt: number;
+        }>;
+        const now = Math.floor(Date.now() / 1000);
+        const next = entries
+          .filter((entry) => entry.channelId !== args.channelId)
+          .concat({
+            channelId: args.channelId,
+            events: args.events,
+            savedAt: now,
+            lastVisitedAt: now,
+          })
+          .sort((left, right) => right.lastVisitedAt - left.lastVisitedAt)
+          .slice(0, 32);
+        window.localStorage.setItem(key, JSON.stringify(next));
+        return null;
+      }
+      case "channel_head_cache_clear": {
+        const args = payload as { scope: { pubkey: string; relayUrl: string } };
+        const key = `buzz-e2e-channel-head:${args.scope.pubkey.toLowerCase()}:${args.scope.relayUrl.toLowerCase().replace(/\/$/, "")}`;
+        window.localStorage.removeItem(key);
+        return null;
+      }
       case "observed_unread_open_scope": {
         const request = payload as {
           request: {
