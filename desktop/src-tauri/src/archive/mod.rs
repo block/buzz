@@ -613,11 +613,18 @@ pub struct ArchivedObserverRangeInput {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedObserverRangeOutput {
+    events: Vec<String>,
+    backfill_complete: bool,
+}
+
 #[tauri::command]
 pub async fn read_archived_observer_events_for_range(
     state: State<'_, AppState>,
     input: ArchivedObserverRangeInput,
-) -> Result<Vec<String>, String> {
+) -> Result<ArchivedObserverRangeOutput, String> {
     let ArchivedObserverRangeInput {
         start_created_at,
         end_created_at,
@@ -647,8 +654,15 @@ pub async fn read_archived_observer_events_for_range(
     state
         .archive_db
         .with_conn(move |conn| {
-            observer_time::backfill_missing(conn, &identity_pk, &relay_url, &owner_keys)?;
-            store::read_archived_observer_events_for_range(
+            let backfill_complete =
+                observer_time::backfill_missing(conn, &identity_pk, &relay_url, &owner_keys)?;
+            if !backfill_complete {
+                return Ok(ArchivedObserverRangeOutput {
+                    events: Vec::new(),
+                    backfill_complete: false,
+                });
+            }
+            let events = store::read_archived_observer_events_for_range(
                 conn,
                 &identity_pk,
                 &relay_url,
@@ -659,7 +673,11 @@ pub async fn read_archived_observer_events_for_range(
                 before_created_at,
                 before_id.as_deref(),
                 limit,
-            )
+            )?;
+            Ok(ArchivedObserverRangeOutput {
+                events,
+                backfill_complete: true,
+            })
         })
         .await
 }

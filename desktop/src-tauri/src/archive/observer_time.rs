@@ -98,7 +98,7 @@ fn read_missing(
         .map_err(|error| format!("prepare observer time backfill: {error}"))?;
     let rows = stmt
         .query_map(
-            params![identity_pubkey, relay_url, BACKFILL_BATCH_LIMIT],
+            params![identity_pubkey, relay_url, BACKFILL_BATCH_LIMIT + 1],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .map_err(|error| format!("query observer time backfill: {error}"))?;
@@ -114,12 +114,13 @@ pub(super) fn backfill_missing(
     identity_pubkey: &str,
     relay_url: &str,
     owner_keys: &Keys,
-) -> Result<usize, String> {
-    let rows = read_missing(conn, identity_pubkey, relay_url)?;
+) -> Result<bool, String> {
+    let mut rows = read_missing(conn, identity_pubkey, relay_url)?;
+    let complete = rows.len() <= BACKFILL_BATCH_LIMIT as usize;
+    rows.truncate(BACKFILL_BATCH_LIMIT as usize);
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| format!("begin observer time backfill: {error}"))?;
-    let mut indexed = 0;
     for (event_id, raw_json) in rows {
         let observed_bounds = Event::from_json(&raw_json)
             .ok()
@@ -140,11 +141,10 @@ pub(super) fn backfill_missing(
             observed_bounds.0,
             observed_bounds.1,
         )?;
-        indexed += 1;
     }
     tx.commit()
         .map_err(|error| format!("commit observer time backfill: {error}"))?;
-    Ok(indexed)
+    Ok(complete)
 }
 
 /// Read owner-scoped observer events whose decrypted inner timestamps overlap
@@ -299,14 +299,8 @@ mod tests {
         let event = signed_observer(&owner, &agent, "2026-08-21T23:59:59Z");
         archive(&conn, &owner, &event);
 
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            1
-        );
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            0
-        );
+        assert!(backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
+        assert!(backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
         let rows = read_archived_observer_events_for_range(
             &conn,
             &owner_pubkey,
@@ -352,14 +346,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            1
-        );
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            0
-        );
+        assert!(backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
+        assert!(backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
         let bounds: (Option<i64>, Option<i64>) = conn
             .query_row(
                 "SELECT observed_start_at, observed_end_at FROM observer_time_index WHERE id='bad'",
@@ -402,17 +390,8 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            BACKFILL_BATCH_LIMIT as usize
-        );
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            1
-        );
-        assert_eq!(
-            backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap(),
-            0
-        );
+        assert!(!backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
+        assert!(backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
+        assert!(backfill_missing(&conn, &owner_pubkey, RELAY, &owner).unwrap());
     }
 }

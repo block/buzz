@@ -463,6 +463,7 @@ export type ArchivedObserverRangeCursor = {
 
 export type ArchivedObserverRangePage = {
   events: import("@/shared/api/types").RelayEvent[];
+  backfillComplete: boolean;
   hasMore: boolean;
   nextBefore: ArchivedObserverRangeCursor | null;
 };
@@ -485,21 +486,21 @@ export async function readArchivedObserverEventsForRange(opts: {
       "Archived observer range limit must be an integer from 1 to 500.",
     );
   }
-  const rawRows = await invokeTauri<string[]>(
-    "read_archived_observer_events_for_range",
-    {
-      input: {
-        startCreatedAt: opts.startCreatedAt,
-        endCreatedAt: opts.endCreatedAt,
-        agentPubkey: opts.agentPubkey ?? null,
-        channelId: opts.channelId ?? null,
-        beforeCreatedAt: opts.before?.createdAt ?? null,
-        beforeId: opts.before?.id ?? null,
-        limit,
-      },
+  const rawPage = await invokeTauri<{
+    events: string[];
+    backfillComplete: boolean;
+  }>("read_archived_observer_events_for_range", {
+    input: {
+      startCreatedAt: opts.startCreatedAt,
+      endCreatedAt: opts.endCreatedAt,
+      agentPubkey: opts.agentPubkey ?? null,
+      channelId: opts.channelId ?? null,
+      beforeCreatedAt: opts.before?.createdAt ?? null,
+      beforeId: opts.before?.id ?? null,
+      limit,
     },
-  );
-  const events = rawRows
+  });
+  const events = rawPage.events
     .map((raw) => {
       try {
         return JSON.parse(raw) as import("@/shared/api/types").RelayEvent;
@@ -518,7 +519,8 @@ export async function readArchivedObserverEventsForRange(opts: {
   const oldest = events.at(-1) ?? null;
   return {
     events,
-    hasMore: rawRows.length === limit,
+    backfillComplete: rawPage.backfillComplete,
+    hasMore: !rawPage.backfillComplete || rawPage.events.length === limit,
     nextBefore: oldest ? { createdAt: oldest.created_at, id: oldest.id } : null,
   };
 }
@@ -539,6 +541,7 @@ export async function readAllArchivedObserverEventsForRange(opts: {
       before,
       limit: opts.pageSize ?? 200,
     });
+    if (!page.backfillComplete) continue;
     all.push(...page.events);
     if (!page.hasMore) return all;
     if (!page.nextBefore) {
@@ -565,6 +568,7 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
       before,
       limit: opts.pageSize ?? 200,
     });
+    if (!page.backfillComplete) continue;
     yield page.events;
     if (!page.hasMore) return;
     if (!page.nextBefore) {
