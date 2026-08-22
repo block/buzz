@@ -9,7 +9,8 @@ use crate::validate::{
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
-    extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
+    contains_everyone_keyword, extract_at_mentions_with_known, extract_nostr_uris,
+    is_everyone_keyword, strip_code_regions, MENTION_CAP,
 };
 
 /// Extract the thread root event ID from a Nostr tag array.
@@ -164,6 +165,7 @@ async fn resolve_content_mentions(
     has_explicit_mentions: bool,
 ) -> Result<(Vec<String>, Vec<String>), CliError> {
     let stripped = strip_code_regions(content);
+    let everyone = contains_everyone_keyword(&stripped);
     if !stripped.contains('@') && !has_explicit_mentions {
         return Ok((vec![], vec![]));
     }
@@ -179,8 +181,23 @@ async fn resolve_content_mentions(
             CliError::Other("could not load channel membership for mention preflight".into())
         })?;
 
+    // `@everyone` / `@channel` expands to every current member, minus the
+    // sender (you don't notify yourself on a broadcast). This runs before
+    // name resolution so the broadcast still works even if profiles fail to
+    // load or a channel has no display names.
+    let sender_hex = client.keys().public_key().to_hex();
+    let broadcast: Vec<String> = if everyone {
+        member_pubkeys
+            .iter()
+            .filter(|pk| **pk != sender_hex)
+            .cloned()
+            .collect()
+    } else {
+        vec![]
+    };
+
     if !stripped.contains('@') {
-        return Ok((member_pubkeys, vec![]));
+        return Ok((member_pubkeys, broadcast));
     }
 
     let profiles_filter = serde_json::json!({
@@ -223,8 +240,20 @@ async fn resolve_content_mentions(
     }
 
     let known_refs: Vec<&str> = display_names.iter().map(String::as_str).collect();
-    let names = extract_at_mentions_with_known(&stripped, &known_refs);
-    let resolved = resolve_names_to_pubkeys(&names, &name_to_pubkeys, has_explicit_mentions)?;
+    // Drop the reserved broadcast keywords from ordinary name resolution — they
+    // are handled by `broadcast` above and must not be treated as (missing)
+    // member display names.
+    let names: Vec<String> = extract_at_mentions_with_known(&stripped, &known_refs)
+        .into_iter()
+        .filter(|n| !is_everyone_keyword(n))
+        .collect();
+    let mut resolved = resolve_names_to_pubkeys(&names, &name_to_pubkeys, has_explicit_mentions)?;
+    // Merge the broadcast set in, de-duplicating against name-resolved pubkeys.
+    for pk in broadcast {
+        if !resolved.contains(&pk) {
+            resolved.push(pk);
+        }
+    }
     Ok((member_pubkeys, resolved))
 }
 
