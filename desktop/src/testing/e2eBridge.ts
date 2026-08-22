@@ -9577,6 +9577,7 @@ async function handleSendChannelMessage(
     channelId: string;
     content: string;
     parentEventId?: string | null;
+    rootEventId?: string | null;
     kind?: number | null;
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
@@ -9699,7 +9700,8 @@ async function handleSendChannelMessage(
           parentEventId: null,
           rootEventId: null,
         };
-    const rootEventId = parentThread.rootEventId ?? args.parentEventId;
+    const rootEventId =
+      args.rootEventId ?? parentThread.rootEventId ?? args.parentEventId;
     const depth = parentEvent
       ? (() => {
           let currentEvent: RelayEvent | undefined = parentEvent;
@@ -9758,7 +9760,7 @@ async function handleSendChannelMessage(
         args.channelId,
         relayIdentity.pubkey,
         args.parentEventId,
-        args.parentEventId,
+        args.rootEventId ?? args.parentEventId,
         args.mentionPubkeys,
       )
     : buildTopLevelMessageTags(
@@ -9776,8 +9778,12 @@ async function handleSendChannelMessage(
   return {
     event_id: result.event_id,
     parent_event_id: args.parentEventId ?? null,
-    root_event_id: args.parentEventId ?? null,
-    depth: args.parentEventId ? 1 : 0,
+    root_event_id: args.rootEventId ?? args.parentEventId ?? null,
+    depth: args.parentEventId
+      ? args.rootEventId && args.rootEventId !== args.parentEventId
+        ? 2
+        : 1
+      : 0,
     created_at: Math.floor(Date.now() / 1000),
   };
 }

@@ -90,6 +90,18 @@ type MessageQueryContext = {
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
+export function resolveCachedReplyRootId(
+  parentEventId: string,
+  messageCaches: readonly RelayEvent[][],
+): string | null {
+  for (const messages of messageCaches) {
+    if (messages.some((event) => event.id === parentEventId)) {
+      return resolveReplyRootId(parentEventId, messages);
+    }
+  }
+  return null;
+}
+
 export function createOptimisticMessage(
   channelId: string,
   content: string,
@@ -551,6 +563,17 @@ export function useSendMessageMutation(
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
           ) ?? [];
+        const threadCaches = queryClient
+          .getQueriesData<RelayEvent[]>({
+            queryKey: ["thread-replies", effectiveChannel.id],
+          })
+          .flatMap(([, events]) => (events ? [events] : []));
+        const suppliedRootEventId = parentEventId
+          ? resolveCachedReplyRootId(parentEventId, [
+              cachedMessages,
+              ...threadCaches,
+            ])
+          : null;
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
@@ -562,6 +585,9 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          undefined,
+          undefined,
+          suppliedRootEventId,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -572,7 +598,7 @@ export function useSendMessageMutation(
               effectiveChannel.id,
               identity.pubkey,
               parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
+              result.rootEventId,
               recipientPubkeys,
             )
           : [];
