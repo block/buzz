@@ -24,10 +24,10 @@ pub(crate) fn augmented_path() -> Option<String> {
 /// Outcome of a CLI login-status probe.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ProbeOutcome {
-    /// The CLI reported a successful login (exit 0).
+    /// The CLI reported a successful login.
     LoggedIn,
-    /// The CLI exited non-zero without a config-parse signal — treat as
-    /// "not authenticated."
+    /// The CLI explicitly reported a logged-out state, or exited non-zero
+    /// without a config-parse signal.
     LoggedOut,
     /// The CLI exited non-zero and its stderr contains a config-parse error
     /// (e.g. from `~/.codex/config.toml`). The user needs to fix their
@@ -49,6 +49,10 @@ pub(crate) enum ProbeOutcome {
 /// one term.
 const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown variant"];
 
+/// Some CLIs report an explicit logged-out state while still exiting successfully.
+/// Grok Build's `grok models` command currently uses this exact message.
+const LOGGED_OUT_OUTPUT_SIGNALS: &[&str] = &["you are not authenticated"];
+
 /// Run the probe at the resolved absolute path so the GUI-PATH gap is
 /// bypassed. Injects the same augmented PATH used for launched agents so
 /// script shims with `/usr/bin/env <interpreter>` shebangs can find runtimes
@@ -66,8 +70,7 @@ pub(crate) fn login_probe(
     crate::util::configure_no_window(&mut command);
 
     match command.output() {
-        Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
-        Ok(o) => classify_probe_output(&o.stderr, false),
+        Ok(o) => classify_probe_output(&o.stdout, &o.stderr, o.status.success()),
         Err(_) => ProbeOutcome::LoggedOut,
     }
 }
@@ -75,30 +78,79 @@ pub(crate) fn login_probe(
 /// Classify collected probe output into a `ProbeOutcome`.
 ///
 /// Shared between `login_probe` (which has the full `Output`) and the
-/// process-level timeout path in `probe_auth_status` (which drains stderr
-/// on a background thread and collects it separately).
-pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> ProbeOutcome {
-    if exit_success {
-        return ProbeOutcome::LoggedIn;
-    }
+/// process-level timeout path in `probe_auth_status` (which drains both output
+/// streams on background threads and collects them separately).
+pub(crate) fn classify_probe_output(
+    stdout_bytes: &[u8],
+    stderr_bytes: &[u8],
+    exit_success: bool,
+) -> ProbeOutcome {
     let stderr = String::from_utf8_lossy(stderr_bytes);
     let stderr_lower = stderr.to_lowercase();
-    if CONFIG_PARSE_SIGNALS
-        .iter()
-        .all(|sig| stderr_lower.contains(sig))
+    if !exit_success
+        && CONFIG_PARSE_SIGNALS
+            .iter()
+            .all(|sig| stderr_lower.contains(sig))
     {
         let excerpt = stderr.trim().lines().next().unwrap_or("").to_string();
         ProbeOutcome::ConfigInvalid {
             stderr_excerpt: excerpt,
         }
     } else {
-        ProbeOutcome::LoggedOut
+        let stdout = String::from_utf8_lossy(stdout_bytes);
+        let output_lower = format!("{stdout}\n{stderr}").to_lowercase();
+        if LOGGED_OUT_OUTPUT_SIGNALS
+            .iter()
+            .any(|signal| output_lower.contains(signal))
+        {
+            ProbeOutcome::LoggedOut
+        } else if exit_success {
+            ProbeOutcome::LoggedIn
+        } else {
+            ProbeOutcome::LoggedOut
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+    use super::{classify_probe_output, ProbeOutcome, CONFIG_PARSE_SIGNALS};
+
+    #[test]
+    fn successful_grok_models_output_can_report_logged_out() {
+        assert_eq!(
+            classify_probe_output(b"You are not authenticated.\n", b"", true),
+            ProbeOutcome::LoggedOut
+        );
+    }
+
+    #[test]
+    fn successful_grok_models_output_reports_logged_in() {
+        assert_eq!(
+            classify_probe_output(b"You are logged in with grok.com.\n", b"", true),
+            ProbeOutcome::LoggedIn
+        );
+    }
+
+    #[test]
+    fn generic_success_without_auth_markers_remains_logged_in() {
+        assert_eq!(
+            classify_probe_output(b"", b"", true),
+            ProbeOutcome::LoggedIn
+        );
+    }
+
+    #[test]
+    fn nonzero_config_error_takes_precedence_over_logged_out_marker() {
+        assert!(matches!(
+            super::classify_probe_output(
+                b"You are not authenticated.\n",
+                b"Error loading configuration: unknown variant `bad`",
+                false,
+            ),
+            ProbeOutcome::ConfigInvalid { .. }
+        ));
+    }
 
     #[cfg(unix)]
     #[test]
