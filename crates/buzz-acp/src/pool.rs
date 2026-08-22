@@ -34,6 +34,7 @@ use crate::acp::{
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
     ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
+use crate::audit;
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
@@ -1777,7 +1778,7 @@ pub async fn run_prompt_task(
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
-            "triggeringEventIds": triggering_event_ids,
+            "triggeringEventIds": triggering_event_ids.clone(),
         }),
     );
 
@@ -1980,6 +1981,36 @@ pub async fn run_prompt_task(
                             target: "pool::session",
                             "created session {sid} for channel {cid}"
                         );
+                        // Phase B B8 ACP_SESSION_STARTED — emitted only on
+                        // this success path, using the exact B7 turn_id
+                        // (the `turn_id` parameter, unchanged — no new one
+                        // generated) and the same `triggering_event_ids`
+                        // already computed once at function entry from
+                        // this same `batch` (explicitly cloned at its
+                        // earlier use above so this canonical value
+                        // survives unmoved to here), giving a
+                        // deterministic B7→B8 pairing (equal turn_id,
+                        // equal event set). Batch-cardinality boundary:
+                        // per-event fields stay None — no single event
+                        // from the batch is picked to stand in for the
+                        // whole batch (see EventDetail::AcpSession for
+                        // the honest full set). `attempt` stays None: no
+                        // authoritative source is directly available
+                        // here, and none is being added to obtain one.
+                        if audit::is_enabled() {
+                            audit::record(
+                                audit::EventType::AcpSessionStarted,
+                                audit::AuditFields {
+                                    channel_id: Some(cid.to_string()),
+                                    agent_session_id: Some(sid.clone()),
+                                    turn_id: Some(turn_id.clone()),
+                                    ..Default::default()
+                                },
+                                audit::EventDetail::AcpSession {
+                                    triggering_event_ids: triggering_event_ids.clone(),
+                                },
+                            );
+                        }
                         agent.state.sessions.insert(*cid, sid.clone());
                         agent
                             .state

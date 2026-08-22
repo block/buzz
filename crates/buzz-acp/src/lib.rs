@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod audit;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -1942,6 +1943,12 @@ async fn tokio_main() -> Result<()> {
         .compact()
         .init();
 
+    // Phase B causal audit sink — global, opt-in, default OFF via
+    // `BUZZ_ACP_AUDIT`. Must run after the tracing subscriber above (so the
+    // sink's own enable/fail-open logging is captured) and before any relay
+    // activity begins. A no-op when the env var is unset — see audit.rs.
+    audit::init();
+
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
@@ -3737,11 +3744,42 @@ fn dispatch_pending(
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
         let affinity_hit = pool.has_session_for(channel_id);
+        // Phase B B7 WAKE_DECISION — `triggering_event_ids` is the same
+        // computation `pool.rs::run_prompt_task` performs on this same
+        // `batch` once it's moved there (see B8); computed here too since
+        // `batch` is consumed below in either branch of the claim match.
+        // `event_id`/`direct_parent_event_id`/`thread_root_event_id`/
+        // `correlation_id`/`workflow_id`/`sender_pubkey`/`target_pubkey`
+        // stay `None` in the shared envelope: a batch can hold more than
+        // one physical event, so no single one of those per-event fields
+        // can honestly stand in for the whole batch — see
+        // `EventDetail::WakeDecision` for the full, honest set instead.
+        // `attempt` also stays `None` here: `EventQueue` has no public
+        // accessor for its per-channel retry counter today, and adding one
+        // is out of scope for this lib.rs-only pass.
+        let triggering_event_ids: Vec<String> = if audit::is_enabled() {
+            batch.events.iter().map(|be| be.event.id.to_hex()).collect()
+        } else {
+            Vec::new()
+        };
         let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
                 tracing::debug!(pending_channels = pending, "pool_exhausted");
+                if audit::is_enabled() {
+                    audit::record(
+                        audit::EventType::WakeDecision,
+                        audit::AuditFields {
+                            channel_id: Some(channel_id.to_string()),
+                            ..Default::default()
+                        },
+                        audit::EventDetail::WakeDecision {
+                            triggering_event_ids,
+                            outcome: audit::WakeOutcome::PoolExhausted,
+                        },
+                    );
+                }
                 queue.requeue_preserve_timestamps(batch);
                 queue.mark_complete(channel_id);
                 break;
@@ -3775,6 +3813,23 @@ fn dispatch_pending(
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
         let turn_id = Uuid::new_v4().to_string();
+        // Phase B B7 WAKE_DECISION (Claimed) — `turn_id` is the same value
+        // threaded into `run_prompt_task` below via `task_turn_id`, giving a
+        // deterministic B7→B8 pairing (see pool.rs::run_prompt_task).
+        if audit::is_enabled() {
+            audit::record(
+                audit::EventType::WakeDecision,
+                audit::AuditFields {
+                    channel_id: Some(channel_id.to_string()),
+                    turn_id: Some(turn_id.clone()),
+                    ..Default::default()
+                },
+                audit::EventDetail::WakeDecision {
+                    triggering_event_ids,
+                    outcome: audit::WakeOutcome::Claimed,
+                },
+            );
+        }
         let task_turn_id = turn_id.clone();
 
         let abort_handle = pool.join_set.spawn(async move {
