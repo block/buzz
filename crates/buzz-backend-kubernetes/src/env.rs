@@ -31,6 +31,7 @@ const AUTHORITATIVE_KEYS: &[&str] = &[
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
     "BUZZ_ACP_MCP_COMMAND",
+    "BUZZ_ACP_MCP_SERVERS_FILE",
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
     START_NONCE_KEY,
 ];
@@ -355,6 +356,7 @@ mod tests {
                     "BUZZ_ACP_AGENT_OWNER": "cafe",
                     "BUZZ_ACP_AGENT_COMMAND": "/bin/sh",
                     "BUZZ_ACP_MCP_COMMAND": "/bin/sh",
+                    "BUZZ_ACP_MCP_SERVERS_FILE": "/tmp/untrusted.json",
                     "BUZZ_ACP_EXIT_AFTER_INACTIVITY": "0",
                 },
                 "owner_pubkey": "beef"
@@ -368,6 +370,7 @@ mod tests {
         assert_eq!(env["BUZZ_ACP_AGENT_OWNER"], "beef");
         assert_eq!(env["BUZZ_ACP_AGENT_COMMAND"], "goose");
         assert_eq!(env["BUZZ_ACP_MCP_COMMAND"], "buzz-dev-mcp");
+        assert!(!env.contains_key("BUZZ_ACP_MCP_SERVERS_FILE"));
         assert_eq!(env["BUZZ_ACP_EXIT_AFTER_INACTIVITY"], "7200");
         assert_eq!(env["BUZZ_MANAGED_AGENT_START_NONCE"], "gen0001");
     }
