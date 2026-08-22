@@ -61,6 +61,38 @@ fn team_delete_event(keys: &Keys, d_tag: &str) -> nostr::Event {
         .unwrap()
 }
 
+fn team_delete_event_at(keys: &Keys, d_tag: &str, created_at: u64) -> nostr::Event {
+    let coord = format!("{TEAM_KIND}:{}:{d_tag}", keys.public_key().to_hex());
+    EventBuilder::new(Kind::Custom(5), "")
+        .tags(vec![Tag::parse(["a", coord.as_str()]).unwrap()])
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+/// Count the live events at a team's NIP-33 coordinate.
+async fn live_team_count(
+    client: &mut BuzzTestClient,
+    keys: &Keys,
+    d_tag: &str,
+    name: &str,
+) -> usize {
+    let sid = sub_id(name);
+    let filter = Filter::new()
+        .kind(Kind::Custom(TEAM_KIND))
+        .author(keys.public_key())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [d_tag]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect")
+        .len()
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_team_publish_and_query() {
@@ -206,6 +238,73 @@ async fn test_team_tombstone_deletes_coordinate() {
         0,
         "tombstone should remove the team coordinate, got {} event(s)",
         after.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A tombstone older than the head it targets is accepted but does nothing —
+/// `soft_delete_by_coordinate` matches on `created_at <= tombstone.created_at`,
+/// and its return value only feeds a debug log, so the relay reports OK either
+/// way. Any writer that bumps a head to `max(now, prior + 1)` (NIP-33 tie-break)
+/// can therefore land a head in the future and then fail to delete it with a
+/// tombstone stamped at a bare `now`. Publishers must stamp the tombstone at or
+/// after the head; this pins the rule they depend on.
+#[tokio::test]
+#[ignore]
+async fn test_tombstone_older_than_head_does_not_delete() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let d_tag = format!("team-stale-tomb-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Head lands ahead of the wall clock, as a same-second replacement would.
+    let now = Timestamp::now().as_secs();
+    let head_at = now + 5;
+    let ok = client
+        .send_event(team_event_at(
+            &keys,
+            &d_tag,
+            r#"{"name":"Bumped Team","persona_ids":["p1"]}"#,
+            head_at,
+        ))
+        .await
+        .expect("send head");
+    assert!(ok.accepted, "relay rejected head: {}", ok.message);
+
+    assert_eq!(
+        live_team_count(&mut client, &keys, &d_tag, "stale-pre").await,
+        1,
+        "head should be live"
+    );
+
+    // Stale tombstone: accepted by the relay, but must not erase a newer head.
+    let ok = client
+        .send_event(team_delete_event_at(&keys, &d_tag, now))
+        .await
+        .expect("send stale tombstone");
+    assert!(
+        ok.accepted,
+        "relay should still accept the stale tombstone: {}",
+        ok.message
+    );
+    assert_eq!(
+        live_team_count(&mut client, &keys, &d_tag, "stale-post").await,
+        1,
+        "a tombstone older than the head must not delete it"
+    );
+
+    // Same instant as the head is enough — the predicate is `<=`.
+    let ok = client
+        .send_event(team_delete_event_at(&keys, &d_tag, head_at))
+        .await
+        .expect("send matching tombstone");
+    assert!(ok.accepted, "relay rejected tombstone: {}", ok.message);
+    assert_eq!(
+        live_team_count(&mut client, &keys, &d_tag, "stale-final").await,
+        0,
+        "a tombstone at the head's instant must delete it"
     );
 
     client.disconnect().await.expect("disconnect");
