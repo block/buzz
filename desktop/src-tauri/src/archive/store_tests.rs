@@ -167,25 +167,28 @@ fn test_merge_owner_p_kinds_two_conn_wal_both_kinds_survive() {
     let init_conn = open_archive_db(&db_path).unwrap();
     drop(init_conn);
 
+    // Open both connections before spawning either worker. Schema setup is not
+    // part of this regression, and a setup failure in one worker would leave
+    // the other worker parked on the barrier forever instead of reporting the
+    // actual error.
+    let conn_a = open_archive_db(&db_path).unwrap();
+    let conn_b = open_archive_db(&db_path).unwrap();
+
     // Barrier ensures both threads are inside `merge_owner_p_kinds` before
     // either one issues `BEGIN IMMEDIATE`, maximising the race window.
     let barrier = Arc::new(Barrier::new(2));
 
-    let path_a = db_path.clone();
-    let path_b = db_path.clone();
     let bar_a = Arc::clone(&barrier);
     let bar_b = Arc::clone(&barrier);
 
     let handle_observer = thread::spawn(move || {
-        let conn = open_archive_db(&path_a).unwrap();
         bar_a.wait(); // sync: both threads ready
-        merge_owner_p_kinds(&conn, "pk", "wss://r", "mypk", 24200, 1)
+        merge_owner_p_kinds(&conn_a, "pk", "wss://r", "mypk", 24200, 1)
     });
 
     let handle_metric = thread::spawn(move || {
-        let conn = open_archive_db(&path_b).unwrap();
         bar_b.wait(); // sync: both threads ready
-        merge_owner_p_kinds(&conn, "pk", "wss://r", "mypk", 44200, 2)
+        merge_owner_p_kinds(&conn_b, "pk", "wss://r", "mypk", 44200, 2)
     });
 
     let res_observer = handle_observer.join().expect("observer thread panicked");
