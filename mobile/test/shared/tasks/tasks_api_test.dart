@@ -146,6 +146,47 @@ void main() {
       expect(captured.url.query, isEmpty);
     });
 
+    test('sends source_ref verbatim and signs the resulting URL', () async {
+      late http.Request captured;
+      final api = apiWith((request) async {
+        captured = request;
+        return http.Response(
+          jsonEncode({
+            'tasks': [_taskJson()],
+          }),
+          200,
+        );
+      });
+
+      final tasks = await api.listTasks(
+        channelId: 'channel-1',
+        sourceRef: 'thread-head-aaa',
+      );
+
+      expect(captured.url.queryParameters, {
+        'channel': 'channel-1',
+        'source_ref': 'thread-head-aaa',
+      });
+      // The relay rebuilds the signed URL from path + raw query, so the
+      // signature must cover source_ref exactly as it went out.
+      expect(_tag(_nip98Event(captured), 'u'), captured.url.toString());
+      expect(tasks.single.id, 'task-1');
+    });
+
+    test('emits no source_ref parameter when it is absent', () async {
+      late http.Request captured;
+      final api = apiWith((request) async {
+        captured = request;
+        return http.Response(jsonEncode(const {'tasks': []}), 200);
+      });
+
+      // A stray empty parameter would change the signed query for every
+      // existing caller, so absence must stay absence.
+      await api.listTasks(channelId: 'channel-1');
+      expect(captured.url.queryParameters.containsKey('source_ref'), isFalse);
+      expect(captured.url.query, 'channel=channel-1');
+    });
+
     test('rejects a response whose task list is not a list', () async {
       final api = apiWith(
         (request) async => http.Response(jsonEncode(const {'tasks': 3}), 200),

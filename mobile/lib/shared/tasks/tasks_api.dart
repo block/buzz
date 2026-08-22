@@ -93,12 +93,14 @@ class TasksApi {
     TaskStatus? status,
     String? channelId,
     String? assignee,
+    String? sourceRef,
     int? limit,
   }) async {
     final query = <String, String>{
       if (status != null) 'status': status.wireValue,
       'channel': ?channelId,
       'assignee': ?assignee,
+      'source_ref': ?sourceRef,
       if (limit != null) 'limit': '$limit',
     };
     final decoded = await _send('GET', _uri('/api/tasks', query), null);

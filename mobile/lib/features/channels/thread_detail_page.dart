@@ -861,6 +861,10 @@ class ThreadDetailPage extends HookConsumerWidget {
           _SummarizeThreadButton(
             channelId: channelId,
             messages: [liveHead, ...replies],
+            // The composer writes a task's `source_ref` as
+            // `threadHeadId ?? rootId`; pass the identical expression so the
+            // reverse lookup is exact rather than heuristic.
+            sourceRef: threadHead.id,
           ),
         ],
       ),
