@@ -2,7 +2,7 @@ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::client::{extract_tag_value, normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -366,7 +366,7 @@ pub async fn cmd_get_messages(
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 45001, 45003],
+        "kinds": get_message_kinds(),
         "#h": [channel_id],
         "limit": limit
     });
@@ -389,6 +389,7 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    let events = apply_edits(&events);
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -459,6 +460,7 @@ pub async fn cmd_get_thread(
             .and_then(|value| value.as_u64())
             .unwrap_or(0)
     });
+    let events = apply_edits(&events);
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -1542,5 +1544,244 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+}
+
+/// Fold kind 40003 edit events into their target messages.
+///
+/// For each kind 40003 event `F` carrying an `e` tag pointing at event `E` in
+/// the same window:
+/// - `F.content` is applied to `E` only if `F.pubkey == E.pubkey`; an edit
+///   signed by anyone other than the original author is ignored (dropped).
+/// - If several valid edits target the same `E`, the one with the highest
+///   `created_at` wins. An exact `created_at` tie breaks deterministically on
+///   the lexicographically larger event `id`.
+/// - The 40003 rows are removed from the output; only folded targets remain.
+/// - An edit whose target is not present in the window is dropped and changes
+///   nothing.
+///
+/// The folded event keeps its original `id`, `pubkey`, `kind`, and
+/// `created_at`. Only `content` changes, plus an added `edited_at` field
+/// carrying the winning edit's `created_at`.
+fn apply_edits(events: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use buzz_core::kind::KIND_STREAM_MESSAGE_EDIT;
+    use std::collections::HashMap;
+
+    // Target authors must be known before edits are ranked, so a forged
+    // edit can never take the winner slot and suppress a genuine one.
+    let mut target_pubkeys: HashMap<&str, &str> = HashMap::new();
+    for e in events {
+        if e.get("kind").and_then(|v| v.as_u64()) == Some(u64::from(KIND_STREAM_MESSAGE_EDIT)) {
+            continue;
+        }
+        if let (Some(id), Some(pk)) = (
+            e.get("id").and_then(|v| v.as_str()),
+            e.get("pubkey").and_then(|v| v.as_str()),
+        ) {
+            target_pubkeys.insert(id, pk);
+        }
+    }
+
+    let mut edits: HashMap<String, (u64, String, &serde_json::Value)> = HashMap::new();
+    for e in events {
+        if e.get("kind").and_then(|v| v.as_u64()) != Some(u64::from(KIND_STREAM_MESSAGE_EDIT)) {
+            continue;
+        }
+        let target_id = extract_tag_value(e, "e");
+        if target_id.is_empty() {
+            continue;
+        }
+        // Author gate: an edit signed by anyone but the target's author is
+        // ignored here, before ranking, so it cannot win the slot.
+        if target_pubkeys.get(target_id.as_str()).copied()
+            != e.get("pubkey").and_then(|v| v.as_str())
+        {
+            continue;
+        }
+        let created_at = e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = e.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        let winner = edits.entry(target_id);
+        winner
+            .and_modify(|(best_at, best_id, best_event)| {
+                if (created_at, id) > (*best_at, best_id.as_str()) {
+                    *best_at = created_at;
+                    *best_id = id.to_string();
+                    *best_event = e;
+                }
+            })
+            .or_insert((created_at, id.to_string(), e));
+    }
+
+    let mut out = Vec::with_capacity(events.len());
+    for e in events {
+        if e.get("kind").and_then(|v| v.as_u64()) == Some(u64::from(KIND_STREAM_MESSAGE_EDIT)) {
+            continue;
+        }
+        let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
+            out.push(e.clone());
+            continue;
+        };
+        let Some((edited_at, _, edit_event)) = edits.get(id) else {
+            out.push(e.clone());
+            continue;
+        };
+        let mut folded = e.clone();
+        folded["content"] = edit_event.get("content").cloned().unwrap_or_default();
+        folded["edited_at"] = serde_json::json!(edited_at);
+        out.push(folded);
+    }
+    out
+}
+
+/// Kinds fetched by `messages get`.
+fn get_message_kinds() -> Vec<u64> {
+    vec![
+        9,
+        40002,
+        u64::from(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT),
+        40008,
+        45001,
+        45003,
+    ]
+}
+
+#[cfg(test)]
+mod apply_edits_tests {
+    use super::apply_edits;
+    use serde_json::json;
+
+    const AUTHOR: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
+    const OTHER: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
+    const TARGET_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const EDIT1_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const EDIT2_ID: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn target() -> serde_json::Value {
+        json!({
+            "id": TARGET_ID,
+            "pubkey": AUTHOR,
+            "kind": 9,
+            "created_at": 1000u64,
+            "content": "original",
+            "tags": []
+        })
+    }
+
+    fn edit(id: &str, pubkey: &str, created_at: u64, content: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "pubkey": pubkey,
+            "kind": 40003,
+            "created_at": created_at,
+            "content": content,
+            "tags": [["e", TARGET_ID]]
+        })
+    }
+
+    // Semantic 1: an edit signed by anyone but the original author is ignored.
+    #[test]
+    fn edit_by_non_author_is_ignored() {
+        let events = vec![target(), edit(EDIT1_ID, OTHER, 2000, "hijacked")];
+        let out = apply_edits(&events);
+        assert_eq!(out.len(), 1, "the non-author edit row must be dropped");
+        assert_eq!(out[0]["content"], "original");
+        assert!(out[0].get("edited_at").is_none());
+    }
+
+    // Semantic 1, the case that matters: a forged edit with a higher
+    // created_at must not take the winner slot and suppress a genuine
+    // author edit. The author gate runs while building the map.
+    #[test]
+    fn hostile_edit_must_not_suppress_a_genuine_author_edit() {
+        let events = vec![
+            target(),
+            edit(EDIT1_ID, AUTHOR, 2000, "genuine edit"),
+            edit(EDIT2_ID, OTHER, 3000, "hijack"),
+        ];
+        let out = apply_edits(&events);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["content"], "genuine edit");
+        assert_eq!(out[0]["edited_at"], 2000);
+    }
+
+    // Semantic 2: highest created_at wins; exact tie broken by larger event id.
+    #[test]
+    fn latest_edit_wins_and_tie_breaks_on_larger_id() {
+        let events = vec![
+            target(),
+            edit(EDIT2_ID, AUTHOR, 2000, "older-later-id"),
+            edit(EDIT1_ID, AUTHOR, 3000, "newest"),
+        ];
+        let out = apply_edits(&events);
+        assert_eq!(out[0]["content"], "newest");
+
+        let tie = vec![
+            target(),
+            edit(EDIT1_ID, AUTHOR, 2000, "smaller id"),
+            edit(EDIT2_ID, AUTHOR, 2000, "larger id"),
+        ];
+        let out = apply_edits(&tie);
+        assert_eq!(
+            out[0]["content"], "larger id",
+            "exact created_at tie breaks on lexicographically larger event id"
+        );
+    }
+
+    // Semantic 3: 40003 rows are removed from the output.
+    #[test]
+    fn edit_rows_are_removed_from_output() {
+        let events = vec![target(), edit(EDIT1_ID, AUTHOR, 2000, "edited")];
+        let out = apply_edits(&events);
+        assert_eq!(out.len(), 1);
+        assert!(out.iter().all(|e| e["kind"] != 40003));
+    }
+
+    // Semantic 4: an edit whose target is not in the window is dropped.
+    #[test]
+    fn orphan_edit_is_dropped() {
+        let orphan = json!({
+            "id": EDIT1_ID,
+            "pubkey": AUTHOR,
+            "kind": 40003,
+            "created_at": 2000u64,
+            "content": "ghost",
+            "tags": [["e", EDIT2_ID]]
+        });
+        let events = vec![target(), orphan];
+        let out = apply_edits(&events);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["id"], TARGET_ID);
+        assert_eq!(out[0]["content"], "original");
+    }
+
+    // Semantic 5: identity fields are preserved; only content changes and
+    // edited_at carries the winning edit's created_at.
+    #[test]
+    fn folded_event_keeps_identity_and_gains_edited_at() {
+        let events = vec![target(), edit(EDIT1_ID, AUTHOR, 2500, "edited")];
+        let out = apply_edits(&events);
+        assert_eq!(out[0]["id"], TARGET_ID);
+        assert_eq!(out[0]["pubkey"], AUTHOR);
+        assert_eq!(out[0]["kind"], 9);
+        assert_eq!(out[0]["created_at"], 1000);
+        assert_eq!(out[0]["content"], "edited");
+        assert_eq!(out[0]["edited_at"], 2500);
+    }
+}
+
+#[cfg(test)]
+mod get_message_kinds_tests {
+    use super::get_message_kinds;
+    use buzz_core::kind::KIND_STREAM_MESSAGE_EDIT;
+
+    // The filter must fetch kind 40003 or edits never reach apply_edits.
+    #[test]
+    fn get_messages_filter_includes_edit_kind() {
+        assert!(
+            get_message_kinds()
+                .iter()
+                .any(|k| *k == u64::from(KIND_STREAM_MESSAGE_EDIT)),
+            "messages get must fetch kind 40003 (KIND_STREAM_MESSAGE_EDIT)"
+        );
     }
 }
