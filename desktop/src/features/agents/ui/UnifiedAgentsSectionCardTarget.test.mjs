@@ -40,6 +40,7 @@ let screen;
 let createElement;
 let QueryClient;
 let QueryClientProvider;
+let CommunitiesProvider;
 let UnifiedAgentsSection;
 
 const ipcHandlers = new Map();
@@ -118,7 +119,11 @@ function renderSection(props) {
     createElement(
       QueryClientProvider,
       { client },
-      createElement(UnifiedAgentsSection, props),
+      createElement(
+        CommunitiesProvider,
+        null,
+        createElement(UnifiedAgentsSection, props),
+      ),
     ),
   );
 }
@@ -127,6 +132,7 @@ before(async () => {
   Object.assign(globalThis, {
     document: dom.window.document,
     HTMLElement: dom.window.HTMLElement,
+    localStorage: dom.window.localStorage,
     window: dom.window,
     IS_REACT_ACT_ENVIRONMENT: true,
   });
@@ -155,6 +161,9 @@ before(async () => {
   ({ createElement } = await import("react"));
   ({ QueryClient, QueryClientProvider } = await import(
     "@tanstack/react-query"
+  ));
+  ({ CommunitiesProvider } = await import(
+    "@/features/communities/useCommunities"
   ));
   ({ UnifiedAgentsSection } = await import("./UnifiedAgentsSection.tsx"));
 });

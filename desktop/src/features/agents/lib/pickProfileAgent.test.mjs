@@ -33,6 +33,24 @@ test("the shared profile target prefers the active persona instance", () => {
   assert.equal(pickProfileAgent([running, stopped], NONE_ARCHIVED), running);
 });
 
+test("the active community identity wins over a running sibling", () => {
+  const legacy = agent({
+    pubkey: "a".repeat(64),
+    relayUrl: "wss://legacy.example",
+    status: "running",
+  });
+  const current = agent({
+    pubkey: "b".repeat(64),
+    relayUrl: "wss://current.example",
+    status: "stopped",
+  });
+
+  assert.equal(
+    pickProfileAgent([legacy, current], NONE_ARCHIVED, "wss://current.example"),
+    current,
+  );
+});
+
 test("an archived instance early in file order cannot hijack the target", () => {
   const archived = agent({
     name: "Archived instance",

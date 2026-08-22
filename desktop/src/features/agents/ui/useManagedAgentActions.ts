@@ -17,6 +17,7 @@ import {
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
@@ -38,6 +39,7 @@ import {
 export function useManagedAgentActions() {
   const queryClient = useQueryClient();
   const { globalConfig } = useGlobalAgentConfig();
+  const { activeCommunity } = useCommunities();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const [shouldLoadChannels, setShouldLoadChannels] = React.useState(false);
@@ -166,7 +168,12 @@ export function useManagedAgentActions() {
       if (!agent) return;
       await startManagedAgentWithRules({
         agent,
-        startManagedAgent: startMutation.mutateAsync,
+        startManagedAgent: (agentPubkey) =>
+          startMutation.mutateAsync({
+            pubkey: agentPubkey,
+            expectedRelayUrl: activeCommunity?.relayUrl,
+            expectedSignerPubkey: activeCommunity?.pubkey,
+          }),
       });
     } catch (error) {
       setActionErrorMessage(
@@ -186,7 +193,12 @@ export function useManagedAgentActions() {
       if (!agent) return;
       await respawnManagedAgentWithRules({
         agent,
-        startManagedAgent: startMutation.mutateAsync,
+        startManagedAgent: (agentPubkey) =>
+          startMutation.mutateAsync({
+            pubkey: agentPubkey,
+            expectedRelayUrl: activeCommunity?.relayUrl,
+            expectedSignerPubkey: activeCommunity?.pubkey,
+          }),
         stopManagedAgent: stopMutation.mutateAsync,
         onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
       });
