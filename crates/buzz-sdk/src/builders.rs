@@ -578,10 +578,10 @@ pub fn build_add_member(
     target_pubkey: &str,
     role: Option<MemberRole>,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
+    let normalized = check_pubkey_hex(target_pubkey, "target_pubkey")?;
     let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
-        tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
+        tag(&["p", &normalized])?,
     ];
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
@@ -594,10 +594,10 @@ pub fn build_remove_member(
     channel_id: Uuid,
     target_pubkey: &str,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
+    let normalized = check_pubkey_hex(target_pubkey, "target_pubkey")?;
     let tags = vec![
         tag(&["h", &channel_id.to_string()])?,
-        tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
+        tag(&["p", &normalized])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
 }
@@ -4866,5 +4866,35 @@ mod tests {
 
         assert_eq!(accept_count, 11, "expected 11 accept cases");
         assert_eq!(reject_count, 20, "expected 20 reject cases");
+    }
+
+    #[test]
+    fn build_add_member_rejects_overlong_pubkey() {
+        let cid = uuid();
+        let overlong = "a".repeat(65);
+        assert!(matches!(
+            build_add_member(cid, &overlong, None),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn build_remove_member_rejects_overlong_pubkey() {
+        let cid = uuid();
+        let overlong = "a".repeat(65);
+        assert!(matches!(
+            build_remove_member(cid, &overlong),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn add_remove_member_lowercases_pubkey() {
+        let cid = uuid();
+        let upper = "A".repeat(64);
+        let ev = sign(build_add_member(cid, &upper, None).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec!["a".repeat(64)]);
+        let ev2 = sign(build_remove_member(cid, &upper).unwrap());
+        assert_eq!(tag_values(&ev2, "p"), vec!["a".repeat(64)]);
     }
 }
