@@ -2016,15 +2016,18 @@ mod tests {
     }
 
     #[cfg(feature = "reqwest")]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn check_ssrf_reads_allowlist_env_var() {
+    #[test]
+    fn check_ssrf_reads_allowlist_env_var() {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         std::env::remove_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS");
-        assert!(check_ssrf("127.0.0.1", 80).await.is_err());
+        assert!(rt.block_on(check_ssrf("127.0.0.1", 80)).is_err());
         std::env::set_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS", "127.0.0.0/8");
-        assert!(check_ssrf("127.0.0.1", 80).await.is_ok());
+        assert!(rt.block_on(check_ssrf("127.0.0.1", 80)).is_ok());
         std::env::remove_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS");
     }
 
