@@ -608,6 +608,15 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn validate_message_payload(content: &str, files: &[String]) -> Result<(), CliError> {
+    if content.trim().is_empty() && files.is_empty() {
+        return Err(CliError::Usage(
+            "message content is empty; stdin may not have been delivered".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -618,6 +627,7 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    validate_message_payload(&p.content, &p.files)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -1059,8 +1069,8 @@ mod tests {
         channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
         match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags,
+        validate_message_payload, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1480,6 +1490,24 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         assert_eq!(event_mention_pubkeys(&event), vec![PK_VALID_A]);
+    }
+
+    #[test]
+    fn message_payload_rejects_empty_content_without_files() {
+        let error = validate_message_payload("", &[]).unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn message_payload_rejects_whitespace_content_without_files() {
+        let error = validate_message_payload(" \n\t", &[]).unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn message_payload_allows_content_or_file_attachments() {
+        assert!(validate_message_payload("hello", &[]).is_ok());
+        assert!(validate_message_payload("", &["image.png".to_string()]).is_ok());
     }
 
     // ---- match_profiles_by_name (author resolution for `messages search --author`) ----
