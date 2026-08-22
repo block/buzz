@@ -36,7 +36,7 @@ pub async fn nostr_nip05(
         .unwrap_or("");
     let json = match (
         params.name,
-        crate::tenant::bind_community(&state.db, raw_host).await,
+        crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases).await,
     ) {
         (Some(n), Ok(tenant)) => {
             let name = n.to_lowercase();

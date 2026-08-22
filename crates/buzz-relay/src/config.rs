@@ -1,5 +1,6 @@
 //! Relay configuration from environment variables.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -103,6 +104,23 @@ pub struct Config {
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
+
+    /// Alias→canonical host map for deployments legitimately reachable on
+    /// more than one address (`BUZZ_HOST_ALIASES`), e.g. a public CDN
+    /// hostname plus an internal tailnet name for the same community
+    /// (upstream #4952/#4953).
+    ///
+    /// Opt-in and additive only: an unset or blank var yields an empty map,
+    /// which is byte-identical to today's single-host-per-community
+    /// behavior — [`crate::tenant::bind_community`] only ever consults this
+    /// map *after* an exact `communities.host` lookup misses, so an alias
+    /// can never shadow a real community host (DB always wins). Both sides
+    /// of every pair must already be in the same normalized, canonical
+    /// authority shape `communities.host` requires (see
+    /// [`crate::handlers::community_provisioning::validate_host`], reused
+    /// here rather than duplicated) — no wildcards, no prefix/suffix
+    /// matching, no case folding beyond that existing normalization.
+    pub host_aliases: HashMap<String, String>,
     /// Maximum number of concurrent WebSocket connections.
     pub max_connections: usize,
     /// Maximum number of concurrently executing message handlers.
@@ -367,6 +385,94 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
+/// Parse `BUZZ_HOST_ALIASES` into an alias→canonical host map.
+///
+/// Format: comma-separated `alias=canonical` pairs, e.g.
+/// `internal.tailnet.example=chat.example.com`. An unset or blank/whitespace
+/// var is a deliberate no-op — returns an empty map, so a deployment that
+/// never sets this var keeps today's exact single-host behavior (see
+/// [`crate::tenant::bind_community`]'s DB-then-alias resolution order).
+///
+/// Validation is a hard startup error, not a warning — a typo here must not
+/// silently disable (or worse, misconfigure) host binding:
+/// - each entry must be exactly `alias=canonical` (exactly one `=`);
+/// - both `alias` and `canonical` must pass the same normalized host grammar
+///   `communities.host` requires — reuses
+///   [`crate::handlers::community_provisioning::validate_host`] rather than
+///   duplicating that grammar, so e.g. uppercase, a default port, or a
+///   scheme prefix are rejected here exactly as they would be for a
+///   community host;
+/// - an alias may not equal its own canonical (a no-op entry that would only
+///   ever mask the DB-first check with an identical lookup);
+/// - aliases must be unique (a duplicate key would make resolution
+///   last-write-wins depending on iteration order);
+/// - alias chains are forbidden — a `canonical` value may never also appear
+///   as another pair's `alias` key. `bind_community` resolves an alias
+///   exactly one hop against the DB, so a chain would silently fail to
+///   resolve instead of erroring here at startup where it's cheap to catch.
+fn parse_host_aliases(raw: &str) -> Result<HashMap<String, String>, ConfigError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut aliases = HashMap::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            // Tolerate a trailing/stray comma, matching BUZZ_CORS_ORIGINS and
+            // RELAY_OPERATOR_PUBKEYS' handling of empty split segments.
+            continue;
+        }
+
+        if entry.matches('=').count() != 1 {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_HOST_ALIASES entry must be alias=canonical (exactly one '='): {entry:?}"
+            )));
+        }
+        let (alias, canonical) = entry
+            .split_once('=')
+            .expect("exactly one '=' checked above");
+        let alias = alias.trim();
+        let canonical = canonical.trim();
+
+        crate::handlers::community_provisioning::validate_host(alias).map_err(|e| {
+            ConfigError::InvalidValue(format!("BUZZ_HOST_ALIASES alias {alias:?} is invalid: {e}"))
+        })?;
+        crate::handlers::community_provisioning::validate_host(canonical).map_err(|e| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_HOST_ALIASES canonical {canonical:?} is invalid: {e}"
+            ))
+        })?;
+
+        if alias == canonical {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_HOST_ALIASES alias {alias:?} cannot be its own canonical host"
+            )));
+        }
+
+        if aliases
+            .insert(alias.to_string(), canonical.to_string())
+            .is_some()
+        {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_HOST_ALIASES has a duplicate alias: {alias:?}"
+            )));
+        }
+    }
+
+    for canonical in aliases.values() {
+        if aliases.contains_key(canonical) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_HOST_ALIASES has a chained alias: {canonical:?} is both a canonical host \
+                 and an alias key — chains are not resolved, only one hop"
+            )));
+        }
+    }
+
+    Ok(aliases)
+}
+
 const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
 
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
@@ -552,6 +658,9 @@ impl Config {
                 Ok(value)
             })
             .transpose()?;
+
+        let host_aliases =
+            parse_host_aliases(&std::env::var("BUZZ_HOST_ALIASES").unwrap_or_default())?;
 
         let max_connections = std::env::var("BUZZ_MAX_CONNECTIONS")
             .ok()
@@ -998,6 +1107,7 @@ impl Config {
             db_read_pool_size,
             relay_url,
             pairing_relay_url,
+            host_aliases,
             max_connections,
             max_concurrent_handlers,
             send_buffer_size,
@@ -1135,6 +1245,10 @@ mod tests {
         assert!(
             config.relay_operator_pubkeys.is_empty(),
             "relay_operator_pubkeys should default empty (provisioning disabled)"
+        );
+        assert!(
+            config.host_aliases.is_empty(),
+            "host_aliases should default empty (no alias binding)"
         );
         assert!(
             !config.allow_nip_oa_auth,
@@ -1574,6 +1688,100 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("must be an http(s) origin")
         ));
+    }
+
+    #[test]
+    fn host_aliases_parses_one_and_two_pairs() {
+        let one = parse_host_aliases("internal.tailnet.example=chat.example.com")
+            .expect("single pair should parse");
+        assert_eq!(one.len(), 1);
+        assert_eq!(
+            one.get("internal.tailnet.example"),
+            Some(&"chat.example.com".to_string())
+        );
+
+        let two = parse_host_aliases(
+            "internal.tailnet.example=chat.example.com,vpn.example=chat.example.com",
+        )
+        .expect("two pairs should parse");
+        assert_eq!(two.len(), 2);
+        assert_eq!(
+            two.get("internal.tailnet.example"),
+            Some(&"chat.example.com".to_string())
+        );
+        assert_eq!(
+            two.get("vpn.example"),
+            Some(&"chat.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn host_aliases_rejects_malformed_pair() {
+        for entry in [
+            "no-equals-sign",
+            "a=b=c",
+            "=missing-alias.example",
+            "missing-canonical.example=",
+        ] {
+            assert!(
+                parse_host_aliases(entry).is_err(),
+                "expected error for {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_aliases_rejects_duplicate_alias() {
+        let result = parse_host_aliases(
+            "internal.tailnet.example=chat.example.com,internal.tailnet.example=other.example.com",
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("duplicate alias")
+        ));
+    }
+
+    #[test]
+    fn host_aliases_rejects_chained_alias() {
+        // b.example is both pair 1's canonical and pair 2's alias key — a
+        // chain bind_community never follows (it resolves one hop only).
+        let result = parse_host_aliases("a.example=b.example,b.example=c.example");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("chained alias")
+        ));
+    }
+
+    #[test]
+    fn host_aliases_rejects_alias_equal_to_its_own_canonical() {
+        let result = parse_host_aliases("chat.example.com=chat.example.com");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("cannot be its own canonical")
+        ));
+    }
+
+    #[test]
+    fn host_aliases_rejects_invalid_host_grammar() {
+        for entry in [
+            "Uppercase.example=chat.example.com",      // uppercase alias
+            "chat.example.com=Uppercase.example",      // uppercase canonical
+            "internal.example:443=chat.example.com",   // non-canonical default port
+            "wss://internal.example=chat.example.com", // scheme prefix
+        ] {
+            assert!(
+                parse_host_aliases(entry).is_err(),
+                "expected error for {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_aliases_unset_or_blank_is_empty_map() {
+        assert!(parse_host_aliases("").expect("empty is valid").is_empty());
+        assert!(parse_host_aliases("   ")
+            .expect("whitespace-only is valid")
+            .is_empty());
     }
 
     #[test]
