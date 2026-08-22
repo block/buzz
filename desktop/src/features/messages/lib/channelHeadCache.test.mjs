@@ -1,0 +1,208 @@
+import assert from "node:assert/strict";
+import { after, afterEach, before, test } from "node:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { JSDOM } from "jsdom";
+import React from "react";
+import {
+  consumeHydratedChannel,
+  hydrateChannelHeads,
+} from "./channelHeadCache.ts";
+import { channelMessagesKey } from "./messageQueryKeys.ts";
+import {
+  reconcileFetchedChannelWindow,
+  useChannelMessagesQuery,
+} from "../hooks.ts";
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  url: "http://localhost",
+});
+const channel = {
+  id: "channel-a",
+  name: "general",
+  channelType: "stream",
+  visibility: "open",
+  description: "",
+  topic: null,
+  purpose: null,
+  memberCount: 1,
+  memberPubkeys: [],
+  lastMessageAt: null,
+  archivedAt: null,
+  participants: [],
+  participantPubkeys: [],
+  isMember: true,
+  ttlSeconds: null,
+  ttlDeadline: null,
+};
+let channelWindowCalls = 0;
+let channelWindowEvents = [];
+
+before(() => {
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    window: dom.window,
+  });
+});
+
+afterEach(async () => {
+  const { cleanup } = await import("@testing-library/react");
+  cleanup();
+});
+
+after(() => dom.window.close());
+const channelId = "channel-a";
+const root = {
+  id: "a".repeat(64),
+  pubkey: "b".repeat(64),
+  created_at: 10,
+  kind: 40002,
+  tags: [["h", channelId]],
+  content: "persisted",
+  sig: "",
+};
+const replacement = {
+  ...root,
+  id: "c".repeat(64),
+  created_at: 11,
+  content: "relay",
+};
+function bounds() {
+  return {
+    id: "d".repeat(64),
+    pubkey: "e".repeat(64),
+    created_at: 12,
+    kind: 39006,
+    tags: [
+      ["h", channelId],
+      ["d", `${channelId}:head`],
+    ],
+    content: JSON.stringify({ has_more: false, next_cursor: null }),
+    sig: "",
+  };
+}
+function install(entries) {
+  channelWindowCalls = 0;
+  channelWindowEvents = [replacement, bounds()];
+  window.localStorage.clear();
+  window.__TAURI_INTERNALS__ = {
+    invoke: async (command) => {
+      if (command === "channel_head_cache_load") return entries;
+      if (command === "get_channel_window") {
+        channelWindowCalls += 1;
+        return channelWindowEvents;
+      }
+      return null;
+    },
+  };
+}
+
+async function mountChannelQuery(client) {
+  const { renderHook, waitFor } = await import("@testing-library/react");
+  const view = renderHook(() => useChannelMessagesQuery(channel), {
+    wrapper: ({ children }) =>
+      React.createElement(QueryClientProvider, { client }, children),
+  });
+  await waitFor(() => assert.equal(view.result.current.isSuccess, true));
+  return view;
+}
+test("mount fetches cold and prefetched channels but consumes hydrated data", async () => {
+  install([]);
+  const coldClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const coldView = await mountChannelQuery(coldClient);
+  assert.equal(channelWindowCalls, 1);
+
+  install([]);
+  const prefetchedClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  prefetchedClient.setQueryData(channelMessagesKey(channelId), [root], {
+    updatedAt: 0,
+  });
+  const prefetchedView = await mountChannelQuery(prefetchedClient);
+  assert.equal(channelWindowCalls, 1);
+
+  install([
+    { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },
+  ]);
+  const hydratedClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  await hydrateChannelHeads(hydratedClient, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  const hydratedView = await mountChannelQuery(hydratedClient);
+  assert.equal(channelWindowCalls, 0);
+  assert.deepEqual(hydratedView.result.current.data, [root]);
+
+  await hydratedClient.invalidateQueries({
+    queryKey: channelMessagesKey(channelId),
+    exact: true,
+    refetchType: "active",
+  });
+  assert.equal(channelWindowCalls, 1);
+  assert.deepEqual(hydratedClient.getQueryData(channelMessagesKey(channelId)), [
+    replacement,
+  ]);
+  hydratedView.unmount();
+  coldView.unmount();
+  prefetchedView.unmount();
+  coldClient.clear();
+  prefetchedClient.clear();
+  hydratedClient.clear();
+});
+
+test("hydrates stale data and consumes its mount gate once", async () => {
+  install([
+    { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },
+  ]);
+  const client = new QueryClient();
+  await hydrateChannelHeads(client, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  assert.deepEqual(client.getQueryData(channelMessagesKey(channelId)), [root]);
+  assert.equal(
+    client.getQueryState(channelMessagesKey(channelId)).dataUpdatedAt,
+    0,
+  );
+  assert.equal(consumeHydratedChannel(client, channelId), true);
+  assert.equal(consumeHydratedChannel(client, channelId), false);
+});
+test("authoritative refresh deletes a vanished hydrated row", async () => {
+  install([
+    { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },
+  ]);
+  const client = new QueryClient();
+  await hydrateChannelHeads(client, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  const next = reconcileFetchedChannelWindow(
+    client,
+    channelId,
+    [replacement, bounds()],
+    client.getQueryData(channelMessagesKey(channelId)),
+    new AbortController().signal,
+  );
+  assert.deepEqual(
+    next.map((e) => e.id),
+    [replacement.id],
+  );
+});
+test("drops malformed entries independently", async () => {
+  install([
+    { channelId: "bad", events: [root], savedAt: 1, lastVisitedAt: 2 },
+    { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },
+  ]);
+  const client = new QueryClient();
+  await hydrateChannelHeads(client, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  assert.equal(client.getQueryData(channelMessagesKey("bad")), undefined);
+  assert.deepEqual(client.getQueryData(channelMessagesKey(channelId)), [root]);
+});

@@ -63,6 +63,7 @@ import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChang
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
+import { hydrateChannelHeads } from "@/features/messages/lib/channelHeadCache";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
@@ -213,10 +214,37 @@ function CommunitySwitchGate() {
   );
 }
 
-function CommunityQueryProvider({ children }: { children: ReactNode }) {
+function CommunityQueryProvider({
+  children,
+  pubkey,
+  relayUrl,
+}: {
+  children: ReactNode;
+  pubkey: string | null;
+  relayUrl: string | null;
+}) {
   const [queryClient] = useState(createBuzzQueryClient);
+  const [isHydrated, setIsHydrated] = useState(!pubkey || !relayUrl);
 
   useEffect(() => setAvatarProfileSyncQueryClient(queryClient), [queryClient]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!pubkey || !relayUrl) {
+      setIsHydrated(true);
+      return;
+    }
+    void hydrateChannelHeads(queryClient, { pubkey, relayUrl })
+      .catch((error) => {
+        console.warn("Failed to hydrate persisted channel heads", error);
+      })
+      .finally(() => {
+        if (!cancelled) setIsHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pubkey, queryClient, relayUrl]);
 
   useEffect(() => {
     const e2eWindow = window as Window & {
@@ -236,7 +264,9 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
   }, [queryClient]);
 
   return (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      {isHydrated ? children : null}
+    </QueryClientProvider>
   );
 }
 
@@ -601,7 +631,11 @@ function CommunityApp({
   }, [communityApplied]);
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
-      <CommunityQueryProvider key={communityKey}>
+      <CommunityQueryProvider
+        key={communityKey}
+        pubkey={community.identityPubkey}
+        relayUrl={activeCommunity?.relayUrl ?? null}
+      >
         <CommunityIdentityReplacementSentinel
           onIdentityReplaced={bumpSignerEpoch}
         />

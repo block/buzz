@@ -126,7 +126,9 @@ Both kinds are relay-only: client submission is rejected at ingest.
 - Reconnect refetches page 0 and re-arms the live subscription
   (`since: now`); deeper pages need no repair path.
 - Replies never enter the channel timeline; the thread panel uses the
-  existing `thread_cursor` surface (#1418).
+  existing `thread_cursor` surface (#1418). Thread filters may opt into
+  `include_aux` to append the same authorized two-hop reactions, edits, and
+  deletions closure as a channel-window response.
 
 ## Siblings
 

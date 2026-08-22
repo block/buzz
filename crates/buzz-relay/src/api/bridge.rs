@@ -393,6 +393,18 @@ const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
 ];
 
+fn build_aux_query(
+    community: buzz_core::CommunityId,
+    target_ids: Vec<String>,
+    kinds: &[u32],
+) -> buzz_db::EventQuery {
+    let mut query = buzz_db::EventQuery::for_community(community);
+    query.kinds = Some(kinds.iter().map(|kind| *kind as i32).collect());
+    query.e_tags = Some(target_ids);
+    query.limit = Some(1000);
+    query
+}
+
 /// Serve one `top_level: true` channel-window filter on the bridge `/query`
 /// path (docs/bridge-channel-window.md). Appends, in order: row events, the
 /// aux closure (`include_aux`), `39005` thread-summary overlays
@@ -496,10 +508,8 @@ async fn handle_channel_window_filter(
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let mut aux_query = buzz_db::EventQuery::for_community(tenant.community());
-            aux_query.kinds = Some(hop_kinds.iter().map(|k| *k as i32).collect());
-            aux_query.e_tags = Some(std::mem::take(&mut hop_ids));
-            aux_query.limit = Some(1000);
+            let aux_query =
+                build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
             let aux_events = session
                 .query_events(&aux_query)
                 .await
@@ -1203,6 +1213,8 @@ async fn query_events_authed(
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
+        let mut thread_row_ids = Vec::with_capacity(thread_replies.len() + 1);
+        thread_row_ids.push(root_hex.to_string());
         for reply in thread_replies {
             let se = reply.stored_event;
             if !event_in_accessible_channel(&se, &accessible_channels) {
@@ -1214,8 +1226,41 @@ async fn query_events_authed(
             if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                 continue;
             }
+            thread_row_ids.push(se.event.id.to_hex());
             if let Ok(v) = serde_json::to_value(&se.event) {
                 events.push(v);
+            }
+        }
+
+        if extension_flag(raw, "include_aux") && !thread_row_ids.is_empty() {
+            let mut seen_aux = std::collections::HashSet::new();
+            let mut hop_ids = thread_row_ids;
+            for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let aux_query =
+                    build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+                let aux_events = state
+                    .db
+                    .query_events_routed("bridge_thread_aux", &aux_query)
+                    .await
+                    .map_err(|e| internal_error(&format!("thread aux query error: {e}")))?;
+                for se in aux_events {
+                    if !seen_aux.insert(se.event.id)
+                        || !event_in_accessible_channel(&se, &accessible_channels)
+                        || !buzz_core::filter::reader_authorized_for_event(
+                            &se.event,
+                            &authed_pubkey_hex,
+                        )
+                    {
+                        continue;
+                    }
+                    hop_ids.push(se.event.id.to_hex());
+                    if let Ok(value) = serde_json::to_value(&se.event) {
+                        events.push(value);
+                    }
+                }
+                if hop_ids.is_empty() {
+                    break;
+                }
             }
         }
         handled.insert(idx);
@@ -2371,6 +2416,20 @@ mod tests {
         ];
 
         assert!(!has_mixed_search_filters(&filters));
+    }
+
+    #[test]
+    fn thread_aux_query_targets_root_and_replies_with_full_first_hop() {
+        let tenant = fresh_tenant("relay.example");
+        let targets = vec!["root".to_string(), "reply".to_string()];
+        let query = build_aux_query(tenant.community(), targets.clone(), &WINDOW_AUX_KINDS);
+
+        assert_eq!(query.e_tags, Some(targets));
+        assert_eq!(
+            query.kinds,
+            Some(WINDOW_AUX_KINDS.iter().map(|kind| *kind as i32).collect())
+        );
+        assert_eq!(query.limit, Some(1000));
     }
 
     #[test]
