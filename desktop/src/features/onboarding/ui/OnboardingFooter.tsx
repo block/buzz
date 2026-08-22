@@ -49,7 +49,16 @@ export function OnboardingFooterProvider({
         aria-hidden
         className="pointer-events-none fixed inset-x-0 bottom-0 z-10 h-36 bg-[linear-gradient(to_top,var(--buzz-onboarding-shell-bottom)_35%,transparent)]"
       />
+      <div
+        className="pointer-events-none fixed inset-x-0 bottom-5 z-20 flex justify-center px-4"
+        data-testid="onboarding-footer-slot"
+        ref={setTarget}
+      />
       {backAction ? (
+        // Rendered after the footer slot so the Back button stacks above the
+        // slot's full-width CTA groups (which re-enable pointer events) and
+        // stays clickable when a step docks a wide group (e.g. the identity
+        // help trigger).
         <div className="fixed bottom-5 left-6 z-20">
           <Button
             className="h-9 rounded-full bg-foreground/10 px-6 text-sm text-foreground hover:bg-foreground/15 hover:text-foreground"
@@ -63,11 +72,6 @@ export function OnboardingFooterProvider({
           </Button>
         </div>
       ) : null}
-      <div
-        className="pointer-events-none fixed inset-x-0 bottom-5 z-20 flex justify-center px-4"
-        data-testid="onboarding-footer-slot"
-        ref={setTarget}
-      />
     </OnboardingFooterTargetContext.Provider>
   );
 }
