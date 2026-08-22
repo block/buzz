@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1104,7 +1104,7 @@ mod tests {
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
     }
 
-    /// 0032 introduces the task system. The load-bearing properties are that it
+    /// 0033 introduces the task system. The load-bearing properties are that it
     /// is purely additive (no existing table is altered, so brownfield
     /// checksums are untouched), that both tables are tenant-scoped with
     /// `community_id`-leading keys, that both are explicitly attached to the
@@ -1115,8 +1115,8 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations[31].version, 32);
-        let sql = migrations[31].sql.as_str();
+        assert_eq!(migrations[32].version, 33);
+        let sql = migrations[32].sql.as_str();
         assert!(sql.contains("CREATE TABLE tasks"));
         assert!(sql.contains("CREATE TABLE task_events"));
         assert!(sql.contains("SET LOCAL lock_timeout = '5s'"));
