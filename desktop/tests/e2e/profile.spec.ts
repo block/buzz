@@ -1871,24 +1871,40 @@ test("an older agent message opens the same persona instance as the Agents libra
   await page.goto("/");
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+
+  // The two instances carry different names, so the persona shows one card per
+  // name — neither is hidden — and each card opens its own instance. The
+  // persona's own name stays on both cards as a second line.
+  const earlierCard = page.getByTestId(
+    `persona-agent-row-${personaId}::earlier parity agent`,
+  );
+  const currentCard = page.getByTestId(
+    `persona-agent-row-${personaId}::current parity agent`,
+  );
+  await expect(earlierCard).toBeVisible();
+  await expect(currentCard).toBeVisible();
+  await expect(page.getByText("Parity Agent", { exact: true })).toHaveCount(2);
+
+  // The running instance's card opens the running instance.
+  await currentCard.click();
+  await expectHashSearchParam(page, "profile", currentPubkey);
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
-  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
+  await page.getByTestId("auxiliary-panel-close").click();
 
-  await page.getByTestId("user-profile-tab-runtime").click();
-  await page.getByTestId("user-profile-instances").click();
-  await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
+  // The renamed, stopped instance's card opens *that* instance rather than
+  // silently redirecting to its running sibling.
+  await earlierCard.click();
   await expectHashSearchParam(page, "profile", historicalPubkey);
-  await expectHashSearchParam(page, "profileTab", "runtime");
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Start agent");
-  await expect(
-    page.getByTestId(`user-profile-instance-${historicalPubkey}`),
-  ).toContainText("Current");
+  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
 
+  // Parity, restated for the new card model: an avatar click on an older
+  // message from the renamed instance must land on the same contract its card
+  // does — not on the persona's running instance.
   await page.getByTestId("auxiliary-panel-close").click();
   await page.getByTestId("channel-agents").click();
   const historicalMessage = page
@@ -1898,7 +1914,7 @@ test("an older agent message opens the same persona instance as the Agents libra
   await historicalMessage.locator("button").first().click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Stop");
+  ).toHaveAttribute("aria-label", "Start agent");
   const messageContract = await readOwnedAgentProfileContract(page);
 
   expect(messageContract).toEqual(agentsLibraryContract);
