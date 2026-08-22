@@ -34,10 +34,11 @@ export function selectTimelineLoadingState(
     // painting those as if loaded flashes a near-empty timeline.
     return status.isFetching;
   }
-  return (
-    status.isFetching &&
-    (status.isPlaceholderData || (status.dataLength ?? 0) === 0)
-  );
+  // Settled this session: the cache holds an authoritative window — possibly
+  // authoritatively EMPTY — so refetches paint cached content (or the empty
+  // state) stale-while-revalidate. Only placeholder data still skeletons: it
+  // is not this channel's own settled window.
+  return status.isFetching && status.isPlaceholderData;
 }
 
 /**

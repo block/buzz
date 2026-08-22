@@ -374,6 +374,9 @@ type E2eConfig = {
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
+    /** Delay (ms) for head (cursorless) channel-window requests, so specs can
+     *  observe what paints while a refetch is in flight. 0/undefined = instant. */
+    channelWindowHeadDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     /** Override whether get_profile reports a real kind:0 event. */
@@ -5579,6 +5582,13 @@ async function handleGetChannelWindow(
   };
 
   if (!args.cursor) {
+    // TEST-ONLY: head (cursorless) window fetches are the cold-load and
+    // revisit-refetch path; delaying them creates the observation window
+    // the stale-revisit spec asserts over.
+    const headDelayMs = getConfig()?.mock?.channelWindowHeadDelayMs ?? 0;
+    if (headDelayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, headDelayMs));
+    }
     return execute();
   }
 

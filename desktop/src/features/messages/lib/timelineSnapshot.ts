@@ -181,21 +181,33 @@ export function selectDeferredListRenderState(
   return "pending";
 }
 
-export type TimelineBodySurface = "skeleton" | "empty" | "list";
+export type TimelineBodySurface = "skeleton" | "blank" | "empty" | "list";
 
 export function selectTimelineBodySurface({
   deferredCount,
   preserveSettledEmptyIntro = false,
   isLoading,
+  isSwitchGap = false,
   liveCount,
 }: {
   deferredCount: number;
   preserveSettledEmptyIntro?: boolean;
   isLoading: boolean;
+  /** Deferred snapshot still holds another channel (channel-switch gap). */
+  isSwitchGap?: boolean;
   liveCount: number;
 }): TimelineBodySurface {
   if (isLoading) {
     return "skeleton";
+  }
+  if (isSwitchGap) {
+    // The deferred snapshot lags the live one for a frame or two on every
+    // channel switch. Without an authoritative load in flight that gap is a
+    // render-pipeline artifact, not a loading state: paint plain background
+    // instead of flashing skeleton bars on every switch. (Painting the
+    // previous channel's lagging rows here is also wrong — the header and
+    // sidebar have already moved on.)
+    return "blank";
   }
 
   const renderState = selectDeferredListRenderState(deferredCount, liveCount);

@@ -49,6 +49,7 @@ import {
   resolveTimelineLoadingLatch,
   selectTimelineLoadingState,
 } from "@/features/messages/lib/timelineLoadingState";
+import { hasTimelineSettledThisSession } from "@/features/messages/lib/settledTimelineChannels";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
@@ -596,8 +597,15 @@ export function ChannelScreen({
       setThreadScrollTargetId,
     });
   const settledChannelIdRef = React.useRef<string | null>(null);
+  // A channel that settled at any point this session keeps its settled
+  // status across switches: its cache holds an authoritative window (live
+  // updates merge into it while away), so a stale revisit renders those rows
+  // stale-while-revalidate instead of flashing the skeleton for the whole
+  // refetch round-trip.
   const hasSettledThisChannel =
-    activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
+    activeChannelId !== null &&
+    (settledChannelIdRef.current === activeChannelId ||
+      hasTimelineSettledThisSession(activeChannelId));
   const timelineLoadingNow =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&

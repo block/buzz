@@ -489,7 +489,11 @@ test("deferred-snapshot: fresh when channel ids match", () => {
   );
 });
 
-test("timeline-body-surface: stale deferred channel snapshot paints skeleton instead of old list", () => {
+test("timeline-body-surface: stale deferred channel snapshot paints blank instead of old list", () => {
+  // Production wiring (MessageTimeline) routes deferred-snapshot divergence
+  // through isSwitchGap, not isLoading: the gap is a render-pipeline
+  // artifact, so it paints the blank surface — never the previous channel's
+  // rows, and not a false skeleton.
   const isStale = isDeferredTimelineSnapshotStale({
     deferredSnapshot: { channelId: "chan-a" },
     liveSnapshot: { channelId: "chan-b" },
@@ -498,10 +502,11 @@ test("timeline-body-surface: stale deferred channel snapshot paints skeleton ins
   assert.equal(
     selectTimelineBodySurface({
       deferredCount: 4,
-      isLoading: isStale,
+      isLoading: false,
+      isSwitchGap: isStale,
       liveCount: 0,
     }),
-    "skeleton",
+    "blank",
   );
 });
 
@@ -609,4 +614,30 @@ test("isRenderedTimelineBehindHistoryPrepend: false when rendered oldest already
   // Rendered shorter than live but oldest unchanged (e.g. a newer live append):
   // not behind an older-history prepend.
   assert.equal(isRenderedTimelineBehindHistoryPrepend([a], [a, b]), false);
+});
+
+test("timeline-body-surface: the channel-switch gap is blank, never a skeleton flash", () => {
+  // Deferred snapshot still holds the previous channel while the live one
+  // moved on. Without an authoritative load in flight this is a 1-2 frame
+  // render-pipeline gap — paint background, not flashing skeleton bars.
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 5,
+      isLoading: false,
+      isSwitchGap: true,
+      liveCount: 3,
+    }),
+    "blank",
+  );
+  // A genuine authoritative load during the gap keeps the skeleton: the cold
+  // switch is a real loading state, not a pipeline artifact.
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 5,
+      isLoading: true,
+      isSwitchGap: true,
+      liveCount: 0,
+    }),
+    "skeleton",
+  );
 });

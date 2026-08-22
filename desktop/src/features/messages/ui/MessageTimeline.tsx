@@ -299,10 +299,17 @@ const MessageTimelineBase = React.forwardRef<
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
     preserveSettledEmptyIntro,
-    isLoading: timelineIsLoading,
+    isLoading,
+    isSwitchGap: isDeferredSnapshotStale,
     liveCount: messages.length,
   });
-  const showTimelineSkeleton = timelineBodySurface === "skeleton";
+  // "blank" (the 1-2 frame channel-switch gap) blocks the same behaviors as
+  // the skeleton — no autoscroll, jumps, pills, or scrollback while the
+  // deferred snapshot catches up — but renders plain background instead of
+  // flashing skeleton bars on every switch.
+  const showTimelineSkeleton =
+    timelineBodySurface === "skeleton" || timelineBodySurface === "blank";
+  const showSkeletonVisual = timelineBodySurface === "skeleton";
   const [isSemanticallyAtBottom, setIsSemanticallyAtBottom] =
     React.useState(true);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset semantic tail state when the active channel changes
@@ -601,6 +608,9 @@ const MessageTimelineBase = React.forwardRef<
     sentinelRef: topSentinelRef,
   });
 
+  // Blocked (skeleton OR blank switch gap) uses EMPTY_MESSAGES: during the
+  // gap the deferred rows still belong to the previous channel, and shape
+  // caching must never write them under this channel's key.
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
     isLoading: showTimelineSkeleton,
@@ -749,6 +759,7 @@ const MessageTimelineBase = React.forwardRef<
           data-buzz-conversation-scroll={
             useTimelineVirtualizer && showMessageList ? undefined : "true"
           }
+          data-render-pending={isRenderPending ? "true" : undefined}
           data-scroll-restoration-id={scrollRestorationId}
           data-testid={
             useTimelineVirtualizer && showMessageList
@@ -794,7 +805,7 @@ const MessageTimelineBase = React.forwardRef<
                     "mt-auto",
                 )}
               >
-                {showTimelineSkeleton ? (
+                {showSkeletonVisual ? (
                   <TimelineSkeleton rows={timelineSkeletonRows} />
                 ) : null}
                 {activeDirectMessageIntro ? (

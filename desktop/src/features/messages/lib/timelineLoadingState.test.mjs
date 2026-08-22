@@ -33,14 +33,20 @@ test("stale placeholder while refetching is loading", () => {
 
 test("subscription-seeded empty cache while fetching is loading", () => {
   // The live subscription's setQueryData seeds [] before history settles, so
-  // data is defined but empty and a fetch is still in flight.
+  // data is defined but empty and a fetch is still in flight. This is a
+  // cold-load shape: the channel has not settled this session (a channel
+  // that HAS settled owns an authoritative — possibly empty — window and
+  // paints it instead; see the settled-empty-revisit test below).
   assert.equal(
-    selectTimelineLoadingState({
-      ...settled,
-      isFetching: true,
-      isPlaceholderData: false,
-      dataLength: 0,
-    }),
+    selectTimelineLoadingState(
+      {
+        ...settled,
+        isFetching: true,
+        isPlaceholderData: false,
+        dataLength: 0,
+      },
+      false,
+    ),
     true,
   );
 });
@@ -155,6 +161,24 @@ test("latch: no active channel passes loadingNow through untouched", () => {
   );
   assert.equal(
     resolveTimelineLoadingLatch("chan-a", null, false).isLoading,
+    false,
+  );
+});
+
+test("settled empty channel revisit paints the empty state, not a skeleton", () => {
+  // The channel settled this session with zero rows: its cache holds an
+  // authoritative empty window, so a stale-revisit refetch must render the
+  // empty state stale-while-revalidate — same contract as populated rows.
+  assert.equal(
+    selectTimelineLoadingState(
+      {
+        isPending: false,
+        isFetching: true,
+        isPlaceholderData: false,
+        dataLength: 0,
+      },
+      true,
+    ),
     false,
   );
 });

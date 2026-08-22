@@ -106,6 +106,8 @@ export default defineConfig({
         "**/cold-switch-longtask.perf.ts",
         "**/switch-settle-after-paint.spec.ts",
         "**/timeline-no-shift.spec.ts",
+        "**/thread-summary-stability.spec.ts",
+        "**/channel-revisit-no-skeleton.spec.ts",
         "**/human-edit-agent-content.spec.ts",
         "**/empty-edit-delete.spec.ts",
         "**/reaction-order.spec.ts",

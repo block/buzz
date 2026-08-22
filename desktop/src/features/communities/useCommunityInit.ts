@@ -34,6 +34,7 @@ import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { resetSettledTimelineChannels } from "@/features/messages/lib/settledTimelineChannels";
 import { resetChannelSwitchTrace } from "@/shared/lib/channelSwitchPerf";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
@@ -86,6 +87,8 @@ async function resetCommunityState({
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
   resetMessageLinkMetadataCache();
+  // resetChannelSwitchTrace() runs earlier, before the first await.
+  resetSettledTimelineChannels();
 }
 
 type CommunityInitResult =
