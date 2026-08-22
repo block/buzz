@@ -65,6 +65,7 @@ async fn authorize_workflow_read(
     let bridge::BridgeAuth {
         pubkey,
         event_id_bytes,
+        created_at,
         ..
     } = bridge::verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
@@ -79,6 +80,7 @@ async fn authorize_workflow_read(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        created_at,
     )
     .await?;
 

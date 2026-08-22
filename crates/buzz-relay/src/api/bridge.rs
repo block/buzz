@@ -840,6 +840,7 @@ async fn submit_event_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        auth_event_created_at,
     )
     .await
     {
@@ -953,6 +954,7 @@ pub async fn query_events(
     let BridgeAuth {
         pubkey,
         event_id_bytes,
+        created_at,
         ..
     } = verify_bridge_auth(
         &headers,
@@ -967,8 +969,16 @@ pub async fn query_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        query_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = query_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        created_at,
+    )
+    .await;
     match &result {
         Ok(Json(Value::Array(events))) => {
             tracing::info!(
@@ -1004,6 +1014,7 @@ async fn query_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    auth_event_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
@@ -1015,6 +1026,7 @@ async fn query_events_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        auth_event_created_at,
     )
     .await?;
 
@@ -1444,6 +1456,7 @@ pub async fn count_events(
     let BridgeAuth {
         pubkey,
         event_id_bytes,
+        created_at,
         ..
     } = verify_bridge_auth(
         &headers,
@@ -1458,8 +1471,16 @@ pub async fn count_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        count_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = count_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        created_at,
+    )
+    .await;
     match &result {
         Ok(Json(value)) => {
             let count = value.get("count").and_then(Value::as_u64);
@@ -1493,6 +1514,7 @@ async fn count_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    auth_event_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
@@ -1504,6 +1526,7 @@ async fn count_events_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        auth_event_created_at,
     )
     .await?;
 

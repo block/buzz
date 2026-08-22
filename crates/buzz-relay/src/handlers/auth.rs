@@ -228,6 +228,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 conn.tenant.community(),
                 pubkey.as_bytes(),
                 auth_tag_json.as_deref(),
+                Some(auth_event_created_at),
             )
             .await
             {
@@ -628,5 +629,58 @@ mod tests {
             None,
             "a non-member owner must not be recorded on a closed relay",
         );
+    }
+
+    /// Delegated *admission* must honour the credential's window, not just
+    /// materialization.
+    ///
+    /// The sibling expiry test enrols the agent directly, so admission never
+    /// consults the tag and it cannot observe this: it only proves an expired
+    /// credential confers no ownership. Here the agent is **not** a relay member
+    /// and reaches the relay solely through its member owner, so the tag is the
+    /// whole basis for access. NIP-AA Step 4 requires the `created_at` clauses to
+    /// be evaluated against the AUTH event's signed `created_at`; without that,
+    /// a once-valid capability reconnects forever while the owner stays enrolled.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_delegated_admission_refuses_credentials_outside_their_window() {
+        // Bounds are strict, so an AUTH event stamped exactly at the boundary
+        // satisfies neither clause.
+        for (label, op) in [("expired", '<'), ("not yet valid", '>')] {
+            let (state, pool) = require_infra(ws_test_state().await);
+            let tenant = ws_seed_community(&pool).await;
+            let agent = Keys::generate();
+            let owner = Keys::generate();
+
+            // Only the owner is enrolled: admission can come from the tag alone.
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &owner.public_key().to_hex(),
+                    "member",
+                    None,
+                )
+                .await
+                .expect("add relay member");
+
+            let now = now_secs();
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(
+                &owner,
+                &agent.public_key(),
+                &format!("created_at{op}{now}"),
+            )
+            .expect("compute auth tag");
+            let (conn, challenge) = pending_conn(&tenant);
+            let event = auth_event(&state, &tenant, &agent, &challenge, Some(&tag), now);
+
+            super::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+
+            let auth_state = conn.auth_state.read().await;
+            assert!(
+                !matches!(&*auth_state, AuthState::Authenticated(_)),
+                "a {label} credential must not admit a non-member agent to a closed relay",
+            );
+        }
     }
 }

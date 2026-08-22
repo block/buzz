@@ -216,6 +216,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
+            Some(event.created_at.as_secs()),
         )
         .await
         .is_err()

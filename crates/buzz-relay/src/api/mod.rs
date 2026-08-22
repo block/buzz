@@ -59,11 +59,22 @@ pub mod relay_members {
     ///
     /// `community` is the server-resolved tenant of the request; membership is
     /// scoped to it so admitting a pubkey to community A never admits it to B.
+    ///
+    /// `auth_event_created_at` is the `created_at` of the signed authentication
+    /// event that carried the NIP-OA tag — the NIP-42 AUTH event on WebSocket,
+    /// the NIP-98 request event over HTTP. NIP-AA Step 4 requires the tag's
+    /// `created_at<t` / `created_at>t` clauses to be evaluated against exactly
+    /// that field, so delegated admission needs it and **`None` denies the
+    /// delegated fallback**: without a trusted timestamp there is nothing to
+    /// judge the attested window against, and admitting anyway would let an
+    /// expired capability back onto a closed relay. Direct membership is
+    /// unaffected — it never consults the tag.
     pub async fn check_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        auth_event_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
             return Ok(MembershipDecision::OpenRelay);
@@ -84,7 +95,18 @@ pub mod relay_members {
                 let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
                     .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
 
-                match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+                // Fail closed: a caller that cannot supply the carrier event's
+                // signed `created_at` cannot have the tag's window evaluated, so
+                // it does not get delegated admission.
+                let Some(created_at) = auth_event_created_at else {
+                    info!(
+                        agent = %pubkey_hex,
+                        "NIP-OA delegation denied: no signed timestamp to evaluate the tag window against"
+                    );
+                    return Ok(MembershipDecision::Denied);
+                };
+
+                match buzz_sdk::nip_oa::verify_auth_tag_at(tag_json, &agent_pubkey, created_at) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
                         let owner_is_member = state
@@ -124,13 +146,26 @@ pub mod relay_members {
     /// therefore means "admitted on its own", **not** "has no owner": callers that
     /// record ownership must pass the result through [`resolve_nip_oa_owner`], which
     /// recovers the owner from the presented tag in exactly those cases.
+    ///
+    /// `auth_event_created_at` carries the signed timestamp the NIP-OA window is
+    /// judged against; see [`check_relay_membership`]. `None` denies the
+    /// delegated fallback rather than skipping the check.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        auth_event_created_at: Option<u64>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
+        match check_relay_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            auth_event_created_at,
+        )
+        .await
+        {
             Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
             Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
             Ok(MembershipDecision::Denied) => Err((
@@ -250,11 +285,11 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         auth_event_created_at: u64,
     ) -> Option<nostr::PublicKey> {
-        // Verified here even when the gate already resolved an owner:
-        // `check_relay_membership` does not evaluate the tag's time bounds, so
-        // an expired credential can still produce a `ViaOwner` decision. That
-        // pre-existing membership grant is out of scope here, but it must not
-        // become a *materialized* ownership record.
+        // Re-verified here even when the gate already resolved an owner. The two
+        // checks judge the same window against the same signed timestamp, so
+        // this is belt-and-braces rather than a second opinion — it keeps
+        // materialization correct on its own terms if the gate is ever changed
+        // or called differently.
         let owner = extract_nip_oa_owner_at(pubkey_bytes, auth_tag_header, auth_event_created_at)?;
 
         if let Some(gate_owner) = gate_owner {
