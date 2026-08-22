@@ -5,6 +5,7 @@ import type { ValidatedJournalAuthorityArtifact } from "./activityLedgerAuthorit
 import {
   buildTodayActivitySurface,
   normalizeActivityEvents,
+  type NormalizedActivityEvent,
   type TodayActivityJournal,
   type TodayActivitySurface,
 } from "./activityLedger";
@@ -17,6 +18,7 @@ export type ActivityLedgerAgentIdentity = {
 
 export const TODAY_SNAPSHOT_SURFACE_MAX_BYTES = 6 * 1024 * 1024;
 const TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL = 100;
+const TODAY_ARCHIVE_MAX_EVENTS_PER_JOURNAL = 300;
 const TODAY_SNAPSHOT_MAX_SUMMARY_CHARS = 4_096;
 const TODAY_SNAPSHOT_MAX_EVENT_DETAIL_CHARS = 8_192;
 
@@ -36,10 +38,97 @@ export type BoundedTodayActivitySurface = TodayActivitySurface & {
 
 function truncateSnapshotText(value: string, maxChars: number) {
   if (value.length <= maxChars) return { value, truncated: false };
-  return { value: `${value.slice(0, maxChars)}…`, truncated: true };
+  return { value: `${value.slice(0, maxChars - 1)}…`, truncated: true };
 }
 
-function compactSnapshotJournal(journal: TodayActivityJournal): {
+function selectSnapshotEvents(
+  journal: TodayActivityJournal,
+  maxEvents: number,
+) {
+  if (journal.events.length <= maxEvents) return journal.events;
+  const selected = new Set<number>();
+  const add = (index: number | undefined) => {
+    if (
+      index !== undefined &&
+      index >= 0 &&
+      index < journal.events.length &&
+      selected.size < maxEvents
+    ) {
+      selected.add(index);
+    }
+  };
+  const addMatching = (
+    predicate: (event: NormalizedActivityEvent) => boolean,
+  ) => {
+    for (let index = 0; index < journal.events.length; index += 1) {
+      if (predicate(journal.events[index])) add(index);
+    }
+  };
+
+  // Verification sources are capped at 256 in the owner-authority contract.
+  // Preserve those sources, their correlation root, and terminal truth before
+  // spending the remaining projection budget on ordinary transcript detail.
+  add(0);
+  addMatching(
+    (event) =>
+      event.provenance.observerKind === "owner_verification" ||
+      event.provenance.sourceKind === 24201,
+  );
+  addMatching((event) => event.proofState === "VERIFIED");
+  add(
+    journal.events.findIndex(
+      (event) =>
+        event.provenance.triggeringEventIds.includes(journal.correlationId) ||
+        event.toolCallId === journal.correlationId ||
+        event.messageId === journal.correlationId,
+    ),
+  );
+  addMatching((event) => event.proofState === "FAILED");
+
+  let latestVerificationEvidence = -1;
+  for (let index = journal.events.length - 1; index >= 0; index -= 1) {
+    const event = journal.events[index];
+    if (
+      event.provenance.sourceKind !== 24201 &&
+      event.provenance.observerKind !== "owner_verification" &&
+      (event.category === "turn" ||
+        event.category === "tool" ||
+        event.category === "permission" ||
+        event.category === "status")
+    ) {
+      latestVerificationEvidence = index;
+      break;
+    }
+  }
+  add(latestVerificationEvidence);
+  addMatching((event) => event.category === "turn");
+  addMatching((event) => event.proofState === "RECEIPTED");
+
+  const latestToolEvents = new Map<string, number>();
+  for (let index = 0; index < journal.events.length; index += 1) {
+    const event = journal.events[index];
+    if (event.category === "tool") {
+      latestToolEvents.set(event.toolCallId ?? event.correlationId, index);
+    }
+  }
+  for (const index of latestToolEvents.values()) add(index);
+
+  for (
+    let index = journal.events.length - 1;
+    index >= 0 && selected.size < maxEvents;
+    index -= 1
+  ) {
+    add(index);
+  }
+  return [...selected]
+    .sort((left, right) => left - right)
+    .map((index) => journal.events[index]);
+}
+
+function compactSnapshotJournal(
+  journal: TodayActivityJournal,
+  maxEvents = TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL,
+): {
   journal: TodayActivityJournal;
   textFieldsTruncated: number;
 } {
@@ -47,13 +136,7 @@ function compactSnapshotJournal(journal: TodayActivityJournal): {
     journal.summary,
     TODAY_SNAPSHOT_MAX_SUMMARY_CHARS,
   );
-  const selectedEvents =
-    journal.events.length > TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL
-      ? [
-          journal.events[0],
-          ...journal.events.slice(-(TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL - 1)),
-        ]
-      : journal.events;
+  const selectedEvents = selectSnapshotEvents(journal, maxEvents);
   let textFieldsTruncated = summary.truncated ? 1 : 0;
   const events = selectedEvents.map((event) => {
     if (event.detail === null) return event;
@@ -111,8 +194,14 @@ function snapshotSurfaceFromJournals(input: {
     (count, journal) => count + journal.events.length,
     0,
   );
-  const omittedJournals = input.originalJournalCount - input.journals.length;
-  const omittedEvents = input.originalEventCount - includedEventCount;
+  const omittedJournals = Math.max(
+    0,
+    input.originalJournalCount - input.journals.length,
+  );
+  const omittedEvents = Math.max(
+    0,
+    input.originalEventCount - includedEventCount,
+  );
   return {
     day: input.day,
     journals: input.journals,
@@ -165,15 +254,32 @@ export function buildBoundedTodayActivitySurface(
   surface: TodayActivitySurface,
   maxBytes = TODAY_SNAPSHOT_SURFACE_MAX_BYTES,
 ): BoundedTodayActivitySurface {
+  const previousProjection = (
+    surface as TodayActivitySurface & {
+      snapshotProjection?: TodaySnapshotProjection;
+    }
+  ).snapshotProjection;
   const ordered = [...surface.journals].sort(
     (left, right) =>
       Date.parse(left.startedAt) - Date.parse(right.startedAt) ||
       left.id.localeCompare(right.id),
   );
-  const compacted = ordered.map(compactSnapshotJournal);
-  const originalEventCount = ordered.reduce(
-    (count, journal) => count + journal.events.length,
+  const compacted = ordered.map((journal) => compactSnapshotJournal(journal));
+  const retainedOriginalEventCount = ordered.reduce(
+    (count, journal) =>
+      count + Math.max(journal.eventCount, journal.events.length),
     0,
+  );
+  const originalJournalCount = Math.max(
+    previousProjection?.originalJournals ?? 0,
+    ordered.length,
+  );
+  const originalEventCount = Math.max(
+    previousProjection
+      ? previousProjection.omittedEvents +
+          ordered.reduce((count, journal) => count + journal.events.length, 0)
+      : 0,
+    retainedOriginalEventCount,
   );
   const build = (
     journals: TodayActivityJournal[],
@@ -183,14 +289,13 @@ export function buildBoundedTodayActivitySurface(
       day: surface.day,
       journals,
       maxBytes,
-      originalJournalCount: ordered.length,
+      originalJournalCount,
       originalEventCount,
       textFieldsTruncated,
     });
-  const compactedTextCount = compacted.reduce(
-    (count, item) => count + item.textFieldsTruncated,
-    0,
-  );
+  const compactedTextCount =
+    (previousProjection?.textFieldsTruncated ?? 0) +
+    compacted.reduce((count, item) => count + item.textFieldsTruncated, 0);
   let candidate = build(
     compacted.map((item) => item.journal),
     compactedTextCount,
@@ -229,6 +334,80 @@ export function buildBoundedTodayActivitySurface(
 
 type DecryptObserverEvent = (event: RelayEvent) => Promise<unknown>;
 const TODAY_ARCHIVE_DECRYPT_CONCURRENCY = 8;
+
+function localDayForTimestamp(timestamp: string) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function journalProjectionKey(agentPubkey: string, journalKey: string) {
+  return `${agentPubkey}\u0000${journalKey}`;
+}
+
+/**
+ * Keep only a bounded, reconstructable working set between archive pages.
+ * Unlike the final snapshot projection this never strips every event from a
+ * retained journal: older pages may still contain its turn start and
+ * correlation root. When the budget is exceeded, the oldest whole journals
+ * are omitted and the omission remains explicit in snapshotProjection.
+ */
+function buildArchiveReconstructionCheckpoint(input: {
+  surface: TodayActivitySurface;
+  originalJournalCount: number;
+  originalEventCount: number;
+  previousTextFieldsTruncated: number;
+}): BoundedTodayActivitySurface {
+  const ordered = [...input.surface.journals].sort(
+    (left, right) =>
+      Date.parse(left.startedAt) - Date.parse(right.startedAt) ||
+      left.id.localeCompare(right.id),
+  );
+  const compacted = ordered.map((journal) =>
+    compactSnapshotJournal(journal, TODAY_ARCHIVE_MAX_EVENTS_PER_JOURNAL),
+  );
+  const newlyTruncated = compacted.reduce(
+    (count, item) => count + item.textFieldsTruncated,
+    0,
+  );
+  const textFieldsTruncated =
+    input.previousTextFieldsTruncated + newlyTruncated;
+  const build = (journals: TodayActivityJournal[]) =>
+    snapshotSurfaceFromJournals({
+      day: input.surface.day,
+      journals,
+      maxBytes: TODAY_SNAPSHOT_SURFACE_MAX_BYTES,
+      originalJournalCount: input.originalJournalCount,
+      originalEventCount: input.originalEventCount,
+      textFieldsTruncated,
+    });
+  const all = compacted.map((item) => item.journal);
+  const candidate = build(all);
+  if (
+    snapshotSurfaceByteLength(candidate) <= TODAY_SNAPSHOT_SURFACE_MAX_BYTES
+  ) {
+    return candidate;
+  }
+
+  let low = 0;
+  let high = all.length;
+  let best = build([]);
+  while (low <= high) {
+    const retained = Math.floor((low + high) / 2);
+    const attempt = build(all.slice(all.length - retained));
+    if (
+      snapshotSurfaceByteLength(attempt) <= TODAY_SNAPSHOT_SURFACE_MAX_BYTES
+    ) {
+      best = attempt;
+      low = retained + 1;
+    } else {
+      high = retained - 1;
+    }
+  }
+  return best;
+}
 
 function observerAgentPubkey(event: RelayEvent): string | null {
   const tag = event.tags.find(
@@ -301,7 +480,11 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   const trustedAgents = new Map(
     input.agents.map((agent) => [agent.pubkey, agent] as const),
   );
-  const observerEvents = new Map<string, ObserverEvent[]>();
+  let retainedEvents = new Map<string, NormalizedActivityEvent[]>();
+  const journalEventCounts = new Map<string, number>();
+  let originalEventCount = 0;
+  let textFieldsTruncated = 0;
+  let checkpoint: BoundedTodayActivitySurface | null = null;
 
   for await (const page of input.pages) {
     const decodedPage: (ObserverEvent[] | null)[] = Array.from(
@@ -343,15 +526,17 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       ),
     );
 
-    // Append in archive order, not promise-completion order, so reconstruction
-    // remains deterministic even when decryption latency varies by frame.
+    // Normalize this page in archive order, not promise-completion order, so
+    // reconstruction remains deterministic even when decryption latency
+    // varies by frame. Decoded observer bodies live for this page only.
+    const pageObserverEvents = new Map<string, ObserverEvent[]>();
     for (let index = 0; index < page.length; index += 1) {
       const relayEvent = page[index];
       const decodedEvents = decodedPage[index];
       if (!relayEvent || !decodedEvents) continue;
       const agentPubkey = observerAgentPubkey(relayEvent);
       if (!agentPubkey) continue;
-      const bucket = observerEvents.get(agentPubkey) ?? [];
+      const bucket = pageObserverEvents.get(agentPubkey) ?? [];
       for (const decodedEvent of decodedEvents) {
         bucket.push({
           ...decodedEvent,
@@ -363,17 +548,61 @@ async function buildTodayActivityFromArchivedEventPages(input: {
           origin: "historical_backfill",
         });
       }
-      observerEvents.set(agentPubkey, bucket);
+      pageObserverEvents.set(agentPubkey, bucket);
+    }
+
+    const feeds = input.agents.map((agent) => {
+      const pageEvents = normalizeActivityEvents(
+        pageObserverEvents.get(agent.pubkey) ?? [],
+      ).filter((event) => localDayForTimestamp(event.timestamp) === input.day);
+      for (const event of pageEvents) {
+        originalEventCount += 1;
+        const key = journalProjectionKey(agent.pubkey, event.journalKey);
+        journalEventCounts.set(key, (journalEventCounts.get(key) ?? 0) + 1);
+      }
+      return {
+        agentPubkey: agent.pubkey,
+        agentName: agent.name,
+        events: [...(retainedEvents.get(agent.pubkey) ?? []), ...pageEvents],
+      };
+    });
+
+    const surface = buildTodayActivitySurface(feeds, { day: input.day });
+    for (const journal of surface.journals) {
+      journal.eventCount =
+        journalEventCounts.get(
+          journalProjectionKey(journal.agentPubkey, journal.journalKey),
+        ) ?? journal.eventCount;
+    }
+    checkpoint = buildArchiveReconstructionCheckpoint({
+      surface,
+      originalJournalCount: journalEventCounts.size,
+      originalEventCount,
+      previousTextFieldsTruncated: textFieldsTruncated,
+    });
+    textFieldsTruncated = checkpoint.snapshotProjection.textFieldsTruncated;
+
+    // Retain only the bounded normalized projection for the next page. The
+    // raw ciphertext page, decoded ObserverEvents, and omitted journal bodies
+    // are now unreachable and can be reclaimed before the iterator advances.
+    retainedEvents = new Map();
+    for (const journal of checkpoint.journals) {
+      const bucket = retainedEvents.get(journal.agentPubkey) ?? [];
+      bucket.push(...journal.events);
+      retainedEvents.set(journal.agentPubkey, bucket);
     }
   }
 
-  return buildTodayActivitySurface(
-    input.agents.map((agent) => ({
-      agentPubkey: agent.pubkey,
-      agentName: agent.name,
-      events: normalizeActivityEvents(observerEvents.get(agent.pubkey) ?? []),
-    })),
-    { day: input.day },
+  return (
+    checkpoint ??
+    snapshotSurfaceFromJournals({
+      day: input.day,
+      journals: [],
+      maxBytes: TODAY_SNAPSHOT_SURFACE_MAX_BYTES,
+      originalJournalCount: 0,
+      originalEventCount: 0,
+      textFieldsTruncated: 0,
+    })
   );
 }
 

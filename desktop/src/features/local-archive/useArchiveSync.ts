@@ -18,6 +18,13 @@ import {
  * announcement.
  */
 let realmEpoch: Promise<number> | null = null;
+const START_RETRY_INITIAL_MS = 100;
+const START_RETRY_MAX_MS = 2_000;
+
+function isStoppingConflict(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("still stopping");
+}
 
 function archiveSyncEpoch(): Promise<number> {
   // Clear on failure so a remount can retry; a cached rejection would make one
@@ -62,20 +69,33 @@ export function useArchiveSync(ready: boolean): void {
     // Companion realms do not participate; see the ownership rule above.
     if (huddleWindowChannelId() !== null) return;
 
-    const lease = nextArchiveSyncLease();
     let stopped = false;
 
     const started = archiveSyncEpoch()
       .then(async (epoch) => {
-        // The cleanup may have run while the epoch was in flight. Issuing the
-        // start now would install a task nobody owns, so record the epoch and
-        // let the cleanup below stop it under the same mark.
-        if (stopped) return epoch;
-        await startArchiveSync(epoch, lease);
-        return epoch;
+        let retryDelayMs = START_RETRY_INITIAL_MS;
+        while (!stopped) {
+          // `start_archive_sync` records the attempted lease before it can
+          // discover that an older task is still stopping. Every retry must
+          // therefore outrank the rejected attempt, not reuse its lease.
+          const lease = nextArchiveSyncLease();
+          try {
+            await startArchiveSync(epoch, lease);
+            return { epoch, lease };
+          } catch (err) {
+            console.warn("[useArchiveSync] start_archive_sync failed:", err);
+            if (!isStoppingConflict(err)) return null;
+          }
+          if (stopped) return null;
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, retryDelayMs),
+          );
+          retryDelayMs = Math.min(retryDelayMs * 2, START_RETRY_MAX_MS);
+        }
+        return null;
       })
       .catch((err: unknown) => {
-        console.warn("[useArchiveSync] start_archive_sync failed:", err);
+        console.warn("[useArchiveSync] archive sync epoch failed:", err);
         return null;
       });
 
@@ -84,9 +104,9 @@ export function useArchiveSync(ready: boolean): void {
       // Chained off the same promise so the stop cannot overtake its start:
       // the epoch is not knowable until the announcement resolves.
       void started
-        .then(async (epoch) => {
-          if (epoch === null) return;
-          await stopArchiveSync(epoch, lease);
+        .then(async (owner) => {
+          if (owner === null) return;
+          await stopArchiveSync(owner.epoch, owner.lease);
         })
         .catch((err: unknown) => {
           console.warn("[useArchiveSync] stop_archive_sync failed:", err);

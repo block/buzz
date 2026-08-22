@@ -76,9 +76,9 @@ export function useActivityLedgerTodaySnapshot(): void {
     const publish = () => {
       if (disposed || inFlight) return;
       inFlight = (async () => {
-        const now = new Date();
+        const reconstructionStartedAt = new Date();
         const relayUrl = await getRelayWsUrl();
-        const day = localDay(now);
+        const day = localDay(reconstructionStartedAt);
         const range = activityLedgerDayRange(day);
         const archivedPages = iterateArchivedObserverEventPagesForRange({
           ...range,
@@ -96,7 +96,10 @@ export function useActivityLedgerTodaySnapshot(): void {
         const surface = buildBoundedTodayActivitySurface(
           applyAuthorityToTodayActivity(observedSurface, authority),
         );
-        const generatedAt = Math.floor(now.getTime() / 1_000);
+        // Timestamp the artifact at publication, not before archive paging,
+        // decryption, authority loading, and projection. A slow reconstruction
+        // must not write a snapshot that is already near or past expiry.
+        const generatedAt = Math.floor(Date.now() / 1_000);
         await writeOwnerTodaySnapshot({
           schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
           ownerPubkey,

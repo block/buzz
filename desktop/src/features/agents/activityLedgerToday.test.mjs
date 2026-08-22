@@ -8,6 +8,7 @@ import {
   buildTodayActivityFromArchivedEvents,
   buildTodayActivityFromArchivedPages,
 } from "./activityLedgerToday.ts";
+import { journalVerificationSources } from "./activityLedgerAuthority.ts";
 
 function relayEvent({ id, pubkey = "agent-a", agent = pubkey, decoded }) {
   return {
@@ -191,6 +192,138 @@ test("Today archive decryption is concurrency-bounded and page-incremental", asy
   assert.equal(surface.counts.journals, 40);
 });
 
+test("Today archive reconstruction bounds decoded history between pages", async () => {
+  const totalJournals = 1_000;
+  const pageSize = 100;
+  const largeClaim = "x".repeat(16 * 1024);
+  async function* pages() {
+    for (let offset = 0; offset < totalJournals; offset += pageSize) {
+      yield Array.from({ length: pageSize }, (_, pageIndex) => {
+        const index = offset + pageIndex;
+        const timestamp = new Date(
+          Date.parse("2026-08-21T14:00:00.000Z") + index * 1_000,
+        ).toISOString();
+        return relayEvent({
+          id: `large-frame-${index}`,
+          decoded: {
+            seq: index + 1,
+            timestamp,
+            kind: "acp_read",
+            turnId: `large-turn-${index}`,
+            payload: {
+              method: "session/update",
+              params: {
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { text: largeClaim },
+                },
+              },
+            },
+          },
+        });
+      });
+    }
+  }
+
+  const surface = await buildTodayActivityFromArchivedPages({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    pages: pages(),
+    decrypt: async (event) => event.decoded,
+  });
+
+  const encodedBytes = new TextEncoder().encode(JSON.stringify(surface));
+  assert.ok(encodedBytes.byteLength <= 6 * 1024 * 1024);
+  assert.equal(surface.snapshotProjection.originalJournals, totalJournals);
+  assert.ok(surface.snapshotProjection.omittedJournals > 0);
+  assert.ok(surface.journals.length < totalJournals);
+  assert.equal(surface.journals.at(-1).id, "large-turn-999");
+});
+
+test("Today archive checkpoints preserve long-journal verification sources", async () => {
+  const timestamp = (seq) =>
+    new Date(
+      Date.parse("2026-08-21T14:00:00.000Z") + seq * 1_000,
+    ).toISOString();
+  const decoded = [
+    {
+      seq: 1,
+      timestamp: timestamp(1),
+      kind: "turn_started",
+      turnId: "long-turn",
+      payload: { triggeringEventIds: ["message-root"] },
+    },
+    {
+      seq: 2,
+      timestamp: timestamp(2),
+      kind: "acp_read",
+      turnId: "long-turn",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "early-tool",
+            title: "write_file",
+            status: "completed",
+            rawOutput: "written",
+          },
+        },
+      },
+    },
+    ...Array.from({ length: 400 }, (_, index) => ({
+      seq: index + 3,
+      timestamp: timestamp(index + 3),
+      kind: "acp_read",
+      turnId: "long-turn",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { text: `claim-${index}` },
+          },
+        },
+      },
+    })),
+    {
+      seq: 403,
+      timestamp: timestamp(403),
+      kind: "turn_completed",
+      turnId: "long-turn",
+      payload: {},
+    },
+  ];
+  const archivedNewestFirst = decoded
+    .map((event) =>
+      relayEvent({
+        id: event.seq.toString(16).padStart(64, "0"),
+        decoded: event,
+      }),
+    )
+    .reverse();
+  async function* pages() {
+    for (let index = 0; index < archivedNewestFirst.length; index += 75) {
+      yield archivedNewestFirst.slice(index, index + 75);
+    }
+  }
+
+  const surface = await buildTodayActivityFromArchivedPages({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    pages: pages(),
+    decrypt: async (event) => event.decoded,
+  });
+  const journal = surface.journals[0];
+  const sources = journalVerificationSources(journal);
+
+  assert.equal(journal.eventCount, decoded.length);
+  assert.equal(journal.proofState, "RECEIPTED");
+  assert.equal(sources.hasReceiptedEvidence, true);
+  assert.equal(sources.hasCorrelationEvidence, true);
+  assert.ok(sources.sourceEventIds.includes("2".padStart(64, "0")));
+});
+
 test("day range is half-open and rejects impossible dates", () => {
   const range = activityLedgerDayRange("2026-08-21");
   assert.equal(range.endCreatedAt - range.startCreatedAt, 24 * 60 * 60);
@@ -366,5 +499,57 @@ test("Today snapshot projection drops oldest journals only as a final fallback",
   assert.equal(
     bounded.snapshotProjection.omittedJournals,
     journals.length - bounded.journals.length,
+  );
+});
+
+test("Today snapshot compaction retains owner verification before receipt overflow", () => {
+  const base = snapshotJournal("verified-long", 1);
+  const receipts = Array.from({ length: 150 }, (_, index) => ({
+    ...base.events[0],
+    id: `receipt-${index}`,
+    proofState: "VERIFIED",
+    provenance: {
+      ...base.events[0].provenance,
+      sourceEventId: index.toString(16).padStart(64, "0"),
+      seq: index + 1,
+    },
+  }));
+  const verification = {
+    ...base.events[0],
+    id: "owner-verification",
+    title: "Owner verification",
+    proofState: "VERIFIED",
+    provenance: {
+      ...base.events[0].provenance,
+      sourceEventId: "f".repeat(64),
+      sourceKind: 24201,
+      observerKind: "owner_verification",
+      seq: 151,
+    },
+  };
+  const journal = {
+    ...base,
+    proofState: "VERIFIED",
+    eventCount: receipts.length + 1,
+    events: [...receipts, verification],
+  };
+  const bounded = buildBoundedTodayActivitySurface({
+    day: "2026-08-21",
+    journals: [journal],
+    channels: [],
+    counts: {
+      journals: 1,
+      failed: 0,
+      inProgress: 0,
+      claimedWithoutEvidence: 0,
+    },
+  });
+
+  assert.equal(bounded.journals[0].events.length, 100);
+  assert.equal(
+    bounded.journals[0].events.some(
+      (event) => event.provenance.observerKind === "owner_verification",
+    ),
+    true,
   );
 });

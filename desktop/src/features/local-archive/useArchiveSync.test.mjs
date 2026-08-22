@@ -54,6 +54,8 @@ let realmCounter = 0;
  */
 function mountGate({
   mergeShouldFail = false,
+  startFailureMessage = "archive sync is still stopping",
+  startFailures = 0,
   windowLabel = "main",
   useArchiveSync: useArchiveSyncImpl = useArchiveSync,
 } = {}) {
@@ -63,6 +65,7 @@ function mountGate({
   const invoked = [];
   const calls = [];
   let epochs = 0;
+  let remainingStartFailures = startFailures;
   dom.window.__TAURI_INTERNALS__ = {
     invoke: (cmd, args) => {
       invoked.push(cmd);
@@ -70,6 +73,10 @@ function mountGate({
       if (cmd === "announce_archive_sync_epoch") {
         epochs += 1;
         return Promise.resolve(epochs);
+      }
+      if (cmd === "start_archive_sync" && remainingStartFailures > 0) {
+        remainingStartFailures -= 1;
+        return Promise.reject(new Error(startFailureMessage));
       }
       return Promise.resolve(null);
     },
@@ -250,6 +257,57 @@ describe("archive sync lifecycle leases", () => {
         leaseOf(first, "stop_archive_sync"),
       "a remount's start must also outrank the previous cleanup, so a stop " +
         "that lands late cannot strand the new task",
+    );
+  });
+
+  it("retries a start rejected while the previous task is stopping", async () => {
+    const gate = mountGate({ startFailures: 1 });
+    await gate.mount();
+    await gate.settleGate();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+
+    const starts = gate.calls.filter(({ cmd }) => cmd === "start_archive_sync");
+    assert.equal(
+      starts.length,
+      2,
+      "the mounted ready gate must retry in place",
+    );
+    assert.ok(
+      starts[1].lease > starts[0].lease,
+      "a retry must outrank the lease recorded by the rejected start",
+    );
+
+    await gate.unmount();
+    const stop = gate.calls.find(({ cmd }) => cmd === "stop_archive_sync");
+    assert.equal(
+      stop?.lease,
+      starts[1].lease,
+      "cleanup must stop the retry that actually acquired ownership",
+    );
+  });
+
+  it("does not loop on a non-retryable start failure", async () => {
+    const gate = mountGate({
+      startFailures: 1,
+      startFailureMessage: "invalid archive owner",
+    });
+    await gate.mount();
+    await gate.settleGate();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+
+    assert.equal(
+      gate.invoked.filter((cmd) => cmd === "start_archive_sync").length,
+      1,
+    );
+    await gate.unmount();
+    assert.equal(
+      gate.invoked.filter((cmd) => cmd === "stop_archive_sync").length,
+      0,
     );
   });
 });
