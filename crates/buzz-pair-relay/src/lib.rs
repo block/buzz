@@ -9,18 +9,22 @@
 //! This binary binds **loopback only** and MUST run behind a reverse proxy
 //! (nginx, caddy, etc.) that:
 //! - Routes only `/pair` to this sidecar
-//! - Enforces HTTP read timeouts (mitigates slowloris at the TCP layer)
+//! - Keeps the pre-upgrade HTTP header/request timeout short and applies
+//!   connection/rate limits before forwarding to the sidecar
+//! - Keeps post-upgrade WebSocket read/send/idle timeouts **greater than 140
+//!   seconds** so the proxy cannot preempt [`CONN_TIMEOUT`]
 //! - Terminates TLS
 //!
-//! The relay does not enforce path restrictions or pre-upgrade connection
-//! limits — those are the reverse proxy's responsibility.
+//! The relay independently enforces [`HTTP_HEADER_READ_TIMEOUT`]. Path
+//! restrictions and pre-upgrade connection/rate limits remain the reverse
+//! proxy's responsibility.
 //!
 //! # Security Model
 //!
 //! - **Signature verification** — Schnorr signatures are verified against the
 //!   NIP-01 event ID hash. Events with invalid signatures are rejected.
 //! - **No persistence** — events exist only in-flight between matched pub/sub.
-//! - **Bounded resources** — 128 max WS connections, 4 KiB max frame, 120s TTL.
+//! - **Bounded resources** — 128 max WS connections, 4 KiB max frame, 140s TTL.
 //! - **Session cap** — at most 6 accepted EVENTs per connection.
 //! - **Freshness** — `created_at` must be within ±120 s of relay wall-clock.
 //! - **Deduplication** — duplicate event IDs are rejected; dedup entries expire after 300 s.
@@ -41,7 +45,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode, Version};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use parking_lot::Mutex;
 use secp256k1::schnorr::Signature as SchnorrSig;
 use secp256k1::XOnlyPublicKey;
@@ -55,8 +59,20 @@ use tokio_tungstenite::tungstenite::protocol::{Message, Role, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 
-/// Hard per-connection lifetime. `pub(crate)` for test access.
-pub(crate) const CONN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Hard per-connection lifetime.
+///
+/// Must outlive desktop `PAIRING_HARD_TIMEOUT` in
+/// `desktop/src-tauri/src/commands/pairing.rs`. If this sidecar closes first,
+/// the desktop surfaces the transport string "relay connection closed" instead
+/// of its own "Session timed out" expired state.
+pub const CONN_TIMEOUT: Duration = Duration::from_secs(140);
+
+/// Maximum time allowed to receive a complete pre-upgrade HTTP header.
+///
+/// This is intentionally much shorter than [`CONN_TIMEOUT`]: ordinary HTTP
+/// parsing is the slowloris boundary, while the longer timeout applies only
+/// after a valid WebSocket upgrade has reserved a bounded relay slot.
+pub const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_CONNS: u32 = 128;
 const CHANNEL_CAP: usize = 4;
@@ -126,6 +142,12 @@ impl Relay {
             seen_ids: Mutex::new(Vec::new()),
             delivered: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Number of connections that completed a valid WebSocket upgrade and
+    /// currently hold one of the bounded relay slots.
+    pub fn active_connection_count(&self) -> u32 {
+        self.conn_count.load(Ordering::Relaxed)
     }
 
     /// Atomically check-and-reserve an event ID. Evicts expired entries first.
@@ -1013,11 +1035,10 @@ pub async fn run_server(listener: TcpListener, relay: Arc<Relay>) {
         tokio::spawn(async move {
             let io = TokioIo::new(tcp);
             let svc = service_fn(move |req| http_service(Arc::clone(&relay), req));
-            if let Err(e) = http1::Builder::new()
-                .serve_connection(io, svc)
-                .with_upgrades()
-                .await
-            {
+            let mut http = http1::Builder::new();
+            http.timer(TokioTimer::new())
+                .header_read_timeout(HTTP_HEADER_READ_TIMEOUT);
+            if let Err(e) = http.serve_connection(io, svc).with_upgrades().await {
                 eprintln!("http error: {e}");
             }
         });
