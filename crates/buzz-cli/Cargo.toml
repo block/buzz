@@ -63,6 +63,17 @@ bytes = "1"
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
 
+# Avatar normalization — decode/downscale/re-encode drops image metadata by
+# construction, which media storage requires. Same version and feature set as
+# buzz-media and desktop; depending on buzz-media instead would pull rust-s3,
+# axum, and mp4 into this binary.
+image = { version = "0.25", default-features = false, features = [
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+] }
+
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }
 

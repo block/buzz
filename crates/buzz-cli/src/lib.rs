@@ -237,6 +237,9 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Publish and manage agent definitions (personas) on the relay
+    #[command(subcommand)]
+    Personas(PersonasCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
@@ -1865,6 +1868,99 @@ pub enum PackCmd {
     },
 }
 
+/// Flags for `buzz personas create`.
+///
+/// A `clap::Args` struct rather than inline variant fields so the CLI surface
+/// and the resolver share one definition of the create inputs.
+#[derive(clap::Args)]
+pub struct PersonaCreateArgs {
+    /// Persona slug (the event d-tag). Defaults to the display name,
+    /// normalized to the relay's `[a-z0-9][a-z0-9_-]{0,63}` grammar
+    #[arg(long)]
+    pub slug: Option<String>,
+    /// Human-readable name shown in clients
+    #[arg(long)]
+    pub display_name: Option<String>,
+    /// System prompt text
+    #[arg(long, conflicts_with = "prompt_file")]
+    pub prompt: Option<String>,
+    /// Read the system prompt from a file
+    #[arg(long)]
+    pub prompt_file: Option<String>,
+    /// Agent harness to run under (e.g. claude, codex, buzz-agent)
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// Model identifier, interpreted relative to the runtime
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Inference provider, when the runtime supports more than one
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Avatar image file. Carried in the event when small enough for Desktop to
+    /// render inline, uploaded to media storage otherwise
+    #[arg(long, conflicts_with = "avatar_url")]
+    pub avatar: Option<String>,
+    /// Avatar URL, used as-is. Use `--avatar` to publish a local image
+    #[arg(long)]
+    pub avatar_url: Option<String>,
+    /// Who instances answer by default
+    #[arg(long, value_enum)]
+    pub respond_to: Option<RespondToArg>,
+    /// Concurrent turn limit copied onto instances at creation (1-32)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub parallelism: Option<u32>,
+    /// Mark the persona for catalog discovery by other members
+    #[arg(long)]
+    pub shared: bool,
+    /// Read fields from a Buzz Desktop `.agent.json` export; individual flags
+    /// override the file
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Overwrite an existing persona at this slug
+    #[arg(long)]
+    pub replace: bool,
+}
+
+/// Subcommands for `buzz personas` — kind:30175 agent definitions.
+///
+/// These events are owner-authored, so the signing key IS the owner: run them
+/// with the same key as the Buzz Desktop you expect the personas to appear in.
+/// Publishing a definition does not start an agent — launching one mints key
+/// material and a NIP-OA auth tag and stays a Desktop operation.
+// clap cannot derive `Args` through a `Box`, and a subcommand enum is built
+// once per process — boxing to even out variant sizes would trade an allocation
+// for nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum PersonasCmd {
+    /// Publish a persona definition
+    #[command(after_help = "Examples:\n  \
+        buzz personas create --display-name Herring --prompt-file ./herring.md \\\n    \
+          --runtime buzz-agent --model databricks-kimi-3\n  \
+        buzz personas create --from ./herring.agent.json\n  \
+        buzz personas create --from ./herring.agent.json --model claude-opus-5[1m] --runtime claude")]
+    Create(PersonaCreateArgs),
+    /// List personas published by this identity
+    List {
+        /// Emit JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one persona
+    Get {
+        /// Persona slug
+        slug: String,
+        /// Emit the relay event as a sig-stripped JSON array
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a persona (NIP-09 coordinate tombstone)
+    Delete {
+        /// Persona slug
+        slug: String,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2065,6 +2161,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Personas(sub) => commands::personas::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
@@ -2191,6 +2288,24 @@ mod tests {
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
     }
 
+    /// Buzz Desktop's mint gate is 1..=32, and the flag path must refuse the
+    /// same values `--from` does rather than publishing a persona that fails at
+    /// launch. 33 is the first value past the ceiling; 4294967296 overflows u32.
+    #[test]
+    fn persona_parallelism_is_bounded_at_the_flag() {
+        for value in ["0", "33", "4294967296"] {
+            assert!(
+                Cli::try_parse_from(["buzz", "personas", "create", "--parallelism", value])
+                    .is_err(),
+                "--parallelism {value} must be refused"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["buzz", "personas", "create", "--parallelism", "32"]).is_ok(),
+            "32 is the ceiling, not past it"
+        );
+    }
+
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
@@ -2208,6 +2323,7 @@ mod tests {
             "notes",
             "pack",
             "patches",
+            "personas",
             "pr",
             "projects",
             "reactions",
@@ -2300,6 +2416,10 @@ mod tests {
                 "unarchive",
                 "update"
             ]
+        );
+        assert_eq!(
+            names(&cmd, "personas"),
+            vec!["create", "delete", "get", "list"]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
