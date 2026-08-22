@@ -3,6 +3,7 @@ import { EditorContent } from "@tiptap/react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
+import { useComposerSubmitShortcut } from "@/features/messages/lib/composerSubmitShortcut";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
@@ -223,9 +224,6 @@ function MessageComposerImpl({
     emojiAutocomplete.isEmojiAutocompleteOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
-  // Set after `useLinkEditor` exists below; the editor's link-click handler
-  // delegates through this ref to break the hook ordering cycle (the editor
-  // needs `onEditLink`, but the link editor needs the editor's `richText`).
   const onEditLinkRef = React.useRef<
     ((info: LinkSelectionInfo) => void) | null
   >(null);
@@ -246,6 +244,7 @@ function MessageComposerImpl({
       (replyTarget
         ? `Reply to ${replyTarget.author} in #${channelName}`
         : `Message #${channelName}`));
+  const composerSubmitShortcut = useComposerSubmitShortcut();
   const richText = useRichTextEditor({
     placeholder: computedPlaceholder,
     editable: !composerDisabled,
@@ -266,6 +265,7 @@ function MessageComposerImpl({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
+    submitShortcut: composerSubmitShortcut,
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       setComposerContentFromText(text);
       setPreviewContent(linkPreviewContent);

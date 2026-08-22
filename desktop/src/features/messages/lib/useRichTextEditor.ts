@@ -36,9 +36,11 @@ import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
+  exitListIfEmptyLast,
   handleCodeFenceEnter,
-  insertNewlineInCodeBlock,
+  insertComposerSoftNewline,
 } from "./codeBlockExtensions";
+import type { ComposerSubmitShortcut } from "./composerSubmitShortcut";
 import { SpoilerMark } from "./spoilerMark";
 import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
 import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
@@ -91,9 +93,11 @@ export type RichTextEditorOptions = {
   messageLinkChannels?: readonly ComposerMessageLinkChannel[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
-  /** Called on plain Enter (submit). Handled inside Tiptap's extension system
-   *  so it fires *before* ProseMirror's default splitBlock behaviour. */
+  /** Called by the active submit shortcut. Handled inside Tiptap's extension
+   *  system so it fires *before* ProseMirror's default splitBlock behaviour. */
   onSubmit?: () => void;
+  /** Which keyboard shortcut submits the composer. Defaults to Enter. */
+  submitShortcut?: ComposerSubmitShortcut;
   /**
    * Called on ArrowUp in an empty composer (Slack parity: edit your last
    * message). Handled inside ProseMirror's `editorProps.handleKeyDown` — the
@@ -215,12 +219,16 @@ export function useRichTextEditor({
   onEditLink,
   onLinkSelectionChange,
   onLinkShortcut,
+  submitShortcut = "enter",
 }: RichTextEditorOptions) {
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
 
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+
+  const submitShortcutRef = React.useRef(submitShortcut);
+  submitShortcutRef.current = submitShortcut;
 
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
@@ -246,7 +254,7 @@ export function useRichTextEditor({
     {
       extensions: [
         StarterKit.configure({
-          // Use hard breaks (Shift+Enter) — Enter submits the message.
+          // Use hard breaks for composer soft-newline shortcuts.
           hardBreak: {
             keepMarks: true,
           },
@@ -355,84 +363,11 @@ export function useRichTextEditor({
         Extension.create({
           name: "smartShiftEnter",
           addKeyboardShortcuts() {
-            // Exit a list by removing the empty last item and inserting a
-            // paragraph after the list. Works for both single-item and
-            // multi-item lists.
-            const exitListIfEmptyLast = (ed: typeof this.editor): boolean => {
-              if (!ed.isActive("listItem")) return false;
-              const { $from } = ed.state.selection;
-
-              // Walk up to find the listItem node (handles nested structures).
-              let listItemDepth = -1;
-              for (let d = $from.depth; d >= 1; d--) {
-                if ($from.node(d).type.name === "listItem") {
-                  listItemDepth = d;
-                  break;
-                }
-              }
-              if (listItemDepth < 1) return false;
-
-              const listItem = $from.node(listItemDepth);
-              const isEmpty =
-                listItem.childCount === 1 &&
-                listItem.firstChild?.textContent === "";
-              if (!isEmpty) return false;
-
-              // Only trigger on the last item in the list.
-              const listDepth = listItemDepth - 1;
-              const list = $from.node(listDepth);
-              const itemIndex = $from.index(listDepth);
-              if (itemIndex !== list.childCount - 1) return false;
-
-              const { tr, schema } = ed.state;
-              if (list.childCount === 1) {
-                // Only item → replace the entire list with an empty paragraph.
-                const listStart = $from.before(listDepth);
-                const listEnd = $from.after(listDepth);
-                const para = schema.nodes.paragraph.create();
-                tr.replaceWith(listStart, listEnd, para);
-                tr.setSelection(
-                  TextSelection.near(tr.doc.resolve(listStart + 1)),
-                );
-              } else {
-                // Multiple items → delete the empty item, insert paragraph
-                // after the list, and move cursor there.
-                const itemStart = $from.before(listItemDepth);
-                const itemEnd = $from.after(listItemDepth);
-                tr.delete(itemStart, itemEnd);
-                const listEnd = tr.mapping.map($from.after(listDepth));
-                const para = schema.nodes.paragraph.create();
-                tr.insert(listEnd, para);
-                tr.setSelection(
-                  TextSelection.near(tr.doc.resolve(listEnd + 1)),
-                );
-              }
-              ed.view.dispatch(tr);
-              return true;
-            };
-
             return {
               "Shift-Enter": ({ editor: ed }) => {
-                if (ed.isActive("codeBlock")) {
-                  return insertNewlineInCodeBlock(ed);
-                }
-                // Empty last list item → exit list to paragraph below.
-                if (exitListIfEmptyLast(ed)) return true;
-                // Non-empty or non-last list item → split.
-                if (ed.isActive("listItem")) {
-                  return ed.commands.splitListItem("listItem");
-                }
-                if (ed.isActive("blockquote")) {
-                  // Empty blockquote paragraph → exit the blockquote.
-                  const { $from } = ed.state.selection;
-                  if ($from.parent.textContent === "") {
-                    return ed.commands.lift("blockquote");
-                  }
-                  // Non-empty → split the paragraph within the blockquote.
-                  return ed.chain().splitBlock().focus().run();
-                }
-                // Default: hard break (StarterKit handles it).
-                return false;
+                return insertComposerSoftNewline(ed, {
+                  handleCodeFence: false,
+                });
               },
               ArrowDown: ({ editor: ed }) => {
                 // Empty last list item + Down → exit list to paragraph below.
@@ -441,20 +376,31 @@ export function useRichTextEditor({
             };
           },
         }),
-        // Plain Enter → submit the message. This runs inside ProseMirror's
-        // keymap pipeline so it fires *before* the default splitBlock command,
-        // preventing the phantom paragraph-split that caused \n\n in messages.
+        // Composer submit/newline shortcut handling. This runs inside
+        // ProseMirror's keymap pipeline so handled Enter presses fire *before*
+        // the default splitBlock command, preventing phantom paragraph splits.
         Extension.create({
           name: "submitOnEnter",
           addKeyboardShortcuts() {
             return {
               Enter: ({ editor: ed }) => {
                 if (isAutocompleteOpen?.current) return false;
+                if (submitShortcutRef.current === "mod-enter") {
+                  return insertComposerSoftNewline(ed, {
+                    handleCodeFence: true,
+                  });
+                }
                 if (!onSubmitRef.current) return false;
 
                 const fenceResult = handleCodeFenceEnter(ed);
                 if (fenceResult !== undefined) return fenceResult;
 
+                onSubmitRef.current();
+                return true;
+              },
+              "Mod-Enter": () => {
+                if (submitShortcutRef.current !== "mod-enter") return false;
+                if (!onSubmitRef.current) return false;
                 onSubmitRef.current();
                 return true;
               },
