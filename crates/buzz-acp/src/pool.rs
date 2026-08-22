@@ -1608,64 +1608,39 @@ pub(crate) fn prepend_standing_for_legacy(
 }
 
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
-/// header, keeping the base/persona boundary recoverable downstream.
+/// header, keeping the base/workspace/persona boundaries recoverable downstream.
 ///
-/// The header framing matches the legacy per-turn path (`queue::base_section`
-/// for `[Base]`, `[System]\n{...}` for the persona) so the desktop observer can
-/// split the combined value into labeled sub-sections. Each prompt is wrapped
-/// only when present, so a persona-only agent yields `[System]\n{persona}`
-/// rather than an unlabeled blob that would be mislabeled as `[Base]`.
-///
-/// Prepends a `[Workspace]` section naming the agent's absolute working
-/// directory. The base prompt describes the workspace layout but never its
-/// absolute root, so without this anchor a model fills the gap by searching
-/// `$HOME` (triggering macOS TCC prompts) or by inventing its own workspace
-/// directory. The line is emitted only when a real base prompt is present and
-/// `cwd` is an absolute path other than the `/` fallback — naming `/` as the
-/// workspace would itself invite a `$HOME`-wide scan.
+/// The static base remains first for prompt-prefix caching. When a base is
+/// present, the dynamic workspace anchor follows it and precedes the user-owned
+/// agent instructions. A persona-only agent still yields
+/// `[Agent Instructions]\n{persona}` rather than an unlabeled blob that would
+/// be mislabeled as `[Base]`.
 fn framed_system_prompt(
     cwd: &str,
     base_prompt: Option<&str>,
     system_prompt: Option<&str>,
 ) -> Option<String> {
-    let body = match (base_prompt, system_prompt) {
+    match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
-            "{}\n\n[System]\n{sp}",
-            crate::queue::base_section(bp)
+            "{}\n\n{}\n\n[Agent Instructions]\n{sp}",
+            crate::queue::base_section(bp),
+            workspace_section(cwd)
         )),
-        (Some(bp), None) => Some(crate::queue::base_section(bp)),
-        (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+        (Some(bp), None) => Some(format!(
+            "{}\n\n{}",
+            crate::queue::base_section(bp),
+            workspace_section(cwd)
+        )),
+        (None, Some(sp)) => Some(format!("[Agent Instructions]\n{sp}")),
         (None, None) => None,
-    }?;
-    // Anchor the workspace only when a base prompt is present — the workspace
-    // section grounds the base prompt's layout description, so it is meaningless
-    // for a persona-only (`[System]`-only) agent that never received that layout.
-    match (base_prompt, workspace_section(cwd)) {
-        (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
-        _ => Some(body),
     }
 }
 
-/// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
-///
-/// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
-/// to `/` on failure): a `/`-rooted workspace line would actively encourage the
-/// `$HOME`-wide scan this section exists to prevent.
-fn workspace_section(cwd: &str) -> Option<String> {
-    if cwd != "/" && cwd.starts_with('/') {
-        Some(format!(
-            "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
-             files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
-             `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
-             here. This is where you already are, so start here rather than scanning \
-             `$HOME`. Any specific path the user names is fine to read."
-        ))
-    } else {
-        None
-    }
+fn workspace_section(cwd: &str) -> String {
+    format!("[Workspace]\nCurrent working directory: {cwd}")
 }
 
-/// Append the team-owned instruction section after `[System]` and before core memory.
+/// Append the team-owned instruction section after `[Agent Instructions]` and before core memory.
 fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
     let instructions = instructions
         .map(str::trim)
@@ -1856,7 +1831,7 @@ pub async fn run_prompt_task(
 
     //
     // Core memory is delivered inside the system prompt the harness already
-    // builds (system role for protocol >= 2, the `[System]` user-message
+    // builds (system role for protocol >= 2, the `[Agent Instructions]` user-message
     // section for legacy agents). To put it on the wire at `session/new` for
     // modern agents, the fetch must run *before* the session is created — so
     // we do it here and cache the rendered section in `state.core_sections`.
@@ -4858,7 +4833,7 @@ mod tests {
     fn test_heartbeat_standing_block_is_base_only() {
         // A heartbeat has no channel, so core and canvas are absent by
         // construction — and it has never carried the persona. Pin that the
-        // shared helper does not start handing heartbeats [System].
+        // shared helper does not start handing heartbeats [Agent Instructions].
         let composed = prepend_standing_for_legacy(1, &base_only(Some("be helpful")), "tick");
         assert_eq!(composed, "[Base]\nbe helpful\n\ntick");
     }
@@ -4942,7 +4917,7 @@ mod tests {
         let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
         let positions: Vec<usize> = [
             "[Base]",
-            "[System]",
+            "[Agent Instructions]",
             "[Team Instructions]",
             "[Agent Memory — core]",
             "[Huddle Instructions]",
@@ -4998,86 +4973,64 @@ mod tests {
         // Also the regression guard against #2372: the session title travels
         // out of band in `_meta.sessionTitle`, so this exact-bytes assertion is
         // what pins the framing against a `[Session]` section reappearing here.
-        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
+        let framed = framed_system_prompt("/workspace", Some("base text"), Some("persona text"))
             .expect("both present yields Some");
-        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+        assert_eq!(
+            framed,
+            "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: /workspace\n\n[Agent Instructions]\npersona text"
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        let framed =
+            framed_system_prompt("/workspace", Some("base text"), None).expect("base yields Some");
+        assert_eq!(
+            framed,
+            "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: /workspace"
+        );
     }
 
     #[test]
-    fn test_framed_system_prompt_persona_only_labels_system() {
+    fn test_framed_system_prompt_persona_only_labels_agent_instructions() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
-        // its own [System] header even when no base prompt exists.
-        let framed =
-            framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+        // its own [Agent Instructions] header even when no base prompt exists.
+        let framed = framed_system_prompt("/workspace", None, Some("persona text"))
+            .expect("persona yields Some");
+        assert_eq!(framed, "[Agent Instructions]\npersona text");
     }
 
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt("/", None, None).is_none());
+        assert!(framed_system_prompt("/workspace", None, None).is_none());
     }
 
     #[test]
-    fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
-        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
-            .expect("base yields Some");
-        assert!(
-            framed.starts_with("[Workspace]\n"),
-            "workspace section must lead: {framed}"
+    fn test_workspace_section_preserves_windows_cwd() {
+        assert_eq!(
+            workspace_section(r"C:\Users\me\buzz"),
+            "[Workspace]\nCurrent working directory: C:\\Users\\me\\buzz"
         );
-        assert!(framed.contains("`/Users/me/.buzz`"));
-        assert!(
-            framed.contains("\n\n[Base]\nbase text"),
-            "base must follow the workspace section: {framed}"
-        );
-    }
-
-    #[test]
-    fn test_framed_system_prompt_persona_only_omits_workspace() {
-        // The workspace section grounds the base prompt's layout; a persona-only
-        // agent never received that layout, so no [Workspace] anchor is emitted.
-        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
-            .expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
-    }
-
-    #[test]
-    fn test_framed_system_prompt_root_cwd_omits_workspace() {
-        // The "/" fallback must never be named — it would invite a $HOME scan.
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
-    }
-
-    #[test]
-    fn test_workspace_section_relative_cwd_is_none() {
-        assert!(workspace_section("relative/path").is_none());
-        assert!(workspace_section("").is_none());
     }
 
     #[test]
     fn test_with_core_appends_below_framed() {
         let framed = with_core(
-            Some("[System]\npersona".to_string()),
+            Some("[Agent Instructions]\npersona".to_string()),
             Some("[Agent Memory — core]\nbe helpful"),
         )
         .expect("both present yields Some");
         assert_eq!(
             framed,
-            "[System]\npersona\n\n[Agent Memory — core]\nbe helpful"
+            "[Agent Instructions]\npersona\n\n[Agent Memory — core]\nbe helpful"
         );
     }
 
     #[test]
     fn test_with_core_framed_only_passes_through() {
-        let framed = with_core(Some("[System]\npersona".to_string()), None)
+        let framed = with_core(Some("[Agent Instructions]\npersona".to_string()), None)
             .expect("framed-only yields Some");
-        assert_eq!(framed, "[System]\npersona");
+        assert_eq!(framed, "[Agent Instructions]\npersona");
     }
 
     #[test]
