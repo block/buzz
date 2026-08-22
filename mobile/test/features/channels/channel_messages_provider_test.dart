@@ -12,6 +12,63 @@ import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test(
+    'loads the newest window without waiting for the live subscription EOSE',
+    () async {
+      final subscribeCompletion = Completer<void>();
+      final relaySession = _RecordingRelaySessionNotifier(
+        subscribeCompletion: subscribeCompletion,
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(() {
+        if (!subscribeCompletion.isCompleted) subscribeCompletion.complete();
+        container.dispose();
+      });
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      expect(relaySession.operations, ['subscribe', 'query']);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['history'],
+      );
+
+      subscribeCompletion.complete();
+      await _pumpEventQueue();
+    },
+  );
+
+  test(
+    'cancels a live subscription that becomes ready after disposal',
+    () async {
+      final subscribeCompletion = Completer<void>();
+      final relaySession = _RecordingRelaySessionNotifier(
+        subscribeCompletion: subscribeCompletion,
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      container.dispose();
+      subscribeCompletion.complete();
+      await _pumpEventQueue();
+
+      expect(relaySession.unsubscribeCount, 1);
+      expect(relaySession.listenerCount, 0);
+    },
+  );
+
+  test(
     'keeps live events that arrive while initial history is loading',
     () async {
       final relaySession = _RecordingRelaySessionNotifier();
@@ -866,22 +923,26 @@ Future<void> _pumpEventQueue() async {
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final bool failSubscribe;
+  final Completer<void>? subscribeCompletion;
   final Queue<Object> _queryResults;
   final List<String> operations = [];
   final List<NostrFilter> liveFilters = [];
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> queryFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  int unsubscribeCount = 0;
   final Completer<void> _subscribed = Completer<void>();
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
   final Queue<Completer<List<NostrEvent>>> _targetHistories = Queue();
 
   _RecordingRelaySessionNotifier({
     this.failSubscribe = false,
+    this.subscribeCompletion,
     List<Object> queryResults = const [],
   }) : _queryResults = Queue<Object>.of(queryResults);
 
   Future<void> get subscribed => _subscribed.future;
+  int get listenerCount => _listeners.length;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -936,8 +997,10 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       throw Exception('subscribe failed');
     }
     _listeners.add(onEvent);
+    await subscribeCompletion?.future;
     return () {
       _listeners.remove(onEvent);
+      unsubscribeCount++;
     };
   }
 
