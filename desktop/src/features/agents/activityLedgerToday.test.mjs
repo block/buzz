@@ -325,6 +325,75 @@ test("Today archive checkpoints preserve long-journal verification sources", asy
   assert.ok(sources.sourceEventIds.includes("2".padStart(64, "0")));
 });
 
+test("Today archive checkpoints reserve the newest signed frame before receipts", async () => {
+  const timestamp = (seq) =>
+    new Date(
+      Date.parse("2026-08-21T14:00:00.000Z") + seq * 1_000,
+    ).toISOString();
+  const decoded = [
+    {
+      seq: 1,
+      timestamp: timestamp(1),
+      kind: "turn_started",
+      turnId: "receipt-heavy-turn",
+      payload: {},
+    },
+    ...Array.from({ length: 300 }, (_, index) => ({
+      seq: index + 2,
+      timestamp: timestamp(index + 2),
+      kind: "acp_read",
+      turnId: "receipt-heavy-turn",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: `tool-${index}`,
+            title: "write_file",
+            status: "completed",
+            rawOutput: "written",
+          },
+        },
+      },
+    })),
+    {
+      seq: 302,
+      timestamp: timestamp(302),
+      kind: "acp_read",
+      turnId: "receipt-heavy-turn",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { text: "later journal activity" },
+          },
+        },
+      },
+    },
+  ];
+  const latestSourceId = decoded.at(-1).seq.toString(16).padStart(64, "0");
+  const surface = await buildTodayActivityFromArchivedEvents({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: decoded.map((event) =>
+      relayEvent({
+        id: event.seq.toString(16).padStart(64, "0"),
+        decoded: event,
+      }),
+    ),
+    decrypt: async (event) => event.decoded,
+  });
+  const journal = surface.journals[0];
+
+  assert.equal(journal.eventCount, decoded.length);
+  assert.equal(journal.events.length, 300);
+  assert.equal(journal.events.at(-1).provenance.sourceEventId, latestSourceId);
+  assert.ok(
+    journalVerificationSources(journal).sourceEventIds.includes(latestSourceId),
+  );
+});
+
 test("day range is half-open and rejects impossible dates", () => {
   const range = activityLedgerDayRange("2026-08-21");
   assert.equal(range.endCreatedAt - range.startCreatedAt, 24 * 60 * 60);
@@ -374,8 +443,10 @@ test("Today archive query overlaps midnight but assigns by inner event time", as
 });
 
 test("Today authority overlay recomputes evidence-gap counts", async () => {
+  const agentPubkey = "1".repeat(64);
   const event = relayEvent({
     id: "a".repeat(64),
+    pubkey: agentPubkey,
     decoded: {
       seq: 1,
       timestamp: "2026-08-21T14:00:00.000Z",
@@ -389,11 +460,12 @@ test("Today authority overlay recomputes evidence-gap counts", async () => {
   });
   const ended = relayEvent({
     id: "b".repeat(64),
+    pubkey: agentPubkey,
     decoded: { ...event.decoded, seq: 2, kind: "turn_completed" },
   });
   const surface = await buildTodayActivityFromArchivedEvents({
     day: "2026-08-21",
-    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    agents: [{ pubkey: agentPubkey, name: "Honey" }],
     events: [event, ended],
     decrypt: async (candidate) => candidate.decoded,
   });
@@ -404,6 +476,7 @@ test("Today authority overlay recomputes evidence-gap counts", async () => {
       {
         ownerPubkey: "owner-a",
         relayUrl: "wss://relay.example",
+        agentPubkey,
         eventId: "c".repeat(64),
         signature: "owner-signature",
         createdAt: ended.created_at + 1,

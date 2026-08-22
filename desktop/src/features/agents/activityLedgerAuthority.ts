@@ -4,11 +4,13 @@ import {
   type NormalizedActivityEvent,
 } from "./activityLedger";
 import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 /** A signature-verified owner artifact returned by the Tauri authority store. */
 export type ValidatedJournalAuthorityArtifact = {
   ownerPubkey: string;
   relayUrl: string;
+  agentPubkey: string;
   eventId: string;
   signature: string;
   createdAt: number;
@@ -129,13 +131,16 @@ export function applyValidatedJournalAuthority(
   journal: MissionJournal,
   artifacts: readonly ValidatedJournalAuthorityArtifact[],
   relayUrl: string,
+  agentPubkey: string,
 ): MissionJournal {
   const relayScope = canonicalRelayUrl(relayUrl);
-  if (!relayScope) return journal;
+  const agentScope = normalizePubkey(agentPubkey);
+  if (!relayScope || !/^[0-9a-f]{64}$/.test(agentScope)) return journal;
   const matching = artifacts
     .filter(
       (artifact) =>
         artifact.relayUrl === relayScope &&
+        artifact.agentPubkey === agentScope &&
         artifact.journalId === journal.id &&
         artifact.correlationId === journal.correlationId,
     )

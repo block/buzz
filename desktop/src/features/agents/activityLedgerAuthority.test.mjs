@@ -14,6 +14,7 @@ import {
 const sourceId = "a".repeat(64);
 const terminalSourceId = "b".repeat(64);
 const relayUrl = "wss://relay.example";
+const agentPubkey = "a".repeat(64);
 
 function observedJournal() {
   return buildMissionJournal(
@@ -59,6 +60,7 @@ function artifact(overrides = {}) {
   return {
     ownerPubkey: "owner-a",
     relayUrl,
+    agentPubkey,
     eventId: "c".repeat(64),
     signature: "owner-signature",
     createdAt: 1_787_319_720,
@@ -72,6 +74,20 @@ function artifact(overrides = {}) {
     sourceEventIds: [sourceId, terminalSourceId].sort(),
     ...overrides,
   };
+}
+
+function applyAuthority(
+  journal,
+  artifacts,
+  scopedRelay = relayUrl,
+  scopedAgent = agentPubkey,
+) {
+  return applyValidatedJournalAuthority(
+    journal,
+    artifacts,
+    scopedRelay,
+    scopedAgent,
+  );
 }
 
 test("stable journal correlation preserves pre-day authority across midnight", () => {
@@ -108,7 +124,7 @@ test("stable journal correlation preserves pre-day authority across midnight", (
   );
   assert.equal(journal.correlationId, journal.id);
 
-  const overridden = applyValidatedJournalAuthority(
+  const overridden = applyAuthority(
     journal,
     [
       artifact({
@@ -125,7 +141,7 @@ test("stable journal correlation preserves pre-day authority across midnight", (
   );
   assert.equal(overridden.summary, "Owner summary written before midnight");
 
-  const staleVerification = applyValidatedJournalAuthority(
+  const staleVerification = applyAuthority(
     journal,
     [
       artifact({
@@ -138,7 +154,7 @@ test("stable journal correlation preserves pre-day authority across midnight", (
   );
   assert.notEqual(staleVerification.proofState, "VERIFIED");
 
-  const currentVerification = applyValidatedJournalAuthority(
+  const currentVerification = applyAuthority(
     journal,
     [
       artifact({
@@ -156,11 +172,7 @@ test("owner-signed verification only promotes evidence bound to the journal", ()
   const journal = observedJournal();
   assert.notEqual(journal.proofState, "VERIFIED");
 
-  const verified = applyValidatedJournalAuthority(
-    journal,
-    [artifact()],
-    relayUrl,
-  );
+  const verified = applyAuthority(journal, [artifact()], relayUrl);
   assert.equal(verified.proofState, "VERIFIED");
   assert.equal(verified.status, "completed");
   assert.equal(verified.events.at(-1).title, "Owner verification");
@@ -174,7 +186,7 @@ test("owner-signed verification only promotes evidence bound to the journal", ()
     "owner-signature",
   );
 
-  const crossJournal = applyValidatedJournalAuthority(
+  const crossJournal = applyAuthority(
     journal,
     [artifact({ sourceEventIds: ["f".repeat(64)] })],
     relayUrl,
@@ -190,11 +202,7 @@ test("later failure and incomplete states outrank an older verification", () => 
     ["incomplete", "UNKNOWN"],
   ]) {
     const terminalJournal = { ...journal, status, proofState };
-    const updated = applyValidatedJournalAuthority(
-      terminalJournal,
-      [artifact()],
-      relayUrl,
-    );
+    const updated = applyAuthority(terminalJournal, [artifact()], relayUrl);
 
     assert.equal(updated.status, status);
     assert.equal(updated.proofState, proofState);
@@ -232,11 +240,11 @@ test("later successful tool evidence invalidates an older verification", () => {
   };
 
   assert.notEqual(
-    applyValidatedJournalAuthority(current, [artifact()], relayUrl).proofState,
+    applyAuthority(current, [artifact()], relayUrl).proofState,
     "VERIFIED",
   );
   assert.equal(
-    applyValidatedJournalAuthority(
+    applyAuthority(
       current,
       [
         artifact({
@@ -272,7 +280,7 @@ test("later turn completion invalidates an older verification", () => {
   };
 
   assert.notEqual(
-    applyValidatedJournalAuthority(current, [artifact()], relayUrl).proofState,
+    applyAuthority(current, [artifact()], relayUrl).proofState,
     "VERIFIED",
   );
 });
@@ -311,13 +319,12 @@ test("every later journal frame invalidates an older verification", () => {
     };
 
     assert.notEqual(
-      applyValidatedJournalAuthority(current, [artifact()], relayUrl)
-        .proofState,
+      applyAuthority(current, [artifact()], relayUrl).proofState,
       "VERIFIED",
       category,
     );
     assert.equal(
-      applyValidatedJournalAuthority(
+      applyAuthority(
         current,
         [
           artifact({
@@ -334,16 +341,8 @@ test("every later journal frame invalidates an older verification", () => {
 
 test("reapplying authority ignores its synthetic owner verification event", () => {
   const journal = observedJournal();
-  const verified = applyValidatedJournalAuthority(
-    journal,
-    [artifact()],
-    relayUrl,
-  );
-  const reapplied = applyValidatedJournalAuthority(
-    verified,
-    [artifact()],
-    relayUrl,
-  );
+  const verified = applyAuthority(journal, [artifact()], relayUrl);
+  const reapplied = applyAuthority(verified, [artifact()], relayUrl);
 
   assert.equal(reapplied.proofState, "VERIFIED");
   assert.equal(reapplied.events.at(-1).title, "Owner verification");
@@ -369,11 +368,7 @@ test("large journal verification computes its sequence without argument spread",
     events,
   };
 
-  const verified = applyValidatedJournalAuthority(
-    largeJournal,
-    [artifact()],
-    relayUrl,
-  );
+  const verified = applyAuthority(largeJournal, [artifact()], relayUrl);
   assert.equal(verified.proofState, "VERIFIED");
   assert.equal(verified.events.at(-1).provenance.seq, 150_001);
 });
@@ -470,21 +465,28 @@ test("latest owner override changes summary without changing proof", () => {
     summary: "Corrected owner summary",
   };
 
-  const updated = applyValidatedJournalAuthority(
-    journal,
-    [latest, base],
-    relayUrl,
-  );
+  const updated = applyAuthority(journal, [latest, base], relayUrl);
   assert.equal(updated.summary, "Corrected owner summary");
   assert.equal(updated.summarySource, "owner");
   assert.equal(updated.ownerModifiedBy, "owner-a");
   assert.equal(updated.proofState, journal.proofState);
 
-  const crossRelay = applyValidatedJournalAuthority(
+  const crossRelay = applyAuthority(
     journal,
     [{ ...latest, relayUrl: "wss://other-relay.example" }],
     relayUrl,
   );
   assert.equal(crossRelay.summarySource, "auto");
   assert.equal(crossRelay.summary, journal.summary);
+});
+
+test("same journal authority cannot cross managed-agent identity", () => {
+  const journal = observedJournal();
+  const crossAgent = applyAuthority(
+    journal,
+    [artifact({ agentPubkey: "b".repeat(64) })],
+    relayUrl,
+    agentPubkey,
+  );
+  assert.notEqual(crossAgent.proofState, "VERIFIED");
 });

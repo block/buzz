@@ -579,6 +579,7 @@ export type JournalAuthorityArtifactType = "owner_override" | "verification";
 export type JournalAuthorityArtifact = {
   ownerPubkey: string;
   relayUrl: string;
+  agentPubkey: string;
   eventId: string;
   signature: string;
   createdAt: number;
@@ -595,6 +596,7 @@ export type JournalAuthorityArtifact = {
 export async function upsertOwnerJournalOverride(
   relayUrl: string,
   input: {
+    agentPubkey: string;
     journalId: string;
     correlationId: string;
     summary: string;
@@ -614,6 +616,7 @@ export async function upsertOwnerJournalOverride(
 export async function upsertJournalVerification(
   relayUrl: string,
   input: {
+    agentPubkey: string;
     journalId: string;
     correlationId: string;
     receiptRef: string;
@@ -628,16 +631,18 @@ export async function upsertJournalVerification(
 
 export async function getJournalAuthorityArtifacts(
   relayUrl: string,
+  agentPubkey: string,
   journalId: string,
 ): Promise<JournalAuthorityArtifact[]> {
   return invokeTauri<JournalAuthorityArtifact[]>(
     "get_journal_authority_artifacts",
-    { relayUrl, journalId },
+    { relayUrl, agentPubkey, journalId },
   );
 }
 
 export async function queryJournalAuthorityArtifacts(opts: {
   relayUrl: string;
+  agentPubkey: string;
   startCreatedAt: number;
   endCreatedAt: number;
   limit?: number;
@@ -647,6 +652,7 @@ export async function queryJournalAuthorityArtifacts(opts: {
     {
       startCreatedAt: opts.startCreatedAt,
       relayUrl: opts.relayUrl,
+      agentPubkey: opts.agentPubkey,
       endCreatedAt: opts.endCreatedAt,
       limit: opts.limit ?? null,
     },

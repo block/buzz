@@ -33,6 +33,7 @@ pub async fn upsert_owner_journal_override(
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
     let relay_url = active_relay_scope(&state, &relay_url)?;
+    let agent_pubkey = journal_authority::normalize_agent_scope(&input.agent_pubkey)?;
     let now = now_secs();
     state
         .archive_db
@@ -41,12 +42,20 @@ pub async fn upsert_owner_journal_override(
                 conn,
                 &identity_pk,
                 &relay_url,
+                &agent_pubkey,
                 input.journal_id.trim(),
                 journal_authority::JournalAuthorityArtifactType::OwnerOverride,
             )?;
             let raw =
                 journal_authority::build_owner_override_event(&keys, &relay_url, &input, revision)?;
-            journal_authority::upsert_signed_artifact(conn, &identity_pk, &relay_url, &raw, now)
+            journal_authority::upsert_signed_artifact(
+                conn,
+                &identity_pk,
+                &relay_url,
+                &agent_pubkey,
+                &raw,
+                now,
+            )
         })
         .await
 }
@@ -63,6 +72,7 @@ pub async fn upsert_journal_verification(
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
     let relay_url = active_relay_scope(&state, &relay_url)?;
+    let agent_pubkey = journal_authority::normalize_agent_scope(&input.agent_pubkey)?;
     let now = now_secs();
     state
         .archive_db
@@ -71,15 +81,27 @@ pub async fn upsert_journal_verification(
                 conn,
                 &identity_pk,
                 &relay_url,
+                &agent_pubkey,
                 input.journal_id.trim(),
                 journal_authority::JournalAuthorityArtifactType::Verification,
             )?;
             let raw =
                 journal_authority::build_verification_event(&keys, &relay_url, &input, revision)?;
-            let artifact =
-                journal_authority::validate_signed_artifact(&raw, &identity_pk, &relay_url)?;
+            let artifact = journal_authority::validate_signed_artifact(
+                &raw,
+                &identity_pk,
+                &relay_url,
+                &agent_pubkey,
+            )?;
             journal_authority::validate_archived_verification_sources(conn, &keys, &artifact)?;
-            journal_authority::upsert_signed_artifact(conn, &identity_pk, &relay_url, &raw, now)
+            journal_authority::upsert_signed_artifact(
+                conn,
+                &identity_pk,
+                &relay_url,
+                &agent_pubkey,
+                &raw,
+                now,
+            )
         })
         .await
 }
@@ -90,11 +112,13 @@ pub async fn upsert_journal_verification(
 pub async fn get_journal_authority_artifacts(
     state: State<'_, AppState>,
     relay_url: String,
+    agent_pubkey: String,
     journal_id: String,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
     let relay_url = active_relay_scope(&state, &relay_url)?;
+    let agent_pubkey = journal_authority::normalize_agent_scope(&agent_pubkey)?;
     let journal_id = journal_id.trim().to_owned();
     state
         .archive_db
@@ -103,6 +127,7 @@ pub async fn get_journal_authority_artifacts(
                 conn,
                 &identity_pk,
                 &relay_url,
+                &agent_pubkey,
                 &journal_id,
             )?;
             for artifact in &artifacts {
@@ -119,6 +144,7 @@ pub async fn get_journal_authority_artifacts(
 pub async fn query_journal_authority_artifacts(
     state: State<'_, AppState>,
     relay_url: String,
+    agent_pubkey: String,
     start_created_at: i64,
     end_created_at: i64,
     limit: Option<i64>,
@@ -126,6 +152,7 @@ pub async fn query_journal_authority_artifacts(
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
     let relay_url = active_relay_scope(&state, &relay_url)?;
+    let agent_pubkey = journal_authority::normalize_agent_scope(&agent_pubkey)?;
     state
         .archive_db
         .with_conn(move |conn| {
@@ -133,6 +160,7 @@ pub async fn query_journal_authority_artifacts(
                 conn,
                 &identity_pk,
                 &relay_url,
+                &agent_pubkey,
                 start_created_at,
                 end_created_at,
                 limit.unwrap_or(200),

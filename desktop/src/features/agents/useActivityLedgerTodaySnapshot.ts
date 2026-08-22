@@ -29,6 +29,16 @@ function localDay(now: Date): string {
   return `${year}-${month}-${date}`;
 }
 
+export function activityLedgerTodaySnapshotDayGate(
+  reconstructedDay: string,
+  publicationTime: Date,
+  rebuildAttempted: boolean,
+): { action: "publish" | "rebuild" | "discard"; day: string } {
+  const day = localDay(publicationTime);
+  if (day === reconstructedDay) return { action: "publish", day };
+  return { action: rebuildAttempted ? "discard" : "rebuild", day };
+}
+
 export function canPublishActivityLedgerTodaySnapshot(
   ownerPubkey: string | undefined,
   managedAgentsLoaded: boolean,
@@ -42,15 +52,25 @@ export function canPublishActivityLedgerTodaySnapshot(
  */
 export async function loadActivityLedgerTodayAuthority(
   relayUrl: string,
-  journalIds: readonly string[],
+  journalScopes: readonly { agentPubkey: string; journalId: string }[],
   load: (
     relayUrl: string,
+    agentPubkey: string,
     journalId: string,
   ) => Promise<JournalAuthorityArtifact[]> = getJournalAuthorityArtifacts,
 ): Promise<JournalAuthorityArtifact[]> {
-  const uniqueJournalIds = [...new Set(journalIds.filter(Boolean))];
+  const uniqueJournalScopes = [
+    ...new Map(
+      journalScopes
+        .filter((scope) => scope.agentPubkey && scope.journalId)
+        .map((scope) => [
+          `${scope.agentPubkey}\u0000${scope.journalId}`,
+          scope,
+        ]),
+    ).values(),
+  ];
   const byJournal: JournalAuthorityArtifact[][] = Array.from(
-    { length: uniqueJournalIds.length },
+    { length: uniqueJournalScopes.length },
     () => [],
   );
   let nextIndex = 0;
@@ -58,14 +78,23 @@ export async function loadActivityLedgerTodayAuthority(
     for (;;) {
       const index = nextIndex;
       nextIndex += 1;
-      const journalId = uniqueJournalIds[index];
-      if (journalId === undefined) return;
-      byJournal[index] = await load(relayUrl, journalId);
+      const scope = uniqueJournalScopes[index];
+      if (scope === undefined) return;
+      byJournal[index] = await load(
+        relayUrl,
+        scope.agentPubkey,
+        scope.journalId,
+      );
     }
   };
   await Promise.all(
     Array.from(
-      { length: Math.min(AUTHORITY_READ_CONCURRENCY, uniqueJournalIds.length) },
+      {
+        length: Math.min(
+          AUTHORITY_READ_CONCURRENCY,
+          uniqueJournalScopes.length,
+        ),
+      },
       worker,
     ),
   );
@@ -104,40 +133,58 @@ export function useActivityLedgerTodaySnapshot(): void {
     const publish = () => {
       if (disposed || inFlight) return;
       inFlight = (async () => {
-        const reconstructionStartedAt = new Date();
         const relayUrl = await getRelayWsUrl();
-        const day = localDay(reconstructionStartedAt);
-        const range = activityLedgerArchiveQueryRange(day);
-        const archivedPages = iterateArchivedObserverEventPagesForRange({
-          ...range,
-          pageSize: 500,
-        });
-        const observedSurface = await buildTodayActivityFromArchivedPages({
-          day,
-          agents: managedIdentities,
-          pages: archivedPages,
-        });
-        const authority = await loadActivityLedgerTodayAuthority(
-          relayUrl,
-          observedSurface.journals.map((journal) => journal.id),
-        );
-        const surface = buildBoundedTodayActivitySurface(
-          applyAuthorityToTodayActivity(observedSurface, authority, relayUrl),
-        );
-        // Timestamp the artifact at publication, not before archive paging,
-        // decryption, authority loading, and projection. A slow reconstruction
-        // must not write a snapshot that is already near or past expiry.
-        const generatedAt = Math.floor(Date.now() / 1_000);
-        await writeOwnerTodaySnapshot({
-          schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
-          ownerPubkey,
-          relayUrl,
-          generatedAt,
-          expiresAt: generatedAt + SNAPSHOT_LIFETIME_SECONDS,
-          capability: OWNER_TODAY_SNAPSHOT_CAPABILITY,
-          surface,
-          rawEvents: [],
-        });
+        let day = localDay(new Date());
+        let rebuildAttempted = false;
+        for (;;) {
+          const range = activityLedgerArchiveQueryRange(day);
+          const archivedPages = iterateArchivedObserverEventPagesForRange({
+            ...range,
+            pageSize: 500,
+          });
+          const observedSurface = await buildTodayActivityFromArchivedPages({
+            day,
+            agents: managedIdentities,
+            pages: archivedPages,
+          });
+          const authority = await loadActivityLedgerTodayAuthority(
+            relayUrl,
+            observedSurface.journals.map((journal) => ({
+              agentPubkey: journal.agentPubkey,
+              journalId: journal.id,
+            })),
+          );
+          const surface = buildBoundedTodayActivitySurface(
+            applyAuthorityToTodayActivity(observedSurface, authority, relayUrl),
+          );
+          const publicationTime = new Date();
+          const dayGate = activityLedgerTodaySnapshotDayGate(
+            day,
+            publicationTime,
+            rebuildAttempted,
+          );
+          if (dayGate.action === "discard") return;
+          if (dayGate.action === "rebuild") {
+            day = dayGate.day;
+            rebuildAttempted = true;
+            continue;
+          }
+          // Timestamp at publication, after paging, decryption, authority, and
+          // the day gate, so a slow reconstruction never receives fresh
+          // validity after its local day has ended.
+          const generatedAt = Math.floor(publicationTime.getTime() / 1_000);
+          await writeOwnerTodaySnapshot({
+            schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
+            ownerPubkey,
+            relayUrl,
+            generatedAt,
+            expiresAt: generatedAt + SNAPSHOT_LIFETIME_SECONDS,
+            capability: OWNER_TODAY_SNAPSHOT_CAPABILITY,
+            surface,
+            rawEvents: [],
+          });
+          return;
+        }
       })()
         .catch((error) => {
           console.warn(

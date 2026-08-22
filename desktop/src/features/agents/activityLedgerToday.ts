@@ -67,9 +67,27 @@ function selectSnapshotEvents(
   };
 
   // Verification sources are capped at 256 in the owner-authority contract.
-  // Preserve those sources, their correlation root, and terminal truth before
-  // spending the remaining projection budget on ordinary transcript detail.
+  // Reserve the actual newest signed journal frame before any bulk priority
+  // class can fill the checkpoint. Every later frame changes verification
+  // freshness, including messages, prompts, thoughts, and plans.
   add(0);
+  let latestVerificationEvidence = -1;
+  for (let index = journal.events.length - 1; index >= 0; index -= 1) {
+    const event = journal.events[index];
+    if (
+      event.provenance.sourceKind !== 24201 &&
+      event.provenance.observerKind !== "owner_verification" &&
+      typeof event.provenance.sourceEventId === "string" &&
+      /^[0-9a-f]{64}$/i.test(event.provenance.sourceEventId)
+    ) {
+      latestVerificationEvidence = index;
+      break;
+    }
+  }
+  add(latestVerificationEvidence);
+
+  // Preserve verification sources, their correlation root, and terminal
+  // truth before spending the remaining budget on transcript detail.
   addMatching(
     (event) =>
       event.provenance.observerKind === "owner_verification" ||
@@ -86,22 +104,6 @@ function selectSnapshotEvents(
   );
   addMatching((event) => event.proofState === "FAILED");
 
-  let latestVerificationEvidence = -1;
-  for (let index = journal.events.length - 1; index >= 0; index -= 1) {
-    const event = journal.events[index];
-    if (
-      event.provenance.sourceKind !== 24201 &&
-      event.provenance.observerKind !== "owner_verification" &&
-      (event.category === "turn" ||
-        event.category === "tool" ||
-        event.category === "permission" ||
-        event.category === "status")
-    ) {
-      latestVerificationEvidence = index;
-      break;
-    }
-  }
-  add(latestVerificationEvidence);
   addMatching((event) => event.category === "turn");
   addMatching((event) => event.proofState === "RECEIPTED");
 
@@ -655,7 +657,12 @@ export function applyAuthorityToTodayActivity(
   relayUrl: string,
 ): TodayActivitySurface {
   const journals: TodayActivityJournal[] = surface.journals.map((journal) => ({
-    ...applyValidatedJournalAuthority(journal, artifacts, relayUrl),
+    ...applyValidatedJournalAuthority(
+      journal,
+      artifacts,
+      relayUrl,
+      journal.agentPubkey,
+    ),
     agentPubkey: journal.agentPubkey,
     agentName: journal.agentName,
   }));

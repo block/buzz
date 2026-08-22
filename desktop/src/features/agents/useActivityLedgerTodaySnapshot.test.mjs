@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activityLedgerTodaySnapshotDayGate,
   canPublishActivityLedgerTodaySnapshot,
   loadActivityLedgerTodayAuthority,
 } from "./useActivityLedgerTodaySnapshot.ts";
@@ -12,15 +13,39 @@ test("Today publishing waits for a successful managed-agent roster read", () => 
   assert.equal(canPublishActivityLedgerTodaySnapshot("owner-a", true), true);
 });
 
+test("Today snapshot day gate never publishes a previous-day reconstruction", () => {
+  assert.deepEqual(
+    activityLedgerTodaySnapshotDayGate(
+      "2026-08-21",
+      new Date("2026-08-22T00:00:01"),
+      false,
+    ),
+    { action: "rebuild", day: "2026-08-22" },
+  );
+  assert.deepEqual(
+    activityLedgerTodaySnapshotDayGate(
+      "2026-08-21",
+      new Date("2026-08-22T00:00:01"),
+      true,
+    ),
+    { action: "discard", day: "2026-08-22" },
+  );
+});
+
 test("Today authority is loaded by retained journal id across day boundaries", async () => {
   const calls = [];
   const artifacts = await loadActivityLedgerTodayAuthority(
     "wss://relay.example",
-    ["journal-across-midnight", "journal-today", "journal-across-midnight"],
-    async (relayUrl, journalId) => {
-      calls.push([relayUrl, journalId]);
+    [
+      { agentPubkey: "agent-a", journalId: "journal-across-midnight" },
+      { agentPubkey: "agent-b", journalId: "journal-today" },
+      { agentPubkey: "agent-a", journalId: "journal-across-midnight" },
+    ],
+    async (relayUrl, agentPubkey, journalId) => {
+      calls.push([relayUrl, agentPubkey, journalId]);
       return [
         {
+          agentPubkey,
           journalId,
           createdAt: journalId === "journal-across-midnight" ? 1 : 2,
         },
@@ -29,8 +54,8 @@ test("Today authority is loaded by retained journal id across day boundaries", a
   );
 
   assert.deepEqual(calls, [
-    ["wss://relay.example", "journal-across-midnight"],
-    ["wss://relay.example", "journal-today"],
+    ["wss://relay.example", "agent-a", "journal-across-midnight"],
+    ["wss://relay.example", "agent-b", "journal-today"],
   ]);
   assert.deepEqual(
     artifacts.map((artifact) => artifact.journalId),
@@ -41,4 +66,23 @@ test("Today authority is loaded by retained journal id across day boundaries", a
     1,
     "an owner edit created before today's range must remain attached",
   );
+});
+
+test("Today authority keeps same journal id isolated across agents", async () => {
+  const calls = [];
+  await loadActivityLedgerTodayAuthority(
+    "wss://relay.example",
+    [
+      { agentPubkey: "agent-a", journalId: "shared-turn" },
+      { agentPubkey: "agent-b", journalId: "shared-turn" },
+    ],
+    async (_relayUrl, agentPubkey, journalId) => {
+      calls.push([agentPubkey, journalId]);
+      return [];
+    },
+  );
+  assert.deepEqual(calls, [
+    ["agent-a", "shared-turn"],
+    ["agent-b", "shared-turn"],
+  ]);
 });

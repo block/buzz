@@ -179,7 +179,11 @@ export function ManagedAgentSessionPanel({
       ) : null}
 
       {latestJournal.eventCount > 0 && relayUrl ? (
-        <MissionJournalSummary journal={latestJournal} relayUrl={relayUrl} />
+        <MissionJournalSummary
+          journal={latestJournal}
+          relayUrl={relayUrl}
+          agentPubkey={agent.pubkey}
+        />
       ) : null}
 
       <SessionBody
@@ -226,9 +230,11 @@ function journalStatusLabel(status: MissionJournal["status"]): string {
 function MissionJournalSummary({
   journal,
   relayUrl,
+  agentPubkey,
 }: {
   journal: MissionJournal;
   relayUrl: string;
+  agentPubkey: string;
 }) {
   const [artifacts, setArtifacts] = React.useState<JournalAuthorityArtifact[]>(
     [],
@@ -241,9 +247,13 @@ function MissionJournalSummary({
   const [error, setError] = React.useState<string | null>(null);
 
   const reloadAuthority = React.useCallback(async () => {
-    const current = await getJournalAuthorityArtifacts(relayUrl, journal.id);
+    const current = await getJournalAuthorityArtifacts(
+      relayUrl,
+      agentPubkey,
+      journal.id,
+    );
     setArtifacts(current);
-  }, [journal.id, relayUrl]);
+  }, [agentPubkey, journal.id, relayUrl]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -253,7 +263,7 @@ function MissionJournalSummary({
     setReceiptRef("");
     setAuthorityLoading(true);
     setError(null);
-    getJournalAuthorityArtifacts(relayUrl, journal.id)
+    getJournalAuthorityArtifacts(relayUrl, agentPubkey, journal.id)
       .then((current) => {
         if (!cancelled) setArtifacts(current);
       })
@@ -272,11 +282,12 @@ function MissionJournalSummary({
     return () => {
       cancelled = true;
     };
-  }, [journal.id, journal.summary, relayUrl]);
+  }, [agentPubkey, journal.id, journal.summary, relayUrl]);
 
   const authorizedJournal = React.useMemo(
-    () => applyValidatedJournalAuthority(journal, artifacts, relayUrl),
-    [artifacts, journal, relayUrl],
+    () =>
+      applyValidatedJournalAuthority(journal, artifacts, relayUrl, agentPubkey),
+    [agentPubkey, artifacts, journal, relayUrl],
   );
   React.useEffect(() => {
     if (mode !== "summary") setSummary(authorizedJournal.summary);
@@ -291,6 +302,7 @@ function MissionJournalSummary({
     setError(null);
     try {
       await upsertOwnerJournalOverride(relayUrl, {
+        agentPubkey,
         journalId: journal.id,
         correlationId: journal.correlationId,
         summary: summary.trim(),
@@ -322,6 +334,7 @@ function MissionJournalSummary({
     setError(null);
     try {
       await upsertJournalVerification(relayUrl, {
+        agentPubkey,
         journalId: journal.id,
         correlationId: journalAuthorityCorrelationId(journal),
         receiptRef: receiptRef.trim(),

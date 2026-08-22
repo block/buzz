@@ -19,13 +19,15 @@ use rusqlite::{params, Connection};
 /// the M1 rebuild, which calls `insert_metric_index_row`, always operates
 /// against a schema that includes the cache-read columns. M4 adds
 /// `archive_meta` and the scope-age index independently of M1–M3. M5 then
-/// scopes journal authority to the canonical relay.
+/// scopes journal authority to the canonical relay, and M6 to the managed
+/// agent identity.
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
     migrate_add_harness_to_metric_index(conn)?;
     migrate_add_archive_meta(conn)?;
-    migrate_scope_journal_authority_to_relay(conn)
+    migrate_scope_journal_authority_to_relay(conn)?;
+    migrate_scope_journal_authority_to_agent(conn)
 }
 
 const RELAY_SCOPED_JOURNAL_AUTHORITY_SCHEMA: &str = r#"
@@ -47,6 +49,28 @@ CREATE TABLE journal_authority_artifacts (
 CREATE INDEX idx_journal_authority_created
     ON journal_authority_artifacts
        (identity_pubkey, relay_url, created_at DESC, event_id DESC);
+"#;
+
+const AGENT_SCOPED_JOURNAL_AUTHORITY_SCHEMA: &str = r#"
+CREATE TABLE journal_authority_artifacts (
+    identity_pubkey TEXT NOT NULL,
+    relay_url       TEXT NOT NULL,
+    agent_pubkey    TEXT NOT NULL,
+    journal_id      TEXT NOT NULL,
+    artifact_type   TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    revision        INTEGER NOT NULL,
+    raw_json        TEXT NOT NULL,
+    stored_at       INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, relay_url, agent_pubkey, journal_id, artifact_type),
+    UNIQUE (identity_pubkey, relay_url, agent_pubkey, event_id),
+    CHECK (artifact_type IN ('owner_override', 'verification')),
+    CHECK (revision > 0)
+);
+CREATE INDEX idx_journal_authority_created
+    ON journal_authority_artifacts
+       (identity_pubkey, relay_url, agent_pubkey, created_at DESC, event_id DESC);
 "#;
 
 /// M5: replace the unreleased owner+journal authority key with an
@@ -94,8 +118,12 @@ fn migrate_scope_journal_authority_to_relay(conn: &Connection) -> Result<(), Str
                 .map_err(|error| format!("migration M5: read authority columns: {error}"))?;
             rows
         };
+        let agent_scoped = columns.iter().any(|(name, _)| name == "agent_pubkey");
         let relay_scoped = columns.iter().any(|(name, _)| name == "relay_url");
-        if relay_scoped {
+        if agent_scoped {
+            // Fresh databases already use the final M6 shape. M6 validates
+            // its full key and creates the final index immediately below.
+        } else if relay_scoped {
             let primary_key = columns
                 .iter()
                 .filter(|(_, position)| *position > 0)
@@ -163,6 +191,129 @@ fn migrate_scope_journal_authority_to_relay(conn: &Connection) -> Result<(), Str
         Ok(()) => conn
             .execute_batch("COMMIT")
             .map_err(|error| format!("migration M5: commit: {error}")),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+/// M6: bind every authority row to the managed agent whose journal it can
+/// affect. Relay-scoped v2 events did not sign an agent identity, so they are
+/// quarantined without inference rather than copied into authoritative state.
+fn migrate_scope_journal_authority_to_agent(conn: &Connection) -> Result<(), String> {
+    const MARKER: &str = "scope_journal_authority_to_agent";
+    let already_run: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
+            [MARKER],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("migration M6: guard check: {error}"))?
+        > 0;
+    if already_run {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| format!("migration M6: begin immediate: {error}"))?;
+    let result = (|| -> Result<(), String> {
+        let already_run: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
+                [MARKER],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("migration M6: in-lock guard check: {error}"))?
+            > 0;
+        if already_run {
+            return Ok(());
+        }
+
+        let columns: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(journal_authority_artifacts)")
+                .map_err(|error| format!("migration M6: inspect authority table: {error}"))?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))
+                .map_err(|error| format!("migration M6: query authority columns: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("migration M6: read authority columns: {error}"))?;
+            rows
+        };
+        let agent_scoped = columns.iter().any(|(name, _)| name == "agent_pubkey");
+        if agent_scoped {
+            let primary_key = columns
+                .iter()
+                .filter(|(_, position)| *position > 0)
+                .map(|(name, position)| (*position, name.as_str()))
+                .collect::<Vec<_>>();
+            if primary_key
+                != [
+                    (1, "identity_pubkey"),
+                    (2, "relay_url"),
+                    (3, "agent_pubkey"),
+                    (4, "journal_id"),
+                    (5, "artifact_type"),
+                ]
+            {
+                return Err("migration M6: agent-scoped authority primary key is invalid".into());
+            }
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_journal_authority_created;
+                 CREATE INDEX idx_journal_authority_created
+                   ON journal_authority_artifacts
+                      (identity_pubkey, relay_url, agent_pubkey,
+                       created_at DESC, event_id DESC);",
+            )
+            .map_err(|error| format!("migration M6: rebuild agent-scoped index: {error}"))?;
+        } else {
+            if !columns.iter().any(|(name, _)| name == "relay_url") {
+                return Err("migration M6: authority table is not relay scoped".into());
+            }
+            let quarantine_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name = 'journal_authority_artifacts_relay_scoped_v2'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| format!("migration M6: inspect quarantine table: {error}"))?
+                > 0;
+            if quarantine_exists {
+                return Err(
+                    "migration M6: relay-scoped authority quarantine exists without marker".into(),
+                );
+            }
+            conn.execute_batch(
+                "ALTER TABLE journal_authority_artifacts
+                   RENAME TO journal_authority_artifacts_relay_scoped_v2;
+                 DROP INDEX IF EXISTS idx_journal_authority_created;",
+            )
+            .map_err(|error| format!("migration M6: quarantine relay authority: {error}"))?;
+            conn.execute_batch(AGENT_SCOPED_JOURNAL_AUTHORITY_SCHEMA)
+                .map_err(|error| format!("migration M6: create agent authority table: {error}"))?;
+        }
+
+        conn.execute(
+            "INSERT INTO archive_migrations (name, applied_at) VALUES (?1, ?2)",
+            params![
+                MARKER,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            ],
+        )
+        .map_err(|error| format!("migration M6: record marker: {error}"))?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|error| format!("migration M6: commit: {error}")),
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(error)
