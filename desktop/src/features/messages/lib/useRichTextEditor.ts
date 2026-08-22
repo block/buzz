@@ -33,6 +33,7 @@ import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
 import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
+import { PreserveMacReplacementSelection } from "./preserveMacReplacementSelection";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
@@ -486,6 +487,7 @@ export function useRichTextEditor({
           },
         }),
         LinkPasteTrailingSpace,
+        PreserveMacReplacementSelection,
         createLinkInteractionExtension({
           getEditLinkHandler: () => onEditLinkRef.current,
           getSelectionChangeHandler: () => onLinkSelectionChangeRef.current,
