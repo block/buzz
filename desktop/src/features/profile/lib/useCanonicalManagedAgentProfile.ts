@@ -1,8 +1,8 @@
 import * as React from "react";
 
 import {
+  pickCanonicalProfileAgent,
   pickDirectProfileAgent,
-  pickProfileAgent,
 } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -28,7 +28,9 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
  *   opened active instance exact so an access edit targets it, only redirecting
  *   an inactive click to a live sibling — see `pickDirectProfileAgent`.
  * - Otherwise persona-target and non-archived historical navigation resolve
- *   through the shared archive-aware selector: all instances archived yields
+ *   through the shared archive-aware selector, scoped to the requested
+ *   instance's display group so a renamed instance resolves to itself rather
+ *   than to a differently named sibling: all candidates archived yields
  *   `undefined` (persona-only mode), else the canonical live instance.
  */
 export function resolveCanonicalManagedAgent(input: {
@@ -60,7 +62,13 @@ export function resolveCanonicalManagedAgent(input: {
       isArchived,
     );
   }
-  return pickProfileAgent(personaInstances, isArchived) ?? directManagedAgent;
+  return (
+    pickCanonicalProfileAgent(
+      personaInstances,
+      directManagedAgent,
+      isArchived,
+    ) ?? directManagedAgent
+  );
 }
 
 /**

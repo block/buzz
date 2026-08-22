@@ -15,6 +15,8 @@ type AgentIdentityCardProps = {
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
+  /** Optional line under the label (e.g. the persona a split card belongs to). */
+  subtitle?: string | null;
 };
 
 export function AgentIdentityCard({
@@ -27,6 +29,7 @@ export function AgentIdentityCard({
   modelLabel,
   onClick,
   statusBadge,
+  subtitle,
 }: AgentIdentityCardProps) {
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
 
@@ -72,6 +75,11 @@ export function AgentIdentityCard({
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>
+        {subtitle ? (
+          <span className="min-w-0 truncate text-2xs font-normal text-muted-foreground">
+            {subtitle}
+          </span>
+        ) : null}
         {modelLabel ? (
           <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}
