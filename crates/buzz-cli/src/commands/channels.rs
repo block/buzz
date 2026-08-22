@@ -13,11 +13,34 @@ use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAg
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
+fn extract_channel_visibility(e: &serde_json::Value) -> Option<&'static str> {
+    e.get("tags")
+        .and_then(|tags| tags.as_array())
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let key = tag
+                    .as_array()
+                    .and_then(|parts| parts.first())
+                    .and_then(|value| value.as_str());
+                match key {
+                    Some("private") => Some("private"),
+                    Some("public") => Some("public"),
+                    _ => None,
+                }
+            })
+        })
+}
+
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "channel_id": extract_d_tag(e),
         "name": extract_tag_value(e, "name"),
+        "channel_type": extract_tag_value(e, "t"),
+        "visibility": extract_channel_visibility(e),
         "description": extract_tag_value(e, "about"),
+        "topic": extract_tag_value(e, "topic"),
+        "purpose": extract_tag_value(e, "purpose"),
+        "archived": extract_tag_value(e, "archived") == "true",
         "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
 }
@@ -1197,9 +1220,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
-        ResolvedAgent, RosterResolution, SkippedSlug,
+        extract_channel_metadata, finalize_roster_resolution, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, validate_update_channel_fields,
+        ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1231,6 +1254,24 @@ mod tests {
         assert_eq!(s.topic.as_deref(), Some("Composer work"));
         assert_eq!(s.purpose.as_deref(), Some("Track UI for the composer"));
         assert_eq!(s.ttl_seconds, Some(3600));
+    }
+
+    #[test]
+    fn list_and_get_metadata_expose_surface_type_and_visibility() {
+        let ev = json!({
+            "created_at": 123,
+            "tags": [
+                ["d", "11111111-1111-1111-1111-111111111111"],
+                ["name", "design"],
+                ["t", "forum"],
+                ["private"],
+                ["about", "Design discussions"]
+            ]
+        });
+
+        let metadata = extract_channel_metadata(&ev);
+        assert_eq!(metadata["channel_type"], "forum");
+        assert_eq!(metadata["visibility"], "private");
     }
 
     #[test]
