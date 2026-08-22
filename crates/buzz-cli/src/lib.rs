@@ -380,13 +380,15 @@ pub enum MessagesCmd {
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
-        /// Nostr event kind (default: channel default)
+        /// Nostr event kind. Defaults to the channel's canonical kind:
+        /// 45001 for a forum topic, 45003 for a forum reply, 9 otherwise.
         #[arg(long)]
         kind: Option<u16>,
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
-        /// Also publish to the Nostr network
+        /// Also publish to the Nostr network. Stream-only (kind 9): rejected
+        /// in a forum channel and with --kind 45001/45003.
         #[arg(long, default_value_t = false)]
         broadcast: bool,
         /// Attach file(s) — uploads and includes as imeta tags
