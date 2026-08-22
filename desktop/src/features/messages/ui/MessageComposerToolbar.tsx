@@ -11,8 +11,10 @@ import {
   ComposerSendButton,
 } from "./ComposerAddressControls";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
+import { ComposerSkillPicker } from "./ComposerSkillPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
+import type { ComposerAgentSkill } from "@/features/messages/lib/composerAgentSkills";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -34,6 +36,8 @@ export const MessageComposerToolbar = React.memo(
     isFormattingOpen,
     isSending,
     isUploading,
+    skillAgentDisplayName,
+    skills,
     onCaptureSelection,
     onEmojiPickerOpenChange,
     onEmojiSelect,
@@ -42,6 +46,8 @@ export const MessageComposerToolbar = React.memo(
     onOpenMentionPicker,
     onPaperclip,
     onRemoveAddressedAgent = ignoreAddressRemoval,
+    onSkillPickerClose,
+    onSkillSelect,
     pulseVersionByPubkey,
     sendDisabled,
     shakeVersionByPubkey,
@@ -55,6 +61,8 @@ export const MessageComposerToolbar = React.memo(
     isFormattingOpen: boolean;
     isSending: boolean;
     isUploading: boolean;
+    skillAgentDisplayName?: string;
+    skills?: readonly ComposerAgentSkill[];
     onCaptureSelection: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
@@ -63,6 +71,8 @@ export const MessageComposerToolbar = React.memo(
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
     onRemoveAddressedAgent?: (pubkey: string) => void;
+    onSkillPickerClose?: () => void;
+    onSkillSelect?: (skill: ComposerAgentSkill) => void;
     pulseVersionByPubkey?: Readonly<Record<string, number>>;
     sendDisabled: boolean;
     shakeVersionByPubkey?: Readonly<Record<string, number>>;
@@ -207,6 +217,16 @@ export const MessageComposerToolbar = React.memo(
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
                 />
+                {skillAgentDisplayName && skills && onSkillSelect ? (
+                  <ComposerSkillPicker
+                    agentDisplayName={skillAgentDisplayName}
+                    disabled={composerDisabled}
+                    onClose={onSkillPickerClose ?? (() => {})}
+                    onSelect={onSkillSelect}
+                    onTriggerMouseDown={onCaptureSelection}
+                    skills={skills}
+                  />
+                ) : null}
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}
