@@ -129,6 +129,17 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
 | `--heartbeat-prompt-file` | `BUZZ_ACP_HEARTBEAT_PROMPT_FILE` | — | Read heartbeat prompt from a file. Conflicts with `--heartbeat-prompt`. |
 
+### Session Persistence
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--state-dir` | `BUZZ_ACP_STATE_DIR` | `<cwd>/.buzz-acp` | Directory for harness state that must outlive the process — today the channel → ACP session map (`sessions-<pubkey>.json`). On restart the harness issues `session/load` for each remembered channel instead of opening a fresh session, so the agent keeps its context. |
+| `--no-resume-sessions` | `BUZZ_ACP_NO_RESUME_SESSIONS` | `false` | Do not remember channel sessions across restarts: every restart opens a fresh `session/new` per channel, as before the session store existed. |
+
+A resume that cannot happen never costs the turn: if the file is missing, the entry is stale, the agent does not advertise `loadSession`, or the agent rejects `session/load`, the harness forgets the mapping and falls back to `session/new` for that channel.
+
+> **Operators running in containers:** the default state directory lives under the working directory, which is ephemeral in most container and pod filesystems — it silently vanishes on every deploy, so every restart starts every channel from scratch. Set `BUZZ_ACP_STATE_DIR` to a path on mounted persistent storage (a volume, PVC, or bind mount, e.g. `/var/lib/buzz-acp`) when the harness does not live on a laptop. Gateways that supervise hosted harnesses can additionally key sessions by `(agent pubkey, channelId)` in their own store — the harness sends the channel on `session/new` as `_meta.channelId` — to resume across a node move even when the file did not survive.
+
 ### Inbound Author Gate
 
 Controls which authors' events the harness forwards to the agent. Events from disallowed authors are silently dropped before reaching subscription rules.
@@ -256,6 +267,7 @@ Forum event kinds:
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
+7. **Restart** — The channel → session map is written to the state dir (see [Session Persistence](#session-persistence)); a restarted harness `session/load`s each remembered session and falls back to `session/new` when it cannot.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 

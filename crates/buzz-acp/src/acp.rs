@@ -138,6 +138,15 @@ fn build_initialize_params() -> serde_json::Value {
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
+/// The Buzz channel a `session/new` is being opened for. See
+/// [`AcpClient::session_new_with_origin`].
+#[derive(Debug, Clone, Copy)]
+pub struct SessionOrigin<'a> {
+    pub channel_id: uuid::Uuid,
+    /// `"dm"`, `"stream"`, … as the relay reports it; `None` when unresolved.
+    pub channel_type: Option<&'a str>,
+}
+
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
@@ -200,6 +209,10 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.loadSession` at
+    /// `initialize`. Gates [`session_load`](Self::session_load): a harness
+    /// restart resumes a channel's remembered session only when the agent can.
+    load_session_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -559,6 +572,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            load_session_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -617,7 +631,45 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.load_session_supported = result
+            .pointer("/agentCapabilities/loadSession")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
+        Ok(result)
+    }
+
+    /// Whether the agent advertised `loadSession` at `initialize`.
+    pub fn load_session_supported(&self) -> bool {
+        self.load_session_supported
+    }
+
+    /// Send `session/load` for a session this harness created before a restart.
+    ///
+    /// ACP has the agent replay the conversation as `session/update`
+    /// notifications before it answers; the read loop dispatches those exactly
+    /// as it does mid-turn, so nothing is persisted or re-published here. On
+    /// `Ok` the session is live again under the same id; on `Err` the caller
+    /// falls back to `session/new` — a resume that fails must never cost the
+    /// turn.
+    ///
+    /// Only meaningful when [`load_session_supported`](Self::load_session_supported)
+    /// is true; sending it to an agent that did not advertise the capability
+    /// gets a method-not-found error, which the caller treats like any other
+    /// resume failure.
+    pub async fn session_load(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<serde_json::Value, AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": mcp_servers,
+        });
+        let result = self.send_request("session/load", params).await?;
+        tracing::info!(target: "acp::session", "session resumed: {session_id}");
         Ok(result)
     }
 
@@ -655,6 +707,28 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        self.session_new_with_origin(cwd, mcp_servers, system_prompt, session_title, None)
+            .await
+    }
+
+    /// [`session_new_full`](Self::session_new_full) plus the channel the session
+    /// is for, sent out of band as `_meta.channelId` / `_meta.channelType`.
+    ///
+    /// The prompt already names the channel in its `[Context]` block, but that
+    /// is text for the model. An agent — or a gateway in front of many agents,
+    /// like `fountain acp` — that wants to key sessions by channel (to resume
+    /// the same conversation after this harness restarts, or to attach
+    /// per-channel resources) has had nothing machine-readable to key on;
+    /// `sessionTitle` carries the channel *name* and is empty for DMs. Absent
+    /// for heartbeat sessions, which have no channel.
+    pub async fn session_new_with_origin(
+        &mut self,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
+        session_title: Option<&str>,
+        origin: Option<SessionOrigin<'_>>,
+    ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -672,6 +746,12 @@ impl AcpClient {
         if let Some(title) = session_title {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
+        }
+        if let Some(origin) = origin {
+            params["_meta"]["channelId"] = serde_json::Value::String(origin.channel_id.to_string());
+            if let Some(channel_type) = origin.channel_type {
+                params["_meta"]["channelType"] = serde_json::Value::String(channel_type.to_owned());
+            }
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -3600,6 +3680,150 @@ mod tests {
             Some("Fizz · #buzz-dev"),
             "title should ride in _meta.sessionTitle, out of band from the prompt"
         );
+    }
+
+    #[tokio::test]
+    async fn session_new_with_origin_sends_channel_id_and_type_in_meta() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let channel_id = uuid::Uuid::new_v4();
+        let resp = client
+            .session_new_with_origin(
+                "/tmp",
+                vec![],
+                None,
+                Some("Fizz · #buzz-dev"),
+                Some(SessionOrigin {
+                    channel_id,
+                    channel_type: Some("dm"),
+                }),
+            )
+            .await
+            .expect("session_new_with_origin should succeed");
+
+        let meta = &resp.raw["_receivedRequest"]["params"]["_meta"];
+        assert_eq!(
+            meta["channelId"].as_str(),
+            Some(channel_id.to_string().as_str())
+        );
+        assert_eq!(meta["channelType"].as_str(), Some("dm"));
+        // The existing member is untouched: the origin merges into _meta.
+        assert_eq!(meta["sessionTitle"].as_str(), Some("Fizz · #buzz-dev"));
+    }
+
+    #[tokio::test]
+    async fn session_new_full_sends_no_channel_origin() {
+        // Heartbeat sessions and the plain constructor: no channel, no member.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let resp = client
+            .session_new_full("/tmp", vec![], None, Some("t"))
+            .await
+            .expect("session_new_full should succeed");
+        let meta = &resp.raw["_receivedRequest"]["params"]["_meta"];
+        assert!(meta.get("channelId").is_none());
+        assert!(meta.get("channelType").is_none());
+    }
+
+    #[tokio::test]
+    async fn initialize_records_load_session_capability() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(!client.load_session_supported());
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client.load_session_supported());
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_load_session_unsupported_when_absent() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(!client.load_session_supported());
+    }
+
+    #[tokio::test]
+    async fn session_load_sends_session_id_cwd_and_servers_and_tolerates_replay() {
+        // ACP: the agent replays history as session/update notifications
+        // BEFORE answering session/load. The read loop must ride through them.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_old","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replayed"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let result = client
+            .session_load("ses_old", "/work", vec![])
+            .await
+            .expect("session_load should succeed");
+        let received = &result["_receivedRequest"];
+        assert_eq!(received["method"].as_str(), Some("session/load"));
+        assert_eq!(received["params"]["sessionId"].as_str(), Some("ses_old"));
+        assert_eq!(received["params"]["cwd"].as_str(), Some("/work"));
+        assert!(received["params"]["mcpServers"].is_array());
+    }
+
+    #[tokio::test]
+    async fn session_load_error_is_an_error_not_a_hang() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"session not found"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client
+            .session_load("ses_gone", "/work", vec![])
+            .await
+            .is_err());
     }
 
     #[tokio::test]
