@@ -4462,6 +4462,16 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_requires_local_writing_and_coding_skills() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("Two locally-defined skills are mandatory for every agent"));
+        assert!(prompt.contains("Run `unslop` as the final editing pass"));
+        assert!(prompt.contains("Apply `karpathy-guidelines` to non-trivial software work"));
+        assert!(prompt.contains("read the matching local `SKILL.md` and apply it directly"));
+        assert!(prompt.contains("never claim a skill ran when it was unavailable"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("use the person's **exact display name as shown in Buzz**"));
