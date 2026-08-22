@@ -956,7 +956,14 @@ test.describe("community rail", () => {
       ),
     ).toBe(1);
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
-    await expect(page).not.toHaveURL(/#\/channels\/general$/);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    await expect(page).toHaveURL(/#\/channels\/general$/);
     await expect
       .poll(() =>
         page.evaluate((communityId) => {
