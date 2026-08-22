@@ -24,7 +24,7 @@
                                   Anthropic Messages API,
                                    OpenRouter, or any OpenAI-compat
                                   (vLLM, llama.cpp, Databricks,
-                                   Block Gateway, Ollama, …)
+                                   Block Gateway, Novita AI, Ollama, …)
 ```
 
 A client sends `session/prompt`. The agent loops: call the LLM → get tool calls → run them via MCP → feed results back → repeat. The loop terminates when the LLM stops asking for tools, the round cap is hit, or the client cancels.
@@ -142,7 +142,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
+| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Novita AI, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
@@ -239,6 +239,7 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
+| Novita AI | `openai` | `POST {base}/chat/completions` | deepseek/deepseek-v3.2, moonshotai/kimi-k2.6 |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
