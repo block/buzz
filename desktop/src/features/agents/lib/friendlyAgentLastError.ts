@@ -6,9 +6,10 @@
  *                  JSON-RPC codes (`-32001` auth, `-32002` model-not-found,
  *                  `-32000` generic), defined in `crates/buzz-agent/src/types.rs`.
  *   buzz-acp   — preserves the code structurally in
- *                  `AcpError::AgentError { code, message }`, whose Display is
- *                  `"Agent reported error (code N): message"`, and includes
- *                  `code` in `turn_error` observer events.
+ *                  `AcpError::AgentError { code, message, data }`, whose Display
+ *                  is `"Agent reported error (code N): message"`, and includes
+ *                  `code` plus bounded diagnostics in `turn_error` observer
+ *                  events.
  *   desktop supervisor — on nonzero exit, recovers `{ message, code }` from
  *                  the log tail (`managed_agents/storage.rs`) into
  *                  `ManagedAgent.lastError` / `lastErrorCode`.
@@ -118,11 +119,19 @@ export function friendlyAgentLastError(
 
 /**
  * Convenience for `turn_error` / `agent_panic` observer payloads: coerce the
- * payload's untyped `code` JSON value and return the display copy, falling
- * back to the raw error text when no classification applies.
+ * payload's untyped `code` JSON value, include owner-scoped diagnostic data,
+ * and return the display copy. General ACP logs and channel notices do not use
+ * this helper, so diagnostic data remains confined to the observer transcript.
  */
-export function friendlyTurnErrorCopy(raw: string, code: unknown): string {
+export function friendlyTurnErrorCopy(
+  raw: string,
+  code: unknown,
+  data?: unknown,
+): string {
+  const detail = typeof data === "string" ? data.trim() : "";
+  const diagnostic =
+    detail.length > 0 && !raw.includes(detail) ? `${raw}\n${detail}` : raw;
   const numeric = code == null ? null : Number(code);
   const safe = Number.isFinite(numeric) ? (numeric as number) : null;
-  return friendlyAgentLastError(raw, safe)?.copy ?? raw;
+  return friendlyAgentLastError(diagnostic, safe)?.copy ?? diagnostic;
 }

@@ -22,6 +22,12 @@ use crate::usage::{
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Maximum serialized, recursively redacted JSON detail included in an agent
+/// error diagnostic.
+const MAX_AGENT_ERROR_DATA_BYTES: usize = 4 * 1024;
+
+const REDACTED_AGENT_ERROR_DATA: &str = "[REDACTED]";
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -107,20 +113,101 @@ pub enum AcpError {
     Protocol(String),
 
     #[error("Agent reported error (code {code}): {message}")]
-    AgentError { code: i64, message: String },
+    AgentError {
+        code: i64,
+        message: String,
+        data: Option<String>,
+    },
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
-/// preserving the numeric code. When the `message` field is missing or
-/// non-string, fall back to the full JSON object so provider-specific
-/// detail (e.g. a `data` field) is not lost.
+/// preserving the numeric code and redacted, bounded provider-specific `data`.
+/// When the `message` field is missing or non-string, use a stable fallback
+/// message while retaining any safe `data` detail.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-    let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
-        None => error.to_string(),
+    let wire_message = error.get("message").and_then(|message| message.as_str());
+    let message = wire_message.unwrap_or("Unknown agent error").to_string();
+    let data = match wire_message {
+        Some(_) => error
+            .get("data")
+            .filter(|data| !data.is_null())
+            .map(bounded_error_data),
+        None => Some(bounded_error_data(error)),
     };
-    AcpError::AgentError { code, message }
+    AcpError::AgentError {
+        code,
+        message,
+        data,
+    }
+}
+
+fn bounded_error_data(data: &serde_json::Value) -> String {
+    let mut redacted = data.clone();
+    redact_error_data(&mut redacted);
+    let serialized = redacted.to_string();
+    if serialized.len() <= MAX_AGENT_ERROR_DATA_BYTES {
+        return serialized;
+    }
+
+    const TRUNCATION_MARKER: &str = "…";
+    let mut end = MAX_AGENT_ERROR_DATA_BYTES - TRUNCATION_MARKER.len();
+    while !serialized.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{}{}", &serialized[..end], TRUNCATION_MARKER)
+}
+
+fn redact_error_data(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(entries) => {
+            let has_sensitive_name = entries.iter().any(|(key, value)| {
+                matches!(canonical_error_data_key(key).as_str(), "key" | "name")
+                    && value.as_str().is_some_and(is_sensitive_error_data_key)
+            });
+            for (key, value) in entries {
+                if is_sensitive_error_data_key(key)
+                    || (has_sensitive_name && canonical_error_data_key(key) == "value")
+                {
+                    *value = serde_json::Value::String(REDACTED_AGENT_ERROR_DATA.to_string());
+                } else {
+                    redact_error_data(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_error_data(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn canonical_error_data_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_sensitive_error_data_key(key: &str) -> bool {
+    let canonical = canonical_error_data_key(key);
+
+    matches!(canonical.as_str(), "auth" | "bearer" | "pwd" | "token")
+        || canonical.contains("authorization")
+        || canonical.ends_with("authtag")
+        || canonical.contains("apikey")
+        || canonical.contains("password")
+        || canonical.contains("passwd")
+        || canonical.contains("privatekey")
+        || canonical.contains("secret")
+        || canonical.contains("credential")
+        || canonical.contains("cookie")
+        || canonical.ends_with("token")
+        || canonical.ends_with("tokenvalue")
+        || canonical.ends_with("tokenhash")
 }
 
 fn build_initialize_params() -> serde_json::Value {
@@ -4768,16 +4855,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_error_from_json_falls_back_to_full_json_when_message_missing() {
+    fn agent_error_from_json_preserves_data_when_message_missing() {
         // Errors without a string `message` field (e.g. only a `data` field) must
-        // not be silently truncated to "unknown error" — the full JSON is preserved.
+        // still retain bounded provider-specific detail.
         let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
         match super::agent_error_from_json(&error) {
-            AcpError::AgentError { code, message } => {
+            AcpError::AgentError {
+                code,
+                message,
+                data,
+            } => {
                 assert_eq!(code, -32000);
+                assert_eq!(message, "Unknown agent error");
+                let data = data.expect("missing-message response should retain full error JSON");
                 assert!(
-                    message.contains("quota exceeded"),
-                    "expected full JSON in message, got: {message}"
+                    data.contains("quota exceeded"),
+                    "expected full JSON in owner data, got: {data}"
                 );
             }
             other => panic!("expected AgentError, got {other:?}"),
@@ -4788,9 +4881,218 @@ mod tests {
     fn agent_error_from_json_uses_message_field_when_present() {
         let error = serde_json::json!({"code": -32001, "message": "auth denied"});
         match super::agent_error_from_json(&error) {
-            AcpError::AgentError { code, message } => {
+            AcpError::AgentError {
+                code,
+                message,
+                data,
+            } => {
                 assert_eq!(code, -32001);
                 assert_eq!(message, "auth denied");
+                assert!(data.is_none());
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_preserves_data_when_message_present() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": "Claude Code process exited: unknown option '--tools'"
+            }
+        });
+
+        let agent_error = super::agent_error_from_json(&error);
+        assert_eq!(
+            agent_error.to_string(),
+            "Agent reported error (code -32603): Internal error"
+        );
+
+        match agent_error {
+            AcpError::AgentError {
+                code,
+                message,
+                data,
+            } => {
+                assert_eq!(code, -32603);
+                assert_eq!(message, "Internal error");
+                let data = data.expect("structured JSON-RPC data should be retained");
+                assert!(
+                    data.contains("unknown option '--tools'"),
+                    "expected JSON-RPC error data in owner detail, got: {data}"
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_recursively_redacts_credential_data() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": "actionable adapter failure",
+                "Authorization": "Bearer top-level-secret",
+                "nested": [
+                    {
+                        "api_key": "api-key-secret",
+                        "accessToken": "access-token-secret",
+                        "client-secret": "client-secret-value",
+                        "password_hash": "password-secret"
+                    },
+                    {
+                        "credentials": {
+                            "username": "operator",
+                            "password": "nested-password-secret"
+                        }
+                    },
+                    { "safe": { "token_count": 42 } }
+                ]
+            }
+        });
+
+        let AcpError::AgentError {
+            data: Some(data), ..
+        } = super::agent_error_from_json(&error)
+        else {
+            panic!("expected AgentError with diagnostic data");
+        };
+        let data: serde_json::Value =
+            serde_json::from_str(&data).expect("redacted diagnostic should remain valid JSON");
+
+        assert_eq!(data["details"], "actionable adapter failure");
+        assert_eq!(data["Authorization"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["nested"][0]["api_key"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["nested"][0]["accessToken"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(
+            data["nested"][0]["client-secret"],
+            REDACTED_AGENT_ERROR_DATA
+        );
+        assert_eq!(
+            data["nested"][0]["password_hash"],
+            REDACTED_AGENT_ERROR_DATA
+        );
+        assert_eq!(data["nested"][1]["credentials"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["nested"][2]["safe"]["token_count"], 42);
+    }
+
+    #[test]
+    fn agent_error_from_json_redacts_named_credential_values() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "request": {
+                    "params": {
+                        "mcpServers": [{
+                            "env": [
+                                {
+                                    "name": "BUZZ_RELAY_URL",
+                                    "value": "wss://relay.example"
+                                },
+                                {
+                                    "name": "BUZZ_PRIVATE_KEY",
+                                    "value": "nsec-secret"
+                                },
+                                {
+                                    "name": "BUZZ_AUTH_TAG",
+                                    "value": "auth-tag-secret"
+                                },
+                                {
+                                    "key": "OPENAI_API_KEY",
+                                    "value": "api-key-secret"
+                                }
+                            ]
+                        }]
+                    }
+                },
+                "auth_tag": "direct-auth-tag-secret"
+            }
+        });
+
+        let AcpError::AgentError {
+            data: Some(data), ..
+        } = super::agent_error_from_json(&error)
+        else {
+            panic!("expected AgentError with diagnostic data");
+        };
+        let data: serde_json::Value =
+            serde_json::from_str(&data).expect("redacted diagnostic should remain valid JSON");
+        let env = &data["request"]["params"]["mcpServers"][0]["env"];
+
+        assert_eq!(env[0]["value"], "wss://relay.example");
+        assert_eq!(env[1]["name"], "BUZZ_PRIVATE_KEY");
+        assert_eq!(env[1]["value"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(env[2]["name"], "BUZZ_AUTH_TAG");
+        assert_eq!(env[2]["value"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(env[3]["key"], "OPENAI_API_KEY");
+        assert_eq!(env[3]["value"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["auth_tag"], REDACTED_AGENT_ERROR_DATA);
+    }
+
+    #[test]
+    fn agent_error_from_json_bounds_data_at_utf8_boundary() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": { "details": "é".repeat(4_096) }
+        });
+
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError {
+                data: Some(data), ..
+            } => {
+                assert!(data.ends_with('…'));
+                assert!(
+                    data.len() <= 4_096,
+                    "expected bounded error data, got {} bytes",
+                    data.len()
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_bounds_fallback_when_message_missing() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "data": { "details": "é".repeat(4_096) }
+        });
+
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError {
+                message,
+                data: Some(data),
+                ..
+            } => {
+                assert_eq!(message, "Unknown agent error");
+                assert!(data.ends_with('…'));
+                assert!(
+                    data.len() <= 4_096,
+                    "expected bounded fallback data, got {} bytes",
+                    data.len()
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_ignores_null_data() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": null
+        });
+
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { message, data, .. } => {
+                assert_eq!(message, "Internal error");
+                assert!(data.is_none());
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
