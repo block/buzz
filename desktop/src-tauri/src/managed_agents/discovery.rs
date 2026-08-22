@@ -33,6 +33,8 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const ANTIGRAVITY_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/desktop/public/harness-logos/antigravity.svg";
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -219,6 +221,39 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    KnownAcpRuntime {
+        id: "antigravity",
+        label: "Antigravity",
+        commands: &["agy"],
+        aliases: &["antigravity", "google-antigravity"],
+        avatar_url: ANTIGRAVITY_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://antigravity.google.com",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz expects agy on PATH (install agy via Google Antigravity). No managed download is bundled.",
+        adapter_install_hint: "",
+        skill_dir: Some(".antigravity/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Authenticate with Google to use Antigravity."),
+        auth_probe_args: None,
+    },
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -254,7 +289,8 @@ pub(crate) fn normalize_command_identity(command: &str) -> String {
             _ => character.to_ascii_lowercase(),
         })
         .collect::<String>();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower).to_string();
+    let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
+    let lower = lower.strip_suffix(".par").unwrap_or(lower).to_string();
 
     if let Some(suffix) = std::env::consts::EXE_SUFFIX.strip_prefix('.') {
         return lower
@@ -448,9 +484,10 @@ pub fn try_record_agent_command(
     Ok(default_agent_command())
 }
 
-fn default_agent_args(command: &str) -> Option<Vec<String>> {
+pub(crate) fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "antigravity" | "google-antigravity" | "agy" | "agy-acp-server" => Some(Vec::new()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -472,7 +509,9 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
+    if normalized.len() == 1
+        && normalized[0].eq_ignore_ascii_case("acp")
+        && normalize_command_identity(command) != "goose"
     {
         return default_args;
     }

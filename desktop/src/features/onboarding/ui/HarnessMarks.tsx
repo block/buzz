@@ -39,11 +39,28 @@ function CursorMark({ className }: MarkProps) {
   );
 }
 
+/// Antigravity mark from Google Antigravity (nominative use).
+function AntigravityMark({ className }: MarkProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="currentColor"
+      role="img"
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d="M12 0C12 6.627 6.627 12 0 12c6.627 0 12 5.627 12 12 0-6.627 5.627-12 12-12-6.627 0-12-6.627-12-12Z" />
+    </svg>
+  );
+}
+
 /// Theme-adaptive inline marks, keyed by runtime/preset id. Consulted before
 /// the bitmap logo maps in `RuntimeIcon`. Codex deliberately has no entry:
 /// the OpenAI blossom was removed from simple-icons v16 at the vendor's
 /// request, so Codex renders RuntimeIcon's neutral terminal-glyph fallback.
 export const RUNTIME_MARKS: Record<string, React.FC<MarkProps>> = {
+  antigravity: AntigravityMark,
   cursor: CursorMark,
   goose: GooseMark,
 };

@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **google antigravity** (via `agy` on `PATH`, PATH-probed preset — no bundled installer).
 
 ## Prerequisites
 
@@ -97,6 +97,25 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Google Antigravity
+
+Google Antigravity is exposed in Buzz as a PATH-probed preset (`agy` on `PATH`). Buzz does **not** bundle or download an `agy_acp_server` binary — install `agy` via Google's official Antigravity distribution and ensure `agy` is on `PATH`.
+
+```bash
+# 1. Verify agy is on PATH
+agy --version
+
+# 2. Run with buzz-acp (no BUZZ_ACP_AGENT_ARGS needed for agy)
+export BUZZ_PRIVATE_KEY="nsec1..."
+export BUZZ_ACP_AGENT_COMMAND="agy"
+
+buzz-acp
+```
+
+Buzz Desktop shows the `agy` harness when `agy` is found on `PATH` (via `common_binary_paths` + login-shell `PATH`). When unavailable, the catalog entry shows `Not installed` with a link to `https://antigravity.google`.
+
+> **Note:** `agy` currently exposes `agent`, `mcp`, `models`, `plugin`, `update` subcommands and `--print --output-format stream-json` (no ACP `agy_acp_server` / `session/new` mode was found on the tested `agy 1.1.17` binary). A future ACP shim (`agy -p --output-format stream-json`) or tier-2 preset with no installer is the honest integration path until Google publishes an ACP endpoint.
 
 ## Configuration
 
@@ -267,7 +286,7 @@ Buzz Desktop supports registering any ACP-speaking agent tool as a selectable ru
 
 ### How it works
 
-**Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
+**Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden. **Antigravity** (`antigravity` / `agy`) is currently a tier-1 ID reservation with PATH probing only — no managed download — to avoid alias collision and to allow a future managed or shim integration without ID breakage.
 
 **Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
 
@@ -318,7 +337,7 @@ To add a new runtime to the tier-2 gallery:
 4. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`. Record the source and license in `desktop/public/harness-logos/CREDITS.md`. Only bundle a mark whose upstream license permits redistribution; skipping this step is caught by `presetLogos.test.mjs`, which asserts every `PRESET_HARNESSES` id has a mapped logo that exists on disk.
 5. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.
 
-The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
+The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `antigravity`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
 
 ## Using Any ACP Agent
 

@@ -220,7 +220,7 @@ pub(crate) fn validate_harness_definition_pub(def: &HarnessDefinition) -> Result
 /// tier-1 runtimes — no hand-maintained copy.  Adding a preset to
 /// `PRESET_HARNESSES` automatically reserves its ID without a separate edit.
 fn builtin_ids() -> impl Iterator<Item = &'static str> {
-    const TIER1: &[&str] = &["goose", "claude", "codex", "buzz-agent"];
+    const TIER1: &[&str] = &["goose", "claude", "codex", "buzz-agent", "antigravity"];
     let tier2 = crate::managed_agents::discovery::preset_harness_ids();
     TIER1.iter().copied().chain(tier2.iter().copied())
 }
@@ -537,13 +537,51 @@ mod tests {
     #[test]
     fn builtin_ids_are_rejected() {
         // Tier-1 hard-coded IDs must always be reserved.
-        for id in &["goose", "claude", "codex", "buzz-agent"] {
+        for id in &["goose", "claude", "codex", "buzz-agent", "antigravity"] {
             assert!(check_id_collision(id).is_err(), "{id} should be rejected");
         }
         // Tier-2 preset IDs must also be reserved (derived from PRESET_HARNESSES).
         for id in crate::managed_agents::discovery::preset_harness_ids() {
             assert!(check_id_collision(id).is_err(), "{id} should be rejected");
         }
+    }
+
+    #[test]
+    fn check_id_collision_rejects_antigravity_case_insensitively() {
+        assert!(check_id_collision("antigravity").is_err());
+        assert!(check_id_collision("AntiGravity").is_err());
+        assert!(check_id_collision("ANTIGRAVITY").is_err());
+        assert!(check_id_collision("aNtiGravity").is_err());
+        assert!(check_id_collision("custom-antigravity").is_ok());
+        assert!(check_id_collision("antigravity-custom").is_ok());
+    }
+
+    #[test]
+    fn load_custom_harnesses_drops_file_shadowing_antigravity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("antigravity.json"),
+            r#"{"id":"antigravity","label":"Shadow Antigravity","command":"fake-agy"}"#,
+        )
+        .unwrap();
+        assert!(
+            load_custom_harnesses(dir.path()).is_empty(),
+            "loader must drop a custom harness file with id 'antigravity'"
+        );
+    }
+
+    #[test]
+    fn load_custom_harnesses_drops_file_shadowing_antigravity_mixed_case() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("custom.json"),
+            r#"{"id":"AntiGravity","label":"Shadow Antigravity","command":"fake-agy"}"#,
+        )
+        .unwrap();
+        assert!(
+            load_custom_harnesses(dir.path()).is_empty(),
+            "loader must drop a custom harness file with id 'AntiGravity'"
+        );
     }
 
     #[test]
