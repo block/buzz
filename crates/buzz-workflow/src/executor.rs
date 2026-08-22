@@ -2015,6 +2015,19 @@ mod tests {
         assert!(ssrf_verdict("example.com", &[], "").is_err());
     }
 
+    #[cfg(feature = "reqwest")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn check_ssrf_reads_allowlist_env_var() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS");
+        assert!(check_ssrf("127.0.0.1", 80).await.is_err());
+        std::env::set_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS", "127.0.0.0/8");
+        assert!(check_ssrf("127.0.0.1", 80).await.is_ok());
+        std::env::remove_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS");
+    }
+
     #[test]
     fn send_message_canonicalizes_valid_explicit_override_for_global_workflow() {
         let override_channel_id = Uuid::new_v4();
