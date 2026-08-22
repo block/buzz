@@ -135,10 +135,17 @@ pub async fn get_feed(
     let mention_owner_pubkeys = fetch_agent_owner_pubkeys(&state, &mention_events).await;
     let suppressed_mentions =
         link_preview_suppression_targets(&mention_events, &mention_edits, &mention_owner_pubkeys);
+    // Category must be the singular `"mention"` to match the `FeedItemCategory`
+    // union in desktop/src/shared/api/types.ts and every frontend comparison
+    // (feed.ts / inbox.ts) as well as the e2e bridge, which already emits the
+    // singular. Emitting "mentions" here made native mention items fall through
+    // to the needs-action fallback title (#2106). The `types` request filter
+    // keyword ("mentions") is a separate API surface and is intentionally
+    // left unchanged.
     let mentions: Vec<FeedItemInfo> = mention_events
         .iter()
         .map(|ev| {
-            let mut item = feed_item_from_event(ev, "mentions");
+            let mut item = feed_item_from_event(ev, "mention");
             apply_link_preview_suppression(&mut item.tags, &item.id, &suppressed_mentions);
             item
         })
