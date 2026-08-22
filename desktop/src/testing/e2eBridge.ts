@@ -11921,6 +11921,7 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "update_tray_agent_activity":
       case "clear_tray_agent_activity":
+      case "set_settings_tray_actions_enabled":
       case "requeue_tray_actions":
         return null;
       case "take_tray_actions":

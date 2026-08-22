@@ -1,4 +1,4 @@
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
@@ -281,6 +281,9 @@ function AppReady({
   isCommunitySwitch: boolean;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
+  const settingsActionsReady = useSettingsTrayActionReadiness(
+    onboarding.stage === "ready",
+  );
 
   if (onboarding.stage === "reset-failed") {
     return <ResetFailedScreen />;
@@ -309,6 +312,10 @@ function AppReady({
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
+  if (!settingsActionsReady) {
+    return <AppLoadingGate />;
+  }
+
   return (
     <EncryptedBackupProvider
       onOpenSettings={() =>
@@ -323,6 +330,34 @@ function AppReady({
       </KnownAgentPubkeysProvider>
     </EncryptedBackupProvider>
   );
+}
+
+function useSettingsTrayActionReadiness(enabled: boolean): boolean {
+  const [ready, setReady] = useState(() => !isMacOSTauri());
+
+  useEffect(() => {
+    if (!isMacOSTauri()) return;
+
+    let disposed = false;
+    setReady(false);
+    void invoke("set_settings_tray_actions_enabled", { enabled })
+      .then(() => {
+        if (!disposed) setReady(enabled);
+      })
+      .catch((error) => {
+        console.error("Failed to update native Settings menu readiness", error);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [enabled]);
+
+  return !enabled || ready;
+}
+
+function isMacOSTauri(): boolean {
+  return isTauri() && navigator.userAgent.includes("Macintosh");
 }
 
 function CommunityApp({
@@ -665,6 +700,15 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     useState<MachineOnboardingPage>();
   const [postOnboardingNav, setPostOnboardingNav] =
     useState<PostOnboardingNavigation | null>(null);
+
+  useEffect(() => {
+    if (!isMacOSTauri() || machine.stage === "ready") return;
+    void invoke("set_settings_tray_actions_enabled", { enabled: false }).catch(
+      (error) => {
+        console.error("Failed to disable native Settings menu actions", error);
+      },
+    );
+  }, [machine.stage]);
 
   const reopenMachineConfig = useCallback(() => {
     setMachineInitialPage("config");

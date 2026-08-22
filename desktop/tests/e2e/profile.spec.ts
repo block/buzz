@@ -2475,11 +2475,14 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
     .poll(() => page.evaluate(() => localStorage.getItem("buzz-theme")))
     .toBe("dracula");
 
-  // Close settings with keyboard shortcut
+  // Repeating the shortcut keeps Settings open.
   await page.keyboard.press(
     process.platform === "darwin" ? "Meta+," : "Control+,",
   );
-  await expect(page.getByTestId("settings-view")).toHaveCount(0);
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+
+  // Close explicitly.
+  await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
 });
 

@@ -849,6 +849,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
             #[cfg(target_os = "macos")]
+            tray_menu::set_settings_tray_actions_enabled,
+            #[cfg(target_os = "macos")]
             tray_menu::requeue_tray_actions,
             #[cfg(target_os = "macos")]
             tray_menu::take_tray_actions,
