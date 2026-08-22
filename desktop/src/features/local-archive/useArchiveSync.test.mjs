@@ -289,6 +289,32 @@ describe("archive sync lifecycle leases", () => {
     );
   });
 
+  it("retries a recoverable durable-queue start failure", async () => {
+    const gate = mountGate({
+      startFailures: 1,
+      startFailureMessage:
+        "archive sync start retryable: failed to open durable queue",
+    });
+    await gate.mount();
+    await gate.settleGate();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+
+    const starts = gate.calls.filter(({ cmd }) => cmd === "start_archive_sync");
+    assert.equal(
+      starts.length,
+      2,
+      "a transient native queue-open failure must not strand the mounted gate",
+    );
+    assert.ok(starts[1].lease > starts[0].lease);
+
+    await gate.unmount();
+    const stop = gate.calls.find(({ cmd }) => cmd === "stop_archive_sync");
+    assert.equal(stop?.lease, starts[1].lease);
+  });
+
   it("does not loop on a non-retryable start failure", async () => {
     const gate = mountGate({
       startFailures: 1,

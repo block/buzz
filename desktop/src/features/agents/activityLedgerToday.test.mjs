@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activityLedgerArchiveQueryRange,
   activityLedgerDayRange,
   applyAuthorityToTodayActivity,
   buildBoundedTodayActivitySurface,
@@ -329,6 +330,47 @@ test("day range is half-open and rejects impossible dates", () => {
   assert.equal(range.endCreatedAt - range.startCreatedAt, 24 * 60 * 60);
   assert.throws(() => activityLedgerDayRange("2026-02-30"));
   assert.throws(() => activityLedgerDayRange("08/21/2026"));
+});
+
+test("Today archive query overlaps midnight but assigns by inner event time", async () => {
+  const day = "2026-08-21";
+  const exact = activityLedgerDayRange(day);
+  const query = activityLedgerArchiveQueryRange(day);
+  assert.ok(query.startCreatedAt < exact.startCreatedAt);
+  assert.ok(query.endCreatedAt > exact.endCreatedAt + 1);
+
+  const innerTimestamp = new Date(
+    (exact.endCreatedAt - 1) * 1_000,
+  ).toISOString();
+  const crossMidnightEnvelope = relayEvent({
+    id: "cross-midnight",
+    decoded: {
+      seq: 1,
+      timestamp: innerTimestamp,
+      kind: "turn_started",
+      turnId: "midnight-turn",
+      payload: {},
+    },
+  });
+  crossMidnightEnvelope.created_at = exact.endCreatedAt + 1;
+
+  const previousDay = await buildTodayActivityFromArchivedEvents({
+    day,
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [crossMidnightEnvelope],
+    decrypt: async (event) => event.decoded,
+  });
+  assert.equal(previousDay.counts.journals, 1);
+
+  const nextDay = new Date(exact.endCreatedAt * 1_000);
+  const nextDayKey = `${nextDay.getFullYear()}-${String(nextDay.getMonth() + 1).padStart(2, "0")}-${String(nextDay.getDate()).padStart(2, "0")}`;
+  const followingDay = await buildTodayActivityFromArchivedEvents({
+    day: nextDayKey,
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [crossMidnightEnvelope],
+    decrypt: async (event) => event.decoded,
+  });
+  assert.equal(followingDay.counts.journals, 0);
 });
 
 test("Today authority overlay recomputes evidence-gap counts", async () => {

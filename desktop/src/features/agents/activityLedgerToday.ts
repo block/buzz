@@ -21,6 +21,7 @@ const TODAY_SNAPSHOT_MAX_EVENTS_PER_JOURNAL = 100;
 const TODAY_ARCHIVE_MAX_EVENTS_PER_JOURNAL = 300;
 const TODAY_SNAPSHOT_MAX_SUMMARY_CHARS = 4_096;
 const TODAY_SNAPSHOT_MAX_EVENT_DETAIL_CHARS = 8_192;
+const TODAY_ARCHIVE_ENVELOPE_OVERLAP_SECONDS = 2;
 
 export type TodaySnapshotProjection = {
   bounded: boolean;
@@ -460,6 +461,23 @@ export function activityLedgerDayRange(day: string): {
   return {
     startCreatedAt: Math.floor(start.getTime() / 1_000),
     endCreatedAt: Math.floor(end.getTime() / 1_000),
+  };
+}
+
+/**
+ * Observer frames are sealed on a one-second publisher tick, so an inner event
+ * can cross an outer signed-envelope day boundary. Query a small overlap and
+ * let reconstruction assign activity by the authoritative inner timestamp.
+ */
+export function activityLedgerArchiveQueryRange(day: string): {
+  startCreatedAt: number;
+  endCreatedAt: number;
+} {
+  const range = activityLedgerDayRange(day);
+  return {
+    startCreatedAt:
+      range.startCreatedAt - TODAY_ARCHIVE_ENVELOPE_OVERLAP_SECONDS,
+    endCreatedAt: range.endCreatedAt + TODAY_ARCHIVE_ENVELOPE_OVERLAP_SECONDS,
   };
 }
 

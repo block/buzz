@@ -61,6 +61,11 @@ const FLUSH_BATCH_SIZE: usize = 25;
 const FLUSH_DEADLINE: Duration = Duration::from_millis(2_000);
 #[cfg(not(test))]
 const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(12);
+const RETRYABLE_START_ERROR_PREFIX: &str = "archive sync start retryable:";
+
+fn retryable_start_error(error: impl std::fmt::Display) -> String {
+    format!("{RETRYABLE_START_ERROR_PREFIX} {error}")
+}
 #[cfg(test)]
 const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -819,7 +824,7 @@ pub async fn start_archive_sync(
     let keys = state.signing_keys()?;
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
     let scope = (keys.public_key().to_hex(), relay_url.clone());
-    let queue_path = durable_queue_path(&app, &scope.0, &scope.1)?;
+    let queue_path = durable_queue_path(&app, &scope.0, &scope.1).map_err(retryable_start_error)?;
 
     // Only cheap handles before `begin`: a start that lost its mark, or a
     // same-scope remount, must not open a relay socket just to drop it again.
@@ -845,7 +850,7 @@ pub async fn start_archive_sync(
             completion.finish();
             drop(ownership);
             sync_state.end((epoch, lease)).await?;
-            return Err(error);
+            return Err(retryable_start_error(error));
         }
     };
 

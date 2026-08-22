@@ -7,13 +7,12 @@ import {
   OWNER_TODAY_SNAPSHOT_CAPABILITY,
   OWNER_TODAY_SNAPSHOT_SCHEMA,
   getJournalAuthorityArtifacts,
-  queryJournalAuthorityArtifacts,
   iterateArchivedObserverEventPagesForRange,
   writeOwnerTodaySnapshot,
   type JournalAuthorityArtifact,
 } from "@/shared/api/tauriArchive";
 import {
-  activityLedgerDayRange,
+  activityLedgerArchiveQueryRange,
   applyAuthorityToTodayActivity,
   buildBoundedTodayActivitySurface,
   buildTodayActivityFromArchivedPages,
@@ -21,7 +20,7 @@ import {
 
 const SNAPSHOT_REFRESH_MS = 60_000;
 const SNAPSHOT_LIFETIME_SECONDS = 5 * 60;
-const MAX_AUTHORITY_RANGE_RESULTS = 500;
+const AUTHORITY_READ_CONCURRENCY = 8;
 
 function localDay(now: Date): string {
   const year = now.getFullYear();
@@ -30,23 +29,42 @@ function localDay(now: Date): string {
   return `${year}-${month}-${date}`;
 }
 
-async function loadCompleteAuthorityWindow(input: {
-  startCreatedAt: number;
-  endCreatedAt: number;
-  journalIds: readonly string[];
-}): Promise<JournalAuthorityArtifact[]> {
-  const artifacts = await queryJournalAuthorityArtifacts({
-    startCreatedAt: input.startCreatedAt,
-    endCreatedAt: input.endCreatedAt,
-    limit: MAX_AUTHORITY_RANGE_RESULTS,
-  });
-  if (artifacts.length < MAX_AUTHORITY_RANGE_RESULTS) return artifacts;
+export function canPublishActivityLedgerTodaySnapshot(
+  ownerPubkey: string | undefined,
+  managedAgentsLoaded: boolean,
+): ownerPubkey is string {
+  return Boolean(ownerPubkey && managedAgentsLoaded);
+}
 
-  // A full page is ambiguous. Fall back to journal-scoped reads so a busy day
-  // cannot silently omit an older owner edit or verification.
-  const byJournal = await Promise.all(
-    [...new Set(input.journalIds)].map((journalId) =>
-      getJournalAuthorityArtifacts(journalId),
+/**
+ * Load authority by retained journal identity, not artifact creation day. A
+ * journal can span midnight while its latest owner edit belongs to yesterday.
+ */
+export async function loadActivityLedgerTodayAuthority(
+  journalIds: readonly string[],
+  load: (
+    journalId: string,
+  ) => Promise<JournalAuthorityArtifact[]> = getJournalAuthorityArtifacts,
+): Promise<JournalAuthorityArtifact[]> {
+  const uniqueJournalIds = [...new Set(journalIds.filter(Boolean))];
+  const byJournal: JournalAuthorityArtifact[][] = Array.from(
+    { length: uniqueJournalIds.length },
+    () => [],
+  );
+  let nextIndex = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const journalId = uniqueJournalIds[index];
+      if (journalId === undefined) return;
+      byJournal[index] = await load(journalId);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(AUTHORITY_READ_CONCURRENCY, uniqueJournalIds.length) },
+      worker,
     ),
   );
   return byJournal.flat();
@@ -58,7 +76,8 @@ async function loadCompleteAuthorityWindow(input: {
  */
 export function useActivityLedgerTodaySnapshot(): void {
   const ownerPubkey = useIdentityQuery().data?.pubkey;
-  const managedAgents = useManagedAgentsQuery().data ?? [];
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const managedAgents = managedAgentsQuery.data ?? [];
   const managedIdentities = React.useMemo(
     () =>
       managedAgents.map((agent) => ({
@@ -69,7 +88,14 @@ export function useActivityLedgerTodaySnapshot(): void {
   );
 
   React.useEffect(() => {
-    if (!ownerPubkey) return;
+    if (
+      !canPublishActivityLedgerTodaySnapshot(
+        ownerPubkey,
+        managedAgentsQuery.isSuccess,
+      )
+    ) {
+      return;
+    }
     let disposed = false;
     let inFlight: Promise<void> | null = null;
 
@@ -79,7 +105,7 @@ export function useActivityLedgerTodaySnapshot(): void {
         const reconstructionStartedAt = new Date();
         const relayUrl = await getRelayWsUrl();
         const day = localDay(reconstructionStartedAt);
-        const range = activityLedgerDayRange(day);
+        const range = activityLedgerArchiveQueryRange(day);
         const archivedPages = iterateArchivedObserverEventPagesForRange({
           ...range,
           pageSize: 500,
@@ -89,10 +115,9 @@ export function useActivityLedgerTodaySnapshot(): void {
           agents: managedIdentities,
           pages: archivedPages,
         });
-        const authority = await loadCompleteAuthorityWindow({
-          ...range,
-          journalIds: observedSurface.journals.map((journal) => journal.id),
-        });
+        const authority = await loadActivityLedgerTodayAuthority(
+          observedSurface.journals.map((journal) => journal.id),
+        );
         const surface = buildBoundedTodayActivitySurface(
           applyAuthorityToTodayActivity(observedSurface, authority),
         );
@@ -128,5 +153,5 @@ export function useActivityLedgerTodaySnapshot(): void {
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [managedIdentities, ownerPubkey]);
+  }, [managedAgentsQuery.isSuccess, managedIdentities, ownerPubkey]);
 }

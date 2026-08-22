@@ -20,10 +20,14 @@ import {
 let realmEpoch: Promise<number> | null = null;
 const START_RETRY_INITIAL_MS = 100;
 const START_RETRY_MAX_MS = 2_000;
+const RETRYABLE_START_ERROR = "archive sync start retryable:";
 
-function isStoppingConflict(err: unknown) {
+function isRetryableStartFailure(err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
-  return message.includes("still stopping");
+  return (
+    message.includes("still stopping") ||
+    message.includes(RETRYABLE_START_ERROR)
+  );
 }
 
 function archiveSyncEpoch(): Promise<number> {
@@ -84,7 +88,7 @@ export function useArchiveSync(ready: boolean): void {
             return { epoch, lease };
           } catch (err) {
             console.warn("[useArchiveSync] start_archive_sync failed:", err);
-            if (!isStoppingConflict(err)) return null;
+            if (!isRetryableStartFailure(err)) return null;
           }
           if (stopped) return null;
           await new Promise((resolve) =>
