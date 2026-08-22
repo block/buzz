@@ -18,9 +18,30 @@ use nostr::Filter;
 
 use buzz_auth::Scope;
 
-use crate::connection::{AuthState, ConnectionState};
+use crate::connection::{AuthState, ConnectionState, PendingSubscription};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+
+/// Topic refcount operations used by subscription lifecycle commits.
+///
+/// Keeping this boundary explicit lets race tests pause inside retain/release
+/// rather than only before the commit begins.
+#[async_trait::async_trait]
+pub(crate) trait SubscriptionTopics: Send + Sync {
+    async fn retain_topic(&self, tenant: &TenantContext, topic: EventTopic);
+    async fn release_topic(&self, tenant: &TenantContext, topic: EventTopic);
+}
+
+#[async_trait::async_trait]
+impl SubscriptionTopics for buzz_pubsub::PubSubManager {
+    async fn retain_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+        self.retain_topic(tenant, topic).await;
+    }
+
+    async fn release_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+        self.release_topic(tenant, topic).await;
+    }
+}
 
 const MAX_SUBSCRIPTIONS: usize = 1024;
 
@@ -47,23 +68,40 @@ pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 128;
 // the range fails the build.
 const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
 
+async fn resolve_accessible_channel_ids(
+    state: &AppState,
+    conn: &ConnectionState,
+    pubkey_bytes: &[u8],
+) -> Result<Vec<uuid::Uuid>, buzz_db::DbError> {
+    #[cfg(test)]
+    pause_access_resolution_for_test(conn.conn_id).await?;
+
+    state
+        .get_accessible_channel_ids_cached(conn.tenant.community(), pubkey_bytes)
+        .await
+}
+
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
-pub async fn handle_req(
+pub(crate) async fn handle_req(
     sub_id: String,
     filters: Vec<Filter>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    pending: Arc<PendingSubscription>,
 ) {
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => {
                 if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
-                    conn.send(RelayMessage::notice("restricted: insufficient scope"));
-                    conn.send(RelayMessage::closed(
+                    send_req_rejection(
+                        &conn,
                         &sub_id,
+                        &pending,
+                        Some("restricted: insufficient scope"),
                         "restricted: insufficient scope",
-                    ));
+                    )
+                    .await;
                     return;
                 }
 
@@ -71,23 +109,28 @@ pub async fn handle_req(
 
                 let subs = conn.subscriptions.lock().await;
                 if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
-                    conn.send(RelayMessage::closed(
+                    send_req_rejection(
+                        &conn,
                         &sub_id,
+                        &pending,
+                        None,
                         "error: too many subscriptions",
-                    ));
+                    )
+                    .await;
                     return;
                 }
 
                 (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
             }
             _ => {
-                conn.send(RelayMessage::notice(
-                    "auth-required: authenticate before subscribing",
-                ));
-                conn.send(RelayMessage::closed(
+                send_req_rejection(
+                    &conn,
                     &sub_id,
+                    &pending,
+                    Some("auth-required: authenticate before subscribing"),
                     "auth-required: not authenticated",
-                ));
+                )
+                .await;
                 return;
             }
         }
@@ -97,10 +140,14 @@ pub async fn handle_req(
     let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
         Ok(ids) => ids,
         Err(()) => {
-            conn.send(RelayMessage::closed(
+            send_req_rejection(
+                &conn,
                 &sub_id,
+                &pending,
+                None,
                 "restricted: too many explicit channels",
-            ));
+            )
+            .await;
             return;
         }
     };
@@ -110,14 +157,11 @@ pub async fn handle_req(
             .increment(1);
         Vec::new()
     } else {
-        match state
-            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-            .await
-        {
+        match resolve_accessible_channel_ids(&state, &conn, &pubkey_bytes).await {
             Ok(ids) => ids,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                send_req_rejection(&conn, &sub_id, &pending, None, "error: database error").await;
                 return;
             }
         }
@@ -170,7 +214,8 @@ pub async fn handle_req(
                     }
                     Err(e) => {
                         warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                        conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                        send_req_rejection(&conn, &sub_id, &pending, None, "error: database error")
+                            .await;
                         return;
                     }
                 }
@@ -201,10 +246,14 @@ pub async fn handle_req(
         .as_ref()
         .is_some_and(|authorized| authorized.is_empty())
     {
-        conn.send(RelayMessage::closed(
+        send_req_rejection(
+            &conn,
             &sub_id,
+            &pending,
+            None,
             "restricted: not a channel member",
-        ));
+        )
+        .await;
         return;
     }
 
@@ -219,24 +268,36 @@ pub async fn handle_req(
     if channel_id.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
         if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            send_req_rejection(
+                &conn,
                 &sub_id,
+                &pending,
+                None,
                 "restricted: p-gated events require #p matching your pubkey",
-            ));
+            )
+            .await;
             return;
         }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            send_req_rejection(
+                &conn,
                 &sub_id,
+                &pending,
+                None,
                 "restricted: agent-engram reads require authors=[self] or #p=[self]",
-            ));
+            )
+            .await;
             return;
         }
         if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            send_req_rejection(
+                &conn,
                 &sub_id,
+                &pending,
+                None,
                 "restricted: author-only kinds require authors=[self]",
-            ));
+            )
+            .await;
             return;
         }
     }
@@ -248,10 +309,14 @@ pub async fn handle_req(
     let has_search = filters.iter().any(|f| f.search.is_some());
     if has_search {
         if filters.iter().any(|f| f.search.is_none()) {
-            conn.send(RelayMessage::closed(
+            send_req_rejection(
+                &conn,
                 &sub_id,
+                &pending,
+                None,
                 "error: mixed search and non-search filters not supported",
-            ));
+            )
+            .await;
             return;
         }
         handle_search_req(
@@ -264,48 +329,28 @@ pub async fn handle_req(
             &conn,
             &state,
             trace_state.as_ref(),
+            &pending,
         )
         .await;
         return;
     }
 
+    let subscription_scope = authorized_requested_channels
+        .clone()
+        .map(crate::subscription::SubscriptionScope::Channels)
+        .unwrap_or(crate::subscription::SubscriptionScope::Global);
+    if !register_subscription_if_current(
+        &sub_id,
+        &filters,
+        &subscription_scope,
+        &conn,
+        &state.sub_registry,
+        state.pubsub.as_ref(),
+        &pending,
+    )
+    .await
     {
-        let mut subs = conn.subscriptions.lock().await;
-        subs.insert(sub_id.clone(), filters.clone());
-    }
-
-    let replaced = if let Some(channel_ids) = authorized_requested_channels.as_ref() {
-        state.sub_registry.register_channels_scoped(
-            conn.tenant.community(),
-            conn_id,
-            sub_id.clone(),
-            filters.clone(),
-            channel_ids.clone(),
-        )
-    } else {
-        state.sub_registry.register_scoped(
-            conn.tenant.community(),
-            conn_id,
-            sub_id.clone(),
-            filters.clone(),
-            None,
-        )
-    };
-    if let Some(replaced) = replaced {
-        release_subscription_topics(&state, &conn.tenant, &replaced.scope).await;
-    }
-    if let Some(channel_ids) = authorized_requested_channels.as_ref() {
-        for &channel_id in channel_ids {
-            state
-                .pubsub
-                .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
-                .await;
-        }
-    } else {
-        state
-            .pubsub
-            .retain_topic(&conn.tenant, EventTopic::Global)
-            .await;
+        return;
     }
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
@@ -382,7 +427,9 @@ pub async fn handle_req(
             Ok(evs) => evs,
             Err(e) => {
                 warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                conn.send(RelayMessage::eose(&sub_id));
+                let _ = conn
+                    .send_historical_if_permitted(&sub_id, &pending, RelayMessage::eose(&sub_id))
+                    .await;
                 return;
             }
         };
@@ -459,7 +506,10 @@ pub async fn handle_req(
             }
 
             let msg = RelayMessage::event(&sub_id, &stored.event);
-            if !conn.send(msg) {
+            if !conn
+                .send_historical_if_permitted(&sub_id, &pending, msg)
+                .await
+            {
                 return;
             }
             total_sent += 1;
@@ -469,7 +519,9 @@ pub async fn handle_req(
         }
     }
 
-    conn.send(RelayMessage::eose(&sub_id));
+    let _ = conn
+        .send_historical_if_permitted(&sub_id, &pending, RelayMessage::eose(&sub_id))
+        .await;
 
     debug!(
         conn_id = %conn_id,
@@ -485,6 +537,92 @@ pub async fn handle_req(
 /// pages to the request.
 const SEARCH_PAGE_SIZE: u32 = 100;
 
+/// Send a terminal response owned by this REQ while its lifecycle lease is current.
+/// A paired NOTICE and CLOSED are queued as one fenced batch.
+async fn send_req_rejection(
+    conn: &ConnectionState,
+    sub_id: &str,
+    pending: &Arc<PendingSubscription>,
+    notice: Option<&str>,
+    reason: &str,
+) -> bool {
+    let messages = notice
+        .into_iter()
+        .map(RelayMessage::notice)
+        .chain(std::iter::once(RelayMessage::closed(sub_id, reason)));
+    conn.send_req_messages_if_permitted(sub_id, pending, messages)
+        .await
+}
+
+/// Atomically commit a REQ into the per-connection map, fan-out registry, and
+/// Redis topic refcount only while it still owns the pending lease. CLOSE uses
+/// the same pending-subscription lock, so it either invalidates this lease
+/// first or observes and removes the completed registration afterward.
+async fn register_subscription_if_current(
+    sub_id: &str,
+    filters: &[Filter],
+    scope: &crate::subscription::SubscriptionScope,
+    conn: &ConnectionState,
+    registry: &crate::subscription::SubscriptionRegistry,
+    pubsub: &dyn SubscriptionTopics,
+    pending: &Arc<PendingSubscription>,
+) -> bool {
+    let pending_subscriptions = conn.pending_subscriptions.lock().await;
+    let permitted_to_commit = pending_subscriptions
+        .get(sub_id)
+        .is_some_and(|current| PendingSubscription::permits_commit(current, pending));
+    if conn.cancel.is_cancelled() || !permitted_to_commit {
+        return false;
+    }
+
+    conn.subscriptions
+        .lock()
+        .await
+        .insert(sub_id.to_owned(), filters.to_vec());
+
+    let replaced = match scope {
+        crate::subscription::SubscriptionScope::Channels(channel_ids) => registry
+            .register_channels_scoped(
+                conn.tenant.community(),
+                conn.conn_id,
+                sub_id.to_owned(),
+                filters.to_vec(),
+                channel_ids.clone(),
+            ),
+        crate::subscription::SubscriptionScope::Global => registry.register_scoped(
+            conn.tenant.community(),
+            conn.conn_id,
+            sub_id.to_owned(),
+            filters.to_vec(),
+            None,
+        ),
+    };
+    if let Some(replaced) = replaced {
+        release_subscription_topics(pubsub, &conn.tenant, &replaced.scope).await;
+    }
+    match scope {
+        crate::subscription::SubscriptionScope::Channels(channel_ids) => {
+            for &channel_id in channel_ids {
+                pubsub
+                    .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
+                    .await;
+            }
+        }
+        crate::subscription::SubscriptionScope::Global => {
+            pubsub.retain_topic(&conn.tenant, EventTopic::Global).await;
+        }
+    }
+
+    // Only a successful replacement commit supersedes historical delivery from
+    // the previous same-ID REQ. Validation/search failures leave it untouched.
+    pending.commit();
+
+    drop(pending_subscriptions);
+    true
+}
+
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
+/// Search subscriptions are one-shot — no persistent subscription is registered.
 /// Maximum FTS pages to fetch per filter (prevents unbounded loops).
 ///
 /// Derived from the advertised page ceiling rather than fixed: the scan
@@ -591,6 +729,7 @@ async fn handle_search_req(
     conn: &ConnectionState,
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
+    pending: &Arc<PendingSubscription>,
 ) {
     // The community-wide channel scope (no #h tag on the filter). `None` means
     // "no accessible channels and no global access" → EOSE, exactly as the
@@ -599,7 +738,9 @@ async fn handle_search_req(
         match build_search_channel_scope_filter(accessible_channels, include_global) {
             Some(scope) => scope,
             None => {
-                conn.send(RelayMessage::eose(sub_id));
+                let _ = conn
+                    .send_historical_if_permitted(sub_id, pending, RelayMessage::eose(sub_id))
+                    .await;
                 return;
             }
         };
@@ -789,7 +930,14 @@ async fn handle_search_req(
                     if !seen_ids.insert(stored.event.id) {
                         continue;
                     }
-                    if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
+                    if !conn
+                        .send_historical_if_permitted(
+                            sub_id,
+                            pending,
+                            RelayMessage::event(sub_id, &stored.event),
+                        )
+                        .await
+                    {
                         return;
                     }
                     emitted += 1;
@@ -802,7 +950,9 @@ async fn handle_search_req(
         }
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    let _ = conn
+        .send_historical_if_permitted(sub_id, pending, RelayMessage::eose(sub_id))
+        .await;
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1134,16 +1284,15 @@ pub(crate) fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec
 }
 
 async fn release_subscription_topics(
-    state: &AppState,
+    pubsub: &dyn SubscriptionTopics,
     tenant: &TenantContext,
     scope: &crate::subscription::SubscriptionScope,
 ) {
     if scope.is_global() {
-        state.pubsub.release_topic(tenant, EventTopic::Global).await;
+        pubsub.release_topic(tenant, EventTopic::Global).await;
     } else {
         for &channel_id in scope.channel_ids() {
-            state
-                .pubsub
+            pubsub
                 .release_topic(tenant, EventTopic::Channel(channel_id))
                 .await;
         }
@@ -1414,9 +1563,494 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
 }
 
 #[cfg(test)]
+struct AccessResolutionTestHook {
+    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    resume: Arc<tokio::sync::Notify>,
+    fail: bool,
+}
+
+#[cfg(test)]
+fn access_resolution_test_hooks(
+) -> &'static std::sync::Mutex<std::collections::HashMap<uuid::Uuid, Arc<AccessResolutionTestHook>>>
+{
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<uuid::Uuid, Arc<AccessResolutionTestHook>>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+async fn pause_access_resolution_for_test(conn_id: uuid::Uuid) -> Result<(), buzz_db::DbError> {
+    let hook = access_resolution_test_hooks()
+        .lock()
+        .expect("access-resolution hook mutex")
+        .get(&conn_id)
+        .cloned();
+    let Some(hook) = hook else {
+        return Ok(());
+    };
+
+    if let Some(started) = hook
+        .started
+        .lock()
+        .expect("access-resolution started mutex")
+        .take()
+    {
+        let _ = started.send(());
+    }
+    hook.resume.notified().await;
+    access_resolution_test_hooks()
+        .lock()
+        .expect("access-resolution hook mutex")
+        .remove(&conn_id);
+
+    if hook.fail {
+        Err(buzz_db::DbError::InvalidData(
+            "injected access-resolution failure".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Alphabet, Filter, SingleLetterTag};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+    use axum::extract::ws::Message as WsMessage;
+    use buzz_core::{CommunityId, StoredEvent};
+    use buzz_pubsub::{EventTopic, PubSubManager};
+    use chrono::Utc;
+    use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag};
+    use tokio::sync::{mpsc, Barrier, Mutex, Notify, RwLock};
+    use tokio::task::JoinSet;
+    use tokio_util::sync::CancellationToken;
+
+    fn test_connection_with_receiver(
+        tenant: TenantContext,
+    ) -> (Arc<ConnectionState>, mpsc::Receiver<WsMessage>) {
+        let (send_tx, send_rx) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<WsMessage>(8);
+        let conn = Arc::new(ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant,
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        (conn, send_rx)
+    }
+
+    fn test_connection(tenant: TenantContext) -> Arc<ConnectionState> {
+        test_connection_with_receiver(tenant).0
+    }
+
+    async fn test_pubsub() -> Arc<PubSubManager> {
+        let config = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
+        let pool = config
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Redis test pool");
+        Arc::new(
+            PubSubManager::new("redis://127.0.0.1:6379", pool)
+                .await
+                .expect("pubsub manager"),
+        )
+    }
+
+    fn matching_event(channel_id: uuid::Uuid) -> StoredEvent {
+        let event = EventBuilder::new(Kind::TextNote, "race test")
+            .tags([])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        StoredEvent::with_received_at(event, Utc::now(), Some(channel_id), true)
+    }
+
+    fn subscription_gauge_value(snapshotter: &metrics_util::debugging::Snapshotter) -> f64 {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find(|(key, ..)| key.key().name() == "buzz_subscriptions_active")
+            .map(|(_, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Gauge(value) = value else {
+                    panic!("buzz_subscriptions_active must be a gauge");
+                };
+                value.into_inner()
+            })
+            .unwrap_or(0.0)
+    }
+
+    struct RetainBarrierTopics {
+        inner: Arc<PubSubManager>,
+        entered: Arc<Barrier>,
+        resume: Arc<Notify>,
+        pause_next_retain: AtomicBool,
+    }
+
+    impl RetainBarrierTopics {
+        fn new(inner: Arc<PubSubManager>) -> Self {
+            Self {
+                inner,
+                entered: Arc::new(Barrier::new(2)),
+                resume: Arc::new(Notify::new()),
+                pause_next_retain: AtomicBool::new(true),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SubscriptionTopics for RetainBarrierTopics {
+        async fn retain_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+            if self.pause_next_retain.swap(false, Ordering::SeqCst) {
+                self.entered.wait().await;
+                self.resume.notified().await;
+            }
+            self.inner.retain_topic(tenant, topic).await;
+        }
+
+        async fn release_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+            self.inner.release_topic(tenant, topic).await;
+        }
+    }
+
+    #[test]
+    fn close_during_topic_retain_serializes_after_registration_commit() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, async {
+                metrics::gauge!("buzz_subscriptions_active").increment(0.0);
+
+                let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+                let conn = test_connection(TenantContext::resolved(community, "race.test"));
+                let registry = Arc::new(crate::subscription::SubscriptionRegistry::new());
+                let inner_pubsub = test_pubsub().await;
+                let pubsub = Arc::new(RetainBarrierTopics::new(Arc::clone(&inner_pubsub)));
+                let channel_id = uuid::Uuid::new_v4();
+                let sub_id = "close-race".to_owned();
+                let filters = vec![Filter::new().kind(Kind::TextNote)];
+                let pending = conn.begin_pending_subscription(&sub_id).await;
+
+                let req_task = tokio::task::spawn_local({
+                    let conn = Arc::clone(&conn);
+                    let registry = Arc::clone(&registry);
+                    let pubsub = Arc::clone(&pubsub);
+                    let pending = Arc::clone(&pending);
+                    let sub_id = sub_id.clone();
+                    let filters = filters.clone();
+                    async move {
+                        register_subscription_if_current(
+                            &sub_id,
+                            &filters,
+                            &crate::subscription::SubscriptionScope::Channels(vec![channel_id]),
+                            &conn,
+                            &registry,
+                            pubsub.as_ref(),
+                            &pending,
+                        )
+                        .await
+                    }
+                });
+
+                pubsub.entered.wait().await;
+                assert_eq!(registry.total_subscriptions(), 1);
+                assert_eq!(
+                    inner_pubsub
+                        .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                        .await,
+                    0
+                );
+
+                let close_finished = Arc::new(AtomicBool::new(false));
+                let close_task = tokio::task::spawn_local({
+                    let close_finished = Arc::clone(&close_finished);
+                    let conn = Arc::clone(&conn);
+                    let registry = Arc::clone(&registry);
+                    let pubsub = Arc::clone(&pubsub);
+                    let sub_id = sub_id.clone();
+                    async move {
+                        crate::handlers::close::remove_subscription(
+                            &sub_id,
+                            &conn,
+                            &registry,
+                            pubsub.as_ref(),
+                        )
+                        .await;
+                        close_finished.store(true, Ordering::SeqCst);
+                    }
+                });
+                tokio::task::yield_now().await;
+                assert!(!close_finished.load(Ordering::SeqCst));
+
+                pubsub.resume.notify_one();
+                assert!(req_task.await.expect("REQ task"));
+                close_task.await.expect("CLOSE task");
+
+                assert!(conn.subscriptions.lock().await.is_empty());
+                assert!(conn.pending_subscriptions.lock().await.is_empty());
+                assert_eq!(registry.total_subscriptions(), 0);
+                assert!(registry
+                    .fan_out_scoped(community, &matching_event(channel_id))
+                    .is_empty());
+                assert_eq!(
+                    inner_pubsub
+                        .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                        .await,
+                    0
+                );
+            });
+        });
+        assert_eq!(subscription_gauge_value(&snapshotter), 0.0);
+    }
+
+    #[tokio::test]
+    async fn predecessor_commits_while_newer_same_id_req_is_pending() {
+        let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let conn = test_connection(TenantContext::resolved(community, "race.test"));
+        let registry = crate::subscription::SubscriptionRegistry::new();
+        let pubsub = test_pubsub().await;
+        let channel_id = uuid::Uuid::new_v4();
+        let sub_id = "replacement-pending";
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+
+        let predecessor = conn.begin_pending_subscription(sub_id).await;
+        let replacement = conn.begin_pending_subscription(sub_id).await;
+
+        assert!(
+            register_subscription_if_current(
+                sub_id,
+                &filters,
+                &crate::subscription::SubscriptionScope::Channels(vec![channel_id]),
+                &conn,
+                &registry,
+                pubsub.as_ref(),
+                &predecessor,
+            )
+            .await
+        );
+        assert!(!predecessor.is_cancelled());
+        assert_eq!(registry.total_subscriptions(), 1);
+        assert_eq!(
+            pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                .await,
+            1
+        );
+
+        // The predecessor's handler completes after establishing its persistent
+        // subscription. If the newer request then fails, pending ownership is
+        // cleared without disturbing that already-registered subscription.
+        conn.finish_pending_subscription(sub_id, &predecessor).await;
+        conn.finish_pending_subscription(sub_id, &replacement).await;
+
+        assert!(conn.pending_subscriptions.lock().await.is_empty());
+        assert_eq!(registry.total_subscriptions(), 1);
+        assert_eq!(
+            conn.subscriptions
+                .lock()
+                .await
+                .get(sub_id)
+                .map(Vec::as_slice),
+            Some(filters.as_slice())
+        );
+        assert_eq!(
+            pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_handle_req_rejection_after_same_id_replacement_is_suppressed() {
+        let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let (conn, mut send_rx) =
+            test_connection_with_receiver(TenantContext::resolved(community, "race.test"));
+        let keys = Keys::generate();
+        *conn.auth_state.write().await = AuthState::Authenticated(buzz_auth::AuthContext {
+            pubkey: keys.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            auth_method: buzz_auth::AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        });
+
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.redis_url = "redis://127.0.0.1:6379".to_owned();
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = test_pubsub().await;
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool);
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            None,
+            Arc::clone(&pubsub),
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        let state = Arc::new(state);
+
+        let sub_id = "handler-replacement-race".to_owned();
+        let stale_filters = vec![Filter::new().kind(Kind::TextNote)];
+        let survivor_filters = vec![Filter::new().kind(Kind::Metadata)];
+        let stale = conn.begin_pending_subscription(&sub_id).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let resume = Arc::new(Notify::new());
+        access_resolution_test_hooks()
+            .lock()
+            .expect("access-resolution hook mutex")
+            .insert(
+                conn.conn_id,
+                Arc::new(AccessResolutionTestHook {
+                    started: std::sync::Mutex::new(Some(started_tx)),
+                    resume: Arc::clone(&resume),
+                    fail: true,
+                }),
+            );
+
+        let stale_task = tokio::spawn(handle_req(
+            sub_id.clone(),
+            stale_filters,
+            Arc::clone(&conn),
+            Arc::clone(&state),
+            Arc::clone(&stale),
+        ));
+        started_rx
+            .await
+            .expect("stale REQ reached access resolution");
+
+        let survivor = conn.begin_pending_subscription(&sub_id).await;
+        assert!(
+            register_subscription_if_current(
+                &sub_id,
+                &survivor_filters,
+                &crate::subscription::SubscriptionScope::Global,
+                &conn,
+                &state.sub_registry,
+                state.pubsub.as_ref(),
+                &survivor,
+            )
+            .await
+        );
+        resume.notify_one();
+        stale_task.await.expect("stale handle_req task");
+
+        assert!(
+            send_rx.try_recv().is_err(),
+            "stale handler must not queue NOTICE or CLOSED after replacement"
+        );
+        assert_eq!(
+            conn.subscriptions.lock().await.get(&sub_id),
+            Some(&survivor_filters),
+            "same-ID survivor must remain registered"
+        );
+        assert_eq!(state.sub_registry.total_subscriptions(), 1);
+    }
+
+    #[test]
+    fn disconnect_during_pre_registration_await_drains_req_before_cleanup() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {
+                metrics::gauge!("buzz_subscriptions_active").increment(0.0);
+
+                let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+                let conn = test_connection(TenantContext::resolved(community, "race.test"));
+                let registry = Arc::new(crate::subscription::SubscriptionRegistry::new());
+                let pubsub = test_pubsub().await;
+                let channel_id = uuid::Uuid::new_v4();
+                let sub_id = "disconnect-race".to_owned();
+                let filters = vec![Filter::new().kind(Kind::TextNote)];
+                let pending = conn.begin_pending_subscription(&sub_id).await;
+                let gate = Arc::new(Notify::new());
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let mut req_tasks = JoinSet::new();
+
+                req_tasks.spawn({
+                    let conn = Arc::clone(&conn);
+                    let registry = Arc::clone(&registry);
+                    let pubsub = Arc::clone(&pubsub);
+                    let pending = Arc::clone(&pending);
+                    let gate = Arc::clone(&gate);
+                    let sub_id = sub_id.clone();
+                    let filters = filters.clone();
+                    async move {
+                        started_tx.send(()).expect("signal pre-registration await");
+                        gate.notified().await;
+                        let _ = register_subscription_if_current(
+                            &sub_id,
+                            &filters,
+                            &crate::subscription::SubscriptionScope::Channels(vec![channel_id]),
+                            &conn,
+                            &registry,
+                            pubsub.as_ref(),
+                            &pending,
+                        )
+                        .await;
+                    }
+                });
+
+                started_rx
+                    .await
+                    .expect("REQ reached pre-registration await");
+                crate::connection::shutdown_pending_requests(&conn, &mut req_tasks).await;
+                for removed in registry.remove_connection(conn.conn_id) {
+                    release_subscription_topics(pubsub.as_ref(), &conn.tenant, &removed.scope)
+                        .await;
+                }
+                gate.notify_one();
+                tokio::task::yield_now().await;
+
+                assert!(conn.cancel.is_cancelled());
+                assert!(req_tasks.is_empty());
+                assert!(conn.subscriptions.lock().await.is_empty());
+                assert!(conn.pending_subscriptions.lock().await.is_empty());
+                assert_eq!(registry.total_subscriptions(), 0);
+                assert!(registry
+                    .fan_out_scoped(community, &matching_event(channel_id))
+                    .is_empty());
+                assert_eq!(
+                    pubsub
+                        .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                        .await,
+                    0
+                );
+            });
+        });
+        assert_eq!(subscription_gauge_value(&snapshotter), 0.0);
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {

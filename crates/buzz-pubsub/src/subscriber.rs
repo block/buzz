@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use nostr::JsonUtil;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 
 use crate::topic::EventTopicKey;
 use crate::ChannelEvent;
@@ -39,6 +39,7 @@ pub(crate) async fn run_subscriber(
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     mut subscription_rx: mpsc::Receiver<SubscriptionCommand>,
+    subscription_changed: Arc<Notify>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
 
@@ -48,6 +49,7 @@ pub(crate) async fn run_subscriber(
             &broadcast_tx,
             desired_topics.clone(),
             &mut subscription_rx,
+            subscription_changed.clone(),
         )
         .await
         {
@@ -77,6 +79,7 @@ async fn connect_and_subscribe(
     broadcast_tx: &broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     subscription_rx: &mut mpsc::Receiver<SubscriptionCommand>,
+    subscription_changed: Arc<Notify>,
 ) -> Result<(), redis::RedisError> {
     let client = redis::Client::open(redis_url)?;
     let conn = client.get_async_pubsub().await?;
@@ -104,6 +107,16 @@ async fn connect_and_subscribe(
 
     loop {
         tokio::select! {
+            _ = subscription_changed.notified() => {
+                // Retains publish a coalesced wake-up in addition to their
+                // best-effort queue hint. Re-read the source of truth so a
+                // queue-full hint cannot leave this live connection stale.
+                for topic in missing_desired_topics(&desired_topics, &active_topics).await {
+                    let channel = topic.redis_channel();
+                    sink.subscribe(&channel).await?;
+                    active_topics.insert(channel);
+                }
+            }
             Some(command) = subscription_rx.recv() => {
                 match command {
                     SubscriptionCommand::Subscribe(topic) => {
@@ -171,6 +184,20 @@ async fn connect_and_subscribe(
     }
 }
 
+pub(crate) async fn missing_desired_topics(
+    desired_topics: &DesiredTopics,
+    active_topics: &HashSet<String>,
+) -> Vec<EventTopicKey> {
+    desired_topics
+        .lock()
+        .await
+        .iter()
+        .filter_map(|(topic, count)| {
+            (*count > 0 && !active_topics.contains(&topic.redis_channel())).then_some(*topic)
+        })
+        .collect()
+}
+
 async fn desired_refcount(desired_topics: &DesiredTopics, topic: EventTopicKey) -> usize {
     desired_topics
         .lock()
@@ -189,6 +216,33 @@ mod tests {
     fn topic(id: u128) -> EventTopicKey {
         let ctx = TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(id)), "test");
         EventTopicKey::from_context(&ctx, crate::EventTopic::Global)
+    }
+
+    #[tokio::test]
+    async fn reconciliation_finds_desired_topic_when_bounded_queue_is_full() {
+        let desired = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::channel(1);
+        let queued_topic = topic(1);
+        let dropped_topic = topic(2);
+
+        tx.try_send(SubscriptionCommand::Subscribe(queued_topic))
+            .expect("fill command queue");
+        desired.lock().await.insert(dropped_topic, 1);
+        let subscription_changed = Notify::new();
+        subscription_changed.notify_one();
+        assert!(matches!(
+            tx.try_send(SubscriptionCommand::Subscribe(dropped_topic)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+
+        tokio::time::timeout(Duration::from_millis(10), subscription_changed.notified())
+            .await
+            .expect("queue-full retain must leave a reconciliation wake-up");
+        let missing = missing_desired_topics(&desired, &HashSet::new()).await;
+        assert_eq!(missing, vec![dropped_topic]);
+
+        let active = HashSet::from([dropped_topic.redis_channel()]);
+        assert!(missing_desired_topics(&desired, &active).await.is_empty());
     }
 
     #[tokio::test]

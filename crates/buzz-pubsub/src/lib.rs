@@ -49,7 +49,7 @@ use std::time::Duration;
 
 use buzz_core::TenantContext;
 use nostr::PublicKey;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
@@ -96,6 +96,9 @@ impl PubSubConfig {
     }
 }
 
+/// Capacity for live subscription hints. Desired state is reconciled separately.
+const SUBSCRIPTION_COMMAND_CAPACITY: usize = 4096;
+
 /// Central pub/sub manager for a Buzz relay instance.
 pub struct PubSubManager {
     pool: deadpool_redis::Pool,
@@ -107,6 +110,8 @@ pub struct PubSubManager {
     desired_topics: subscriber::DesiredTopics,
     subscription_tx: mpsc::Sender<subscriber::SubscriptionCommand>,
     subscription_rx: Mutex<Option<mpsc::Receiver<subscriber::SubscriptionCommand>>>,
+    /// Coalesced wake-up for reconciling desired topics with the live Redis connection.
+    subscription_changed: Arc<Notify>,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
@@ -126,7 +131,7 @@ impl PubSubManager {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
-        let (subscription_tx, subscription_rx) = mpsc::channel(4096);
+        let (subscription_tx, subscription_rx) = mpsc::channel(SUBSCRIPTION_COMMAND_CAPACITY);
 
         Ok(Self {
             pool,
@@ -135,6 +140,7 @@ impl PubSubManager {
             desired_topics: Arc::new(Mutex::new(HashMap::new())),
             subscription_tx,
             subscription_rx: Mutex::new(Some(subscription_rx)),
+            subscription_changed: Arc::new(Notify::new()),
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
@@ -156,6 +162,7 @@ impl PubSubManager {
             self.broadcast_tx.clone(),
             self.desired_topics.clone(),
             subscription_rx,
+            self.subscription_changed.clone(),
         )
         .await;
     }
@@ -200,10 +207,22 @@ impl PubSubManager {
         };
 
         if should_subscribe {
-            let _ = self
+            // This wake-up is lossless and coalesced: if the bounded command
+            // queue is full, the subscriber still reconciles the complete
+            // desired-topic snapshot without waiting for a Redis reconnect.
+            self.subscription_changed.notify_one();
+            match self
                 .subscription_tx
-                .send(subscriber::SubscriptionCommand::Subscribe(topic_key))
-                .await;
+                .try_send(subscriber::SubscriptionCommand::Subscribe(topic_key))
+            {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        ?topic_key,
+                        "pubsub subscription command queue full; reconciliation scheduled"
+                    );
+                }
+            }
         }
     }
 
@@ -377,6 +396,8 @@ pub(crate) mod test_util {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::test_util::make_test_pool;
     use buzz_core::{CommunityId, TenantContext};
@@ -587,6 +608,38 @@ mod tests {
 
         manager.release_topic(&ctx_b, topic).await;
         assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 0);
+    }
+
+    #[tokio::test]
+    async fn queue_full_retain_schedules_live_reconciliation() {
+        let manager = make_manager().await;
+        let filler_ctx = ctx(0xaaaa, "a.example");
+
+        for id in 0..SUBSCRIPTION_COMMAND_CAPACITY {
+            manager
+                .retain_topic(
+                    &filler_ctx,
+                    EventTopic::Channel(Uuid::from_u128(id as u128)),
+                )
+                .await;
+        }
+
+        let dropped_ctx = ctx(0xbbbb, "b.example");
+        let dropped_topic = EventTopic::Channel(Uuid::from_u128(0xcccc));
+        manager.retain_topic(&dropped_ctx, dropped_topic).await;
+        assert_eq!(manager.topic_refcount(&dropped_ctx, dropped_topic).await, 1);
+
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            manager.subscription_changed.notified(),
+        )
+        .await
+        .expect("queue-full retain must leave a reconciliation wake-up");
+
+        let topic_key = EventTopicKey::from_context(&dropped_ctx, dropped_topic);
+        let missing =
+            subscriber::missing_desired_topics(&manager.desired_topics, &HashSet::new()).await;
+        assert!(missing.contains(&topic_key));
     }
 
     #[tokio::test]

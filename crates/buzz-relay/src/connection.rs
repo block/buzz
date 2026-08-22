@@ -2,13 +2,14 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
@@ -35,6 +36,94 @@ pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>
 pub(crate) struct RestartClose {
     pub(crate) flushed: tokio::sync::oneshot::Sender<bool>,
 }
+
+/// A cancellable lease for one in-flight REQ. The lease is installed before
+/// the handler task starts so CLOSE can invalidate a subscription that has not
+/// reached registration yet.
+#[derive(Debug)]
+pub(crate) struct PendingSubscription {
+    cancel: CancellationToken,
+    committed: AtomicBool,
+    completed: AtomicBool,
+    predecessor: Option<Arc<PendingSubscription>>,
+}
+
+impl PendingSubscription {
+    fn new(predecessor: Option<Arc<PendingSubscription>>) -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            committed: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+            predecessor,
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Cancel this request and every older same-ID request it superseded.
+    pub(crate) fn cancel_lineage(&self) {
+        let mut current = Some(self);
+        while let Some(request) = current {
+            request.cancel();
+            current = request.predecessor.as_deref();
+        }
+    }
+
+    /// Supersede older same-ID requests after this replacement commits.
+    pub(crate) fn commit(&self) {
+        self.committed.store(true, Ordering::Release);
+        if let Some(predecessor) = self.predecessor.as_ref() {
+            predecessor.cancel_lineage();
+        }
+    }
+
+    /// Return whether `candidate` is allowed to commit while this request owns
+    /// the subscription ID. A newer same-ID REQ may take map ownership while
+    /// an older request is still doing validation or historical setup. Until
+    /// the newer request commits, any uncancelled request in its predecessor
+    /// lineage may still establish the subscription it started.
+    pub(crate) fn permits_commit(
+        current: &Arc<PendingSubscription>,
+        candidate: &Arc<PendingSubscription>,
+    ) -> bool {
+        let mut request = Some(Arc::clone(current));
+        while let Some(request_in_lineage) = request {
+            if Arc::ptr_eq(&request_in_lineage, candidate) {
+                return !candidate.is_cancelled();
+            }
+            request = request_in_lineage.predecessor.clone();
+        }
+        false
+    }
+
+    fn live_predecessor(&self) -> Option<Arc<PendingSubscription>> {
+        if self.committed.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let mut current = self.predecessor.clone();
+        while let Some(predecessor) = current {
+            if !predecessor.is_cancelled() && !predecessor.completed.load(Ordering::Acquire) {
+                return Some(predecessor);
+            }
+            current = predecessor.predecessor.clone();
+        }
+        None
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+}
+
+/// In-flight REQs keyed by client-supplied subscription ID.
+pub(crate) type PendingSubscriptions = Arc<Mutex<HashMap<String, Arc<PendingSubscription>>>>;
 
 /// Maximum outbound data frames buffered into the websocket sink before one flush.
 const MAX_WS_SEND_BATCH: usize = 64;
@@ -70,6 +159,8 @@ pub struct ConnectionState {
     pub auth_state: RwLock<AuthState>,
     /// Active subscriptions keyed by subscription ID.
     pub subscriptions: ConnectionSubscriptions,
+    /// REQs that have started but may not yet be registered for fan-out.
+    pub(crate) pending_subscriptions: PendingSubscriptions,
     /// Sender for outbound data messages (EVENT, NOTICE, OK, etc.).
     pub send_tx: mpsc::Sender<WsMessage>,
     /// Sender for outbound control frames (Pong, Close).
@@ -87,6 +178,86 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
+    /// Install a pending REQ before its handler task starts. A repeated REQ
+    /// with the same subscription ID becomes the new owner, but the previous
+    /// request stays alive until the replacement commits successfully.
+    pub(crate) async fn begin_pending_subscription(
+        &self,
+        sub_id: &str,
+    ) -> Arc<PendingSubscription> {
+        let mut pending_subscriptions = self.pending_subscriptions.lock().await;
+        let predecessor = pending_subscriptions.get(sub_id).cloned();
+        let pending = Arc::new(PendingSubscription::new(predecessor));
+        pending_subscriptions.insert(sub_id.to_owned(), Arc::clone(&pending));
+        pending
+    }
+
+    /// Cancel every in-flight REQ before connection registry cleanup begins.
+    async fn cancel_all_pending_subscriptions(&self) {
+        let mut pending = self.pending_subscriptions.lock().await;
+        for (_, request) in pending.drain() {
+            request.cancel_lineage();
+        }
+    }
+
+    /// Forget a completed REQ only if it still owns this subscription ID.
+    pub(crate) async fn finish_pending_subscription(
+        &self,
+        sub_id: &str,
+        completed: &Arc<PendingSubscription>,
+    ) {
+        completed.completed.store(true, Ordering::Release);
+        let mut pending = self.pending_subscriptions.lock().await;
+        if pending
+            .get(sub_id)
+            .is_some_and(|current| Arc::ptr_eq(current, completed))
+        {
+            if let Some(predecessor) = completed.live_predecessor() {
+                pending.insert(sub_id.to_owned(), predecessor);
+            } else {
+                pending.remove(sub_id);
+            }
+        }
+    }
+
+    /// Queue output owned by one REQ only while its lease remains live.
+    ///
+    /// The lifecycle lock covers the complete batch so a paired NOTICE/CLOSED
+    /// response cannot straddle a same-ID replacement or CLOSE cutover. The
+    /// same fence also covers historical EVENT/EOSE output.
+    pub(crate) async fn send_req_messages_if_permitted<I>(
+        &self,
+        sub_id: &str,
+        pending: &Arc<PendingSubscription>,
+        messages: I,
+    ) -> bool
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let pending_subscriptions = self.pending_subscriptions.lock().await;
+        let permitted = pending_subscriptions
+            .get(sub_id)
+            .is_some_and(|current| PendingSubscription::permits_commit(current, pending));
+        if self.cancel.is_cancelled() || !permitted {
+            return false;
+        }
+
+        // Keep the lifecycle lock through every queue insertion. Replacement
+        // commit and CLOSE take the same lock, so neither can publish its
+        // cutover and then be followed by output from this lease.
+        messages.into_iter().all(|msg| self.send(msg))
+    }
+
+    pub(crate) async fn send_historical_if_permitted(
+        &self,
+        sub_id: &str,
+        pending: &Arc<PendingSubscription>,
+        msg: String,
+    ) -> bool {
+        self.send_req_messages_if_permitted(sub_id, pending, [msg])
+            .await
+    }
+
     /// Sends a data message to this connection's outbound channel.
     ///
     /// On a full buffer, increments the backpressure counter. The first
@@ -178,6 +349,7 @@ async fn handle_active_connection(
 
     let backpressure_count = Arc::new(AtomicU8::new(0));
     let subscriptions = Arc::new(Mutex::new(HashMap::new()));
+    let pending_subscriptions = Arc::new(Mutex::new(HashMap::new()));
 
     let conn = Arc::new(ConnectionState {
         conn_id,
@@ -187,6 +359,7 @@ async fn handle_active_connection(
             challenge: challenge.clone(),
         }),
         subscriptions: Arc::clone(&subscriptions),
+        pending_subscriptions,
         send_tx: tx.clone(),
         ctrl_tx: ctrl_tx.clone(),
         cancel: cancel.clone(),
@@ -470,6 +643,8 @@ async fn recv_loop(
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
+    let mut req_tasks = JoinSet::new();
+
     loop {
         tokio::select! {
             msg = ws_recv.next() => {
@@ -491,7 +666,12 @@ async fn recv_loop(
                             break;
                         }
                         trace!(len = text.len(), "frame received");
-                        handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+                        handle_text_message(
+                            text.to_string(),
+                            Arc::clone(&conn),
+                            Arc::clone(&state),
+                            &mut req_tasks,
+                        ).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let max_frame_bytes = state.config.max_frame_bytes;
@@ -513,7 +693,12 @@ async fn recv_loop(
                         // (notably certain Nostr libraries) send text payloads in binary frames.
                         // NIP-01 is text-only, but accepting binary is a common relay extension.
                         if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                            handle_text_message(text, Arc::clone(&conn), Arc::clone(&state)).await;
+                            handle_text_message(
+                                text,
+                                Arc::clone(&conn),
+                                Arc::clone(&state),
+                                &mut req_tasks,
+                            ).await;
                         }
                     }
                     Some(Ok(WsMessage::Pong(_))) => {
@@ -539,12 +724,31 @@ async fn recv_loop(
                     }
                 }
             }
+            completed = req_tasks.join_next(), if !req_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    debug!(conn_id = %conn.conn_id, %error, "REQ handler task failed");
+                }
+            }
             _ = cancel.cancelled() => break,
         }
     }
+
+    shutdown_pending_requests(&conn, &mut req_tasks).await;
 }
 
-async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Arc<AppState>) {
+pub(crate) async fn shutdown_pending_requests(conn: &ConnectionState, req_tasks: &mut JoinSet<()>) {
+    conn.cancel.cancel();
+    conn.cancel_all_pending_subscriptions().await;
+    req_tasks.abort_all();
+    while req_tasks.join_next().await.is_some() {}
+}
+
+async fn handle_text_message(
+    text: String,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+    req_tasks: &mut JoinSet<()>,
+) {
     let msg = match ClientMessage::parse(&text) {
         Ok(m) => m,
         Err(e) => {
@@ -606,10 +810,22 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
+            let pending = conn.begin_pending_subscription(&sub_id).await;
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            req_tasks.spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    tokio::select! {
+                        biased;
+                        _ = pending.cancelled() => {}
+                        _ = handlers::req::handle_req(
+                            sub_id.clone(),
+                            filters,
+                            Arc::clone(&conn),
+                            state,
+                            Arc::clone(&pending),
+                        ) => {}
+                    }
+                    conn.finish_pending_subscription(&sub_id, &pending).await;
                     drop(permit);
                 }
                 .instrument(span),
@@ -740,6 +956,291 @@ fn send_admission_result(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn failed_same_id_replacement_restores_the_previous_lease() {
+        let conn = ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "lease.test",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx: mpsc::channel(1).0,
+            ctrl_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        };
+
+        let original = conn.begin_pending_subscription("same-id").await;
+        let replacement = conn.begin_pending_subscription("same-id").await;
+        assert!(!original.is_cancelled());
+
+        conn.finish_pending_subscription("same-id", &replacement)
+            .await;
+        let current = conn
+            .pending_subscriptions
+            .lock()
+            .await
+            .get("same-id")
+            .cloned()
+            .expect("original lease restored");
+        assert!(Arc::ptr_eq(&current, &original));
+        assert!(!original.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_does_not_restore_a_completed_predecessor() {
+        let conn = ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "lease.test",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx: mpsc::channel(1).0,
+            ctrl_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        };
+
+        let original = conn.begin_pending_subscription("same-id").await;
+        let replacement = conn.begin_pending_subscription("same-id").await;
+
+        // The predecessor finishes while the replacement still owns the map.
+        conn.finish_pending_subscription("same-id", &original).await;
+        assert!(conn
+            .pending_subscriptions
+            .lock()
+            .await
+            .contains_key("same-id"));
+
+        // If the replacement also fails, the completed predecessor must not be
+        // restored as an owner whose completion callback will never run again.
+        conn.finish_pending_subscription("same-id", &replacement)
+            .await;
+        assert!(conn.pending_subscriptions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replacement_commit_fences_predecessor_historical_output() {
+        let (send_tx, mut send_rx) = mpsc::channel(8);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "lease.test",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        let predecessor = conn.begin_pending_subscription("same-id").await;
+        let replacement = conn.begin_pending_subscription("same-id").await;
+        let lifecycle = conn.pending_subscriptions.lock().await;
+
+        let old_event = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            let predecessor = Arc::clone(&predecessor);
+            async move {
+                conn.send_historical_if_permitted("same-id", &predecessor, "old-event".into())
+                    .await
+            }
+        });
+        let old_eose = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            let predecessor = Arc::clone(&predecessor);
+            async move {
+                conn.send_historical_if_permitted("same-id", &predecessor, "old-eose".into())
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+
+        replacement.commit();
+        assert!(conn.send("new-owner".into()));
+        drop(lifecycle);
+
+        assert!(!old_event.await.expect("old event task"));
+        assert!(!old_eose.await.expect("old EOSE task"));
+        assert_eq!(
+            send_rx.recv().await,
+            Some(WsMessage::Text("new-owner".into()))
+        );
+        assert!(send_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn close_fences_predecessor_historical_output_before_closed() {
+        let (send_tx, mut send_rx) = mpsc::channel(8);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "lease.test",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        let pending = conn.begin_pending_subscription("same-id").await;
+        let mut lifecycle = conn.pending_subscriptions.lock().await;
+
+        let old_event = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            let pending = Arc::clone(&pending);
+            async move {
+                conn.send_historical_if_permitted("same-id", &pending, "old-event".into())
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+
+        lifecycle
+            .remove("same-id")
+            .expect("pending owner")
+            .cancel_lineage();
+        assert!(conn.send("closed".into()));
+        drop(lifecycle);
+
+        assert!(!old_event.await.expect("old event task"));
+        assert_eq!(send_rx.recv().await, Some(WsMessage::Text("closed".into())));
+        assert!(send_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_req_rejection_is_fenced_after_same_id_replacement_commits() {
+        let (send_tx, mut send_rx) = mpsc::channel(8);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "lease.test",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        let predecessor = conn.begin_pending_subscription("same-id").await;
+        let replacement = conn.begin_pending_subscription("same-id").await;
+        let lifecycle = conn.pending_subscriptions.lock().await;
+
+        // Model A resuming from an access-resolution error while B is at its
+        // registration cutover. A must wait for the lifecycle lock rather than
+        // queue its terminal response directly.
+        let stale_rejection = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            let predecessor = Arc::clone(&predecessor);
+            async move {
+                conn.send_req_messages_if_permitted(
+                    "same-id",
+                    &predecessor,
+                    ["old-notice".into(), "old-closed".into()],
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+
+        replacement.commit();
+        assert!(conn.send("new-owner".into()));
+        drop(lifecycle);
+
+        assert!(!stale_rejection.await.expect("stale rejection task"));
+        assert_eq!(
+            send_rx.recv().await,
+            Some(WsMessage::Text("new-owner".into()))
+        );
+        assert!(send_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_req_rejection_is_fenced_after_close_acknowledgement() {
+        let (send_tx, mut send_rx) = mpsc::channel(8);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "lease.test",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx: mpsc::channel(1).0,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        let pending = conn.begin_pending_subscription("same-id").await;
+        let mut lifecycle = conn.pending_subscriptions.lock().await;
+
+        let stale_rejection = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            let pending = Arc::clone(&pending);
+            async move {
+                conn.send_req_messages_if_permitted(
+                    "same-id",
+                    &pending,
+                    ["old-notice".into(), "old-closed".into()],
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+
+        lifecycle
+            .remove("same-id")
+            .expect("pending owner")
+            .cancel_lineage();
+        assert!(conn.send("close-ack".into()));
+        drop(lifecycle);
+
+        assert!(!stale_rejection.await.expect("stale rejection task"));
+        assert_eq!(
+            send_rx.recv().await,
+            Some(WsMessage::Text("close-ack".into()))
+        );
+        assert!(send_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn committed_same_id_replacement_cancels_the_previous_lease() {
+        let original = Arc::new(PendingSubscription::new(None));
+        let replacement = PendingSubscription::new(Some(Arc::clone(&original)));
+
+        replacement.commit();
+
+        assert!(original.is_cancelled());
+        assert!(!replacement.is_cancelled());
+    }
 
     #[derive(Debug, Default)]
     struct MockSinkState {
