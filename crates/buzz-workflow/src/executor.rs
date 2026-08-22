@@ -850,12 +850,19 @@ async fn check_ssrf(host: &str, port: u16) -> Result<std::net::IpAddr, WorkflowE
     )
 }
 
+#[cfg(feature = "reqwest")]
 fn ssrf_verdict(
     host: &str,
     addrs: &[std::net::IpAddr],
     allowed_spec: &str,
 ) -> Result<std::net::IpAddr, WorkflowError> {
-    let allowed = buzz_core::network::parse_allowed_cidrs(allowed_spec);
+    let (allowed, dropped) = buzz_core::network::parse_allowed_cidrs(allowed_spec);
+    if !dropped.is_empty() {
+        tracing::warn!(
+            "BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS: dropping malformed entries {:?}",
+            dropped
+        );
+    }
     for ip in addrs {
         if buzz_core::network::is_blocked_ip(ip, &allowed) {
             return Err(WorkflowError::WebhookError(format!(
@@ -1974,28 +1981,38 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "reqwest")]
     fn ssrf_verdict_empty_blocks_cgnat() {
         let ip: std::net::IpAddr = "100.64.1.5".parse().unwrap();
         assert!(ssrf_verdict("example.com", &[ip], "").is_err());
     }
 
     #[test]
+    #[cfg(feature = "reqwest")]
     fn ssrf_verdict_allows_cgnat_with_spec() {
         let ip: std::net::IpAddr = "100.64.1.5".parse().unwrap();
         assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_ok());
     }
 
     #[test]
+    #[cfg(feature = "reqwest")]
     fn ssrf_verdict_still_blocks_other_private() {
         let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
         assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_err());
     }
 
     #[test]
+    #[cfg(feature = "reqwest")]
     fn ssrf_verdict_public_passes() {
         let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
         assert!(ssrf_verdict("example.com", &[ip], "").is_ok());
         assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "reqwest")]
+    fn ssrf_verdict_empty_addrs_is_err() {
+        assert!(ssrf_verdict("example.com", &[], "").is_err());
     }
 
     #[test]
