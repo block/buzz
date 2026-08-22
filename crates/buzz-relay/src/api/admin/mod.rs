@@ -389,6 +389,7 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
     }
 
+    #[ignore = "requires Postgres"]
     #[tokio::test]
     async fn report_detail_rejects_unknown_report() {
         let response = router(test_state().await)
@@ -419,6 +420,7 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
     }
 
+    #[ignore = "requires Postgres"]
     #[tokio::test]
     async fn feedback_attachment_rejects_unknown_feedback() {
         let response = router(test_state().await)
