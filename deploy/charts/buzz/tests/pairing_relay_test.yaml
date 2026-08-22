@@ -52,3 +52,75 @@ tests:
             name: BUZZ_PAIRING_RELAY_URL
             value: wss://pairing.buzz.xyz
         template: templates/deployment.yaml
+
+  - it: honors pairing relay scheduling knobs
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      pairingRelay.nodeSelector:
+        nodegroup: infrastructure
+      pairingRelay.tolerations:
+        - key: nodegroup
+          operator: Equal
+          value: infrastructure
+          effect: NoSchedule
+      pairingRelay.affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: pairing-relay
+    asserts:
+      - equal:
+          path: spec.template.spec.nodeSelector.nodegroup
+          value: infrastructure
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
+      - contains:
+          path: spec.template.spec.tolerations
+          content:
+            key: nodegroup
+            operator: Equal
+            value: infrastructure
+            effect: NoSchedule
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
+      - exists:
+          path: spec.template.spec.affinity.podAntiAffinity
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
+
+  - it: omits scheduling fields when knobs are unset
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+    asserts:
+      - notExists:
+          path: spec.template.spec.nodeSelector
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
+      - notExists:
+          path: spec.template.spec.tolerations
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
+      - notExists:
+          path: spec.template.spec.affinity
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
