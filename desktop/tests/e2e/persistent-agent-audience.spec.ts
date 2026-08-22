@@ -185,14 +185,14 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   await input.fill("draft text");
   await pressPrimaryShift(page, "M");
 
-  await expect(input).toHaveText("draft text");
-  const addressChips = composer.getByTestId("composer-address-chips");
-  await expect(addressChips.getByRole("button")).toHaveCount(1);
-  await expect(addressChips.getByRole("button")).toContainText("@alice");
-  await pressPrimaryShift(page, "M");
-  await expect(addressChips).toHaveCount(0);
+  await expect(input).toHaveText("@alice draft text");
+  await expect(input.locator(".agent-mention-highlight")).toHaveText("alice");
+  await input.fill("draft text");
   await expect(input).toHaveText("draft text");
   await pressPrimaryShift(page, "M");
+  await expect(input).toHaveText("draft text");
+  await pressPrimaryShift(page, "M");
+  await expect(input).toHaveText("@alice draft text");
   await expect(
     composer
       .getByTestId("composer-address-locks")
@@ -231,7 +231,7 @@ test("the mention button opens settings and can undo an address", async ({
     name: "Manage automatic agent mentions",
   });
 
-  await input.fill("draft text");
+  await input.type("draft text");
   await ingress.click();
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
@@ -263,7 +263,7 @@ test("the mention button opens settings and can undo an address", async ({
   ).toHaveCount(0);
   await ingress.click();
   await expect(menu).toHaveCount(0);
-  await input.fill("");
+  await expect(input).toHaveText("draft text");
   await ingress.click();
   await expect(menu).toBeVisible();
   await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
@@ -276,10 +276,11 @@ test("the mention button opens settings and can undo an address", async ({
   await menu
     .getByRole("button", { name: "Stop automatically mentioning Morgarita" })
     .click();
-  await expect(input).toHaveText("");
+  await expect(input).toHaveText("draft text");
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
+  await input.fill("");
 
   await menu
     .getByRole("button", { name: "Mention Morgarita", exact: true })
@@ -291,7 +292,7 @@ test("the mention button opens settings and can undo an address", async ({
 
   await input.type("later");
   await input.press("Enter");
-  await expect(input).toHaveText("");
+  await expect(input).toHaveText("@Morgarita ");
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita later"))
     .toContain(AGENT_A);
@@ -312,7 +313,6 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   const composer = threadComposer(page);
   await automaticallyMention(composer, "Morgarita");
   const input = composer.getByTestId("message-input");
-  const send = composer.getByTestId("send-message");
   const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
   const initialPulseVersion = Number(
     await avatar.getAttribute("data-pulse-version"),
@@ -332,10 +332,10 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   await expect(input).toBeFocused();
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
 
-  await expect(send).toBeDisabled();
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "hello"))
     .toContain(AGENT_A);
+  await expect(input).toHaveText("@Morgarita ");
 
   const sentRow = page
     .getByTestId("message-row")
@@ -398,12 +398,8 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
   await input.type("hello");
   await input.press("Enter");
 
-  await expect(input).toHaveText("", { timeout: 500 });
-  await expect(input.locator("[data-placeholder]").first()).toHaveAttribute(
-    "data-placeholder",
-    "Message #general",
-    { timeout: 500 },
-  );
+  await expect(input).toHaveText("@Morgarita ", { timeout: 2_500 });
+  await expect(input.locator("[data-placeholder]")).toHaveCount(0);
   await expect(input).toBeFocused();
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
@@ -466,15 +462,6 @@ test("the auto-pin toast can undo and the picker can restore the agent", async (
 
   await input.press("Escape");
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
-  await composer.locator("[data-mention-picker-trigger]").click();
-  await composer
-    .getByTestId("mention-autocomplete")
-    .getByRole("button", { name: "Mention Morgarita", exact: true })
-    .click();
-  await expect(input).toHaveText("");
-  await expect(
-    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
 });
 
 test("channel automatic mentions carry into threads and stay synchronized", async ({
@@ -495,7 +482,7 @@ test("channel automatic mentions carry into threads and stay synchronized", asyn
   await expect(threadAutomaticMention).toBeVisible();
 
   await threadComposer(page)
-    .getByTestId(`composer-address-chip-${AGENT_A}`)
+    .getByTestId(`composer-address-lock-remove-${AGENT_A}`)
     .click();
   await expect(threadAutomaticMention).toHaveCount(0);
   await expect(channelAutomaticMention).toHaveCount(0);

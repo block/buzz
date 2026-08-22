@@ -59,7 +59,6 @@ import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
 import { MentionAutocomplete } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
-import { ComposerAddressChips } from "./ComposerAddressControls";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
@@ -306,6 +305,12 @@ function MessageComposerImpl({
     onOpenOptions: () => openMentionOptionsRef.current(),
     onPulse: addressPulse.pulseOne,
   });
+  const restoreAddressedAgentMentionsRef = React.useRef<
+    (
+      pubkeys?: readonly string[],
+      allowedUnpinnedPubkeys?: readonly string[],
+    ) => void
+  >(() => {});
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -317,6 +322,11 @@ function MessageComposerImpl({
     mentions,
     onAddressedAgentsSendStarted: addressPulse.pulseMany,
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
+    onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
+      requestAnimationFrame(() =>
+        restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys),
+      );
+    },
     onInlineAgentMentionsSent: addInlineAgentMentionsToAudience,
     onPrepareSendChannel,
     onSendRef,
@@ -404,6 +414,7 @@ function MessageComposerImpl({
     lockedAgents,
     lockedAgentPubkeys,
     removeAddressedAgent,
+    restoreAddressedAgentMentions,
     selectMentionSuggestion,
     toggleAlwaysAddressAgent,
   } = useAgentAddressLockPicker({
@@ -415,6 +426,7 @@ function MessageComposerImpl({
     profiles,
     richText,
   });
+  restoreAddressedAgentMentionsRef.current = restoreAddressedAgentMentions;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -967,20 +979,12 @@ function MessageComposerImpl({
             )}
             {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
             <div
-              className="rich-text-composer relative flex max-h-32 items-start gap-1.5 overflow-y-auto"
+              className="rich-text-composer relative max-h-32 overflow-y-auto"
               data-testid="message-input-scroll"
               ref={composerScrollRef}
               onKeyDown={handleEditorKeyDown}
             >
-              <ComposerAddressChips
-                agents={editTarget == null ? lockedAgents : []}
-                disabled={composerDisabled}
-                onRemove={removeAddressedAgent}
-              />
-              <EditorContent
-                className="min-w-0 flex-1"
-                editor={richText.editor}
-              />
+              <EditorContent editor={richText.editor} />
             </div>
             <ComposerDockToolbar
               addressedAgents={editTarget == null ? lockedAgents : []}

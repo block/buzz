@@ -45,6 +45,7 @@ test("always addressing an agent keeps autocomplete open, adds the lock, and pul
       },
     ],
     getMentionDisplayName: () => "Agent Ada",
+    registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
   const audience = {
@@ -105,6 +106,7 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
       },
     ],
     getMentionDisplayName: () => "Agent Ada",
+    registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
   const audience = {
@@ -136,7 +138,13 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
     });
   });
 
-  assert.deepEqual(appliedEdits, []);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 4,
+      replaceToOffset: 15,
+      insertText: "",
+    },
+  ]);
   assert.equal(cancelCount, 0);
   assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, []);
@@ -158,10 +166,13 @@ test("selecting an already addressed agent from the explicit picker pulses its b
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
-    insertMention: () => {
-      throw new Error("an already addressed agent must not be inserted");
-    },
+    insertMention: () => ({
+      replaceFromOffset: 5,
+      replaceToOffset: 5,
+      insertText: "@Agent Ada ",
+    }),
     mentionStartIndex: 5,
   };
   const audience = {
@@ -190,7 +201,13 @@ test("selecting an already addressed agent from the explicit picker pulses its b
     });
   });
 
-  assert.deepEqual(appliedEdits, []);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 5,
+      replaceToOffset: 5,
+      insertText: "@Agent Ada ",
+    },
+  ]);
   assert.deepEqual(addedPubkeys, []);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
 });
@@ -207,6 +224,7 @@ test("selecting an agent from a typed query leaves the inline mention for send",
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    registerMentionPubkey: () => {},
     isInlineMentionSelection: () => true,
     insertMention: () => ({
       replaceFromOffset: 5,
@@ -267,10 +285,13 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
-    insertMention: () => {
-      throw new Error("explicit picker selections must become addressing");
-    },
+    insertMention: () => ({
+      replaceFromOffset: 5,
+      replaceToOffset: 5,
+      insertText: "@Agent Ada ",
+    }),
     mentionStartIndex: 5,
   };
   const audience = {
@@ -299,7 +320,13 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
     });
   });
 
-  assert.deepEqual(appliedEdits, []);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 5,
+      replaceToOffset: 5,
+      insertText: "@Agent Ada ",
+    },
+  ]);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
   assert.equal(
@@ -321,6 +348,7 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
     insertMention: () => ({
       replaceFromOffset: 0,

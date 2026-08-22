@@ -59,6 +59,10 @@ type UseMentionSendFlowOptions = {
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onAddressedAgentsSendStarted?: (pubkeys: readonly string[]) => void;
   onAddressedAgentsSendFailed?: (pubkeys: readonly string[]) => void;
+  onAddressedAgentsSendSucceeded?: (
+    pubkeys: readonly string[],
+    newlyPinnedPubkeys: readonly string[],
+  ) => void;
   onInlineAgentMentionsSent?: (promotion: {
     expectedRevision: number;
     pubkeys: readonly string[];
@@ -99,6 +103,7 @@ export function useMentionSendFlow({
   onPrepareSendChannel,
   onAddressedAgentsSendStarted,
   onAddressedAgentsSendFailed,
+  onAddressedAgentsSendSucceeded,
   onInlineAgentMentionsSent,
   onSendRef,
   richText,
@@ -587,12 +592,27 @@ export function useMentionSendFlow({
           const sentMentionPubkeys = new Set(
             revalidatedMentionPubkeys.map(normalizePubkey),
           );
+          const newlyPinnedPubkeys = draft.inlineAgentMentionPubkeys.filter(
+            (pubkey) => sentMentionPubkeys.has(normalizePubkey(pubkey)),
+          );
           onInlineAgentMentionsSent?.({
             expectedRevision: draft.audienceRevision,
-            pubkeys: draft.inlineAgentMentionPubkeys.filter((pubkey) =>
-              sentMentionPubkeys.has(normalizePubkey(pubkey)),
-            ),
+            pubkeys: newlyPinnedPubkeys,
           });
+          if (
+            draft.capturedChannelId === channelIdRef.current ||
+            channelIdRef.current === null
+          ) {
+            onAddressedAgentsSendSucceeded?.(
+              [
+                ...new Set([
+                  ...draft.addressedAgentPubkeys,
+                  ...newlyPinnedPubkeys,
+                ]),
+              ],
+              newlyPinnedPubkeys,
+            );
+          }
           if (draft.sentDraftKey) {
             drafts.markDraftSent(
               draft.sentDraftKey,
@@ -658,6 +678,7 @@ export function useMentionSendFlow({
       mentions.revalidateMentionPubkeys,
       onAddressedAgentsSendStarted,
       onAddressedAgentsSendFailed,
+      onAddressedAgentsSendSucceeded,
       onInlineAgentMentionsSent,
       onPrepareSendChannel,
       onSendRef,

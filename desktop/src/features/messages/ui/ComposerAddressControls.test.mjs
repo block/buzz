@@ -45,7 +45,7 @@ test("mention control expands with automatically mentioned agents", async () => 
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");
   const { TooltipProvider } = await import("@/shared/ui/tooltip");
-  const { ComposerAddressChips, ComposerMentionButton } = await import(
+  const { ComposerMentionButton } = await import(
     "./ComposerAddressControls.tsx"
   );
   let opened = 0;
@@ -69,24 +69,6 @@ test("mention control expands with automatically mentioned agents", async () => 
   view.rerender(renderButton([agent, secondAgent, thirdAgent]));
 
   assert.ok(view.getByTestId("composer-address-locks"));
-  const chipView = render(
-    React.createElement(
-      "div",
-      { className: "message-markdown" },
-      React.createElement(ComposerAddressChips, {
-        agents: [agent],
-        disabled: false,
-        onRemove: (pubkey) => removed.push(pubkey),
-      }),
-    ),
-  );
-  const chip = chipView.getByTestId("composer-address-chip-agent-pubkey");
-  assert.equal(chip.textContent, "@Agent Ada");
-  assert.match(chip.className, /(?:^|\s)mention-chip(?:\s|$)/);
-  assert.match(chip.className, /(?:^|\s)agent-mention-highlight(?:\s|$)/);
-  fireEvent.click(chip);
-  assert.deepEqual(removed, ["agent-pubkey"]);
-  removed.length = 0;
   const avatar = view.getByTestId("composer-address-lock-agent-pubkey");
   assert.ok(avatar);
   const manage = view.getByRole("button", {
