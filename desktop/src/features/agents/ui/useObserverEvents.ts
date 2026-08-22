@@ -17,6 +17,7 @@ import {
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
+import { getTranscriptHistoryCertainty } from "./agentSessionHistoryCertainty";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   createArchivePagingState,
@@ -405,5 +406,14 @@ export function useLoadArchivedObserverEvents(
     };
   }, [enabled, identityPubkey, hasSubscription, channelId]);
 
-  return { fetchOlderArchived, hasOlderArchived };
+  // Expose whether an empty transcript can be stated as fact. Callers that
+  // render an empty state must not claim "no activity" when history was simply
+  // unreadable — see agentSessionHistoryCertainty.
+  const historyCertainty = getTranscriptHistoryCertainty({
+    hasSubscription,
+    channelId,
+    archiveHydrated: !hasOlderArchived,
+  });
+
+  return { fetchOlderArchived, hasOlderArchived, historyCertainty };
 }

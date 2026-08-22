@@ -23,8 +23,11 @@ import {
 } from "@/shared/ui/dialog";
 import { Toggle } from "@/shared/ui/toggle";
 import { AnimatedCount } from "@/shared/ui/AnimatedCount";
-import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
+import {
+  AgentSessionTranscriptEmptyBody,
+  type AgentSessionTranscriptEmptyState,
+} from "./AgentSessionTranscriptEmptyState";
 import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
 import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
 import {
@@ -36,8 +39,6 @@ import { useTranscriptAnimationEnabled } from "./transcriptAnimationPreference";
 import { useTranscriptTimestampsEnabled } from "./transcriptTimestampPreference";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
-  ActivityRow,
-  ActivityRowContent,
   ActivityRowLabel,
   type ActivityRowStats,
   splitActivityRowCountedObject,
@@ -53,8 +54,15 @@ import {
   turnSetupDetail,
   turnSetupTimestamp,
   type TranscriptDisplayBlock,
+  type TranscriptToolRunChildSegment,
   type TranscriptTurnSegment,
 } from "./agentSessionTranscriptGrouping";
+import { TranscriptToolRunGroup } from "./TranscriptToolRunGroup";
+import {
+  TranscriptToolRunGroupKeyProvider,
+  useResolvedToolRunGroupKeys,
+} from "./useTranscriptToolRunGroupKeys";
+import { TranscriptRowTimestamp } from "./TranscriptRowTimestamp";
 import { buildCompactToolSummary } from "./agentSessionToolSummary";
 import { shouldShowTranscriptRowTimestamp } from "./agentSessionTranscriptPresentation";
 import { formatTranscriptTimestampTitle } from "./agentSessionUtils";
@@ -90,7 +98,7 @@ function useHasCompletedInitialRender() {
  */
 const SHOW_TRANSCRIPT_ACP_SOURCE = shouldShowTranscriptAcpSource();
 
-export type AgentSessionTranscriptEmptyState = "idle" | "loading";
+export type { AgentSessionTranscriptEmptyState };
 
 function shouldShowTranscriptAcpSource() {
   const envValue = import.meta.env.VITE_SHOW_TRANSCRIPT_ACP_SOURCE;
@@ -156,6 +164,15 @@ export function AgentSessionTranscriptList({
     () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
     [items, latestLiveSessionId],
   );
+  // Durable per-group identities for this pass, resolved once for the whole
+  // transcript so a reader's expansion choice survives leaves leaving a group
+  // (a failed call is ejected from it). Scoped by the transcript instance, not
+  // globally: the compact preview and the channel pane render the same work and
+  // must not overwrite each other's recognition table.
+  const toolRunGroupKeys = useResolvedToolRunGroupKeys(
+    `${agentPubkey}:${channelId ?? "all"}:${variant}`,
+    displayBlocks,
+  );
   // Derive the same block keys the DOM renders as `data-message-id` so
   // useAnchoredScroll anchors on real DOM rows. Value-stabilized so the
   // hook's restoration effect only fires when the ordered block sequence
@@ -202,27 +219,14 @@ export function AgentSessionTranscriptList({
   );
 
   if (!hasRenderableContent) {
-    const isLoading = emptyState === "loading" || isTurnLive;
-
     return (
       <div className={scrollContainerClassNames}>
         <div className="flex h-full min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
-          {isLoading ? (
-            <FuzzyLogo
-              ariaLabel="Waiting for ACP activity"
-              className="mx-auto text-muted-foreground"
-              fuzz={false}
-              loop
-            />
-          ) : (
-            <>
-              <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
-              <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {emptyDescription}
-              </p>
-            </>
-          )}
+          <AgentSessionTranscriptEmptyBody
+            emptyDescription={emptyDescription}
+            isLoading={emptyState === "loading" || isTurnLive}
+            state={emptyState}
+          />
         </div>
       </div>
     );
@@ -248,36 +252,38 @@ export function AgentSessionTranscriptList({
         role="log"
       >
         <AgentSessionTranscriptVariantProvider value={variant}>
-          {displayBlocks.map((block) => {
-            const blockKey = getDisplayBlockKey(block);
-            return (
-              <motion.div
-                animate={ROW_ENTER_TO}
-                data-message-id={blockKey}
-                initial={
-                  animationsDisabled || !hasCompletedInitialRenderRef.current
-                    ? false
-                    : ROW_ENTER_FROM
-                }
-                key={blockKey}
-                layout={layoutAnimationsEnabled ? "position" : false}
-                transition={ROW_ENTER_SPRING}
-              >
-                {/* content-visibility stays on a non-animated child: motion
+          <TranscriptToolRunGroupKeyProvider value={toolRunGroupKeys}>
+            {displayBlocks.map((block) => {
+              const blockKey = getDisplayBlockKey(block);
+              return (
+                <motion.div
+                  animate={ROW_ENTER_TO}
+                  data-message-id={blockKey}
+                  initial={
+                    animationsDisabled || !hasCompletedInitialRenderRef.current
+                      ? false
+                      : ROW_ENTER_FROM
+                  }
+                  key={blockKey}
+                  layout={layoutAnimationsEnabled ? "position" : false}
+                  transition={ROW_ENTER_SPRING}
+                >
+                  {/* content-visibility stays on a non-animated child: motion
                     measures the outer wrapper for layout animations, which
                     would otherwise force skipped offscreen rows to render. */}
-                <div className="content-visibility-auto">
-                  <TranscriptDisplayBlockView
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    block={block}
-                    profiles={profiles}
-                  />
-                </div>
-              </motion.div>
-            );
-          })}
+                  <div className="content-visibility-auto">
+                    <TranscriptDisplayBlockView
+                      agentAvatarUrl={agentAvatarUrl}
+                      agentName={agentName}
+                      agentPubkey={agentPubkey}
+                      block={block}
+                      profiles={profiles}
+                    />
+                  </div>
+                </motion.div>
+              );
+            })}
+          </TranscriptToolRunGroupKeyProvider>
           {isTurnLive && !isCompactPreview ? <TurnLivenessIndicator /> : null}
         </AgentSessionTranscriptVariantProvider>
       </div>
@@ -503,84 +509,57 @@ function SameKindSummaryItem({
     [summary.items, summary.renderClass, summary.variant],
   );
   const groupedFileEditStats = summarizeFileEditDiffs(groupedFileEditDiffs);
-  const expandsToToolItems = summary.items.every(
-    (item) => item.type === "tool",
-  );
   const variant = useAgentSessionTranscriptVariant();
   const timestampsEnabled = useTranscriptTimestampsEnabled();
   const showTimestamp = timestampsEnabled && variant !== "compactPreview";
+
   // Mixed bursts expand to their child segments in original order: raw tool
   // rows plus nested same-kind summaries that joined the burst (which stay
-  // expandable to their own child rows).
-  const childSegments = summary.segments ?? null;
+  // expandable to their own child rows). Rendering is passed as a callback so
+  // the group card never has to import this module back. Not memoized: the
+  // group card calls it during render and never uses its identity as a
+  // dependency, and memoizing would need this component as its own dep.
+  const renderChild = (
+    child: TranscriptToolRunChildSegment,
+    expansion?: {
+      expanded: boolean;
+      onExpansionChange: (expanded: boolean) => void;
+    },
+  ) =>
+    child.kind === "summary" ? (
+      <SameKindSummaryItem
+        agentAvatarUrl={agentAvatarUrl}
+        agentName={agentName}
+        agentPubkey={agentPubkey}
+        key={child.summary.id}
+        profiles={profiles}
+        summary={child.summary}
+      />
+    ) : (
+      <TranscriptItemView
+        agentAvatarUrl={agentAvatarUrl}
+        agentName={agentName}
+        agentPubkey={agentPubkey}
+        item={child.item}
+        key={child.item.id}
+        onExpansionChange={expansion?.onExpansionChange}
+        profiles={profiles}
+        expanded={expansion?.expanded}
+      />
+    );
 
   return (
-    <>
-      <ActivityRow
-        className="flex flex-col gap-0.5"
-        openToneScope="summary"
-        testId="transcript-same-kind-summary"
-        title={formatTranscriptTimestampTitle(summary.timestamp)}
-      >
+    <TranscriptToolRunGroup
+      label={
         <ToolRunSummaryLabel
           label={summary.label}
           stats={groupedFileEditStats}
         />
-        <ActivityRowContent
-          className={cn(
-            "flex flex-col",
-            expandsToToolItems || childSegments ? "gap-0.5" : "gap-1 pl-5",
-          )}
-        >
-          {childSegments
-            ? childSegments.map((child) =>
-                child.kind === "summary" ? (
-                  <SameKindSummaryItem
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    key={child.summary.id}
-                    profiles={profiles}
-                    summary={child.summary}
-                  />
-                ) : (
-                  <TranscriptItemView
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    item={child.item}
-                    key={child.item.id}
-                    profiles={profiles}
-                  />
-                ),
-              )
-            : expandsToToolItems
-              ? summary.items.map((item) => (
-                  <TranscriptItemView
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    item={item}
-                    key={item.id}
-                    profiles={profiles}
-                  />
-                ))
-              : summary.items.map((item) => (
-                  <p
-                    className="truncate text-xs text-muted-foreground"
-                    key={item.id}
-                  >
-                    {item.type === "tool"
-                      ? item.descriptor.preview || item.descriptor.label
-                      : item.title}
-                  </p>
-                ))}
-        </ActivityRowContent>
-      </ActivityRow>
-      {showTimestamp ? (
-        <TranscriptRowTimestamp timestamp={summary.timestamp} />
-      ) : null}
-    </>
+      }
+      renderChild={renderChild}
+      showTimestamp={showTimestamp}
+      summary={summary}
+    />
   );
 }
 
@@ -886,25 +865,9 @@ function TranscriptItemRow({
 }
 
 /**
- * Opt-in per-row timestamp, anchored bottom-left under the row content and
- * styled to match the chat/transcript timestamps.
+ * Opt-in per-row timestamp lives in `./TranscriptRowTimestamp` so the tool-run
+ * group card can render it without importing this module.
  */
-function TranscriptRowTimestamp({
-  messageLink = null,
-  timestamp,
-}: {
-  messageLink?: { channelId: string; messageId: string } | null;
-  timestamp: string;
-}) {
-  return (
-    <div
-      className="mt-0.5 flex justify-start"
-      data-testid="transcript-row-timestamp"
-    >
-      <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
-    </div>
-  );
-}
 
 function TurnSetupStatus({
   items,
@@ -979,17 +942,23 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
   agentName,
   agentPubkey,
   item,
+  onExpansionChange,
   profiles,
+  expanded,
 }: AgentTranscriptIdentityProps & {
   item: TranscriptItem;
   profiles?: UserProfileLookup;
+  expanded?: boolean;
+  onExpansionChange?: (expanded: boolean) => void;
 }) {
   return (
     <TranscriptActivityItem
       agentAvatarUrl={agentAvatarUrl}
       agentName={agentName}
       agentPubkey={agentPubkey}
+      expanded={expanded}
       item={item}
+      onExpansionChange={onExpansionChange}
       profiles={profiles}
     />
   );

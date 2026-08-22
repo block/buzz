@@ -29,11 +29,16 @@ export function ToolItem({
   agentPubkey,
   item,
   profiles,
+  expanded,
+  onExpansionChange,
 }: AgentTranscriptIdentityProps & {
   item: Extract<TranscriptItem, { type: "tool" }>;
   profiles?: UserProfileLookup;
+  expanded?: boolean;
+  onExpansionChange?: (expanded: boolean) => void;
 }) {
-  const [isExpanded, setIsExpanded] = React.useState(false);
+  const [localExpanded, setLocalExpanded] = React.useState(false);
+  const isExpanded = expanded ?? localExpanded;
   const hasArgs = Object.keys(item.args).length > 0;
   const hasResult = item.result.trim().length > 0;
   const canonicalToolName = item.buzzToolName ?? item.toolName;
@@ -52,9 +57,14 @@ export function ToolItem({
   const agentResolvedAvatarUrl = agentProfile?.avatarUrl ?? agentAvatarUrl;
   const handleToggle = React.useCallback(
     (event: React.SyntheticEvent<HTMLDetailsElement>) => {
-      setIsExpanded(event.currentTarget.open);
+      const nextExpanded = event.currentTarget.open;
+      if (onExpansionChange) {
+        onExpansionChange(nextExpanded);
+      } else {
+        setLocalExpanded(nextExpanded);
+      }
     },
-    [],
+    [onExpansionChange],
   );
 
   if (compactSummary.presentation === "message") {
