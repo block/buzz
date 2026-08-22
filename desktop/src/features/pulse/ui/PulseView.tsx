@@ -5,6 +5,8 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { mergeAgentPresenceStatus } from "@/features/agents/lib/agentPresenceStatus";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import {
   useContactListQuery,
   useUsersBatchQuery,
@@ -127,13 +129,14 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     () => new Set(agentPubkeys),
     [agentPubkeys],
   );
-  const agentStatusMap = React.useMemo(() => {
-    const map: Record<string, "online" | "away" | "offline"> = {};
-    for (const a of relayAgents) {
-      map[a.pubkey] = a.status;
-    }
-    return map;
-  }, [relayAgents]);
+  // Relay presence is the only source that reflects whether an agent process is
+  // actually up: nothing writes `status` into kind:10100, so every
+  // relay-discovered agent otherwise renders as offline regardless of state.
+  const agentPresenceQuery = usePresenceQuery(agentPubkeys);
+  const agentStatusMap = React.useMemo(
+    () => mergeAgentPresenceStatus(relayAgents, agentPresenceQuery.data),
+    [relayAgents, agentPresenceQuery.data],
+  );
 
   const mentionPubkeys = React.useMemo(
     () =>
