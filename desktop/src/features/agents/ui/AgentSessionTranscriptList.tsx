@@ -22,7 +22,6 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Toggle } from "@/shared/ui/toggle";
-import { AnimatedCount } from "@/shared/ui/AnimatedCount";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
@@ -34,18 +33,10 @@ import {
 } from "./agentSessionTranscriptContext";
 import { useTranscriptAnimationEnabled } from "./transcriptAnimationPreference";
 import { useTranscriptTimestampsEnabled } from "./transcriptTimestampPreference";
+import { AgentSessionToolRunSegment } from "./AgentSessionToolRunCard";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
-import {
-  ActivityRow,
-  ActivityRowContent,
-  ActivityRowLabel,
-  type ActivityRowStats,
-  splitActivityRowCountedObject,
-  splitActivityRowLabel,
-} from "./activityRenderClasses/ActivityRow";
 import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
 import type { AgentTranscriptIdentityProps } from "./activityRenderClasses/types";
-import type { FileEditDiff } from "./agentSessionFileEditDiff";
 import {
   buildTranscriptDisplayBlocks,
   formatTurnSetupLabel,
@@ -55,10 +46,8 @@ import {
   type TranscriptDisplayBlock,
   type TranscriptTurnSegment,
 } from "./agentSessionTranscriptGrouping";
-import { buildCompactToolSummary } from "./agentSessionToolSummary";
 import { shouldShowTranscriptRowTimestamp } from "./agentSessionTranscriptPresentation";
 import { formatTranscriptTimestampTitle } from "./agentSessionUtils";
-import { hasFileEditLineDiff } from "./FileEditDiffView";
 import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
 
 const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
@@ -326,8 +315,8 @@ function hasRenderableCompactBlock(block: TranscriptDisplayBlock) {
     if (segment.kind === "prompt") {
       return true;
     }
-    if (segment.kind === "summary") {
-      return segment.summary.items.some(isRenderableCompactItem);
+    if (segment.kind === "tool-run") {
+      return segment.run.items.some(isRenderableCompactItem);
     }
     return false;
   });
@@ -431,8 +420,8 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
     // steers), so key on the user message id rather than the bare turn id.
     return `turn:${turnId}:prompt:${segment.user.id}`;
   }
-  if (segment.kind === "summary") {
-    return segment.summary.id;
+  if (segment.kind === "tool-run") {
+    return segment.run.id;
   }
   return segment.item.id;
 }
@@ -462,14 +451,14 @@ function TranscriptTurnSegmentView({
     return <TurnSetupStatus items={segment.items} />;
   }
 
-  if (segment.kind === "summary") {
+  if (segment.kind === "tool-run") {
     return (
-      <SameKindSummaryItem
+      <AgentSessionToolRunSegment
         agentAvatarUrl={agentAvatarUrl}
         agentName={agentName}
         agentPubkey={agentPubkey}
         profiles={profiles}
-        summary={segment.summary}
+        run={segment.run}
       />
     );
   }
@@ -481,173 +470,6 @@ function TranscriptTurnSegmentView({
       agentPubkey={agentPubkey}
       item={segment.item}
       profiles={profiles}
-    />
-  );
-}
-
-function SameKindSummaryItem({
-  agentAvatarUrl,
-  agentName,
-  agentPubkey,
-  profiles,
-  summary,
-}: AgentTranscriptIdentityProps & {
-  profiles?: UserProfileLookup;
-  summary: Extract<TranscriptTurnSegment, { kind: "summary" }>["summary"];
-}) {
-  const groupedFileEditDiffs = React.useMemo(
-    () =>
-      summary.renderClass === "file-edit" || summary.variant === "mixed"
-        ? getGroupedFileEditDiffs(summary.items)
-        : [],
-    [summary.items, summary.renderClass, summary.variant],
-  );
-  const groupedFileEditStats = summarizeFileEditDiffs(groupedFileEditDiffs);
-  const expandsToToolItems = summary.items.every(
-    (item) => item.type === "tool",
-  );
-  const variant = useAgentSessionTranscriptVariant();
-  const timestampsEnabled = useTranscriptTimestampsEnabled();
-  const showTimestamp = timestampsEnabled && variant !== "compactPreview";
-  // Mixed bursts expand to their child segments in original order: raw tool
-  // rows plus nested same-kind summaries that joined the burst (which stay
-  // expandable to their own child rows).
-  const childSegments = summary.segments ?? null;
-
-  return (
-    <>
-      <ActivityRow
-        className="flex flex-col gap-0.5"
-        openToneScope="summary"
-        testId="transcript-same-kind-summary"
-        title={formatTranscriptTimestampTitle(summary.timestamp)}
-      >
-        <ToolRunSummaryLabel
-          label={summary.label}
-          stats={groupedFileEditStats}
-        />
-        <ActivityRowContent
-          className={cn(
-            "flex flex-col",
-            expandsToToolItems || childSegments ? "gap-0.5" : "gap-1 pl-5",
-          )}
-        >
-          {childSegments
-            ? childSegments.map((child) =>
-                child.kind === "summary" ? (
-                  <SameKindSummaryItem
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    key={child.summary.id}
-                    profiles={profiles}
-                    summary={child.summary}
-                  />
-                ) : (
-                  <TranscriptItemView
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    item={child.item}
-                    key={child.item.id}
-                    profiles={profiles}
-                  />
-                ),
-              )
-            : expandsToToolItems
-              ? summary.items.map((item) => (
-                  <TranscriptItemView
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentName={agentName}
-                    agentPubkey={agentPubkey}
-                    item={item}
-                    key={item.id}
-                    profiles={profiles}
-                  />
-                ))
-              : summary.items.map((item) => (
-                  <p
-                    className="truncate text-xs text-muted-foreground"
-                    key={item.id}
-                  >
-                    {item.type === "tool"
-                      ? item.descriptor.preview || item.descriptor.label
-                      : item.title}
-                  </p>
-                ))}
-        </ActivityRowContent>
-      </ActivityRow>
-      {showTimestamp ? (
-        <TranscriptRowTimestamp timestamp={summary.timestamp} />
-      ) : null}
-    </>
-  );
-}
-
-function getGroupedFileEditDiffs(items: TranscriptItem[]): FileEditDiff[] {
-  return items.flatMap((item) => {
-    if (item.type !== "tool" || item.isError) {
-      return [];
-    }
-
-    const diff = buildCompactToolSummary(item).fileEditDiff;
-    return diff && hasFileEditLineDiff(diff) ? [diff] : [];
-  });
-}
-
-function summarizeFileEditDiffs(
-  diffs: FileEditDiff[],
-): ActivityRowStats | null {
-  if (diffs.length === 0) {
-    return null;
-  }
-
-  return diffs.reduce(
-    (stats, diff) => ({
-      additions: stats.additions + diff.additions,
-      deletions: stats.deletions + diff.deletions,
-    }),
-    { additions: 0, deletions: 0 },
-  );
-}
-
-function ToolRunSummaryLabel({
-  label,
-  stats,
-}: {
-  label: string;
-  stats?: ActivityRowStats | null;
-}) {
-  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
-  const parts = splitActivityRowLabel(label);
-
-  if (!parts) {
-    return <span className="truncate text-sm font-medium">{label}</span>;
-  }
-
-  // Streaming bursts grow their count in place ("Ran 16 tool calls" →
-  // "Ran 17 tool calls"); rolling the digits odometer-style makes the
-  // increment legible. AnimatedCount keeps an sr-only static value and
-  // falls back to static text under prefers-reduced-motion.
-  const countedObject =
-    animationPreferenceEnabled && typeof parts.object === "string"
-      ? splitActivityRowCountedObject(parts.object)
-      : null;
-  const object = countedObject ? (
-    <>
-      <AnimatedCount value={countedObject.count} />
-      {countedObject.rest}
-    </>
-  ) : (
-    parts.object
-  );
-
-  return (
-    <ActivityRowLabel
-      object={object}
-      openToneScope="summary"
-      stats={stats}
-      verb={parts.verb}
     />
   );
 }

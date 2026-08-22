@@ -8,6 +8,7 @@ import {
   getDisplayBlockKey,
 } from "./agentSessionTranscriptGrouping.ts";
 import { isObserverEventAfter } from "../observerRelayStore.ts";
+import { classifyTool } from "./agentSessionToolClassifier.ts";
 
 const baseTimestamp = "2026-06-14T22:20:23.000Z";
 
@@ -244,8 +245,12 @@ test("buildTranscriptDisplayBlocks groups same-kind tool runs within a turn", ()
 
   assert.equal(block.kind, "turn");
   assert.equal(block.segments.length, 1);
-  assert.equal(block.segments[0].kind, "summary");
-  assert.equal(block.segments[0].summary.label, "Read 3 files");
+  assert.equal(block.segments[0].kind, "tool-run");
+  assert.equal(block.segments[0].run.id, "tool-run:tool:1");
+  assert.deepEqual(
+    block.segments[0].run.items.map((item) => item.id),
+    ["tool:1", "tool:2", "tool:3"],
+  );
 });
 
 test("buildTranscriptDisplayBlocks groups consecutive file edit tool runs", () => {
@@ -278,11 +283,9 @@ test("buildTranscriptDisplayBlocks groups consecutive file edit tool runs", () =
 
   assert.equal(block.kind, "turn");
   assert.equal(block.segments.length, 1);
-  assert.equal(block.segments[0].kind, "summary");
-  assert.equal(block.segments[0].summary.label, "Edited 2 files");
-  assert.equal(block.segments[0].summary.renderClass, "file-edit");
+  assert.equal(block.segments[0].kind, "tool-run");
   assert.deepEqual(
-    block.segments[0].summary.items.map((item) => item.id),
+    block.segments[0].run.items.map((item) => item.id),
     ["edit:1", "edit:2"],
   );
 });
@@ -297,16 +300,14 @@ test("buildTranscriptDisplayBlocks groups mixed consecutive eligible tool runs",
 
   assert.equal(block.kind, "turn");
   assert.equal(block.segments.length, 1);
-  assert.equal(block.segments[0].kind, "summary");
-  assert.equal(block.segments[0].summary.variant, "mixed");
-  assert.equal(block.segments[0].summary.label, "Ran 4 tool calls");
+  assert.equal(block.segments[0].kind, "tool-run");
   assert.deepEqual(
-    block.segments[0].summary.items.map((item) => item.id),
+    block.segments[0].run.items.map((item) => item.id),
     ["read-1", "shell-1", "read-2", "read-3"],
   );
 });
 
-test("buildTranscriptDisplayBlocks groups tool bursts at threshold 2", () => {
+test("buildTranscriptDisplayBlocks groups tool runs at threshold 2", () => {
   const [block] = buildTranscriptDisplayBlocks([
     mkTool("read-1", "Read file", "file-read", "read_file"),
     mkTool("shell-1", "Ran command", "shell", "shell:command"),
@@ -314,9 +315,8 @@ test("buildTranscriptDisplayBlocks groups tool bursts at threshold 2", () => {
 
   assert.equal(block.kind, "turn");
   assert.equal(block.segments.length, 1);
-  assert.equal(block.segments[0].kind, "summary");
-  assert.equal(block.segments[0].summary.variant, "mixed");
-  assert.equal(block.segments[0].summary.label, "Ran 2 tool calls");
+  assert.equal(block.segments[0].kind, "tool-run");
+  assert.equal(block.segments[0].run.items.length, 2);
 });
 
 test("buildTranscriptDisplayBlocks keeps a lone eligible tool row expanded", () => {
@@ -331,7 +331,7 @@ test("buildTranscriptDisplayBlocks keeps a lone eligible tool row expanded", () 
   );
 });
 
-test("buildTranscriptDisplayBlocks nests same-kind summaries inside tool bursts", () => {
+test("buildTranscriptDisplayBlocks flattens heterogeneous tool work into ONE run", () => {
   const [block] = buildTranscriptDisplayBlocks([
     mkTool("read-1", "Read file", "file-read", "read_file"),
     mkTool("read-2", "Read file", "file-read", "read_file"),
@@ -341,27 +341,17 @@ test("buildTranscriptDisplayBlocks nests same-kind summaries inside tool bursts"
   ]);
 
   assert.equal(block.kind, "turn");
+  // One card, one level of steps. The old two-pass scheme nested a same-kind
+  // summary inside a mixed burst here, producing two stacked headlines.
   assert.equal(block.segments.length, 1);
-  assert.equal(block.segments[0].kind, "summary");
-  assert.equal(block.segments[0].summary.variant, "mixed");
-  assert.equal(block.segments[0].summary.label, "Ran 5 tool calls");
-  // Mixed summaries are the only visible burst summary; nested same-kind
-  // summaries flatten back to leaf rows to avoid redundant rows such as
-  // "Ran 16 tool calls" → "Ran 12 commands".
+  assert.equal(block.segments[0].kind, "tool-run");
   assert.deepEqual(
-    block.segments[0].summary.segments.map((child) =>
-      child.kind === "item" ? child.item.id : child.summary.label,
-    ),
-    ["read-1", "read-2", "read-3", "shell-1", "skill-1"],
-  );
-  // Flat leaf items preserve original order.
-  assert.deepEqual(
-    block.segments[0].summary.items.map((item) => item.id),
+    block.segments[0].run.items.map((item) => item.id),
     ["read-1", "read-2", "read-3", "shell-1", "skill-1"],
   );
 });
 
-test("buildTranscriptDisplayBlocks collapses alternating search/read bursts into one summary", () => {
+test("buildTranscriptDisplayBlocks collapses alternating command/read work into one run", () => {
   const [block] = buildTranscriptDisplayBlocks([
     mkTool("shell-1", "Ran command", "shell", "shell:command"),
     mkTool("read-1", "Read file", "file-read", "read_file"),
@@ -375,13 +365,9 @@ test("buildTranscriptDisplayBlocks collapses alternating search/read bursts into
 
   assert.equal(block.kind, "turn");
   assert.equal(block.segments.length, 1);
-  assert.equal(block.segments[0].kind, "summary");
-  assert.equal(block.segments[0].summary.variant, "mixed");
-  assert.equal(block.segments[0].summary.label, "Ran 8 tool calls");
+  assert.equal(block.segments[0].kind, "tool-run");
   assert.deepEqual(
-    block.segments[0].summary.segments.map((child) =>
-      child.kind === "summary" ? child.summary.label : child.item.id,
-    ),
+    block.segments[0].run.items.map((item) => item.id),
     [
       "shell-1",
       "read-1",
@@ -392,6 +378,26 @@ test("buildTranscriptDisplayBlocks collapses alternating search/read bursts into
       "read-5",
       "read-6",
     ],
+  );
+});
+
+// Appending a step must not change the run id: the card is keyed on it, and a
+// changed key remounts the card and drops the reader's disclosure choice.
+test("buildTranscriptDisplayBlocks keeps the run id stable as steps stream in", () => {
+  const step = (id) => mkTool(id, "Read file", "file-read", "read_file");
+  const runId = (items) =>
+    buildTranscriptDisplayBlocks(items)[0].segments[0].run.id;
+
+  const two = [step("read-1"), step("read-2")];
+  assert.equal(runId(two), "tool-run:read-1");
+  assert.equal(runId([...two, step("read-3")]), "tool-run:read-1");
+  assert.equal(
+    runId([
+      ...two,
+      step("read-3"),
+      mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    ]),
+    "tool-run:read-1",
   );
 });
 
@@ -407,20 +413,24 @@ test("buildTranscriptDisplayBlocks keeps messages out of mixed tool runs", () =>
   assert.equal(block.kind, "turn");
   assert.deepEqual(
     block.segments.map((segment) => segment.kind),
-    ["summary", "item", "summary"],
+    ["tool-run", "item", "tool-run"],
   );
   assert.equal(block.segments[1].item.id, "assistant");
   assert.deepEqual(
-    block.segments[0].summary.items.map((item) => item.id),
+    block.segments[0].run.items.map((item) => item.id),
     ["read-1", "shell-1"],
   );
   assert.deepEqual(
-    block.segments[2].summary.items.map((item) => item.id),
+    block.segments[2].run.items.map((item) => item.id),
     ["read-2", "shell-2"],
   );
 });
 
-test("buildTranscriptDisplayBlocks breaks failed tools out of mixed tool runs", () => {
+// A failure belongs to the run it happened in. Shattering the run around it
+// (the old behaviour) produced three rows for one stretch of work and hid the
+// failure's context; the card instead keeps the failing step as a member,
+// stays open, and highlights it.
+test("buildTranscriptDisplayBlocks keeps failed tools inside their run", () => {
   const failed = {
     ...mkTool("shell-fail", "Ran command failed", "error", "shell:command"),
     isError: true,
@@ -439,19 +449,23 @@ test("buildTranscriptDisplayBlocks breaks failed tools out of mixed tool runs", 
   assert.equal(block.kind, "turn");
   assert.deepEqual(
     block.segments.map((segment) => segment.kind),
-    ["summary", "item", "summary"],
+    ["tool-run"],
   );
-  assert.equal(block.segments[0].summary.variant, "mixed");
-  assert.equal(block.segments[0].summary.label, "Ran 3 tool calls");
-  assert.equal(block.segments[1].item.id, "shell-fail");
-  assert.equal(block.segments[2].summary.variant, "mixed");
   assert.deepEqual(
-    block.segments[2].summary.items.map((item) => item.id),
-    ["read-2", "shell-2", "image-1"],
+    block.segments[0].run.items.map((item) => item.id),
+    [
+      "read-1",
+      "shell-1",
+      "skill-1",
+      "shell-fail",
+      "read-2",
+      "shell-2",
+      "image-1",
+    ],
   );
 });
 
-test("flattenDisplayBlocks preserves child order through mixed summaries", () => {
+test("flattenDisplayBlocks preserves step order through tool runs", () => {
   const blocks = buildTranscriptDisplayBlocks([
     mkTool("read-1", "Read file", "file-read", "read_file"),
     mkTool("shell-1", "Ran command", "shell", "shell:command"),
@@ -464,7 +478,7 @@ test("flattenDisplayBlocks preserves child order through mixed summaries", () =>
   );
 });
 
-test("buildTranscriptDisplayBlocks never same-kind groups failed tools", () => {
+test("buildTranscriptDisplayBlocks groups an all-failed run into one card", () => {
   const mkFailed = (id) => ({
     ...mkTool(id, "Ran command failed", "error", "shell:command"),
     isError: true,
@@ -479,11 +493,15 @@ test("buildTranscriptDisplayBlocks never same-kind groups failed tools", () => {
   assert.equal(block.kind, "turn");
   assert.deepEqual(
     block.segments.map((segment) => segment.kind),
-    ["item", "item", "item"],
+    ["tool-run"],
+  );
+  assert.deepEqual(
+    block.segments[0].run.items.map((item) => item.id),
+    ["fail-1", "fail-2", "fail-3"],
   );
 });
 
-test("buildTranscriptDisplayBlocks never same-kind groups status tool rows", () => {
+test("buildTranscriptDisplayBlocks never runs status tool rows into a card", () => {
   const [block] = buildTranscriptDisplayBlocks([
     mkTool("status-1", "Context compacted", "status", "status:post-compact"),
     mkTool("status-2", "Context compacted", "status", "status:post-compact"),
@@ -497,7 +515,7 @@ test("buildTranscriptDisplayBlocks never same-kind groups status tool rows", () 
   );
 });
 
-test("buildTranscriptDisplayBlocks never same-kind groups suppressed tool rows", () => {
+test("buildTranscriptDisplayBlocks never runs suppressed tool rows into a card", () => {
   const [block] = buildTranscriptDisplayBlocks([
     mkTool("stop-1", "Checked todos", "suppressed", "suppressed:stop-hook"),
     mkTool("stop-2", "Checked todos", "suppressed", "suppressed:stop-hook"),
@@ -511,16 +529,11 @@ test("buildTranscriptDisplayBlocks never same-kind groups suppressed tool rows",
   );
 });
 
-test("buildTranscriptDisplayBlocks breaks same-kind runs on an ineligible row", () => {
-  const failed = {
-    ...mkTool("fail-1", "Read file failed", "error", "read_file"),
-    isError: true,
-  };
-
+test("buildTranscriptDisplayBlocks breaks runs on an ineligible row", () => {
   const [block] = buildTranscriptDisplayBlocks([
     mkTool("read-1", "Read file", "file-read", "read_file"),
     mkTool("read-2", "Read file", "file-read", "read_file"),
-    failed,
+    mkTool("status-1", "Context compacted", "status", "status:post-compact"),
     mkTool("read-3", "Read file", "file-read", "read_file"),
     mkTool("read-4", "Read file", "file-read", "read_file"),
   ]);
@@ -528,17 +541,112 @@ test("buildTranscriptDisplayBlocks breaks same-kind runs on an ineligible row", 
   assert.equal(block.kind, "turn");
   assert.deepEqual(
     block.segments.map((segment) => segment.kind),
-    ["summary", "item", "summary"],
+    ["tool-run", "item", "tool-run"],
   );
-  assert.equal(block.segments[1].item.id, "fail-1");
+  assert.equal(block.segments[1].item.id, "status-1");
   assert.deepEqual(
-    block.segments[0].summary.items.map((item) => item.id),
+    block.segments[0].run.items.map((item) => item.id),
     ["read-1", "read-2"],
   );
   assert.deepEqual(
-    block.segments[2].summary.items.map((item) => item.id),
+    block.segments[2].run.items.map((item) => item.id),
     ["read-3", "read-4"],
   );
+});
+
+// Thoughts and plans are read as prose, not as steps, and permission gates are
+// intervention points — each stays visible and splits the run around it.
+test("buildTranscriptDisplayBlocks breaks runs on thoughts and permission gates", () => {
+  const thought = {
+    id: "thought-1",
+    type: "thought",
+    renderClass: "thought",
+    title: "Thinking",
+    text: "considering options",
+    timestamp: "2026-06-18T00:00:00Z",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+  const permission = {
+    ...mkTool("perm-1", "Permission requested", "permission", "permission:ask"),
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    thought,
+    mkTool("read-3", "Read file", "file-read", "read_file"),
+    permission,
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("shell-2", "Ran command", "shell", "shell:command"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["tool-run", "item", "item", "item", "tool-run"],
+  );
+  assert.equal(block.segments[1].item.id, "thought-1");
+  // A lone eligible step between two breakers renders as today, not as a card.
+  assert.equal(block.segments[2].item.id, "read-3");
+  assert.equal(block.segments[3].item.id, "perm-1");
+});
+
+// A failed safety/status row must still break the run. The classifier flattens
+// any failed step to render class `error` while keeping its original groupKey,
+// so eligibility decided on the reported class alone folded a failed stop hook
+// into the surrounding chain. Built through the real classifier, because the
+// bug lived in exactly that flattening — a hand-written descriptor would not
+// reproduce it.
+test("buildTranscriptDisplayBlocks breaks runs on a FAILED suppressed row", () => {
+  const failedStopHook = mkClassifiedTool("stop-1", "stop", { isError: true });
+  assert.equal(failedStopHook.descriptor.renderClass, "error");
+  assert.equal(failedStopHook.descriptor.groupKey, "suppressed:stop-hook");
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("shell-2", "Ran command", "shell", "shell:command"),
+    failedStopHook,
+    mkTool("shell-3", "Ran command", "shell", "shell:command"),
+    mkTool("shell-4", "Ran command", "shell", "shell:command"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["tool-run", "item", "tool-run"],
+  );
+  assert.equal(block.segments[1].item.id, "stop-1");
+  assert.deepEqual(
+    block.segments[0].run.items.map((item) => item.id),
+    ["shell-1", "shell-2"],
+  );
+  assert.deepEqual(
+    block.segments[2].run.items.map((item) => item.id),
+    ["shell-3", "shell-4"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks breaks runs on a FAILED status row", () => {
+  const failedCompact = mkClassifiedTool("compact-1", "postcompact", {
+    isError: true,
+  });
+  assert.equal(failedCompact.descriptor.renderClass, "error");
+  assert.equal(failedCompact.descriptor.groupKey, "status:post-compact");
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    failedCompact,
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["tool-run", "item"],
+  );
+  assert.equal(block.segments[1].item.id, "compact-1");
 });
 
 test("buildTranscriptDisplayBlocks bundles steer message with steer context behind the prompt segment", () => {
@@ -638,6 +746,32 @@ function mkTool(id, label, renderClass = "generic", groupKey = label) {
     turnId: "turn-1",
     sessionId: "sess-1",
     channelId: "chan-1",
+  };
+}
+
+/**
+ * A tool item whose descriptor comes from the REAL classifier, so tests that
+ * depend on how it flattens failures (failed steps become render class `error`
+ * while keeping their original groupKey) exercise production behaviour rather
+ * than a fixture's guess at it.
+ */
+function mkClassifiedTool(id, toolName, { args = {}, isError = false } = {}) {
+  const descriptor = classifyTool({
+    title: toolName,
+    toolName,
+    buzzToolName: null,
+    args,
+    result: "",
+    isError,
+  });
+
+  return {
+    ...mkTool(id, toolName, descriptor.renderClass, descriptor.groupKey),
+    args,
+    descriptor,
+    isError,
+    status: isError ? "failed" : "completed",
+    toolName,
   };
 }
 

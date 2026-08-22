@@ -1,10 +1,13 @@
 import { buildTranscriptState } from "./agentSessionTranscript";
 import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
-import { classifyToolItem } from "./agentSessionToolClassifier";
+import {
+  isToolRunEligible,
+  TOOL_RUN_MINIMUM_STEPS,
+} from "./agentSessionToolRunSummary";
 
 export type TranscriptTurnSegment =
   | { kind: "item"; item: TranscriptItem }
-  | { kind: "summary"; summary: TranscriptToolRunSummary }
+  | { kind: "tool-run"; run: TranscriptToolRun }
   | { kind: "setup"; items: Extract<TranscriptItem, { type: "lifecycle" }>[] }
   | {
       kind: "prompt";
@@ -58,30 +61,16 @@ export type TranscriptDisplayBlock =
       firstItemId: string;
     };
 
-export type TranscriptToolRunChildSegment =
-  | { kind: "item"; item: TranscriptItem }
-  | { kind: "summary"; summary: TranscriptToolRunSummary };
-
-export type TranscriptToolRunSummary = {
+export type TranscriptToolRun = {
+  /**
+   * Stable identity for the run, derived from its FIRST step's item id. A run
+   * grows in place as later steps stream in — appending a step must not change
+   * this id, or the card would remount and lose its disclosure state.
+   */
   id: string;
-  label: string;
-  count: number;
-  /** Flat leaf tool items in original order (nested summaries expanded). */
-  items: TranscriptItem[];
-  renderClass: TranscriptItem["renderClass"] | null;
-  /**
-   * "same-kind" summaries collapse runs sharing one semantic groupKey and get
-   * specific labels ("Read 3 files"). "mixed" summaries collapse broader
-   * bursts of routine tool work ("Ran 9 tool calls") and may contain nested
-   * same-kind summaries as children.
-   */
-  variant: "same-kind" | "mixed";
-  /**
-   * Child segments in original order for mixed bursts — raw tool rows plus
-   * any same-kind summaries that joined the burst. Absent on same-kind
-   * summaries, whose children are just `items`.
-   */
-  segments?: TranscriptToolRunChildSegment[];
+  /** Tool steps in original order. */
+  items: Extract<TranscriptItem, { type: "tool" }>[];
+  /** Timestamp of the run's first step. */
   timestamp: string;
 };
 
@@ -176,7 +165,7 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
   }
 
   if (!userPrompt) {
-    return groupToolSegments(activitySegments);
+    return groupToolRunSegments(activitySegments);
   }
 
   const segments: TranscriptTurnSegment[] = [
@@ -189,204 +178,66 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
     ...activitySegments,
   ];
 
-  return groupToolSegments(segments);
+  return groupToolRunSegments(segments);
 }
 
 /**
- * Two-pass tool grouping:
- * 1. Same-kind runs collapse into summaries with specific labels
- *    ("Read 3 files", "Edited 2 files").
- * 2. Leftover adjacent eligible tool rows of differing kinds collapse into a
- *    mixed fallback summary ("Ran 5 tool calls").
+ * Collapse each maximal run of consecutive chain-eligible tool steps into one
+ * `tool-run` segment.
  *
- * Messages, errors, permissions, and status/lifecycle rows never join either
- * pass, so intervention points stay visible.
+ * This is the transcript's ONE tool-grouping mechanism. It replaced an earlier
+ * two-pass scheme (same-kind summaries, then a "mixed burst" summary that could
+ * nest them) whose nesting produced redundant headlines like "Ran 16 tool calls"
+ * → "Ran 12 commands". A run is now flat: one card, one level of steps, and the
+ * headline adapts to whether the run is homogeneous
+ * (`summarizeToolRunHeadline`).
+ *
+ * Messages, thoughts, plans, permissions, status/lifecycle, raw-rail, and
+ * suppressed rows are not eligible, so they both stay visible and break runs —
+ * intervention points never disappear into a card. Failed tool steps are
+ * deliberately eligible: a failure belongs to the run it happened in, and the
+ * card keeps itself open and highlights the failing step.
  */
-function groupToolSegments(
-  segments: TranscriptTurnSegment[],
-): TranscriptTurnSegment[] {
-  return groupMixedToolRuns(groupSameKindSegments(segments));
-}
-
-function groupSameKindSegments(
+function groupToolRunSegments(
   segments: TranscriptTurnSegment[],
 ): TranscriptTurnSegment[] {
   const grouped: TranscriptTurnSegment[] = [];
+
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    if (segment.kind !== "item") {
+    if (segment.kind !== "item" || !isToolRunEligible(segment.item)) {
       grouped.push(segment);
       continue;
     }
-    const key = sameKindKey(segment.item);
-    if (!key) {
-      grouped.push(segment);
-      continue;
-    }
-    const run = [segment.item];
-    let j = i + 1;
+
+    const run: Extract<TranscriptItem, { type: "tool" }>[] = [];
+    let j = i;
     while (j < segments.length) {
       const next = segments[j];
-      if (next.kind !== "item" || sameKindKey(next.item) !== key) break;
-      run.push(next.item);
+      if (next.kind !== "item" || !isToolRunEligible(next.item)) break;
+      // isToolRunEligible only admits tool items.
+      run.push(next.item as Extract<TranscriptItem, { type: "tool" }>);
       j += 1;
     }
-    if (run.length >= minimumSummaryRunLength(run[0])) {
+
+    if (run.length >= TOOL_RUN_MINIMUM_STEPS) {
       grouped.push({
-        kind: "summary",
-        summary: {
-          id: `summary:${key}:${run[0].id}`,
-          label: sameKindLabel(run[0], run.length),
-          count: run.length,
+        kind: "tool-run",
+        run: {
+          // Keyed on the first step so the id is append-stable while the run
+          // streams; see TranscriptToolRun.id.
+          id: `tool-run:${run[0].id}`,
           items: run,
-          renderClass: getRenderClass(run[0]),
-          variant: "same-kind",
           timestamp: run[0].timestamp,
         },
       });
-      i = j - 1;
     } else {
       grouped.push(...run.map((item) => ({ kind: "item" as const, item })));
-      i = j - 1;
-    }
-  }
-  return grouped;
-}
-
-const MIXED_RUN_MINIMUM_SEGMENTS = 2;
-
-/**
- * Burst pass: collapse an interleave-tolerant run of routine tool work into
- * one "Ran N tool calls" summary. Both leftover raw eligible tool rows and
- * same-kind summaries produced by the first pass participate, so alternating
- * patterns like search → read-summary → search → read-summary collapse into a
- * single supervision row whose children are the original segments in order.
- * Messages, permissions, errors/failed tools, and status/suppressed rows
- * break bursts, so intervention points stay visible.
- */
-function groupMixedToolRuns(
-  segments: TranscriptTurnSegment[],
-): TranscriptTurnSegment[] {
-  const grouped: TranscriptTurnSegment[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
-    if (!isBurstParticipant(segment)) {
-      grouped.push(segment);
-      continue;
-    }
-    const run: TranscriptToolRunChildSegment[] = [segment];
-    let j = i + 1;
-    while (j < segments.length) {
-      const next = segments[j];
-      if (!isBurstParticipant(next)) break;
-      run.push(next);
-      j += 1;
-    }
-    if (run.length >= MIXED_RUN_MINIMUM_SEGMENTS) {
-      const items = run.flatMap((child) =>
-        child.kind === "item" ? [child.item] : child.summary.items,
-      );
-      // Mixed bursts are already the visual summary. Expanding nested
-      // same-kind summaries here creates redundant rows like
-      // "Ran 16 tool calls" → "Ran 12 commands". Keep same-kind summaries as
-      // grouping inputs, but flatten the mixed summary's visible children back
-      // to leaf tool rows.
-      const childSegments = items.map((item) => ({
-        kind: "item" as const,
-        item,
-      }));
-      grouped.push({
-        kind: "summary",
-        summary: {
-          id: `summary:mixed:${items[0].id}`,
-          label: `Ran ${items.length} tool calls`,
-          count: items.length,
-          items,
-          renderClass: null,
-          variant: "mixed",
-          segments: childSegments,
-          timestamp: items[0].timestamp,
-        },
-      });
-    } else {
-      grouped.push(...run);
     }
     i = j - 1;
   }
+
   return grouped;
-}
-
-/**
- * Burst participants are raw eligible tool rows and same-kind summaries
- * (already-collapsed routine tool work). Mixed summaries never re-enter.
- */
-function isBurstParticipant(
-  segment: TranscriptTurnSegment,
-): segment is TranscriptToolRunChildSegment {
-  if (segment.kind === "item") {
-    return isGroupingEligible(segment.item);
-  }
-  return segment.kind === "summary" && segment.summary.variant === "same-kind";
-}
-
-const GROUPING_ELIGIBLE_RENDER_CLASSES = new Set<
-  NonNullable<TranscriptItem["renderClass"]>
->([
-  "file-read",
-  "skill-read",
-  "shell",
-  "relay-op",
-  "file-edit",
-  "image",
-  "plan",
-  "generic",
-]);
-
-/**
- * Shared eligibility for both grouping passes. Failed tools (isError or
- * reclassified renderClass "error"), messages, permissions, status, and
- * suppressed rows are never grouped and break runs, so intervention points
- * stay visible.
- */
-function isGroupingEligible(item: TranscriptItem): boolean {
-  if (item.type !== "tool" || item.isError) return false;
-  const renderClass = getRenderClass(item);
-  return (
-    renderClass != null && GROUPING_ELIGIBLE_RENDER_CLASSES.has(renderClass)
-  );
-}
-
-function sameKindKey(item: TranscriptItem): string | null {
-  if (!isGroupingEligible(item) || item.type !== "tool") return null;
-  const descriptor = item.descriptor ?? classifyToolItem(item);
-  return descriptor.groupKey ?? getRenderClass(item);
-}
-
-function sameKindLabel(item: TranscriptItem, count: number): string {
-  if (item.type !== "tool") return `${count} items`;
-  const descriptor = item.descriptor ?? classifyToolItem(item);
-  const renderClass = getRenderClass(item);
-  const label = descriptor.label;
-  if (renderClass === "file-edit") {
-    return `Edited ${count} file${count === 1 ? "" : "s"}`;
-  }
-  if (renderClass === "file-read") return `Read ${count} files`;
-  if (renderClass === "skill-read") {
-    return `Read ${count} skill${count === 1 ? "" : "s"}`;
-  }
-  if (renderClass === "shell") return `Ran ${count} commands`;
-  if (renderClass === "relay-op") return `Ran ${count} Buzz relay ops`;
-  return `${label} ×${count}`;
-}
-
-function minimumSummaryRunLength(item: TranscriptItem): number {
-  return getRenderClass(item) === "file-edit" ? 2 : 3;
-}
-
-function getRenderClass(item: TranscriptItem) {
-  if (item.type !== "tool") return item.renderClass;
-  const descriptor = item.descriptor ?? classifyToolItem(item);
-  return item.renderClass ?? descriptor.renderClass;
 }
 
 /**
@@ -732,8 +583,8 @@ export function flattenDisplayBlocks(
         if (segment.context) {
           result.push(segment.context);
         }
-      } else if (segment.kind === "summary") {
-        result.push(...segment.summary.items);
+      } else if (segment.kind === "tool-run") {
+        result.push(...segment.run.items);
       } else {
         result.push(...segment.items);
       }
