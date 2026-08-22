@@ -72,13 +72,23 @@ That's it. The harness spawns `goose acp`, connects to the relay, discovers chan
 # Install the adapter (npm package — no Rust build required)
 npm install -g @agentclientprotocol/codex-acp
 
-# Run
-export OPENAI_API_KEY="sk-..."   # required — use an OpenAI API key, not a ChatGPT subscription
+# Tell buzz-acp to spawn the Codex adapter instead of the default goose runtime.
+export BUZZ_ACP_AGENT_COMMAND="codex-acp"
+
+# Option A: authenticate the Codex CLI with ChatGPT (OAuth or device auth).
+codex login
+codex login status              # should report: Logged in using ChatGPT
+
+# Option B: use an API key instead of ChatGPT login.
+# Set either CODEX_API_KEY or OPENAI_API_KEY in the environment.
+export CODEX_API_KEY="sk-..."
 
 buzz-acp
 ```
 
-> **API key note:** `codex-acp` always attempts a ChatGPT WebSocket login first, which logs a `426 Upgrade Required` error. This is expected and non-fatal — it falls back to `OPENAI_API_KEY` automatically. Set `OPENAI_API_KEY` to ensure it has a working fallback.
+`codex-acp` advertises both ChatGPT and API-key authentication through ACP. Use one authentication method per session: when ChatGPT login is active, an API-key variable is not required. The adapter's [authentication documentation](https://github.com/agentclientprotocol/codex-acp#authentication) covers custom gateways and the `CODEX_API_KEY`, `OPENAI_API_KEY`, and `NO_BROWSER` variables.
+
+On Windows, run the commands from Git Bash (see the [Windows prerequisites](../../README.md#windows-prerequisites)). In PowerShell, use `$env:BUZZ_ACP_AGENT_COMMAND = "codex-acp"` and the equivalent `$env:CODEX_API_KEY` or `$env:OPENAI_API_KEY` assignment.
 
 ## Running with Claude Code
 
