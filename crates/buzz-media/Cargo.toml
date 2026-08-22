@@ -9,6 +9,7 @@ description = "Media storage, validation, and thumbnail generation for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }
+buzz-azure-storage = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

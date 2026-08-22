@@ -788,6 +788,48 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
+        let git_store = crate::api::git::store::GitStore::new(
+            &config.media.s3_endpoint,
+            &config.media.s3_access_key,
+            &config.media.s3_secret_key,
+            &config.media.s3_bucket,
+            &config.media.s3_region,
+            config.media.s3_addressing_style,
+        )
+        .expect("media storage was already constructed with this S3 config");
+        Self::new_with_git_store(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            relay_keypair,
+            media_storage,
+            git_store,
+        )
+    }
+
+    /// Constructs `AppState` with an explicitly selected Git object backend.
+    ///
+    /// Production uses this constructor so storage configuration errors can
+    /// fail startup cleanly instead of panicking inside state assembly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_git_store(
+        config: Config,
+        db: Db,
+        redis_pool: deadpool_redis::Pool,
+        audit: impl Into<Option<AuditService>>,
+        pubsub: Arc<PubSubManager>,
+        auth: AuthService,
+        search: SearchService,
+        workflow_engine: Arc<WorkflowEngine>,
+        relay_keypair: nostr::Keys,
+        media_storage: MediaStorage,
+        git_store: crate::api::git::store::GitStore,
+    ) -> (Self, AuditShutdownHandle) {
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
@@ -833,15 +875,6 @@ impl AppState {
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store = crate::api::git::store::GitStore::new(
-            &config.media.s3_endpoint,
-            &config.media.s3_access_key,
-            &config.media.s3_secret_key,
-            &config.media.s3_bucket,
-            &config.media.s3_region,
-            config.media.s3_addressing_style,
-        )
-        .expect("media storage was already constructed with this S3 config");
         let git_pack_cache = Arc::new(
             crate::api::git::pack_cache::GitPackCache::new(
                 &config.git_pack_cache_path,

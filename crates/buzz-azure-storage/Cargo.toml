@@ -1,0 +1,19 @@
+[package]
+name = "buzz-azure-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Azure Blob Storage adapter and conformance surface for Buzz"
+
+[dependencies]
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+object_store = { version = "0.14.1", default-features = false, features = ["azure", "tokio"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+uuid = { workspace = true }

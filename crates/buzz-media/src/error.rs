@@ -103,6 +103,16 @@ impl From<s3::error::S3Error> for MediaError {
     }
 }
 
+impl From<buzz_azure_storage::AzureStorageError> for MediaError {
+    fn from(error: buzz_azure_storage::AzureStorageError) -> Self {
+        if error.is_not_found() {
+            Self::NotFound
+        } else {
+            Self::StorageError(error.to_string())
+        }
+    }
+}
+
 impl From<serde_json::Error> for MediaError {
     fn from(e: serde_json::Error) -> Self {
         Self::StorageError(e.to_string())

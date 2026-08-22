@@ -32,6 +32,10 @@ use s3::error::S3Error;
 use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
 
+#[path = "store/azure.rs"]
+mod azure;
+use azure::AzureGitStore;
+
 /// Opaque object-store ETag (used for `If-Match` on pointer CAS).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ETag(pub String);
@@ -91,6 +95,9 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// Azure Blob backend or transport failure.
+    #[error("azure blob backend error: {0}")]
+    AzureBackend(#[from] buzz_azure_storage::AzureStorageError),
     /// Invalid storage configuration detected at client construction.
     #[error("git store config error: {0}")]
     Config(String),
@@ -167,8 +174,15 @@ impl From<ProbeFailure> for StoreError {
 
 /// Object-store client for git refs.
 #[derive(Clone)]
+enum GitBackend {
+    S3(Arc<Bucket>),
+    Azure(AzureGitStore),
+}
+
+#[derive(Clone)]
+/// Backend-neutral object-store client for Buzz Git refs and immutable objects.
 pub struct GitStore {
-    bucket: Arc<Bucket>,
+    backend: GitBackend,
 }
 
 impl GitStore {
@@ -218,7 +232,57 @@ impl GitStore {
             buzz_media::config::S3AddressingStyle::Virtual => bucket,
         };
         Ok(Self {
-            bucket: Arc::from(bucket),
+            backend: GitBackend::S3(Arc::from(bucket)),
+        })
+    }
+
+    /// Build the configured production Git backend.
+    ///
+    /// Azure uses `BUZZ_AZURE_STORAGE_ACCOUNT` and
+    /// `BUZZ_AZURE_GIT_CONTAINER`, authenticated through workload identity.
+    pub fn from_runtime_env(
+        endpoint: &str,
+        access_key: &str,
+        secret_key: &str,
+        bucket_name: &str,
+        region: &str,
+        addressing_style: buzz_media::config::S3AddressingStyle,
+    ) -> Result<Self, StoreError> {
+        match std::env::var("BUZZ_OBJECT_STORAGE_BACKEND")
+            .unwrap_or_else(|_| "s3".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "s3" => Self::new(
+                endpoint,
+                access_key,
+                secret_key,
+                bucket_name,
+                region,
+                addressing_style,
+            ),
+            "azure" => {
+                let account = required_env("BUZZ_AZURE_STORAGE_ACCOUNT")?;
+                let container = required_env("BUZZ_AZURE_GIT_CONTAINER")?;
+                Self::new_azure(&account, &container)
+            }
+            backend => Err(StoreError::Config(format!(
+                "unsupported BUZZ_OBJECT_STORAGE_BACKEND '{backend}'; expected s3 or azure"
+            ))),
+        }
+    }
+
+    /// Build an Azure Git backend from the Azure credential environment.
+    pub fn new_azure(account: &str, container: &str) -> Result<Self, StoreError> {
+        Ok(Self {
+            backend: GitBackend::Azure(AzureGitStore::from_env(account, container)?),
+        })
+    }
+
+    #[cfg(test)]
+    fn new_azurite(container: &str) -> Result<Self, StoreError> {
+        Ok(Self {
+            backend: GitBackend::Azure(AzureGitStore::for_azurite(container)?),
         })
     }
 
@@ -263,23 +327,35 @@ impl GitStore {
         content_type: &str,
     ) -> Result<String, StoreError> {
         let key = Self::content_key(prefix, bytes);
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
-            .put_object_with_content_type_and_headers(&key, bytes, content_type, Some(headers))
-            .await
-        {
-            Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
-            // 412 on a content-addressed key means the key already holds the
-            // same bytes (by construction — the key is the digest). A1 is
-            // preserved without a defensive GET.
-            Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
-            Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
-                resp.status_code(),
-                "unexpected status".into(),
-            ))),
-            Err(e) => Err(StoreError::Backend(e)),
+        match &self.backend {
+            GitBackend::S3(bucket) => {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+                match bucket
+                    .put_object_with_content_type_and_headers(
+                        &key,
+                        bytes,
+                        content_type,
+                        Some(headers),
+                    )
+                    .await
+                {
+                    Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
+                    // 412 on a content-addressed key means the key already holds the
+                    // same bytes (by construction — the key is the digest). A1 is
+                    // preserved without a defensive GET.
+                    Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
+                    Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                        resp.status_code(),
+                        "unexpected status".into(),
+                    ))),
+                    Err(e) => Err(StoreError::Backend(e)),
+                }
+            }
+            GitBackend::Azure(store) => {
+                store.create_idempotent(&key, bytes, content_type).await?;
+                Ok(key)
+            }
         }
     }
 
@@ -298,25 +374,34 @@ impl GitStore {
     /// trusting it.
     pub async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError> {
         let key = Self::idx_key_for_pack_digest(pack_digest)?;
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
-            .put_object_with_content_type_and_headers(
-                &key,
-                idx_bytes,
-                "application/x-git-index",
-                Some(headers),
-            )
-            .await
-        {
-            Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
-            Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
-            Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
-                resp.status_code(),
-                "unexpected status".into(),
-            ))),
-            Err(e) => Err(StoreError::Backend(e)),
+        match &self.backend {
+            GitBackend::S3(bucket) => {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+                match bucket
+                    .put_object_with_content_type_and_headers(
+                        &key,
+                        idx_bytes,
+                        "application/x-git-index",
+                        Some(headers),
+                    )
+                    .await
+                {
+                    Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
+                    Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
+                    Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                        resp.status_code(),
+                        "unexpected status".into(),
+                    ))),
+                    Err(e) => Err(StoreError::Backend(e)),
+                }
+            }
+            GitBackend::Azure(store) => {
+                store
+                    .create_idempotent(&key, idx_bytes, "application/x-git-index")
+                    .await?;
+                Ok(key)
+            }
         }
     }
 
@@ -350,10 +435,13 @@ impl GitStore {
     /// detectability. This raw `get` exists for the pointer (whose key is not a
     /// digest).
     pub async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
-        match self.bucket.get_object(key).await {
-            Ok(resp) => Ok(Bytes::from(resp.to_vec())),
-            Err(S3Error::HttpFailWithBody(404, _)) => Err(StoreError::NotFound(key.into())),
-            Err(e) => Err(StoreError::Backend(e)),
+        match &self.backend {
+            GitBackend::S3(bucket) => match bucket.get_object(key).await {
+                Ok(resp) => Ok(Bytes::from(resp.to_vec())),
+                Err(S3Error::HttpFailWithBody(404, _)) => Err(StoreError::NotFound(key.into())),
+                Err(e) => Err(StoreError::Backend(e)),
+            },
+            GitBackend::Azure(store) => store.get(key).await,
         }
     }
 
@@ -409,30 +497,44 @@ impl GitStore {
 
     /// GET an object after rejecting bodies larger than `max_bytes`.
     pub async fn get_limited(&self, key: &str, max_bytes: u64) -> Result<Bytes, StoreError> {
-        let (head, status) = self.bucket.head_object(key).await.map_err(|e| match e {
-            S3Error::HttpFailWithBody(404, _) => StoreError::NotFound(key.into()),
-            other => StoreError::Backend(other),
-        })?;
-        if status == 404 {
-            return Err(StoreError::NotFound(key.into()));
-        }
-        if !(200..300).contains(&status) {
-            return Err(StoreError::Backend(S3Error::HttpFailWithBody(
-                status,
-                "unexpected status".into(),
-            )));
-        }
-        if let Some(content_length) = head.content_length {
-            let size = u64::try_from(content_length).unwrap_or(u64::MAX);
-            if size > max_bytes {
-                return Err(StoreError::ObjectTooLarge {
-                    key: key.into(),
-                    size,
-                    max: max_bytes,
-                });
+        let object_size = match &self.backend {
+            GitBackend::S3(bucket) => {
+                let (head, status) = bucket.head_object(key).await.map_err(|e| match e {
+                    S3Error::HttpFailWithBody(404, _) => StoreError::NotFound(key.into()),
+                    other => StoreError::Backend(other),
+                })?;
+                if status == 404 {
+                    return Err(StoreError::NotFound(key.into()));
+                }
+                if !(200..300).contains(&status) {
+                    return Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                        status,
+                        "unexpected status".into(),
+                    )));
+                }
+                head.content_length
+                    .map(|size| u64::try_from(size).unwrap_or(u64::MAX))
             }
+            GitBackend::Azure(store) => store.size(key).await?,
+        };
+        let Some(size) = object_size else {
+            if matches!(&self.backend, GitBackend::Azure(_)) {
+                return Err(StoreError::NotFound(key.into()));
+            }
+            return self.finish_limited_get(key, max_bytes).await;
+        };
+        if size > max_bytes {
+            return Err(StoreError::ObjectTooLarge {
+                key: key.into(),
+                size,
+                max: max_bytes,
+            });
         }
 
+        self.finish_limited_get(key, max_bytes).await
+    }
+
+    async fn finish_limited_get(&self, key: &str, max_bytes: u64) -> Result<Bytes, StoreError> {
         let bytes = self.get(key).await?;
         let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if size > max_bytes {
@@ -458,23 +560,26 @@ impl GitStore {
     /// the snapshot consistent (A2: a single GET observes a single committed
     /// object). Verified empirically in `probe::probe_get_exposes_etag`.
     pub async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
-        match self.bucket.get_object(key).await {
-            Ok(resp) => {
-                let headers = resp.headers();
-                let etag = headers
-                    .get("etag")
-                    .or_else(|| headers.get("ETag"))
-                    .cloned()
-                    .ok_or_else(|| {
-                        StoreError::Backend(S3Error::HttpFailWithBody(
-                            500,
-                            "GET pointer: response missing ETag".into(),
-                        ))
-                    })?;
-                Ok(Some((ETag(etag), Bytes::from(resp.to_vec()))))
-            }
-            Err(S3Error::HttpFailWithBody(404, _)) => Ok(None),
-            Err(e) => Err(StoreError::Backend(e)),
+        match &self.backend {
+            GitBackend::S3(bucket) => match bucket.get_object(key).await {
+                Ok(resp) => {
+                    let headers = resp.headers();
+                    let etag = headers
+                        .get("etag")
+                        .or_else(|| headers.get("ETag"))
+                        .cloned()
+                        .ok_or_else(|| {
+                            StoreError::Backend(S3Error::HttpFailWithBody(
+                                500,
+                                "GET pointer: response missing ETag".into(),
+                            ))
+                        })?;
+                    Ok(Some((ETag(etag), Bytes::from(resp.to_vec()))))
+                }
+                Err(S3Error::HttpFailWithBody(404, _)) => Ok(None),
+                Err(e) => Err(StoreError::Backend(e)),
+            },
+            GitBackend::Azure(store) => store.get_pointer(key).await,
         }
     }
 
@@ -489,28 +594,37 @@ impl GitStore {
         body: &[u8],
         precond: Precond,
     ) -> Result<CasOutcome, StoreError> {
-        let mut headers = axum::http::HeaderMap::new();
-        match &precond {
-            Precond::IfNoneMatchStar => {
-                headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+        match &self.backend {
+            GitBackend::S3(bucket) => {
+                let mut headers = axum::http::HeaderMap::new();
+                match &precond {
+                    Precond::IfNoneMatchStar => {
+                        headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+                    }
+                    Precond::IfMatch(ETag(tag)) => {
+                        headers.insert(
+                            axum::http::header::IF_MATCH,
+                            tag.parse().map_err(|_| {
+                                StoreError::Backend(S3Error::HttpFailWithBody(
+                                    400,
+                                    format!("invalid etag {tag}"),
+                                ))
+                            })?,
+                        );
+                    }
+                }
+                let result = bucket
+                    .put_object_with_content_type_and_headers(
+                        key,
+                        body,
+                        "application/json",
+                        Some(headers),
+                    )
+                    .await;
+                Self::classify_cas(result)
             }
-            Precond::IfMatch(ETag(tag)) => {
-                headers.insert(
-                    axum::http::header::IF_MATCH,
-                    tag.parse().map_err(|_| {
-                        StoreError::Backend(S3Error::HttpFailWithBody(
-                            400,
-                            format!("invalid etag {tag}"),
-                        ))
-                    })?,
-                );
-            }
+            GitBackend::Azure(store) => store.put_pointer(key, body, precond).await,
         }
-        let result = self
-            .bucket
-            .put_object_with_content_type_and_headers(key, body, "application/json", Some(headers))
-            .await;
-        Self::classify_cas(result)
     }
 
     /// Map a rust-s3 PUT outcome to a `CasOutcome`.
@@ -620,7 +734,7 @@ impl GitStore {
         // -- Phase 2: if_match_race -----------------------------------------------
         // Seed the pointer with a known value, then race N IfMatch updates.
         let seed = b"probe-pointer-seed".to_vec();
-        let _ = self.bucket.delete_object(&pointer_key).await; // ignore 404
+        let _ = self.delete_if_exists(&pointer_key).await;
         let seed_outcome = self
             .put_pointer(&pointer_key, &seed, Precond::IfNoneMatchStar)
             .await?;
@@ -730,7 +844,7 @@ impl GitStore {
             let body = format!("probe-inm-race-{nonce}-{round}").into_bytes();
             let key = Self::content_key("probe/inm-race", &body);
             // Clean slate.
-            let _ = self.bucket.delete_object(&key).await;
+            let _ = self.delete_if_exists(&key).await;
             let arc_self: Arc<&Self> = Arc::new(self);
             let mut tasks = Vec::with_capacity(cfg.race_width);
             for _ in 0..cfg.race_width {
@@ -873,7 +987,7 @@ impl GitStore {
 
         // Cleanup pointer (immutable probe writes accumulate by design; the
         // bucket's retention policy handles them, not the probe).
-        let _ = self.bucket.delete_object(&pointer_key).await;
+        let _ = self.delete_if_exists(&pointer_key).await;
 
         Ok(ProbeReport {
             race_width: cfg.race_width,
@@ -893,23 +1007,50 @@ impl GitStore {
     /// we need to *see* 412 outcomes rather than swallow them as idempotent.
     /// Returns the HTTP status code on success-or-412; bubbles other errors.
     async fn put_immutable_raw(&self, key: &str, bytes: &[u8]) -> Result<u16, StoreError> {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
-            .put_object_with_content_type_and_headers(
-                key,
-                bytes,
-                "application/octet-stream",
-                Some(headers),
-            )
-            .await
-        {
-            Ok(resp) => Ok(resp.status_code()),
-            Err(S3Error::HttpFailWithBody(412, _)) => Ok(412),
-            Err(e) => Err(StoreError::Backend(e)),
+        match &self.backend {
+            GitBackend::S3(bucket) => {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+                match bucket
+                    .put_object_with_content_type_and_headers(
+                        key,
+                        bytes,
+                        "application/octet-stream",
+                        Some(headers),
+                    )
+                    .await
+                {
+                    Ok(resp) => Ok(resp.status_code()),
+                    Err(S3Error::HttpFailWithBody(412, _)) => Ok(412),
+                    Err(e) => Err(StoreError::Backend(e)),
+                }
+            }
+            GitBackend::Azure(store) => store.put_immutable_raw(key, bytes).await,
         }
     }
+
+    async fn delete_if_exists(&self, key: &str) -> Result<(), StoreError> {
+        match &self.backend {
+            GitBackend::S3(bucket) => match bucket.delete_object(key).await {
+                Ok(_) | Err(S3Error::HttpFailWithBody(404, _)) => Ok(()),
+                Err(error) => Err(StoreError::Backend(error)),
+            },
+            GitBackend::Azure(store) => store.delete_if_exists(key).await,
+        }
+    }
+
+    #[cfg(test)]
+    fn s3_bucket(&self) -> Option<&Bucket> {
+        match &self.backend {
+            GitBackend::S3(bucket) => Some(bucket.as_ref()),
+            GitBackend::Azure(_) => None,
+        }
+    }
+}
+
+fn required_env(name: &str) -> Result<String, StoreError> {
+    std::env::var(name)
+        .map_err(|_| StoreError::Config(format!("required environment variable {name} is not set")))
 }
 
 #[cfg(test)]
@@ -958,7 +1099,7 @@ mod tests {
             buzz_media::config::S3AddressingStyle::Path,
         )
         .expect("static creds should build a git store");
-        match store.bucket.region {
+        match store.s3_bucket().expect("S3 constructor").region {
             Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
             ref other => panic!("expected Custom region, got {other:?}"),
         }
@@ -987,8 +1128,9 @@ mod tests {
                 style,
             )
             .expect("construct git store");
-            assert_eq!(store.bucket.url(), expected_url);
-            assert_eq!(store.bucket.is_path_style(), path_style);
+            let bucket = store.s3_bucket().expect("S3 constructor");
+            assert_eq!(bucket.url(), expected_url);
+            assert_eq!(bucket.is_path_style(), path_style);
         }
     }
 
@@ -1013,6 +1155,25 @@ mod tests {
                 "expected Config error, got {err:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn azure_git_backend_passes_the_production_conformance_gate() {
+        if std::env::var("BUZZ_GIT_AZURITE_TEST").as_deref() != Ok("1") {
+            eprintln!("skipping: set BUZZ_GIT_AZURITE_TEST=1 and start Azurite");
+            return;
+        }
+        let store = GitStore::new_azurite("buzz-conformance").expect("connect to Azurite");
+        let report = store
+            .run_conformance_probe(ProbeConfig {
+                race_width: 8,
+                race_rounds: 2,
+            })
+            .await
+            .expect("Azure Git/CAS conformance gate");
+        assert_eq!(report.race_width, 8);
+        assert_eq!(report.race_rounds, 2);
+        assert_eq!(report.transport_drops, 0);
     }
 }
 
@@ -1074,8 +1235,8 @@ mod probe {
         let key = format!("probe/cas-{}.txt", uuid::Uuid::new_v4());
         let mut hdrs = axum::http::HeaderMap::new();
         hdrs.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        let r1 = st
-            .bucket
+        let bucket = st.s3_bucket().expect("S3 probe store");
+        let r1 = bucket
             .put_object_with_content_type_and_headers(
                 &key,
                 b"first",
@@ -1084,12 +1245,11 @@ mod probe {
             )
             .await;
         assert!((200..300).contains(&r1.expect("first ok").status_code()));
-        let r2 = st
-            .bucket
+        let r2 = bucket
             .put_object_with_content_type_and_headers(&key, b"second", "text/plain", Some(hdrs))
             .await;
         assert!(matches!(r2, Err(S3Error::HttpFailWithBody(412, _))));
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = bucket.delete_object(&key).await;
     }
 
     #[tokio::test]
@@ -1167,8 +1327,9 @@ mod probe {
         assert_eq!(etag_now, e2, "get_pointer etag matches PUT-response etag");
 
         // Cleanup.
-        let _ = st.bucket.delete_object(&pkey).await;
-        let _ = st.bucket.delete_object(&key).await;
+        let bucket = st.s3_bucket().expect("S3 probe store");
+        let _ = bucket.delete_object(&pkey).await;
+        let _ = bucket.delete_object(&key).await;
     }
 
     /// End-to-end conformance probe against MinIO. This is the same code path
@@ -1199,16 +1360,17 @@ mod probe {
         }
         let st = store();
         let key = format!("probe/etag-{}.txt", uuid::Uuid::new_v4());
-        st.bucket
+        let bucket = st.s3_bucket().expect("S3 probe store");
+        bucket
             .put_object_with_content_type(&key, b"hi", "text/plain")
             .await
             .expect("put");
-        let resp = st.bucket.get_object(&key).await.expect("get");
+        let resp = bucket.get_object(&key).await.expect("get");
         let headers = resp.headers();
         eprintln!("GET headers: {headers:?}");
         let etag = headers.get("etag").or_else(|| headers.get("ETag")).cloned();
         assert!(etag.is_some(), "GET response must carry ETag header");
         eprintln!("ETag from GET: {etag:?}");
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = bucket.delete_object(&key).await;
     }
 }
