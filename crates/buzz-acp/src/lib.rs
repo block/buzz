@@ -60,7 +60,7 @@ fn is_subcommand(name: &str) -> bool {
 }
 
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+const MODELS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
