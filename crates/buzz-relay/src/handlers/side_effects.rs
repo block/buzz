@@ -1986,6 +1986,24 @@ async fn handle_delete_group(
     Ok(())
 }
 
+/// Pick the channel role for a `kind:9021` self-join.
+///
+/// The joiner cannot state a role — the event carries none — so the relay has to
+/// choose. `Bot` is not a rung on the Owner > Admin > Member > Guest ladder; it
+/// is a separate designation, so classifying an agent here cannot shadow a human
+/// role. `agent_owner_pubkey IS NOT NULL` is the same agent discriminator used
+/// elsewhere in the codebase (see `buzz_db::usage::user_counts`).
+///
+/// Takes the `get_agent_channel_policy` row so the decision stays unit-testable.
+fn self_join_role(
+    agent_channel_policy: Option<&(String, Option<Vec<u8>>)>,
+) -> buzz_db::channel::MemberRole {
+    match agent_channel_policy {
+        Some((_, Some(_owner))) => buzz_db::channel::MemberRole::Bot,
+        _ => buzz_db::channel::MemberRole::Member,
+    }
+}
+
 async fn handle_join_request(
     tenant: &TenantContext,
     event: &Event,
@@ -2017,16 +2035,41 @@ async fn handle_join_request(
         return Ok(());
     }
 
+    // Role on self-join: kind:9021 carries no role and the joiner cannot express
+    // one, so the relay has to pick. Use the same agent discriminator the rest of
+    // the codebase already relies on — `agent_owner_pubkey IS NOT NULL`, see
+    // `buzz_db::usage::user_counts` — instead of assuming every joiner is human.
+    //
+    // Assigning `Member` to an agent is not cosmetic: clients treat the channel
+    // role as the agent signal, so a self-joined agent is silently excluded from
+    // @mention eligibility with no in-app way to repair it (changing an active
+    // member's role is owner/admin-only).
+    //
+    // This deliberately does NOT touch `handle_put_user`: there the caller states
+    // the role explicitly and must keep admin/member/guest for humans. The relay
+    // only decides where no one else can.
+    let role = match state
+        .db
+        .get_agent_channel_policy(tenant.community(), &actor_bytes)
+        .await
+    {
+        Ok(policy) => self_join_role(policy.as_ref()),
+        // Never fail a join over the classification lookup — fall back to the
+        // previous behaviour, which is also the safer of the two roles.
+        Err(e) => {
+            warn!(
+                channel = %channel_id,
+                error = %e,
+                "kind:9021 join — agent classification lookup failed, defaulting to member"
+            );
+            buzz_db::channel::MemberRole::Member
+        }
+    };
+
     // Add as member (idempotent — add_member handles duplicates).
     state
         .db
-        .add_member(
-            tenant.community(),
-            channel_id,
-            &actor_bytes,
-            buzz_db::channel::MemberRole::Member,
-            None,
-        )
+        .add_member(tenant.community(), channel_id, &actor_bytes, role, None)
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
 
@@ -3590,6 +3633,35 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_join_role_classifies_an_agent_as_bot() {
+        let policy = ("anyone".to_string(), Some(vec![0xab; 32]));
+        assert_eq!(
+            self_join_role(Some(&policy)),
+            buzz_db::channel::MemberRole::Bot,
+            "a user row carrying an agent owner is an agent"
+        );
+    }
+
+    #[test]
+    fn self_join_role_classifies_a_human_as_member() {
+        let policy = ("anyone".to_string(), None);
+        assert_eq!(
+            self_join_role(Some(&policy)),
+            buzz_db::channel::MemberRole::Member,
+            "a user row with no agent owner is a human"
+        );
+    }
+
+    #[test]
+    fn self_join_role_defaults_to_member_without_a_user_row() {
+        assert_eq!(
+            self_join_role(None),
+            buzz_db::channel::MemberRole::Member,
+            "no row means nothing is known — keep the pre-existing behaviour"
+        );
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {
