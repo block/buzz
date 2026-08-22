@@ -54,21 +54,29 @@ import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds.ts";
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const CHANNEL_ID = "11111111-2222-3333-4444-555555555555";
+/** The expanded DM a mid-send agent mention creates (usePrepareDmSendChannel). */
+const EXPANDED_DM_ID = "99999999-8888-7777-6666-555555555555";
 const AGENT_PUBKEY = "a".repeat(64);
 const ROOT_ID = "1".repeat(64);
+const OTHER_ROOT_ID = "2".repeat(64);
 const REPLY_ID = "3".repeat(64);
 
 const CHANNEL = { id: CHANNEL_ID, name: "agents", channelType: "channel" };
+const EXPANDED_DM = {
+  id: EXPANDED_DM_ID,
+  name: "agent dm",
+  channelType: "dm",
+};
 
 /** The user's top-level message that p-tags the agent. */
-function topLevelEvent() {
+function topLevelEvent({ id = ROOT_ID, channelId = CHANNEL_ID } = {}) {
   return {
-    id: ROOT_ID,
+    id,
     pubkey: "b".repeat(64),
     created_at: 100,
     kind: KIND_STREAM_MESSAGE,
     tags: [
-      ["h", CHANNEL_ID],
+      ["h", channelId],
       ["p", AGENT_PUBKEY],
     ],
     content: "@agent hello",
@@ -77,15 +85,15 @@ function topLevelEvent() {
 }
 
 /** The agent's hidden NIP-10 reply to that message. */
-function agentReplyEvent() {
+function agentReplyEvent({ rootId = ROOT_ID, channelId = CHANNEL_ID } = {}) {
   return {
     id: REPLY_ID,
     pubkey: AGENT_PUBKEY,
     created_at: 101,
     kind: KIND_STREAM_MESSAGE,
     tags: [
-      ["h", CHANNEL_ID],
-      ["e", ROOT_ID, "", "reply"],
+      ["h", channelId],
+      ["e", rootId, "", "reply"],
     ],
     content: "on it",
     sig: "0".repeat(128),
@@ -116,9 +124,9 @@ async function mountAutoOpen() {
 
   let captured = null;
 
-  function Inner({ hasActiveAuxiliaryPanel }) {
+  function Inner({ hasActiveAuxiliaryPanel, activeChannel }) {
     const result = useAgentReplyAutoOpen({
-      activeChannel: CHANNEL,
+      activeChannel,
       agentPubkeys: new Set([AGENT_PUBKEY]),
       hasActiveAuxiliaryPanel,
       relaySelfPubkey: null,
@@ -138,13 +146,16 @@ async function mountAutoOpen() {
   const container = document.createElement("div");
   const root = createRoot(container);
 
-  const render = async (hasActiveAuxiliaryPanel) => {
+  const render = async (hasActiveAuxiliaryPanel, activeChannel = CHANNEL) => {
     await act(async () => {
       root.render(
         React.createElement(
           QueryClientProvider,
           { client: queryClient },
-          React.createElement(Inner, { hasActiveAuxiliaryPanel }),
+          React.createElement(Inner, {
+            hasActiveAuxiliaryPanel,
+            activeChannel,
+          }),
         ),
       );
     });
@@ -156,9 +167,15 @@ async function mountAutoOpen() {
     calls,
     render,
     /** Record the user's top-level agent-targeted send. */
-    sendTopLevel: async () => {
+    sendTopLevel: async (event = topLevelEvent()) => {
       await act(async () => {
-        captured(topLevelEvent());
+        captured(event);
+      });
+    },
+    /** Record a send that failed — the callback receives null. */
+    sendFailed: async () => {
+      await act(async () => {
+        captured(null);
       });
     },
     /**
@@ -168,7 +185,7 @@ async function mountAutoOpen() {
      * The interception is scoped to this one synchronous emit so React's own
      * scheduling is never affected.
      */
-    emitReplyCapturingTimer: () => {
+    emitReplyCapturingTimer: (reply = agentReplyEvent()) => {
       const deferred = [];
       const realSetTimeout = globalThis.setTimeout;
       globalThis.setTimeout = (fn, ms, ...rest) => {
@@ -179,11 +196,24 @@ async function mountAutoOpen() {
         return realSetTimeout(fn, ms, ...rest);
       };
       try {
-        for (const fn of [...liveCallbacks]) fn(agentReplyEvent());
+        for (const fn of [...liveCallbacks]) fn(reply);
       } finally {
         globalThis.setTimeout = realSetTimeout;
       }
       return deferred;
+    },
+    /**
+     * Emit a reply with the real timer, then flush the macrotask queue. Used
+     * by the unmount test, where the point is that a genuinely scheduled
+     * timer must be cancelled rather than merely captured.
+     */
+    emitReplyWithRealTimer: (reply = agentReplyEvent()) => {
+      for (const fn of [...liveCallbacks]) fn(reply);
+    },
+    flushTimers: async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      });
     },
     runDeferred: async (deferred) => {
       await act(async () => {
@@ -254,6 +284,118 @@ describe("useAgentReplyAutoOpen deferred apply", () => {
       harness.calls,
       [],
       "the deferred batch must bail rather than displace the user's panel",
+    );
+
+    await harness.unmount();
+  });
+
+  it("cancels a scheduled open when the screen unmounts first", async () => {
+    const harness = await mountAutoOpen();
+    await harness.sendTopLevel();
+
+    // Real timer this time: the point is that an actually-scheduled callback
+    // is cleared on unmount, not merely withheld by the test.
+    harness.emitReplyWithRealTimer();
+    await harness.unmount();
+    await harness.flushTimers();
+
+    assert.deepEqual(
+      harness.calls,
+      [],
+      "an unmounted screen must not run the deferred setters",
+    );
+  });
+});
+
+describe("useAgentReplyAutoOpen pending-trigger lifecycle", () => {
+  beforeEach(() => {
+    mock.restoreAll();
+  });
+
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  it("opens in the expanded DM the send was redirected to", async () => {
+    const harness = await mountAutoOpen();
+
+    // Mentioning an agent in a DM creates an expanded DM mid-send, so the
+    // published event carries the new channel in its h tag. The pane then
+    // navigates there — after the send has already resolved.
+    await harness.sendTopLevel(topLevelEvent({ channelId: EXPANDED_DM_ID }));
+    await harness.render(false, EXPANDED_DM);
+
+    const deferred = harness.emitReplyCapturingTimer(
+      agentReplyEvent({ channelId: EXPANDED_DM_ID }),
+    );
+    assert.equal(
+      deferred.length,
+      1,
+      "the redirected send should still arm the trigger",
+    );
+
+    await harness.runDeferred(deferred);
+
+    assert.deepEqual(
+      harness.calls.find(([name]) => name === "setOpenThreadHeadId"),
+      ["setOpenThreadHeadId", ROOT_ID],
+      "the expanded DM's reply should open its own thread",
+    );
+
+    await harness.unmount();
+  });
+
+  it("ignores a reply that arrives on a different channel", async () => {
+    const harness = await mountAutoOpen();
+    await harness.sendTopLevel();
+
+    const deferred = harness.emitReplyCapturingTimer(
+      agentReplyEvent({ channelId: EXPANDED_DM_ID }),
+    );
+
+    assert.deepEqual(
+      deferred,
+      [],
+      "a reply on another channel must not schedule an open",
+    );
+    assert.deepEqual(harness.calls, [], "and must not touch panel state");
+
+    await harness.unmount();
+  });
+
+  it("clears the pending trigger when a later send fails", async () => {
+    const harness = await mountAutoOpen();
+
+    // Send A succeeds and arms the trigger.
+    await harness.sendTopLevel();
+    // Send B fails. The user is waiting on B, so a late reply to A must not
+    // steal the panel.
+    await harness.sendFailed();
+
+    const deferred = harness.emitReplyCapturingTimer();
+
+    assert.deepEqual(
+      deferred,
+      [],
+      "a failed send should have cleared the earlier trigger",
+    );
+    assert.deepEqual(harness.calls, [], "and no panel state should change");
+
+    await harness.unmount();
+  });
+
+  it("does not arm on a reply to an unrelated root", async () => {
+    const harness = await mountAutoOpen();
+    await harness.sendTopLevel();
+
+    const deferred = harness.emitReplyCapturingTimer(
+      agentReplyEvent({ rootId: OTHER_ROOT_ID }),
+    );
+
+    assert.deepEqual(
+      deferred,
+      [],
+      "a reply rooted elsewhere must not open a thread",
     );
 
     await harness.unmount();
