@@ -356,7 +356,7 @@ export const MessageRow = React.memo(
       message.body,
       message.tags,
     );
-    const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
+    const bodyOffsetClass = emojiOnly ? "mt-1" : "mt-conversation-body";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
 
@@ -472,7 +472,7 @@ export const MessageRow = React.memo(
             <VideoReviewCommentMarkdown
               channelNames={channelNames}
               className={cn(
-                "max-w-full text-sm",
+                "max-w-full text-message",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
@@ -719,7 +719,7 @@ export const MessageRow = React.memo(
             botIdenticonValue={message.author}
           >
             <button
-              className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               type="button"
             >
               {authorNode}
@@ -952,7 +952,7 @@ export const MessageRow = React.memo(
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
             playEntrance && "motion-enter-conversation",
-            "py-1",
+            "py-conversation-row",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
               : isThreadReplyLayout
@@ -974,18 +974,22 @@ export const MessageRow = React.memo(
             <>
               {selectionCheckboxNode}
               {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
+                <div className={bodyContainerClass} data-testid="message-body">
+                  {messageBodyNode}
+                </div>
               </div>
             </>
           ) : (
             <>
               {selectionCheckboxNode}
               {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
+                <div className={bodyContainerClass} data-testid="message-body">
+                  {messageBodyNode}
+                </div>
               </div>
             </>
           )}

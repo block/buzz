@@ -285,6 +285,9 @@ type MockBridgeOptions = {
   clearPendingNavigationDeepLinksError?: string;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
+   * community mid-startup and observe the fail-closed scope check. */
+  startManagedAgentDelayMs?: number;
   /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
   mediaProxyInitiallyUnavailable?: boolean;
   /** Hold mock send live echoes until the E2E release seam is invoked. */
@@ -354,6 +357,10 @@ type MockBridgeOptions = {
   nostrBindSignDelayMs?: number;
   /** Reject successive mock WebSocket connect attempts, then resume. */
   websocketConnectErrors?: string[];
+  /** Deliver AUTH synchronously, before the mock connect command resolves. */
+  websocketAuthBeforeConnectResolves?: boolean;
+  /** Stall the first AUTH signing command forever; later attempts complete. */
+  stallFirstAuthSigning?: boolean;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in

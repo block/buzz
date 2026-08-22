@@ -355,13 +355,17 @@ without touching the composer.
 
 ## Two things the build changed that are worth knowing
 
-**`lib.rs` had to be extracted before this could land.** Registering two Tauri
-commands needs two lines, and `lib.rs` was already past the repository's
-1000-line ceiling, so the ratchet refused them. `CONTEXT.md` says to extract
-rather than squash, so the 320-line `generate_handler!` list moved to
-`command_registry.rs` as a macro. It is a macro and not a function so that each
-command path still resolves against `lib.rs`'s imports — notably its
-`use commands::*` glob — at the expansion site. `lib.rs` went 1013 → 688.
+**`lib.rs` had to be extracted before this could land — and then un-extracted.**
+Registering two Tauri commands needs two lines, and `lib.rs` was past the
+repository's 1000-line ceiling, so the 320-line `generate_handler!` list moved
+into a `command_registry.rs` macro.
+
+That lasted one day. Upstream's 0.5.18 shipped `lib.rs` at 932 lines *and* 13
+new command registrations, which would have landed inside a 338-line conflict —
+and a lost registration fails only at runtime, invisible to `tsc`, `cargo check`
+and the test suite. The extraction was reverted during that catch-up and the
+file deleted. The lesson is not "don't extract"; it is **don't extract the one
+block upstream edits every release**.
 
 **Drive routing is off under e2e unless a spec opts in.** Several existing
 specs upload a 16 MB file or a video specifically to assert the *relay* path,

@@ -19,6 +19,7 @@
 //! sherpa-onnx is CPU-bound and not Send-safe across await points.
 
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -158,26 +159,154 @@ impl Drop for SttPipeline {
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
 /// How many 16 kHz samples of silence before we flush to STT.
-/// 300 ms × 16 000 Hz / 256 samples-per-frame ≈ 19 frames.
-/// Previous value (28 frames / 450 ms) felt sluggish in conversation.
+/// 500 ms × 16 000 Hz / 256 samples-per-frame ≈ 31 frames.
+/// This favors natural conversational pauses over the lower latency of the
+/// previous 19-frame / 304 ms window.
 ///
 /// This window is a turn-taking quality knob, not a latency lever: an earlier
 /// env override (`BUZZ_STT_FLUSH_MS`) let it be lowered to 150 ms, which split
 /// natural mid-sentence pauses into separate messages and confused the
 /// listening agents. Reverted — the window is fixed at the production value.
-const SILENCE_FLUSH_FRAMES: usize = 19;
+const SILENCE_FLUSH_FRAMES: usize = 31;
 
 /// earshot requires exactly 256 samples per frame at 16 kHz.
 const VAD_FRAME_SAMPLES: usize = 256;
 
-/// VAD probability threshold — above this is considered speech.
-const VAD_THRESHOLD: f32 = 0.5;
+/// Earshot 1.1.0 onset operating point. Any Earshot model/version change
+/// invalidates this and `VAD_OFFSET_THRESHOLD`; re-run the matched-corpus
+/// threshold harness before updating either constant.
+const VAD_ONSET_THRESHOLD: f32 = 0.55;
+
+/// Earshot 1.1.0 offset operating point. The lower threshold keeps borderline
+/// speech inside the active utterance without changing the onset sensitivity.
+const VAD_OFFSET_THRESHOLD: f32 = 0.35;
+
+/// Consecutive onset frames required before an utterance begins.
+const VAD_ONSET_FRAMES: usize = 3;
+
+/// Audio retained before confirmed onset so initial phonemes are not clipped.
+/// A rolling pre-roll that survived a hard boundary would leak segment N into
+/// segment N+1 when the next confirmed onset occurs within
+/// `VAD_PRE_ROLL_FRAMES - VAD_ONSET_FRAMES` frames (13 frames, or 208 ms, at
+/// the shipped values) of the previous flush. Hangover and the silence flush
+/// window do not enter this bound; `reset_segment` keeps them independent by
+/// clearing pre-roll.
+const VAD_PRE_ROLL_FRAMES: usize = 16;
+
+/// Trailing silence retained in the transcript buffer (about 100 ms).
+const VAD_HANGOVER_FRAMES: usize = 6;
 
 /// Minimum voiced audio needed before an utterance may be decoded.
 /// One earshot false-positive frame is only 16 ms; requiring 192 ms prevents
 /// silence/room-noise blips from reaching Parakeet and becoming hallucinated
 /// transcript text while still preserving short replies such as "yes".
 const MIN_VOICED_FRAMES: usize = 12;
+
+#[derive(Debug, PartialEq, Eq)]
+enum VadFrameAction {
+    None,
+    Speech,
+    FirstSilence,
+    Flush,
+}
+
+struct VadEndpoint {
+    pre_roll: VecDeque<Vec<f32>>,
+    speech_buf: Vec<f32>,
+    onset_frames: usize,
+    silence_frames: usize,
+    voiced_frames: usize,
+    in_speech: bool,
+}
+
+impl VadEndpoint {
+    fn new() -> Self {
+        Self {
+            pre_roll: VecDeque::with_capacity(VAD_PRE_ROLL_FRAMES),
+            speech_buf: Vec::new(),
+            onset_frames: 0,
+            silence_frames: 0,
+            voiced_frames: 0,
+            in_speech: false,
+        }
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: Vec<f32>,
+        probability: f32,
+        accepts_audio: bool,
+        flush_allowed: bool,
+        flush_frames: usize,
+    ) -> VadFrameAction {
+        if !accepts_audio {
+            self.pre_roll.clear();
+            self.onset_frames = 0;
+            return VadFrameAction::None;
+        }
+
+        if !self.in_speech {
+            self.pre_roll.push_back(frame);
+            if self.pre_roll.len() > VAD_PRE_ROLL_FRAMES {
+                self.pre_roll.pop_front();
+            }
+
+            if probability > VAD_ONSET_THRESHOLD {
+                self.onset_frames += 1;
+            } else {
+                self.onset_frames = 0;
+            }
+
+            if self.onset_frames < VAD_ONSET_FRAMES {
+                return VadFrameAction::None;
+            }
+
+            self.in_speech = true;
+            self.silence_frames = 0;
+            self.voiced_frames = self.onset_frames;
+            self.onset_frames = 0;
+            for buffered in self.pre_roll.drain(..) {
+                self.speech_buf.extend_from_slice(&buffered);
+            }
+            return VadFrameAction::Speech;
+        }
+
+        if probability > VAD_OFFSET_THRESHOLD {
+            self.silence_frames = 0;
+            self.voiced_frames += 1;
+            self.speech_buf.extend_from_slice(&frame);
+            return VadFrameAction::Speech;
+        }
+
+        self.silence_frames += 1;
+        self.speech_buf.extend_from_slice(&frame);
+        if flush_allowed && self.silence_frames >= flush_frames {
+            let excess_silence = self.silence_frames.saturating_sub(VAD_HANGOVER_FRAMES);
+            let retained_samples = self
+                .speech_buf
+                .len()
+                .saturating_sub(excess_silence * VAD_FRAME_SAMPLES);
+            self.speech_buf.truncate(retained_samples);
+            VadFrameAction::Flush
+        } else if self.silence_frames == 1 {
+            VadFrameAction::FirstSilence
+        } else {
+            VadFrameAction::None
+        }
+    }
+
+    fn reset_segment(&mut self) {
+        self.speech_buf.clear();
+        // A hard message boundary also clears pre-roll: fast follow-up turns
+        // may receive less than the full window, but no frame can be decoded
+        // into both adjacent transcript messages.
+        self.pre_roll.clear();
+        self.onset_frames = 0;
+        self.silence_frames = 0;
+        self.voiced_frames = 0;
+        self.in_speech = false;
+    }
+}
 
 /// How long the worker waits on the audio channel before checking the shutdown flag.
 const RECV_TIMEOUT: Duration = Duration::from_millis(50);
@@ -279,14 +408,8 @@ fn stt_worker(
     let mut input_buf_48k: Vec<f32> = Vec::with_capacity(chunk_in * 2);
     // Leftover 16 kHz samples that didn't fill a full VAD frame.
     let mut leftover_16k: Vec<f32> = Vec::new();
-    // Accumulated speech frames (16 kHz).
-    let mut speech_buf: Vec<f32> = Vec::new();
-    // Consecutive silence frame count.
-    let mut silence_frames: usize = 0;
-    // Whether we're currently in a speech segment.
-    let mut in_speech = false;
-    // Number of frames earshot classified as voiced in the current segment.
-    let mut voiced_frames = 0;
+    // Model-independent endpointing state around Earshot's frame probabilities.
+    let mut endpoint = VadEndpoint::new();
     // Silence flush window (frames) — fixed at the production value.
     let flush_frames = SILENCE_FLUSH_FRAMES;
     // EXPERIMENTAL: speculative decode result + the voiced-frame count it was
@@ -315,12 +438,18 @@ fn stt_worker(
                 || manual_mic_unmuted
                     .as_ref()
                     .is_some_and(|manual| manual.load(Ordering::Acquire));
-            if transmit_was_active && !transmit_now && in_speech && !speech_buf.is_empty() {
-                flush_to_stt(&speech_buf, voiced_frames, &recognizer, &text_tx);
-                speech_buf.clear();
-                silence_frames = 0;
-                in_speech = false;
-                voiced_frames = 0;
+            if transmit_was_active
+                && !transmit_now
+                && endpoint.in_speech
+                && !endpoint.speech_buf.is_empty()
+            {
+                flush_to_stt(
+                    &endpoint.speech_buf,
+                    endpoint.voiced_frames,
+                    &recognizer,
+                    &text_tx,
+                );
+                endpoint.reset_segment();
             }
             transmit_was_active = transmit_now;
         }
@@ -351,10 +480,7 @@ fn stt_worker(
                     &resampled,
                     &mut leftover_16k,
                     &mut vad,
-                    &mut speech_buf,
-                    &mut silence_frames,
-                    &mut in_speech,
-                    &mut voiced_frames,
+                    &mut endpoint,
                     flush_frames,
                     (speculative_enabled, &mut speculative),
                     &recognizer,
@@ -413,10 +539,7 @@ fn process_16k_samples(
     samples: &[f32],
     leftover: &mut Vec<f32>,
     vad: &mut earshot::Detector<earshot::DefaultPredictor>,
-    speech_buf: &mut Vec<f32>,
-    silence_frames: &mut usize,
-    in_speech: &mut bool,
-    voiced_frames: &mut usize,
+    endpoint: &mut VadEndpoint,
     flush_frames: usize,
     speculative: (bool, &mut Option<(String, usize)>),
     recognizer: &sherpa_onnx::OfflineRecognizer,
@@ -431,73 +554,61 @@ fn process_16k_samples(
         let frame: Vec<f32> = leftover.drain(..VAD_FRAME_SAMPLES).collect();
         let clamped: Vec<f32> = frame.iter().map(|&s| s.clamp(-1.0, 1.0)).collect();
         let prob = vad.predict_f32(&clamped);
-        let is_speech = prob > VAD_THRESHOLD;
-
         let manually_open = manual_mic_unmuted.is_some_and(|manual| manual.load(Ordering::Acquire));
         let ptt_held = ptt_active.is_some_and(|ptt| ptt.load(Ordering::Acquire));
-        // Shortcut-enabled mode accepts input from either the held shortcut or
-        // a manually open microphone.
-        let is_speech = if ptt_active.is_some() {
-            is_speech && (ptt_held || manually_open)
-        } else {
-            is_speech
-        };
+        let accepts_audio = ptt_active.is_none() || ptt_held || manually_open;
         // A held shortcut means "I am not done talking": silence never ends
         // the utterance while it is held. VAD pause flushing applies in pure
         // VAD mode, or with a manually open mic once the shortcut is up.
-        let vad_flush_allowed = vad_flush_allowed(ptt_active.is_some(), manually_open, ptt_held);
+        let flush_allowed = vad_flush_allowed(ptt_active.is_some(), manually_open, ptt_held);
 
-        if is_speech {
-            *silence_frames = 0;
-            *in_speech = true;
-            *voiced_frames += 1;
-            speech_buf.extend_from_slice(&frame);
-            // New voiced audio invalidates any speculative decode.
-            speculative.take();
-
-            // OOM guard: flush and reset if the buffer exceeds 30 s of audio.
-            if speech_buf.len() >= MAX_SPEECH_SAMPLES {
-                flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx);
-                speech_buf.clear();
-                *silence_frames = 0;
-                *in_speech = false;
-                *voiced_frames = 0;
+        match endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames) {
+            VadFrameAction::Speech => {
+                // New voiced audio invalidates any speculative decode.
+                speculative.take();
             }
-        } else if *in_speech {
-            // Still accumulate during brief silence gaps.
-            speech_buf.extend_from_slice(&frame);
-            *silence_frames += 1;
-
-            // EXPERIMENTAL: kick the Parakeet decode at the first silent
-            // frame so it overlaps the flush window. speech_buf keeps
-            // accumulating silence afterwards, but trailing silence does not
-            // change the transcript; any resumed speech invalidates the
-            // speculative result above.
-            if speculative_enabled
-                && speculative.is_none()
-                && vad_flush_allowed
-                && has_enough_voiced_audio(*voiced_frames)
-            {
-                speculative.replace((decode_speech(recognizer, speech_buf), *voiced_frames));
+            VadFrameAction::FirstSilence => {
+                // Start speculative decode at the first silent frame. Any
+                // resumed speech invalidates this result in the arm above.
+                if speculative_enabled
+                    && speculative.is_none()
+                    && flush_allowed
+                    && has_enough_voiced_audio(endpoint.voiced_frames)
+                {
+                    speculative.replace((
+                        decode_speech(recognizer, &endpoint.speech_buf),
+                        endpoint.voiced_frames,
+                    ));
+                }
             }
-
-            // A manually open microphone behaves like normal VAD. A held
-            // shortcut keeps the utterance grouped until key release.
-            if vad_flush_allowed && *silence_frames >= flush_frames {
-                // End of utterance — transcribe (or emit the speculative decode).
+            VadFrameAction::Flush => {
                 match speculative.take() {
-                    Some((text, decoded_at)) if decoded_at == *voiced_frames => {
+                    Some((text, decoded_at)) if decoded_at == endpoint.voiced_frames => {
                         send_transcript(text, text_tx);
                     }
-                    _ => flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx),
+                    _ => flush_to_stt(
+                        &endpoint.speech_buf,
+                        endpoint.voiced_frames,
+                        recognizer,
+                        text_tx,
+                    ),
                 }
-                speech_buf.clear();
-                *silence_frames = 0;
-                *in_speech = false;
-                *voiced_frames = 0;
+                endpoint.reset_segment();
             }
+            VadFrameAction::None => {}
         }
-        // If not in speech and not accumulating, just discard the frame.
+
+        // Preserve the 30 s guard even while PTT suppresses silence flushing.
+        if endpoint.speech_buf.len() >= MAX_SPEECH_SAMPLES {
+            flush_to_stt(
+                &endpoint.speech_buf,
+                endpoint.voiced_frames,
+                recognizer,
+                text_tx,
+            );
+            endpoint.reset_segment();
+            speculative.take();
+        }
     }
 }
 
@@ -511,7 +622,13 @@ fn flush_to_stt(
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
 ) {
-    if speech_buf.is_empty() || !has_enough_voiced_audio(voiced_frames) {
+    if speech_buf.is_empty() {
+        return;
+    }
+    if !has_enough_voiced_audio(voiced_frames) {
+        eprintln!(
+            "buzz-desktop: STT dropped short VAD segment ({voiced_frames}/{MIN_VOICED_FRAMES} voiced frames)"
+        );
         return;
     }
     send_transcript(decode_speech(recognizer, speech_buf), text_tx);
@@ -570,13 +687,185 @@ use super::drain_until_shutdown;
 
 #[cfg(test)]
 mod tests {
-    use super::{has_enough_voiced_audio, vad_flush_allowed, MIN_VOICED_FRAMES};
+    use super::{
+        has_enough_voiced_audio, vad_flush_allowed, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
+        SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
+    };
+
+    fn frame(value: f32) -> Vec<f32> {
+        vec![value; VAD_FRAME_SAMPLES]
+    }
 
     #[test]
     fn short_vad_blips_do_not_reach_the_recognizer() {
         assert!(!has_enough_voiced_audio(1));
         assert!(!has_enough_voiced_audio(MIN_VOICED_FRAMES - 1));
         assert!(has_enough_voiced_audio(MIN_VOICED_FRAMES));
+    }
+
+    #[test]
+    fn confirmed_onset_prepends_pre_roll_once() {
+        let mut endpoint = VadEndpoint::new();
+        for value in 0..VAD_PRE_ROLL_FRAMES - VAD_ONSET_FRAMES {
+            assert_eq!(
+                endpoint.process_frame(frame(value as f32), 0.0, true, true, SILENCE_FLUSH_FRAMES),
+                VadFrameAction::None
+            );
+        }
+        for value in 0..VAD_ONSET_FRAMES {
+            let action = endpoint.process_frame(
+                frame(100.0 + value as f32),
+                0.9,
+                true,
+                true,
+                SILENCE_FLUSH_FRAMES,
+            );
+            if value + 1 == VAD_ONSET_FRAMES {
+                assert_eq!(action, VadFrameAction::Speech);
+            } else {
+                assert_eq!(action, VadFrameAction::None);
+            }
+        }
+
+        assert_eq!(
+            endpoint.speech_buf.len(),
+            VAD_PRE_ROLL_FRAMES * VAD_FRAME_SAMPLES
+        );
+        assert_eq!(endpoint.speech_buf[0], 0.0);
+        assert_eq!(endpoint.speech_buf[VAD_FRAME_SAMPLES], 1.0);
+        assert_eq!(endpoint.pre_roll.len(), 0);
+        endpoint.process_frame(frame(200.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        assert_eq!(
+            endpoint.speech_buf.len(),
+            (VAD_PRE_ROLL_FRAMES + 1) * VAD_FRAME_SAMPLES
+        );
+    }
+
+    #[test]
+    fn onset_requires_consecutive_high_frames() {
+        let mut endpoint = VadEndpoint::new();
+        for probability in [0.9, 0.9, 0.2, 0.9, 0.9] {
+            assert_eq!(
+                endpoint.process_frame(frame(1.0), probability, true, true, SILENCE_FLUSH_FRAMES),
+                VadFrameAction::None
+            );
+        }
+        assert_eq!(
+            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES),
+            VadFrameAction::Speech
+        );
+    }
+
+    #[test]
+    fn offset_hysteresis_preserves_borderline_speech() {
+        let mut endpoint = VadEndpoint::new();
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        assert_eq!(
+            endpoint.process_frame(frame(2.0), 0.4, true, true, SILENCE_FLUSH_FRAMES),
+            VadFrameAction::Speech
+        );
+        assert_eq!(endpoint.silence_frames, 0);
+    }
+
+    #[test]
+    fn below_offset_threshold_starts_silence() {
+        let mut endpoint = VadEndpoint::new();
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        assert_eq!(
+            endpoint.process_frame(frame(0.0), 0.3, true, true, SILENCE_FLUSH_FRAMES),
+            VadFrameAction::FirstSilence
+        );
+        assert_eq!(endpoint.silence_frames, 1);
+    }
+
+    #[test]
+    fn short_segment_reaches_the_visible_drop_path() {
+        let mut endpoint = VadEndpoint::new();
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        let mut action = VadFrameAction::None;
+        for _ in 0..SILENCE_FLUSH_FRAMES {
+            action = endpoint.process_frame(frame(0.0), 0.0, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        assert_eq!(action, VadFrameAction::Flush);
+        assert!(!has_enough_voiced_audio(endpoint.voiced_frames));
+        assert!(!endpoint.speech_buf.is_empty());
+    }
+
+    #[test]
+    fn silence_flush_retains_only_hangover_audio() {
+        let mut endpoint = VadEndpoint::new();
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        let speech_len = endpoint.speech_buf.len();
+        for index in 1..=SILENCE_FLUSH_FRAMES {
+            let action = endpoint.process_frame(frame(0.0), 0.0, true, true, SILENCE_FLUSH_FRAMES);
+            if index == SILENCE_FLUSH_FRAMES {
+                assert_eq!(action, VadFrameAction::Flush);
+            }
+        }
+        assert_eq!(
+            endpoint.speech_buf.len(),
+            speech_len + 6 * VAD_FRAME_SAMPLES
+        );
+    }
+
+    #[test]
+    fn flush_boundary_never_double_includes_audio() {
+        const SEGMENT_N_MARKER: f32 = 777.0;
+        let mut endpoint = VadEndpoint::new();
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(
+                frame(SEGMENT_N_MARKER),
+                0.9,
+                true,
+                true,
+                SILENCE_FLUSH_FRAMES,
+            );
+        }
+        for _ in 0..SILENCE_FLUSH_FRAMES {
+            endpoint.process_frame(
+                frame(SEGMENT_N_MARKER),
+                0.0,
+                true,
+                true,
+                SILENCE_FLUSH_FRAMES,
+            );
+        }
+        endpoint.reset_segment();
+
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(frame(2.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        let leaked = endpoint
+            .speech_buf
+            .iter()
+            .filter(|sample| **sample == SEGMENT_N_MARKER)
+            .count();
+        assert_eq!(leaked, 0, "segment N audio leaked into segment N+1");
+    }
+
+    #[test]
+    fn reset_prevents_pre_roll_from_leaking_between_segments() {
+        const SEGMENT_N_MARKER: f32 = 777.0;
+        let mut endpoint = VadEndpoint::new();
+        endpoint.pre_roll.push_back(frame(SEGMENT_N_MARKER));
+        endpoint.reset_segment();
+        for _ in 0..VAD_ONSET_FRAMES {
+            endpoint.process_frame(frame(2.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        }
+        let leaked = endpoint
+            .speech_buf
+            .iter()
+            .filter(|sample| **sample == SEGMENT_N_MARKER)
+            .count();
+        assert_eq!(leaked, 0, "segment N pre-roll leaked into segment N+1");
     }
 
     #[test]

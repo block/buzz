@@ -1,4 +1,11 @@
 use super::*;
+// Upstream keeps its event-builder tests inline in `events.rs`, inside a
+// `mod tests` that imports `Keys` locally. This fork extracted those tests into
+// this file for the size ratchet, and `use super::*` only reaches `events.rs`'s
+// *module-level* imports — which do not include `Keys`. So the import upstream
+// makes inside its test module has to be made here instead. Any upstream test
+// that gains a new local import will land here needing the same treatment.
+use nostr::Keys;
 
 #[test]
 fn channel_builders_reject_hash_only_names() {

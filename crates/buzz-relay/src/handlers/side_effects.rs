@@ -1049,6 +1049,55 @@ fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Resul
     Ok(tags)
 }
 
+async fn store_group_members_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
+) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
+    let group_id = channel_id.to_string();
+    let tags = group_members_tags(&group_id, &member_snapshot.members)?;
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = member_snapshot
+        .latest_member_event_timestamp(tenant.community(), channel_id, &relay_pubkey)
+        .await?
+        .map(|timestamp| timestamp + 1)
+        .unwrap_or(now)
+        .max(now);
+    let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(ts))
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|error| anyhow::anyhow!("failed to sign member snapshot: {error}"))?;
+    let (stored, inserted) = member_snapshot
+        .replace_member_event(tenant.community(), channel_id, &event)
+        .await?;
+    Ok(inserted.then_some(stored))
+}
+
+async fn dispatch_group_members_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored: Option<buzz_core::StoredEvent>,
+    relay_pubkey_hex: &str,
+) {
+    if let Some(stored) = stored {
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored,
+            KIND_NIP29_GROUP_MEMBERS,
+            relay_pubkey_hex,
+            None,
+        )
+        .await;
+    }
+}
+
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
@@ -1151,18 +1200,18 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    {
-        let tags = group_members_tags(&group_id, &members)?;
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
-            KIND_NIP29_GROUP_MEMBERS,
-            tags,
-            &relay_pubkey_hex,
-        )
+    // Re-capture membership behind the writer lock immediately before the
+    // authoritative 39002 replacement. Metadata/admin snapshots retain their
+    // existing behavior; only membership publication needs this freshness fence.
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    let mut member_snapshot = state
+        .db
+        .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
         .await?;
-    }
+    let stored_members =
+        store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
+    member_snapshot.release().await?;
+    dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
     Ok(())
 }
@@ -3052,6 +3101,68 @@ pub async fn publish_nip43_member_removed(
     publish_nip43_delta(tenant, state, 8001, target_pubkey_hex, "member-removed").await
 }
 
+/// Repair legacy kind:39002 snapshots truncated by the former 1,000-member
+/// database cap.
+///
+/// The scan is deliberately limited to canonical rosters above that boundary,
+/// so normal-sized channels and already-correct large snapshots incur no
+/// rewrites. Community identity travels with every candidate; a shared relay
+/// never resolves a channel against a neighboring tenant.
+pub async fn reconcile_large_channel_member_snapshots(
+    state: &Arc<AppState>,
+) -> anyhow::Result<usize> {
+    const LEGACY_ROSTER_LIMIT: i64 = 1_000;
+
+    let relay_pubkey = state.relay_keypair.public_key();
+    let candidates = state
+        .db
+        .list_large_channel_rosters_needing_reconciliation(
+            LEGACY_ROSTER_LIMIT,
+            &relay_pubkey.to_bytes(),
+        )
+        .await?;
+    let relay_pubkey_hex = relay_pubkey.to_hex();
+    let mut reconciled = 0usize;
+
+    for candidate in candidates {
+        let result = async {
+            let channel_id = candidate.channel_id;
+            // Hold the membership-writer lock from roster capture through
+            // replacement. Otherwise a rolling deployment can publish stale
+            // roster A after another relay commits and publishes roster B.
+            let mut member_snapshot = state
+                .db
+                .lock_member_snapshot(candidate.community_id, channel_id, &relay_pubkey.to_bytes())
+                .await?;
+            let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
+            let stored_members =
+                store_group_members_event(&tenant, state, channel_id, &mut member_snapshot).await?;
+            member_snapshot.release().await?;
+            dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
+            Ok::<bool, anyhow::Error>(true)
+        }
+        .await;
+
+        match result {
+            Ok(true) => reconciled += 1,
+            Ok(false) => {}
+            Err(error) => {
+                metrics::counter!("buzz_channel_roster_reconciliation_failures_total").increment(1);
+                warn!(
+                    community_id = %candidate.community_id,
+                    host = %candidate.host,
+                    channel_id = %candidate.channel_id,
+                    %error,
+                    "large channel roster reconciliation failed"
+                );
+            }
+        }
+    }
+
+    metrics::counter!("buzz_channel_roster_reconciliations_total").increment(reconciled as u64);
+    Ok(reconciled)
+}
+
 /// Reconcile channels that exist in the DB but don't have kind:39000 events.
 ///
 /// This handles the case where channels were created via direct SQL inserts
@@ -3116,6 +3227,61 @@ pub async fn reconcile_channel_events(
     Ok(())
 }
 
+/// Test-only barrier hooks for [`publish_nipia_archival_list`]. Lets a test
+/// hold one publisher after it has read canonical archive state and before it
+/// replaces the head, making the stale-read/late-write race deterministic.
+/// Compiled only under `cfg(test)`; the production call site is `#[cfg(test)]`.
+///
+/// The gate is scoped to a `CommunityId`: only a publisher whose tenant matches
+/// the armed community is held. Publishers from other tenants — the rapid
+/// archive/unarchive or owner-archive regressions running in parallel under the
+/// Rust test runner — pass straight through and never consume the gate armed
+/// for the concurrent-publisher test's unique tenant.
+#[cfg(test)]
+pub(crate) mod publish_test_hooks {
+    use buzz_core::tenant::CommunityId;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::{oneshot, Notify};
+
+    struct Gate {
+        community: CommunityId,
+        arrived: oneshot::Sender<()>,
+        release: Arc<Notify>,
+    }
+
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    /// Arm a one-shot barrier for `community`. Await the returned receiver to
+    /// learn when the held publisher has reached the hook (i.e. has read
+    /// canonical state); call `notify_one` on the returned handle to let it
+    /// proceed. Only the first publisher of the matching community to reach the
+    /// hook after arming is held; every other publisher passes.
+    pub(crate) fn arm(community: CommunityId) -> (oneshot::Receiver<()>, Arc<Notify>) {
+        let (tx, rx) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        *GATE.lock().unwrap() = Some(Gate {
+            community,
+            arrived: tx,
+            release: release.clone(),
+        });
+        (rx, release)
+    }
+
+    pub(super) async fn after_list_archived(community: CommunityId) {
+        let gate = {
+            let mut slot = GATE.lock().unwrap();
+            match slot.as_ref() {
+                Some(gate) if gate.community == community => slot.take(),
+                _ => None,
+            }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.arrived.send(());
+            gate.release.notified().await;
+        }
+    }
+}
+
 /// Publish a kind:13535 archived identities list event (NIP-IA).
 ///
 /// Queries all current archived identities and emits a relay-signed,
@@ -3124,29 +3290,76 @@ pub async fn publish_nipia_archival_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let archived = state.db.list_archived(tenant.community()).await?;
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    const MAX_REPLACEMENT_ATTEMPTS: usize = 8;
+    let relay_pubkey = state.relay_keypair.public_key();
+    let relay_pubkey_hex = relay_pubkey.to_hex();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
+    // A concurrent archive mutation can race between reading the current head and
+    // replacing it. Rebuild from canonical state on rejection so an older snapshot
+    // can never strand the final archive set.
+    for _ in 0..MAX_REPLACEMENT_ATTEMPTS {
+        let archived = state.db.list_archived(tenant.community()).await?;
+        // Test-only barrier: lets a test hold a stale publisher here — after it
+        // has read canonical state, before it replaces the head — so the
+        // stale-read/late-write ordering the drift check must catch is
+        // deterministic, not scheduler-dependent. Inert in production.
+        #[cfg(test)]
+        publish_test_hooks::after_list_archived(tenant.community()).await;
+        let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
+        tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 
-    for identity in &archived {
-        tags.push(
-            Tag::parse(["p", &identity.pubkey])
-                .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-        );
-    }
+        for identity in &archived {
+            tags.push(
+                Tag::parse(["p", &identity.pubkey])
+                    .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
+            );
+        }
 
-    let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
+        // NIP-16 resolves same-second replacements by event id. Force this
+        // canonical snapshot strictly past the current head instead of letting a
+        // rapid archive→unarchive randomly preserve the stale archive state.
+        let now = nostr::Timestamp::now().as_secs();
+        let previous = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
+                limit: Some(1),
+                global_only: true,
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await?;
+        let created_at = previous
+            .first()
+            .map(|event| (event.event.created_at.as_secs() + 1).max(now))
+            .unwrap_or(now);
 
-    let (stored, was_inserted) = state
-        .db
-        .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
-    if was_inserted {
+        let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
+
+        let (stored, was_inserted) = state
+            .db
+            .replace_addressable_event(tenant.community(), &event, None)
+            .await?;
+        if !was_inserted {
+            continue;
+        }
+
+        let current_archived = state.db.list_archived(tenant.community()).await?;
+        let snapshot_is_current =
+            archived
+                .iter()
+                .map(|identity| identity.pubkey.as_str())
+                .eq(current_archived
+                    .iter()
+                    .map(|identity| identity.pubkey.as_str()));
+        if !snapshot_is_current {
+            continue;
+        }
+
         dispatch_persistent_event(
             tenant,
             state,
@@ -3156,13 +3369,16 @@ pub async fn publish_nipia_archival_list(
             None,
         )
         .await;
+        info!(
+            archived_count = archived.len(),
+            "NIP-IA archived identities list published"
+        );
+        return Ok(());
     }
 
-    info!(
-        archived_count = archived.len(),
-        "NIP-IA archived identities list published"
-    );
-    Ok(())
+    anyhow::bail!(
+        "failed to publish kind:{KIND_IA_ARCHIVED_LIST} after {MAX_REPLACEMENT_ATTEMPTS} concurrent replacements"
+    )
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for

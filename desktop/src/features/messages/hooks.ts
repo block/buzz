@@ -553,6 +553,11 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          // Upstream's tenant-scope guard owns positions 11 and 12 as of
+          // 0.5.18; this send path does not capture either, so they are
+          // skipped rather than reordered.
+          undefined,
+          undefined,
           supersedesTags,
           // `@channel` / `@here` written in the message text. Read from the
           // content rather than tracked as composer state so a draft restored

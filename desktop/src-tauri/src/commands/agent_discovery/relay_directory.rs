@@ -9,6 +9,41 @@ use crate::{
 
 const RELAY_DIRECTORY_PAGE_SIZE: usize = 500;
 const RELAY_FILTER_BATCH_SIZE: usize = 10;
+/// Per-rebuild ceiling on directory-rebuild `/query` requests in flight at once.
+/// The rebuild fans dozens of exact-author batches across the relay; issuing
+/// them serially dominated agent-mention send latency (~6 s for ~100
+/// candidates). A bounded window collapses that to a few round trips while
+/// keeping the request rate well under the relay's admission gate, which
+/// back-pressures any 429 anyway. Each rebuild builds one semaphore and shares
+/// it across every phase, so a single rebuild's runtime-directory and
+/// owner-profile phases — which run concurrently under one `try_join!` — never
+/// exceed it together. (Overlapping rebuilds each hold their own budget.)
+const RELAY_DIRECTORY_MAX_CONCURRENCY: usize = 8;
+
+/// Run one `query_relay` request per `RELAY_FILTER_BATCH_SIZE` chunk of
+/// `filters`, each acquiring a permit from `semaphore` so the total in-flight
+/// request count stays within the shared ceiling even when several batch sets
+/// run concurrently. Returned events are concatenated; order is unspecified —
+/// every caller keys the events by pubkey downstream, so ordering is irrelevant.
+async fn query_filter_batches(
+    state: &AppState,
+    semaphore: &tokio::sync::Semaphore,
+    filters: &[serde_json::Value],
+    error_label: &str,
+) -> Result<Vec<nostr::Event>, String> {
+    let pages = futures_util::future::try_join_all(filters.chunks(RELAY_FILTER_BATCH_SIZE).map(
+        |batch| async move {
+            let _permit = semaphore.acquire().await.map_err(|error| {
+                format!("{error_label}: directory concurrency semaphore closed: {error}")
+            })?;
+            query_relay(state, batch)
+                .await
+                .map_err(|error| format!("{error_label}: {error}"))
+        },
+    ))
+    .await?;
+    Ok(pages.into_iter().flatten().collect())
+}
 
 fn exact_author_filters(pubkeys: &[String], kind: u16) -> Vec<serde_json::Value> {
     pubkeys
@@ -77,15 +112,10 @@ async fn query_all_relay_pages(
     }
 }
 
-fn owner_only_relay_directory() -> bool {
-    crate::managed_agents::owner_only_access_build()
-}
-
-fn retain_verified_owner(
-    verified_owners: &mut std::collections::HashMap<String, String>,
-    required_owner: &str,
-) {
-    verified_owners.retain(|_, owner| owner.eq_ignore_ascii_case(required_owner));
+fn retain_agents_allowed_by_build(agents: &mut Vec<RelayAgentInfo>, require_verified_owner: bool) {
+    if require_verified_owner {
+        agents.retain(|agent| agent.owner_pubkey.is_some());
+    }
 }
 
 pub(crate) async fn list_relay_agents_for_state(
@@ -100,7 +130,6 @@ async fn list_relay_agents_for_selection(
     channel_id: Option<&str>,
 ) -> Result<Vec<RelayAgentInfo>, String> {
     let viewer_pubkey = current_user_pubkey(state)?;
-    let owner_only = owner_only_relay_directory();
     let relay_pubkey = identity_archive::fetch_relay_self(state)
         .await?
         .ok_or_else(|| "relay agent membership authority is unavailable".to_string())?;
@@ -129,60 +158,54 @@ async fn list_relay_agents_for_selection(
         return Ok(Vec::new());
     }
 
-    let mut directory_events = Vec::new();
-    let mut profile_events = Vec::new();
     let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
     let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
-    for filter_offset in (0..candidate_pubkeys.len()).step_by(RELAY_FILTER_BATCH_SIZE) {
-        let filter_end = (filter_offset + RELAY_FILTER_BATCH_SIZE).min(candidate_pubkeys.len());
-        let (directory, profiles) = tokio::join!(
-            query_relay(state, &directory_filters[filter_offset..filter_end]),
-            query_relay(state, &profile_filters[filter_offset..filter_end]),
-        );
-        directory_events.extend(
-            directory
-                .map_err(|error| format!("relay agent runtime-directory query failed: {error}"))?,
-        );
-        profile_events.extend(
-            profiles.map_err(|error| format!("relay agent owner-profile query failed: {error}"))?,
-        );
-    }
+    // One semaphore per rebuild caps `/query` requests across this rebuild's
+    // phases, so its runtime-directory and owner-profile phases below stay
+    // within the ceiling even though `try_join!` runs them concurrently.
+    let semaphore = tokio::sync::Semaphore::new(RELAY_DIRECTORY_MAX_CONCURRENCY);
+    let (directory_events, profile_events) = tokio::try_join!(
+        query_filter_batches(
+            state,
+            &semaphore,
+            &directory_filters,
+            "relay agent runtime-directory query failed",
+        ),
+        query_filter_batches(
+            state,
+            &semaphore,
+            &profile_filters,
+            "relay agent owner-profile query failed",
+        ),
+    )?;
 
     // Only the agent's signed NIP-OA profile can name the owner coordinate to
     // query. Each exact `(owner, d=agent)` filter returns at most one current
     // replaceable event, so forged 30177 coordinates cannot amplify or crowd
     // the authentic policy out of a bounded result page.
-    let mut verified_owners = nostr_convert::verified_agent_owners_from_profiles(&profile_events);
-    // The internal capability narrows the remote directory to cryptographically
-    // verified agents owned by the active user. Same-owner siblings remain
-    // mentionable because they are inside the harness's owner-only boundary;
-    // all cross-owner coordinates are discarded before policy lookup.
-    if owner_only {
-        retain_verified_owner(&mut verified_owners, &viewer_pubkey);
-    }
+    let verified_owners = nostr_convert::verified_agent_owners_from_profiles(&profile_events);
     let managed_filters = managed_policy_filters(&candidate_pubkeys, &verified_owners);
-    let mut managed_agent_events = Vec::new();
-    for filters in managed_filters.chunks(RELAY_FILTER_BATCH_SIZE) {
-        managed_agent_events.extend(
-            query_relay(state, filters)
-                .await
-                .map_err(|error| format!("relay agent managed-policy query failed: {error}"))?,
-        );
-    }
+    let managed_agent_events = query_filter_batches(
+        state,
+        &semaphore,
+        &managed_filters,
+        "relay agent managed-policy query failed",
+    )
+    .await?;
 
     let mut agents = nostr_convert::relay_agents_from_directory_events(
         &directory_events,
         &managed_agent_events,
         &profile_events,
     );
-    if owner_only {
-        agents.retain(|agent| {
-            agent
-                .owner_pubkey
-                .as_deref()
-                .is_some_and(|owner| owner.eq_ignore_ascii_case(&viewer_pubkey))
-        });
-    }
+    // Marked builds reject legacy directory records that lack a verified
+    // NIP-OA owner, but do not require that owner to equal the viewer. The
+    // verified owner's signed respond_to policy remains the authorization
+    // boundary for independently operated relay agents.
+    retain_agents_allowed_by_build(
+        &mut agents,
+        crate::managed_agents::owner_only_access_build(),
+    );
     agents.retain(|agent| member_agent_channel_ids.contains_key(&agent.pubkey));
     for agent in &mut agents {
         agent.channel_ids = member_agent_channel_ids
@@ -224,22 +247,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn owner_only_directory_keeps_only_verified_same_owner_coordinates() {
-        let viewer = "a".repeat(64);
-        let other_owner = "b".repeat(64);
-        let same_owner_agent = "c".repeat(64);
-        let other_owner_agent = "d".repeat(64);
-        let mut owners = std::collections::HashMap::from([
-            (same_owner_agent.clone(), viewer.to_uppercase()),
-            (other_owner_agent, other_owner),
-        ]);
+    fn marked_build_requires_verified_owner_without_requiring_viewer_ownership() {
+        let cross_owner = "b".repeat(64);
+        let mut agents = vec![
+            RelayAgentInfo {
+                pubkey: "a".repeat(64),
+                owner_pubkey: Some(cross_owner.clone()),
+                name: "Verified cross-owner".to_string(),
+                agent_type: "agent".to_string(),
+                channels: Vec::new(),
+                channel_ids: Vec::new(),
+                capabilities: Vec::new(),
+                status: "offline".to_string(),
+                respond_to: None,
+                respond_to_allowlist: Vec::new(),
+            },
+            RelayAgentInfo {
+                pubkey: "c".repeat(64),
+                owner_pubkey: None,
+                name: "Ownerless legacy".to_string(),
+                agent_type: "agent".to_string(),
+                channels: Vec::new(),
+                channel_ids: Vec::new(),
+                capabilities: Vec::new(),
+                status: "online".to_string(),
+                respond_to: None,
+                respond_to_allowlist: Vec::new(),
+            },
+        ];
 
-        retain_verified_owner(&mut owners, &viewer);
+        retain_agents_allowed_by_build(&mut agents, true);
 
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "Verified cross-owner");
         assert_eq!(
-            owners,
-            std::collections::HashMap::from([(same_owner_agent, viewer.to_uppercase())])
+            agents[0].owner_pubkey.as_deref(),
+            Some(cross_owner.as_str())
         );
+    }
+
+    #[test]
+    fn oss_build_preserves_ownerless_legacy_agents() {
+        let mut agents = vec![RelayAgentInfo {
+            pubkey: "a".repeat(64),
+            owner_pubkey: None,
+            name: "Ownerless legacy".to_string(),
+            agent_type: "agent".to_string(),
+            channels: Vec::new(),
+            channel_ids: Vec::new(),
+            capabilities: Vec::new(),
+            status: "online".to_string(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+        }];
+
+        retain_agents_allowed_by_build(&mut agents, false);
+
+        assert_eq!(agents.len(), 1);
+        assert!(agents[0].owner_pubkey.is_none());
     }
 
     #[test]

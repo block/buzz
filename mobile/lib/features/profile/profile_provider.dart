@@ -5,7 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
-import 'user_profile.dart';
+import '../../shared/profile/user_profile.dart';
 
 /// The current user's profile (kind:0 metadata) loaded over the relay
 /// WebSocket. Returns null when no nsec is configured or when the user has

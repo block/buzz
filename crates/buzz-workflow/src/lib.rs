@@ -887,6 +887,7 @@ async fn should_fire_workflow(
 ) -> bool {
     if let TriggerDef::ReactionAdded {
         emoji: Some(ref expected),
+        ..
     } = def.trigger
     {
         if &trigger_ctx.emoji != expected {
@@ -900,33 +901,13 @@ async fn should_fire_workflow(
         }
     }
 
-    if let TriggerDef::MessagePosted {
-        filter: Some(ref expr),
-    } = def.trigger
-    {
-        match executor::evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::debug!(
-                    workflow_id = %workflow_id,
-                    "Trigger filter evaluated false — skipping workflow"
-                );
-                return false;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    workflow_id = %workflow_id,
-                    "Trigger filter error: {e} — skipping workflow"
-                );
-                return false;
-            }
-        }
-    }
-
-    if let TriggerDef::DiffPosted {
-        filter: Some(ref expr),
-    } = def.trigger
-    {
+    let filter = match &def.trigger {
+        TriggerDef::MessagePosted { filter }
+        | TriggerDef::ReactionAdded { filter, .. }
+        | TriggerDef::DiffPosted { filter } => filter.as_ref(),
+        TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
+    };
+    if let Some(expr) = filter {
         match executor::evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
             Ok(true) => {}
             Ok(false) => {
@@ -1016,8 +997,22 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         timestamp: event.event.created_at.as_secs().to_string(),
         emoji,
         message_id,
+        is_reply: event_is_reply(&event.event),
         webhook_fields: HashMap::new(),
     }
+}
+
+/// True when an event is a threaded reply — it carries a valid NIP-10 `reply`
+/// marker. Delegates to the shared [`buzz_core::nip10`] parser so this stays in
+/// lockstep with ingest's `resolve_nip10_thread_meta`: a `root` marker alone is
+/// top-level, and a marker with a malformed (non-64-hex) event id is ignored by
+/// ingest, so it must not flip `trigger_is_reply` either — else a
+/// `trigger_is_reply == false` workflow would skip a message ingest stored as a
+/// new top-level post.
+fn event_is_reply(event: &nostr::Event) -> bool {
+    buzz_core::nip10::parse_thread_markers(&event.tags)
+        .reply
+        .is_some()
 }
 
 /// Pure authority decision for [`WorkflowEngine::check_owner_authority`].
@@ -1364,7 +1359,10 @@ steps:
 
     #[test]
     fn trigger_matches_reaction() {
-        let trigger = TriggerDef::ReactionAdded { emoji: None };
+        let trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
         assert!(trigger_matches_event(
             &trigger,
             buzz_core::kind::KIND_REACTION
@@ -1373,6 +1371,36 @@ steps:
             &trigger,
             buzz_core::kind::KIND_STREAM_MESSAGE
         ));
+    }
+
+    #[tokio::test]
+    async fn reaction_filter_matches_target_message() {
+        let yaml = r#"
+name: "React to one message"
+trigger:
+  on: reaction_added
+  filter: 'trigger_message_id == "target-message"'
+steps:
+  - id: wait
+    action: delay
+    duration: 1s
+"#;
+        let (def, _) = WorkflowEngine::parse_yaml(yaml).expect("parse failed");
+        let mut trigger_ctx = executor::TriggerContext {
+            message_id: "target-message".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(
+            should_fire_workflow(&def, &trigger_ctx, Uuid::new_v4()).await,
+            "reaction to the selected message should fire"
+        );
+
+        trigger_ctx.message_id = "different-message".to_owned();
+        assert!(
+            !should_fire_workflow(&def, &trigger_ctx, Uuid::new_v4()).await,
+            "reaction to a different message should be filtered out"
+        );
     }
 
     #[test]
@@ -1421,7 +1449,10 @@ steps:
 
     #[test]
     fn reaction_added_matches_kind_7_only() {
-        let trigger = TriggerDef::ReactionAdded { emoji: None };
+        let trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
         // Must match KIND_REACTION = 7.
         assert!(trigger_matches_event(&trigger, 7));
         // Must NOT match stream message (kind 9).
@@ -1436,6 +1467,7 @@ steps:
         // trigger_matches_event only checks the kind number.
         let trigger = TriggerDef::ReactionAdded {
             emoji: Some("thumbsup".to_owned()),
+            filter: None,
         };
         assert!(trigger_matches_event(&trigger, 7));
         assert!(!trigger_matches_event(&trigger, 9));
@@ -1458,7 +1490,10 @@ steps:
         // before calling trigger_matches_event, but verify the function itself
         // also returns false for these kinds.
         let msg_trigger = TriggerDef::MessagePosted { filter: None };
-        let react_trigger = TriggerDef::ReactionAdded { emoji: None };
+        let react_trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
 
         for kind in buzz_core::kind::KIND_WORKFLOW_TRIGGERED
             ..=buzz_core::kind::KIND_WORKFLOW_APPROVAL_DENIED
@@ -1478,7 +1513,10 @@ steps:
     fn trigger_matches_event_kind_zero_matches_nothing() {
         // Kind 0 is a profile event — no trigger should match it.
         let msg_trigger = TriggerDef::MessagePosted { filter: None };
-        let react_trigger = TriggerDef::ReactionAdded { emoji: None };
+        let react_trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
         let sched_trigger = TriggerDef::Schedule {
             cron: None,
             interval: Some("1h".to_owned()),
@@ -1564,6 +1602,144 @@ steps:
         // Non-reaction events have empty emoji.
         assert_eq!(ctx.emoji, "");
         assert!(ctx.webhook_fields.is_empty());
+        // A top-level message (no e-tags) is not a reply.
+        assert!(!ctx.is_reply);
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_true_for_threaded_message() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .tags([])
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let root_hex = root_event.id.to_hex();
+
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "a threaded reply")
+            .tags([
+                Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
+                Tag::parse(["e", &root_hex, "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(ctx.is_reply, "message with reply/root e-tags is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_true_for_reply_only_marker() {
+        // A NIP-10 `reply` marker without a `root` marker (the fallback ingest
+        // treats as `root == reply`) is still a threaded reply.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let parent = Keys::generate();
+        let parent_event = EventBuilder::new(Kind::Custom(9), "parent")
+            .sign_with_keys(&parent)
+            .expect("sign parent");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "reply only")
+            .tags([Tag::parse(["e", &parent_event.id.to_hex(), "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(ctx.is_reply, "a lone `reply` marker is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_root_only_marker() {
+        // Ingest treats `(root=Some, reply=None)` as top-level, so
+        // `event_is_reply` must too — otherwise `trigger_is_reply == false`
+        // would skip a message the relay stored as a new top-level post.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "root marker only")
+            .tags([Tag::parse(["e", &root_event.id.to_hex(), "", "root"]).expect("root tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a lone `root` marker is top-level to ingest, not a reply"
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_unmarked_e_tag() {
+        // A bare `e` tag with no NIP-10 marker (e.g. a plain mention/quote) is
+        // not treated as a thread reply — only `reply`/`root` markers count.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let other = Keys::generate();
+        let other_event = EventBuilder::new(Kind::Custom(9), "other")
+            .tags([])
+            .sign_with_keys(&other)
+            .expect("sign");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "quotes another")
+            .tags([Tag::parse(["e", &other_event.id.to_hex()]).expect("bare e tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(!ctx.is_reply, "unmarked e-tag must not count as a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_malformed_reply_id() {
+        // Ingest gates a marker on a valid 64-hex event id; a malformed reply
+        // id is not a thread link, so ingest stores the event top-level. The
+        // predicate must agree, or `trigger_is_reply == false` would skip it.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "malformed reply marker")
+            .tags([Tag::parse(["e", "bad", "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a malformed reply id is ignored by ingest, so it is top-level"
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_valid_root_malformed_reply() {
+        // A valid `root` marker but a malformed `reply` id: ingest ignores the
+        // reply and stores the event as root-only, i.e. top-level. The predicate
+        // must not flip to reply on the malformed marker.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "valid root, malformed reply")
+            .tags([
+                Tag::parse(["e", &root_event.id.to_hex(), "", "root"]).expect("root tag"),
+                Tag::parse(["e", "bad", "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a valid root with a malformed reply id is top-level to ingest"
+        );
     }
 
     #[test]
@@ -1715,7 +1891,11 @@ steps:
     async fn setup_db() -> buzz_db::Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned());
+            // Local-only test default; this is not a production credential.
+            .unwrap_or_else(|_| {
+                let local_test_database = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+                local_test_database.to_owned()
+            });
         buzz_db::Db::new(&buzz_db::DbConfig {
             database_url,
             ..Default::default()

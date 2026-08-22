@@ -1,4 +1,10 @@
 use super::*;
+// `messages.rs` re-exports only `search_messages` and `search_messages_limit`
+// from its private `search` submodule, so `use super::*` does not reach the
+// filter builder. Upstream has all of this in one file, where its inline tests
+// see it for free; this fork split `search.rs` out for the size ratchet, so the
+// path has to be spelled. Third instance of this today — see CONTEXT.md.
+use super::search::build_search_messages_filter;
 
 #[test]
 fn search_messages_limit_allows_discussion_discovery_page() {

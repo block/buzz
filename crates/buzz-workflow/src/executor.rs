@@ -37,6 +37,10 @@ pub struct TriggerContext {
     pub emoji: String,
     /// Event ID of the triggering message (hex string).
     pub message_id: String,
+    /// True when the triggering event is itself a threaded reply (carries a
+    /// NIP-10 `reply`/`root` marker e-tag). Lets a `message_posted` filter
+    /// select only top-level messages via `trigger_is_reply == false`.
+    pub is_reply: bool,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
 }
@@ -213,6 +217,7 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// | `trigger.timestamp`               | `trigger_timestamp`       |
 /// | `trigger.emoji`                   | `trigger_emoji`           |
 /// | `trigger.message_id`              | `trigger_message_id`      |
+/// | `trigger.is_reply`                | `trigger_is_reply` (bool) |
 /// | `steps.STEP_ID.output.FIELD`      | `steps_STEP_ID_output_FIELD` |
 ///
 /// Also registers string helper functions that the `cron` crate's `evalexpr` v11
@@ -299,6 +304,14 @@ pub fn build_eval_context(
         ctx.set_value((*name).into(), Value::String((*val).to_owned()))
             .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
     }
+
+    // `trigger_is_reply` is boolean (not a string field), so a filter can read
+    // `trigger_is_reply == false` to fire only on top-level messages.
+    ctx.set_value(
+        "trigger_is_reply".into(),
+        Value::Boolean(trigger_ctx.is_reply),
+    )
+    .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
 
     for (step_id, output) in step_outputs {
         if let JsonValue::Object(map) = output {
@@ -403,9 +416,14 @@ pub fn resolve_step_templates(
     };
 
     match &step.action {
-        SendMessage { text, channel } => Ok(SendMessage {
+        SendMessage {
+            text,
+            channel,
+            reply_in_thread,
+        } => Ok(SendMessage {
             text: t(text)?,
             channel: t_opt(channel)?,
+            reply_in_thread: *reply_in_thread,
         }),
         SendDm { to, text } => Ok(SendDm {
             to: t(to)?,
@@ -546,7 +564,11 @@ pub async fn dispatch_action(
     let result = serving_write
         .protect(async {
             match action {
-                SendMessage { text, channel } => {
+                SendMessage {
+                    text,
+                    channel,
+                    reply_in_thread,
+                } => {
                     // Look up workflow metadata for destination validation and
                     // attribution, scoped to the run's community — the same run/workflow
                     // UUID may exist in another community, so a bare-id lookup could
@@ -577,16 +599,38 @@ pub async fn dispatch_action(
                     )?;
                     let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
 
+                    // Thread the reply onto the triggering message when requested.
+                    // The trigger must carry the event to reply to; schema
+                    // validation already forbids `reply_in_thread` on triggers
+                    // that have no message, so an empty id here is a real fault.
+                    let reply_to = if *reply_in_thread {
+                        if trigger_ctx.message_id.is_empty() {
+                            return Err(WorkflowError::InvalidDefinition(
+                                "SendMessage: reply_in_thread is set but the trigger has no message_id to reply to".into(),
+                            ));
+                        }
+                        Some(trigger_ctx.message_id.as_str())
+                    } else {
+                        None
+                    };
+
                     info!(
                         run_id = %run_id,
                         step = step_id,
                         channel = %channel_id,
+                        reply_in_thread = *reply_in_thread,
                         "SendMessage → {channel_id}: {text}"
                     );
 
                     let event_id = engine
                         .action_sink()?
-                        .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                        .send_message(
+                            community_id,
+                            &channel_id,
+                            text,
+                            &owner_pubkey_hex,
+                            reply_to,
+                        )
                         .await
                         .map_err(WorkflowError::from)?;
 
@@ -1266,6 +1310,7 @@ mod tests {
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
+            is_reply: false,
             webhook_fields: HashMap::new(),
         }
     }
@@ -1383,6 +1428,56 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn condition_trigger_is_reply_selects_top_level_only() {
+        // The top-level-only filter from the feature's use case.
+        let mut ctx = make_trigger();
+
+        ctx.is_reply = false;
+        assert!(
+            evaluate_condition("trigger_is_reply == false", &ctx, &HashMap::new())
+                .await
+                .unwrap(),
+            "top-level message should pass the filter"
+        );
+
+        ctx.is_reply = true;
+        assert!(
+            !evaluate_condition("trigger_is_reply == false", &ctx, &HashMap::new())
+                .await
+                .unwrap(),
+            "threaded reply should be filtered out"
+        );
+    }
+
+    #[test]
+    fn resolve_step_templates_carries_reply_in_thread() {
+        let ctx = make_trigger();
+        let step = Step {
+            id: "reply".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::SendMessage {
+                text: "hi {{trigger.author}}".to_owned(),
+                channel: None,
+                reply_in_thread: true,
+            },
+        };
+        let resolved = resolve_step_templates(&step, &ctx, &HashMap::new()).unwrap();
+        match resolved {
+            ActionDef::SendMessage {
+                text,
+                reply_in_thread,
+                ..
+            } => {
+                assert_eq!(text, "hi abc123def456");
+                assert!(reply_in_thread, "reply_in_thread must survive resolution");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[tokio::test]

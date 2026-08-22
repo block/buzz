@@ -8,7 +8,8 @@
   },
   "family_tokens": [
     "claude-",
-    "gpt-"
+    "gpt-",
+    "kimi-"
   ],
   "family_rules": [
     {
@@ -372,6 +373,24 @@
       "normalization_policy": "openai-standard"
     },
     {
+      "id": "dbv2-kimi-k3-exact",
+      "_comment": "Databricks Kimi K3 aliases share the exact record's upstream Moonshot capabilities. Kimi is absent from the Databricks models.dev catalog, so retain the established MLflow Chat route; upstream models.dev advertises a reasoning toggle and effort values low|high|max, with no documented default. The toggle is not representable on the MLflow Chat request schema (only reasoning_effort is), so thinking_mode stays none, matching the kimi-k2-7-code precedent.",
+      "match_kind": "exact",
+      "match_value": "kimi-k3",
+      "providers": [
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard"
+    },
+    {
       "id": "dbv2-claude-prefix",
       "_comment": "DBv2-only broad Claude prefix. Replaces the routing role of the dropped dbv2-claude-code-names-segment 'claude' token: uncurated databricks-claude-* endpoints still route via Anthropic Messages with conservative (omit-fields) effort classification. Bare code-name segments without a leading 'claude-' (e.g. opus-5, goose-opus-5) are deliberately dropped and fall through to the databricks_v2 concrete-unknown fallback (mlflow-chat) — segment-anywhere matching is not expressible as a prefix.",
       "match_kind": "prefix",
@@ -435,6 +454,78 @@
       "_reconciliation": "adopt",
       "_reconciliation_note": "models.dev advertises low|medium|high. Same as gpt-5-4-mini. Adopt.",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-gpt-5-4-nano\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-fable-5",
+      "registry_label": "Claude Fable 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-fable-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-8",
+      "registry_label": "Claude Opus 4.8",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-opus-4-8",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-5",
+      "registry_label": "Claude Opus 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-opus-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-sonnet-5",
+      "registry_label": "Claude Sonnet 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-sonnet-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
     },
     {
       "provider": "databricks_v2",
@@ -931,6 +1022,25 @@
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
       "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-kimi-k3",
+      "registry_label": "Kimi K3",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "databricks_v2_wire_route: provider fallback (databricks_v2/concrete_unknown); thinking_mode+supported_efforts: models.dev Moonshot Kimi K3 catalog; default_effort: no documented default",
+      "_source": "models.dev Moonshot Kimi K3 reasoning_options: toggle + low|high|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default. The MLflow Chat request schema cannot express a reasoning toggle (only reasoning_effort is representable), so thinking_mode maps to none rather than the upstream toggle, matching the kimi-k2-7-code precedent.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-20, SHA-256 7ccb5635f682e4248ad8d39f515fbe3f2bb10e67bbc7fa1b94e66dddb00779e5): providers.moonshotai.models[\"kimi-k3\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]; Databricks endpoint absent from providers.databricks.models"
     },
     {
       "provider": "databricks_v2",

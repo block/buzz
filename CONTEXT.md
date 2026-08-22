@@ -144,6 +144,65 @@ It knows nothing about our `["mention-scope", "channel"|"here"]` tag. Consequenc
 - **`@channel` is never high-priority on catch-up either — that is a real regression**, and it erases the entire `@channel`-vs-`@here` distinction FORK.md advertises. Minimal fix: add `|| has_exact_tag(&event.tags, "mention-scope", "channel")` to that expression.
 - Secondary: upstream's `should_notify` (same file) has no mention-scope branch, so a threaded reply carrying `@channel` in a thread you have not participated in is filtered out of catch-up entirely. Follow-up, not a merge blocker.
 
+### Ratchet extractions of upstream test modules break on every catch-up
+Three separate failures in the `0.5.18` merge, all the same shape, and **none of
+them visible to `cargo check`** — only `cargo clippy --workspace --all-targets`,
+because test code is not compiled otherwise.
+
+Upstream keeps its Rust tests inline in a `mod tests` at the bottom of the file
+under test, where they see the parent module's private items and make their own
+local imports. This fork has extracted several of those test modules into
+sibling files to satisfy the 1000-line ratchet. Those files start with
+`use super::*`, which reaches the parent's **module-level** imports only — not
+the imports upstream makes *inside* its test block, and not private submodules
+the parent does not re-export.
+
+So every upstream release that adds a test lands it in our extracted file, where
+it cannot see what it saw upstream. What broke here:
+
+- `events_tests.rs` — three new upstream tests using `Keys`, imported inside
+  upstream's inline `mod tests`. Fixed with `use nostr::Keys;`.
+- `commands/messages_tests.rs` — a new test calling
+  `build_search_messages_filter`, which this fork moved into a private
+  `commands/messages/search.rs` that `messages.rs` does not re-export. Fixed with
+  `use super::search::build_search_messages_filter;`.
+- `managed_agents/discovery.rs` — a `#[cfg(test)]` re-export of
+  `login_shell_candidates` whose only consumer is a `#[cfg(unix)]` test, so it
+  is an unused import on Windows under `-D warnings`. Fixed by narrowing the
+  re-export to `#[cfg(all(test, unix))]`.
+
+**Always run `cargo clippy --workspace --all-targets -- -D warnings` from
+`desktop/src-tauri` after a catch-up.** `cargo check` passing means nothing here.
+Files carrying this liability today: `events_tests.rs`,
+`commands/messages_tests.rs`, `commands/messages/search.rs`,
+`managed_agents/discovery/tests.rs`.
+
+### Upstream's Unix-gated test scaffolding is dead code on Windows
+A second, unrelated clippy failure class, same catch-up. Upstream adds test
+helpers whose only callers are `#[cfg(unix)]` tests. **Upstream's CI does not
+build this crate for Windows; ours does**, so their `-D warnings` passes and
+ours does not. In `0.5.18`: `discovery/auth_status_cache.rs::len`, and
+`discovery/login_shell_spawn_probe.rs::{reset, count}`.
+
+Fix with `#[cfg_attr(windows, allow(dead_code))]`, not a blanket
+`#[allow(dead_code)]` — the lint should stay live on Unix, where genuine
+deadness still matters. Do not gate the function itself on `#[cfg(unix)]`: the
+callers are Unix-gated, the definition is not, and hiding it would break
+upstream's own structure for no gain.
+
+This is a permanent tax on being a Windows-first fork of a project that is not,
+and it will recur on any release that adds Unix-only test scaffolding. It is
+**not** the same as the extraction problem above, and the fix is different.
+
+### 0.5.18 raises the minimum local Node version
+Upstream's new `features/projects/ui/useRetainedProjectGitViews.test.mjs` imports
+`registerHooks` from `node:module`, which exists only in **Node 22.15+**. On an
+older local Node the whole test file fails to parse and `pnpm test` reports one
+failure that has nothing to do with any change. CI is unaffected —
+`release.yml` pins Node 24. **Do not patch upstream's test**; upgrade Node. It
+is the only file in the repo using that API, so this will not recur until
+upstream adopts another new-Node feature.
+
 ### Also found
 - **New upstream test helpers call bare `bash`** — `pool.rs` merged lines ~8579, ~8750, ~8839, ~9135 (`spawn_effort_acp`, `spawn_switch_acp`, etc.). Our fork added a `#[cfg(windows)]` shim for exactly this. They will fail on a Windows dev box. Cheapest fix: hoist the shim into one `fn test_bash_cmd() -> &'static str` and point all call sites at it.
 - **`useLiveChannelUpdates.ts`: we never modified it.** Straight fast-forward. But upstream now calls `updateChannelLastMessageAt` on *every* unread-trigger event including self-authored and muted, so anything rendering off the channels cache (sidebar rollup, Inbox lanes) re-renders per inbound message. Correct, just noisier.
@@ -176,7 +235,7 @@ Upstream's 0.5.18 unread/notification/archive work does **not** duplicate anythi
 - **Meet-connected ≠ Drive-connected.** Accounts connected before this shipped hold a refresh token minted without `drive.file`. It refreshes fine and then 403s. `google_access_token` returns the *granted* scope so this is caught before the upload starts and answered with "disconnect and reconnect under Settings → Voice".
 - **Resumable upload gotchas**, both commented at the code: Drive answers intermediate chunks with **308**, which `reqwest` reports as an ordinary failure — 308 is the success case for every chunk but the last. And a zero-byte file still needs one `Content-Range: bytes */0` request or the session never completes. Chunks must be multiples of 256 KiB; we use 8 MiB.
 - **Drive routing is OFF under e2e** unless a spec sets `__BUZZ_E2E__.mock.driveUploads`, mirroring `deferredComposerUploads`. Several specs upload a 16 MB file or a video specifically to assert the relay path. **Consequence: the Drive path has no end-to-end coverage at all.**
-- **`lib.rs` was extracted to make room.** Registering two commands needs two lines and `lib.rs` was at 1013. The 320-line `generate_handler!` list moved to `command_registry.rs` as a `macro_rules!` — a macro and not a function so every command path still resolves against `lib.rs`'s imports (notably `use commands::*`) at the expansion site. `lib.rs` is now 688.
+- **`lib.rs` was briefly extracted to make room, and un-extracted one day later.** Registering two commands needed two lines and `lib.rs` was at 1013, so the 320-line `generate_handler!` list moved to a `command_registry.rs` macro. Upstream then shipped 0.5.18 with `lib.rs` at 932 *and* 13 new commands, which would have landed inside a 338-line conflict where losing them fails silently at runtime. The extraction was reverted during that catch-up and `command_registry.rs` deleted. **Do not reach for this again** — if `lib.rs` is over the ceiling, extract something upstream does not also edit every release.
 - **Not built**: resume-after-failure. A dropped connection restarts the upload. The session URI needed to continue is already in hand.
 
 ## Inbox (three lanes, settled in `0.5.14-3`)

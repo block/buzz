@@ -166,6 +166,16 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "A link can be marked as a new version of a file, and a file as a new version of a link",
     ],
   },
+  {
+    version: "0.5.18-0",
+    date: "2026-08-21",
+    bullets: [
+      "Desktop notifications now name who sent the message",
+      "Font size and conversation density can be adjusted, with a live preview, under Settings",
+      "Ctrl+W closes the window",
+      "Faster message rendering, and several fixes: recent-channel ordering, emoji recents, and archived channels no longer appearing in # autocomplete",
+    ],
+  },
 ];
 
 /**

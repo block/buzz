@@ -710,7 +710,7 @@ const MessageTimelineBase = React.forwardRef<
   return (
     <MessageSelectionProvider channelId={channelId}>
       <FileVersionProvider channelId={channelId} jumpToMessage={jumpToMessage}>
-        <TooltipProvider delayDuration={200}>
+        <TooltipProvider>
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
             {showUnreadPill ? (
               <div

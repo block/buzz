@@ -56,7 +56,7 @@ function resolveSourcePath(basePath) {
 const stubModules = new Map([
   [
     "emoji-mart",
-    "export const init = () => {};\n" +
+    "export const init = (...args) => globalThis.__BUZZ_TEST_EMOJI_MART_INIT__?.(...args);\n" +
       "export const SearchIndex = { search: async () => [] };\n" +
       "export default {};\n",
   ],

@@ -5,6 +5,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_TYPING_INDICATOR,
 } from "../../src/shared/constants/kinds";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 import {
   TEST_IDENTITIES,
   installMockBridge,
@@ -1745,8 +1746,15 @@ test("empty channel shows intro actions", async ({ page }) => {
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
+  const addAgentsAction = page.getByTestId("channel-intro-action-create-agent");
+  await expect(addAgentsAction).toBeVisible();
   await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
+    addAgentsAction.getByText("Add agents", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    addAgentsAction.getByText("Bring them in.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-add-people"),
@@ -1766,7 +1774,7 @@ test("empty channel shows intro actions", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
-  await page.getByTestId("channel-intro-action-create-agent").click();
+  await addAgentsAction.click();
   await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
 
   await page.keyboard.press("Escape");
@@ -1869,7 +1877,11 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to general",
   );
@@ -2441,7 +2453,11 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await expect(page.getByTestId("message-dm-intro")).toContainText(
     "This is the beginning of your direct message with",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );
@@ -2942,6 +2958,140 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(leaveBox).not.toBeNull();
   expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("channel settings hides workflows and skips its query when the experiment is disabled", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    overrides.workflows = false;
+    window.localStorage.setItem(key, JSON.stringify(overrides));
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await expect(page.getByTestId("channel-workflows-ingress")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.some(
+          ({ command }) => command === "get_channel_workflows",
+        ),
+      ),
+    )
+    .toBe(false);
+});
+
+test("channel settings opens and creates channel workflows over the channel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await invokeMockCommand(page, "create_workflow", {
+    channelId: GENERAL_CHANNEL_ID,
+    yamlDefinition:
+      "name: Welcome responder\ntrigger:\n  on: message_posted\nsteps:\n  - id: reply\n    run: send_message\n    with:\n      text: Welcome\n",
+  });
+  await openChannelManagement(page, "general");
+
+  const sheet = page.getByTestId("channel-management-sheet");
+  const canvasBox = await sheet
+    .getByTestId("channel-canvas-ingress")
+    .boundingBox();
+  const workflowsBox = await sheet
+    .getByTestId("channel-workflows-ingress")
+    .boundingBox();
+  expect(canvasBox).not.toBeNull();
+  expect(workflowsBox).not.toBeNull();
+  expect(canvasBox?.y).toBeLessThan(workflowsBox?.y);
+
+  await sheet.getByTestId("channel-workflows-ingress").click();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  // Opening a workflow keeps the settings Workflows view mounted beneath the
+  // shared editor; the channel route stays put behind both layers.
+  const channelUrl = new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`);
+  await sheet.getByTestId("channel-workflow-mock-wf-1").click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit workflow" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+
+  const overlayEditor = page.getByRole("dialog", { name: "Edit workflow" });
+  await overlayEditor.getByRole("tab", { name: "YAML" }).click();
+  const overlayYaml = overlayEditor.getByRole("textbox", {
+    name: "Workflow YAML",
+  });
+  await overlayYaml.fill(
+    (await overlayYaml.inputValue()).replace(
+      "Welcome responder",
+      "Unsaved welcome responder",
+    ),
+  );
+  await overlayEditor.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Duplicate" }).click();
+  const discardConfirmation = page.getByRole("alertdialog", {
+    name: "Discard changes?",
+  });
+  await expect(discardConfirmation).toBeVisible();
+  await discardConfirmation
+    .getByRole("button", { name: "Keep editing" })
+    .click();
+  await expect(overlayEditor).toBeVisible();
+  await expect(overlayYaml).toContainText("Unsaved welcome responder");
+  await expect(
+    page.getByRole("dialog", { name: "Duplicate workflow" }),
+  ).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await page
+    .getByRole("alertdialog", { name: "Discard changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click();
+  await expect(page.getByRole("dialog", { name: "Edit workflow" })).toHaveCount(
+    0,
+  );
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  await page.getByTestId("channel-workflows-new").click();
+
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(
+    page.getByRole("combobox", { exact: true, name: "Channel" }),
+  ).toContainText("general");
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toHaveCount(0);
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-new")).toBeVisible();
 });
 
 async function seedHomeInboxMention(

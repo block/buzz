@@ -6,7 +6,6 @@ import type {
   ChannelPageCursor,
   ChannelType,
   CreateChannelInput,
-  OpenDmInput,
   SetChannelPurposeInput,
   SetChannelTopicInput,
   UpdateChannelInput,
@@ -144,6 +143,22 @@ export async function getChannels(
   };
 }
 
+/**
+ * Fetch the open-channel directory: every joinable open channel plus the
+ * active identity's own channels, each carrying its `isMember` flag.
+ *
+ * `getChannels` intentionally omits this discovery superset from the 60s poll
+ * because it requires an unbounded all-open relay scan. Call this on demand —
+ * when the channel browser opens or a global search goes active — with a
+ * generous staleTime so the expensive scan runs only when a user is actually
+ * looking for channels to join.
+ */
+export async function getOpenChannelDirectory(): Promise<Channel[]> {
+  return (await invokeTauri<RawChannel[]>("get_open_channel_directory")).map(
+    fromRawChannel,
+  );
+}
+
 export async function createChannel(
   input: CreateChannelInput,
 ): Promise<Channel> {
@@ -155,6 +170,25 @@ export async function ensureStarterChannels(): Promise<Channel[]> {
     fromRawChannel,
   );
 }
+
+export type OpenDmInput = {
+  pubkeys: string[];
+  /**
+   * Tenant scope captured by the caller before its first await (community
+   * relay URL). The backend fails closed when the active community no longer
+   * matches, so a suspended callback can never open a DM in the wrong
+   * community. Omit for callers without a tenant boundary.
+   */
+  expectedRelayUrl?: string;
+  /**
+   * Signer identity captured together with the relay scope (owner pubkey,
+   * hex). Relay and keys change under separate locks during a community
+   * switch, so the backend also fails closed when the active identity no
+   * longer matches — a stale callback can neither open the DM in the wrong
+   * community nor open it under the wrong identity.
+   */
+  expectedSignerPubkey?: string;
+};
 
 export async function openDm(input: OpenDmInput): Promise<Channel> {
   return fromRawChannel(await invokeTauri<RawChannel>("open_dm", input));

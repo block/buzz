@@ -14,6 +14,7 @@ class _CommunitySection extends ConsumerWidget {
 
     return AppListCard(
       label: 'Community',
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.userPlus,

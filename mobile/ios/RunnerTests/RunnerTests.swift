@@ -5,7 +5,105 @@ import XCTest
 
 @testable import Buzz
 
+private extension UIColor {
+  convenience init(hex: UInt32) {
+    self.init(
+      red: CGFloat((hex >> 16) & 0xFF) / 255,
+      green: CGFloat((hex >> 8) & 0xFF) / 255,
+      blue: CGFloat(hex & 0xFF) / 255,
+      alpha: 1
+    )
+  }
+}
+
 class RunnerTests: XCTestCase {
+
+  func testNavigationGlassButtonExpandsToConfiguredHitTarget() {
+    let button = NavigationGlassButton(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+    button.hitTargetInsets = UIEdgeInsets(top: 2, left: 18, bottom: 2, right: 0)
+
+    XCTAssertTrue(button.point(inside: CGPoint(x: -17, y: 20), with: nil))
+    XCTAssertTrue(button.point(inside: CGPoint(x: 20, y: -1), with: nil))
+    XCTAssertFalse(button.point(inside: CGPoint(x: -19, y: 20), with: nil))
+    XCTAssertFalse(button.point(inside: CGPoint(x: 20, y: -3), with: nil))
+  }
+
+  func testNavigationGlassButtonRejectsExpandedHitsWhenDisabled() {
+    let button = NavigationGlassButton(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+    button.hitTargetInsets = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+    button.isEnabled = false
+
+    XCTAssertFalse(button.point(inside: CGPoint(x: -1, y: 20), with: nil))
+  }
+
+  func testNavigationGlassFallbackContrastsSupportedAccentsInLightMode() {
+    let accents: [(name: String, color: UIColor)] = [
+      ("Neutral", UIColor(hex: 0x000000)),
+      ("Blue", UIColor(hex: 0x3B82F6)),
+      ("Cyan", UIColor(hex: 0x06B6D4)),
+      ("Green", UIColor(hex: 0x22C55E)),
+      ("Orange", UIColor(hex: 0xF97316)),
+      ("Red", UIColor(hex: 0xEF4444)),
+      ("Pink", UIColor(hex: 0xEC4899)),
+      ("Lilac", UIColor(hex: 0xC0A2F1)),
+      ("Purple", UIColor(hex: 0xA855F7)),
+      ("Indigo", UIColor(hex: 0x6366F1)),
+      ("White", .white),
+    ]
+
+    for accent in accents {
+      let background = NavigationGlassButtonPlatformView.fallbackBackgroundColor(
+        foregroundColor: accent.color,
+        interfaceStyle: .light
+      )
+      var red: CGFloat = 0
+      var green: CGFloat = 0
+      var blue: CGFloat = 0
+      var alpha: CGFloat = 0
+      XCTAssertTrue(
+        background.getRed(&red, green: &green, blue: &blue, alpha: &alpha),
+        accent.name
+      )
+      XCTAssertEqual(alpha, 1, accuracy: 0.001, accent.name)
+      XCTAssertGreaterThanOrEqual(
+        NavigationGlassButtonPlatformView.contrastRatio(
+          foregroundColor: accent.color,
+          backgroundColor: background
+        ),
+        3,
+        accent.name
+      )
+    }
+  }
+
+  func testNavigationGlassFallbackKeepsSystemSurfaceInDarkMode() {
+    let darkAccents = [
+      UIColor(hex: 0xE1E4E8),
+      UIColor(hex: 0x60A5FA),
+      UIColor(hex: 0x22D3EE),
+      UIColor(hex: 0x4ADE80),
+      UIColor(hex: 0xFB923C),
+      UIColor(hex: 0xF87171),
+      UIColor(hex: 0xF472B6),
+      UIColor(hex: 0xC0A2F1),
+      UIColor(hex: 0xC084FC),
+      UIColor(hex: 0x818CF8),
+    ]
+
+    for accent in darkAccents {
+      let background = NavigationGlassButtonPlatformView.fallbackBackgroundColor(
+        foregroundColor: accent,
+        interfaceStyle: .dark
+      )
+      XCTAssertGreaterThanOrEqual(
+        NavigationGlassButtonPlatformView.contrastRatio(
+          foregroundColor: accent,
+          backgroundColor: background
+        ),
+        3
+      )
+    }
+  }
 
   func testRelativeTrackInsertionTimesPreserveAudioDelay() {
     let times = AppDelegate.relativeTrackInsertionTimes(
@@ -403,6 +501,368 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testCategoryTrackerHighlightsLastHeaderAtOrAboveTop() {
+    let order = ["people", "nature", "flags"]
+    let offsets: [String: CGFloat] = [
+      "people": -320,
+      "nature": -12,
+      "flags": 200,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerFollowsScrollPastEachHeader() {
+    let order = ["people", "nature", "flags"]
+
+    // Scrolled to the very top: the first section is highlighted.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 400, "flags": 800],
+        viewportTop: 0
+      ),
+      "people"
+    )
+
+    // Scrolled far enough that Flags has reached the top.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": -800, "nature": -400, "flags": 0],
+        viewportTop: 0
+      ),
+      "flags"
+    )
+  }
+
+  func testCategoryTrackerFallsBackToFirstSectionBeforeAnyHeaderReachesTop() {
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: ["people", "nature"],
+        offsets: ["people": 40, "nature": 400],
+        viewportTop: 0
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerSelectsShortFinalSectionAtClampedBottom() {
+    // The list has overflowed (People scrolled above the top) and its end is on
+    // screen, but the short Custom section's header sits below the top because
+    // the content clamps before it can reach it. The rail must still highlight
+    // Custom rather than leaving Nature — its predecessor — selected.
+    let order = ["people", "nature", "custom"]
+    let offsets: [String: CGFloat] = [
+      "people": -900,
+      "nature": -420,
+      "custom": 360,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 500
+      ),
+      "custom"
+    )
+  }
+
+  func testCategoryTrackerKeepsHeaderRuleWhenContentEndIsOffscreen() {
+    // The same short-final geometry, but the content end is still below the
+    // viewport (the user has not reached the bottom), so the ordinary
+    // header-at-top rule applies and Nature stays selected.
+    let order = ["people", "nature", "custom"]
+    let offsets: [String: CGFloat] = [
+      "people": -900,
+      "nature": -420,
+      "custom": 360,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 900
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerDoesNotForceLastSectionForAShortList() {
+    // A list that fits without scrolling has its content end on screen too, but
+    // its first header is still at the top — so the bottom rule must not fire
+    // and steal the highlight to the final section.
+    let order = ["people", "nature"]
+    let offsets: [String: CGFloat] = ["people": 0, "nature": 120]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 240
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerDoesNotFlickerBackAtPinnedHeaderBoundary() {
+    let order = ["people", "nature", "flags"]
+
+    // Nature has just become selected. A subsequent layout pass can briefly
+    // report its pinned header a couple of points below the boundary while the
+    // previous header is still pinned. Keep Nature selected through that
+    // transient frame instead of alternating the category rail.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 2, "flags": 400],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerReleasesBoundaryLatchOnRealUpwardScroll() {
+    let order = ["people", "nature", "flags"]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 24, "flags": 424],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerReleasesSelectionWhenOldHeaderIsMissing() {
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: ["people", "nature", "flags"],
+        offsets: ["people": 0, "flags": 400],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "people"
+    )
+  }
+
+  func testRemoteEmojiLoaderLimitsConcurrentDownloads() async throws {
+    let maximumConcurrentDownloads = 3
+    let taskCount = 8
+    let probe = NativeEmojiDownloadProbe()
+    let tasksAttemptedAdmission = XCTestExpectation(
+      description: "all download tasks attempted admission"
+    )
+    tasksAttemptedAdmission.expectedFulfillmentCount = taskCount
+    let loader = NativeEmojiRemoteImageLoader(
+      maximumConcurrentDownloads: maximumConcurrentDownloads,
+      cacheByteLimit: 0,
+      admissionAttemptForTesting: { tasksAttemptedAdmission.fulfill() },
+      downloader: { _ in
+        await probe.holdDownload()
+        return UIImage()
+      }
+    )
+    let tasks = (0..<taskCount).map { index in
+      Task {
+        try await loader.image(
+          for: URLRequest(
+            url: try XCTUnwrap(URL(string: "https://example.com/\(index).png"))
+          )
+        )
+      }
+    }
+
+    await fulfillment(of: [tasksAttemptedAdmission], timeout: 2)
+    await probe.waitUntilStarted(maximumConcurrentDownloads)
+    var snapshot = await probe.snapshot()
+    XCTAssertEqual(snapshot.started, maximumConcurrentDownloads)
+    XCTAssertEqual(snapshot.peakActive, maximumConcurrentDownloads)
+
+    for expectedStarted in (maximumConcurrentDownloads + 1)...tasks.count {
+      await probe.releaseOne()
+      await probe.waitUntilStarted(expectedStarted)
+    }
+    await probe.releaseAll()
+    for task in tasks {
+      _ = try await task.value
+    }
+
+    snapshot = await probe.snapshot()
+    XCTAssertEqual(snapshot.started, tasks.count)
+    XCTAssertEqual(snapshot.peakActive, maximumConcurrentDownloads)
+    XCTAssertEqual(snapshot.active, 0)
+  }
+
+  func testNativeMessageActionsPreserveRequestedGroupsAndHeight() throws {
+    let actionArguments: [[String: Any]] = [
+      [
+        "id": "reply", "title": "Reply",
+        "symbol": "arrowshape.turn.up.left", "group": "primary",
+      ],
+      [
+        "id": "copyText", "title": "Copy text",
+        "symbol": "doc.on.doc", "group": "utility",
+      ],
+      [
+        "id": "delete", "title": "Delete message",
+        "symbol": "trash", "group": "destructive", "destructive": true,
+      ],
+    ]
+    let definitions = try actionArguments.map { arguments in
+      try XCTUnwrap(NativeMessageActionDefinition(arguments: arguments))
+    }
+
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.populatedGroups(actions: definitions),
+      [.primary, .utility, .destructive]
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.separatorCount(actions: definitions),
+      2
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.preferredHeight(
+        actions: definitions,
+        compatibleWith: UITraitCollection(
+          preferredContentSizeCategory: .large
+        )
+      ),
+      153
+    )
+  }
+
+  @MainActor
+  func testNativeMessageActionRowUsesUIKitTypographyAndSelection() throws {
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "reply", "title": "Reply",
+          "symbol": "arrowshape.turn.up.left", "group": "primary",
+        ]
+      )
+    )
+    var selected = false
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      onSelected: { selected = true }
+    )
+
+    XCTAssertEqual(
+      row.actionTitleLabel.font.fontDescriptor.object(forKey: .textStyle) as? String,
+      UIFont.TextStyle.body.rawValue
+    )
+    XCTAssertNotNil(row.actionImageView.image)
+    row.sendActions(for: .touchUpInside)
+    XCTAssertTrue(selected)
+  }
+
+  @MainActor
+  func testNativeMessageActionRowExpandsForAccessibilityTypography() throws {
+    let traits = UITraitCollection(
+      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
+    )
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "followThread", "title": "Follow thread",
+          "symbol": "bell", "group": "utility",
+        ]
+      )
+    )
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      compatibleWith: traits,
+      onSelected: {}
+    )
+    let fittingSize = row.systemLayoutSizeFitting(
+      CGSize(width: 288, height: UIView.layoutFittingCompressedSize.height),
+      withHorizontalFittingPriority: .required,
+      verticalFittingPriority: .fittingSizeLevel
+    )
+    row.frame = CGRect(origin: .zero, size: fittingSize)
+    row.layoutIfNeeded()
+    let labelFrame = row.convert(
+      row.actionTitleLabel.bounds,
+      from: row.actionTitleLabel
+    )
+
+    XCTAssertGreaterThan(fittingSize.height, 48)
+    XCTAssertGreaterThan(labelFrame.height, 0)
+    XCTAssertGreaterThanOrEqual(
+      labelFrame.minY,
+      NativeMessageActionSurfaceLayout.rowVerticalPadding
+    )
+    XCTAssertLessThanOrEqual(
+      labelFrame.maxY,
+      fittingSize.height - NativeMessageActionSurfaceLayout.rowVerticalPadding
+    )
+    XCTAssertEqual(row.actionTitleLabel.numberOfLines, 0)
+    XCTAssertFalse(row.actionTitleLabel.adjustsFontSizeToFitWidth)
+  }
+
+  @MainActor
+  func testNativeMessageActionSurfaceUsesSystemMaterial() {
+    let effect = NativeMessageActionSurfaceAppearance.backdropEffect(
+      reduceTransparency: false
+    )
+    if #available(iOS 26.0, *) {
+      XCTAssertTrue(effect is UIGlassEffect)
+      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 33)
+    } else {
+      XCTAssertTrue(effect is UIBlurEffect)
+      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 12)
+    }
+    XCTAssertNil(
+      NativeMessageActionSurfaceAppearance.backdropEffect(
+        reduceTransparency: true
+      )
+    )
+  }
+
+  func testNativeMessageActionListDoesNotHideDialogSiblings() {
+    XCTAssertFalse(
+      NativeMessageActionSurfaceAppearance.actionListAccessibilityViewIsModal
+    )
+  }
+
+  func testNativeMessageActionSurfaceMatchesFlutterInterfaceStyle() {
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "dark"),
+      .dark
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "light"),
+      .light
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "system"),
+      .unspecified
+    )
+  }
+
   private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {
     let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
@@ -629,4 +1089,62 @@ private func readUInt32BigEndian(_ data: Data, at offset: Int) throws -> UInt32 
   guard data.count - offset >= 4 else { throw RelayImagePolicyError.invalidPng }
   return UInt32(data[offset]) << 24 | UInt32(data[offset + 1]) << 16
     | UInt32(data[offset + 2]) << 8 | UInt32(data[offset + 3])
+}
+
+private actor NativeEmojiDownloadProbe {
+  private struct MilestoneWaiter {
+    let count: Int
+    let continuation: CheckedContinuation<Void, Never>
+  }
+
+  private var active = 0
+  private var peakActive = 0
+  private var started = 0
+  private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
+  private var milestoneWaiters: [MilestoneWaiter] = []
+
+  func holdDownload() async {
+    active += 1
+    started += 1
+    peakActive = max(peakActive, active)
+    resumeReachedMilestones()
+    await withCheckedContinuation { continuation in
+      releaseContinuations.append(continuation)
+    }
+    active -= 1
+  }
+
+  func waitUntilStarted(_ count: Int) async {
+    guard started < count else { return }
+    await withCheckedContinuation { continuation in
+      milestoneWaiters.append(
+        MilestoneWaiter(count: count, continuation: continuation)
+      )
+    }
+  }
+
+  func releaseOne() {
+    guard !releaseContinuations.isEmpty else { return }
+    releaseContinuations.removeFirst().resume()
+  }
+
+  func releaseAll() {
+    let continuations = releaseContinuations
+    releaseContinuations.removeAll()
+    for continuation in continuations {
+      continuation.resume()
+    }
+  }
+
+  func snapshot() -> (active: Int, peakActive: Int, started: Int) {
+    (active, peakActive, started)
+  }
+
+  private func resumeReachedMilestones() {
+    let reached = milestoneWaiters.filter { $0.count <= started }
+    milestoneWaiters.removeAll { $0.count <= started }
+    for waiter in reached {
+      waiter.continuation.resume()
+    }
+  }
 }

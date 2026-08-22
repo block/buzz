@@ -35,6 +35,8 @@ export type SupportedLinkPreview = {
   typeLabel:
     | "PR"
     | "issue"
+    | "Review"
+    | "Task"
     | "repo"
     | "project"
     | "file"
@@ -319,7 +321,7 @@ function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
       href: buildPullRequestLink(link),
       provider: "Buzz",
       title,
-      typeLabel: "PR",
+      typeLabel: "Review",
     };
   }
   if (link.type === "issue") {
@@ -328,7 +330,7 @@ function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
       href: buildIssueLink(link),
       provider: "Buzz",
       title,
-      typeLabel: "issue",
+      typeLabel: "Task",
     };
   }
   if (link.type === "project") {
