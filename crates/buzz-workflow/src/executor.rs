@@ -843,18 +843,30 @@ async fn check_ssrf(host: &str, port: u16) -> Result<std::net::IpAddr, WorkflowE
 
     debug!("Resolved webhook host '{}' → {:?}", host, addrs);
 
-    let allowed = buzz_core::network::parse_allowed_cidrs(
+    ssrf_verdict(
+        host,
+        &addrs,
         &std::env::var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS").unwrap_or_default(),
-    );
-    for ip in &addrs {
+    )
+}
+
+fn ssrf_verdict(
+    host: &str,
+    addrs: &[std::net::IpAddr],
+    allowed_spec: &str,
+) -> Result<std::net::IpAddr, WorkflowError> {
+    let allowed = buzz_core::network::parse_allowed_cidrs(allowed_spec);
+    for ip in addrs {
         if buzz_core::network::is_blocked_ip(ip, &allowed) {
             return Err(WorkflowError::WebhookError(format!(
                 "SSRF blocked: '{host}' resolved to private/reserved address {ip} (allow it with BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS)"
             )));
         }
     }
-
-    Ok(addrs[0])
+    addrs
+        .first()
+        .copied()
+        .ok_or_else(|| WorkflowError::WebhookError("DNS resolution returned no addresses".into()))
 }
 
 /// Maximum response body size for webhook calls (1 MiB).
@@ -1959,6 +1971,31 @@ mod tests {
             err.to_string().contains("channel override must match"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn ssrf_verdict_empty_blocks_cgnat() {
+        let ip: std::net::IpAddr = "100.64.1.5".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "").is_err());
+    }
+
+    #[test]
+    fn ssrf_verdict_allows_cgnat_with_spec() {
+        let ip: std::net::IpAddr = "100.64.1.5".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_ok());
+    }
+
+    #[test]
+    fn ssrf_verdict_still_blocks_other_private() {
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_err());
+    }
+
+    #[test]
+    fn ssrf_verdict_public_passes() {
+        let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "").is_ok());
+        assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_ok());
     }
 
     #[test]
