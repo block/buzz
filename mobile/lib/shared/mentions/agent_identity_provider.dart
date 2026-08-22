@@ -1,11 +1,221 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
+
+final _hexPubkey = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+
+/// HTTP transport used to discover the active relay's NIP-11 `self` key.
+/// Tests override this provider; production owns and closes one client.
+final archivedIdentityHttpClientProvider = Provider<http.Client>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return client;
+});
+
+/// A verified relay-scoped NIP-IA snapshot.
+@immutable
+class ArchivedIdentitySnapshot {
+  final String eventId;
+  final int createdAt;
+  final Set<String> pubkeys;
+
+  const ArchivedIdentitySnapshot({
+    required this.eventId,
+    required this.createdAt,
+    required this.pubkeys,
+  });
+}
+
+/// Reads the stable relay identity advertised by NIP-11.
+///
+/// Invalid or unavailable relay metadata fails open: callers receive `null`
+/// and do not hide any identity.
+Future<String?> fetchRelayIdentityPubkey(
+  http.Client client,
+  String relayUrl,
+) async {
+  try {
+    final uri = Uri.parse(relayUrl.trim());
+    final response = await client
+        .get(uri, headers: const {'Accept': 'application/nostr+json'})
+        .timeout(const Duration(seconds: 5));
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+    final document = jsonDecode(response.body);
+    if (document is! Map<String, dynamic>) return null;
+    final relayPubkey = document['self'];
+    if (relayPubkey is! String || !_hexPubkey.hasMatch(relayPubkey)) {
+      return null;
+    }
+    return relayPubkey.toLowerCase();
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Verifies and parses one NIP-IA `kind:13535` snapshot.
+///
+/// Trust requires all three anchors: the NIP-11 relay author, a valid NIP-01
+/// id/signature, and exactly one NIP-70 `["-"]` marker. Malformed `p` tags
+/// are ignored rather than allowed to poison the complete snapshot.
+ArchivedIdentitySnapshot? parseArchivedIdentitySnapshot(
+  NostrEvent event,
+  String relayPubkey,
+) {
+  final normalizedRelayPubkey = relayPubkey.toLowerCase();
+  if (event.kind != EventKind.archivedIdentities ||
+      event.pubkey.toLowerCase() != normalizedRelayPubkey ||
+      !_hexPubkey.hasMatch(normalizedRelayPubkey)) {
+    return null;
+  }
+  final nip70Markers = event.tags
+      .where((tag) => tag.isNotEmpty && tag.first == '-')
+      .toList();
+  if (nip70Markers.length != 1 || nip70Markers.single.length != 1) {
+    return null;
+  }
+  try {
+    final verified = nostr.Event.fromJson(jsonEncode(event.toJson()));
+    if (verified.id != event.id) return null;
+  } catch (_) {
+    return null;
+  }
+
+  return ArchivedIdentitySnapshot(
+    eventId: event.id,
+    createdAt: event.createdAt,
+    pubkeys: Set.unmodifiable({
+      for (final tag in event.tags)
+        if (tag.length >= 2 && tag.first == 'p' && _hexPubkey.hasMatch(tag[1]))
+          tag[1].toLowerCase(),
+    }),
+  );
+}
+
+/// NIP-01 replacement ordering: newest timestamp wins; equal timestamps keep
+/// the lexicographically lowest event id.
+ArchivedIdentitySnapshot? latestArchivedIdentitySnapshot(
+  Iterable<NostrEvent> events,
+  String relayPubkey,
+) {
+  ArchivedIdentitySnapshot? latest;
+  for (final event in events) {
+    final candidate = parseArchivedIdentitySnapshot(event, relayPubkey);
+    if (candidate == null) continue;
+    if (latest == null ||
+        candidate.createdAt > latest.createdAt ||
+        (candidate.createdAt == latest.createdAt &&
+            candidate.eventId.compareTo(latest.eventId) < 0)) {
+      latest = candidate;
+    }
+  }
+  return latest;
+}
+
+class ArchivedIdentityPubkeysNotifier extends AsyncNotifier<Set<String>> {
+  void Function()? _unsubscribe;
+  ArchivedIdentitySnapshot? _latest;
+  int _generation = 0;
+
+  @override
+  Future<Set<String>> build() async {
+    final relayConfig = ref.watch(relayConfigProvider);
+    final sessionState = ref.watch(relaySessionProvider);
+    final generation = ++_generation;
+    _clearSubscription();
+    ref.onDispose(() {
+      _generation++;
+      _clearSubscription();
+    });
+
+    if (sessionState.status != SessionStatus.connected) return const {};
+    final relayPubkey = await fetchRelayIdentityPubkey(
+      ref.read(archivedIdentityHttpClientProvider),
+      relayConfig.baseUrl,
+    );
+    if (relayPubkey == null || generation != _generation) return const {};
+
+    final session = ref.read(relaySessionProvider.notifier);
+    try {
+      final events = await session.fetchHistory(
+        NostrFilters.archivedIdentities(relayPubkey),
+      );
+      if (generation != _generation) return const {};
+      _latest = latestArchivedIdentitySnapshot(events, relayPubkey);
+      unawaited(_subscribe(session, relayPubkey, generation));
+      return _latest?.pubkeys ?? const {};
+    } catch (error) {
+      debugPrint('[ArchivedIdentities] snapshot fetch failed: $error');
+      return const {};
+    }
+  }
+
+  Future<void> _subscribe(
+    RelaySessionNotifier session,
+    String relayPubkey,
+    int generation,
+  ) async {
+    // Overlap the history/live handoff so a snapshot published in the gap is
+    // replayed instead of missed. Replacement ordering deduplicates it.
+    final since =
+        (_latest?.createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000) -
+        5;
+    try {
+      final unsubscribe = await session.subscribe(
+        NostrFilters.archivedIdentities(relayPubkey).copyWithSince(since),
+        (event) => _acceptLiveSnapshot(event, relayPubkey, generation),
+      );
+      if (generation != _generation) {
+        unsubscribe();
+        return;
+      }
+      _unsubscribe = unsubscribe;
+    } catch (error) {
+      if (generation == _generation) {
+        debugPrint('[ArchivedIdentities] live subscription failed: $error');
+      }
+    }
+  }
+
+  void _acceptLiveSnapshot(
+    NostrEvent event,
+    String relayPubkey,
+    int generation,
+  ) {
+    if (generation != _generation) return;
+    final candidate = parseArchivedIdentitySnapshot(event, relayPubkey);
+    if (candidate == null) return;
+    final latest = _latest;
+    if (latest != null &&
+        (candidate.createdAt < latest.createdAt ||
+            (candidate.createdAt == latest.createdAt &&
+                candidate.eventId.compareTo(latest.eventId) >= 0))) {
+      return;
+    }
+    _latest = candidate;
+    state = AsyncData(candidate.pubkeys);
+  }
+
+  void _clearSubscription() {
+    _unsubscribe?.call();
+    _unsubscribe = null;
+    _latest = null;
+  }
+}
+
+/// Relay-scoped identities hidden from forward-looking discovery surfaces.
+/// Fail-open while disconnected, loading, or when relay proof is invalid.
+final archivedIdentityPubkeysProvider =
+    AsyncNotifierProvider<ArchivedIdentityPubkeysNotifier, Set<String>>(
+      ArchivedIdentityPubkeysNotifier.new,
+    );
 
 /// A relay agent parsed from its kind:10100 agent-profile event.
 ///
