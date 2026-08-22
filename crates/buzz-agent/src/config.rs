@@ -484,8 +484,8 @@ pub struct Config {
     /// disable `_Stop` hooks entirely (agent always honors end_turn).
     pub stop_max_rejections: u32,
     /// Remind the model to publish when a turn is about to end without any
-    /// recognized attempt to post to Buzz. Default off; opt in per agent with
-    /// `BUZZ_AGENT_REQUIRE_REPLY=1`.
+    /// recognized attempt to post to Buzz. Default on; opt out per agent with
+    /// `BUZZ_AGENT_REQUIRE_REPLY=0`.
     ///
     /// Advisory only: at most `MAX_REPLY_NAGS` reminders (see `agent.rs`),
     /// then the turn ends regardless. Bounded by the same
@@ -624,7 +624,7 @@ impl Config {
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
-            require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
+            require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 1u8)? != 0,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
