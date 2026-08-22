@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use buzz_core::CommunityId;
+use buzz_core::{kind::KIND_WORKFLOW_DEF, CommunityId};
 
 use crate::error::{DbError, Result};
 
@@ -185,6 +185,21 @@ pub struct WorkflowRecord {
     pub created_at: DateTime<Utc>,
     /// When the workflow was last updated.
     pub updated_at: DateTime<Utc>,
+}
+
+/// Result of atomically deleting a workflow and tombstoning its definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowDeleteOutcome {
+    /// The workflow row, definition event, or both were deleted.
+    Deleted {
+        /// Channel whose workflow cache must be invalidated, when a workflow
+        /// row was present.
+        channel_id: Option<Uuid>,
+        /// Whether the live kind-30620 definition event was tombstoned.
+        definition_deleted: bool,
+    },
+    /// The deletion event predates the live definition and was ignored.
+    Stale,
 }
 
 /// A single execution of a workflow.
@@ -789,6 +804,88 @@ pub async fn delete_workflow_for_owner(
         Some(row) => Ok(row.try_get("channel_id")?),
         None => Err(DbError::NotFound(format!("workflow {id}"))),
     }
+}
+
+/// Atomically delete an owned workflow row and tombstone its live definition.
+///
+/// The definition coordinate is `(kind:30620, owner_pubkey, d_tag)`. The event
+/// is tombstoned only when it is no newer than `deletion_created_at_secs`, per
+/// NIP-09 ordering. If a newer live definition exists, the transaction returns
+/// [`WorkflowDeleteOutcome::Stale`] without deleting the workflow row. This
+/// keeps the query-visible definition and executable record consistent across
+/// crashes and retries.
+pub async fn delete_workflow_and_definition_for_owner(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    owner_pubkey: &[u8],
+    d_tag: &str,
+    deletion_created_at_secs: i64,
+) -> Result<WorkflowDeleteOutcome> {
+    let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let mut tx = pool.begin().await?;
+
+    let definition_deleted = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+         AND deleted_at IS NULL AND created_at <= $5",
+    )
+    .bind(community_id.as_uuid())
+    .bind(KIND_WORKFLOW_DEF as i32)
+    .bind(owner_pubkey)
+    .bind(d_tag)
+    .bind(deletion_created_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+
+    if !definition_deleted {
+        let newer_definition_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+             AND deleted_at IS NULL AND created_at > $5)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(owner_pubkey)
+        .bind(d_tag)
+        .bind(deletion_created_at)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if newer_definition_exists {
+            tx.rollback().await?;
+            return Ok(WorkflowDeleteOutcome::Stale);
+        }
+    }
+
+    let row = sqlx::query(
+        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3 \
+         RETURNING channel_id",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(owner_pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let workflow_deleted = row.is_some();
+    let channel_id: Option<Uuid> = match row {
+        Some(row) => row.try_get("channel_id")?,
+        None => None,
+    };
+
+    if !workflow_deleted && !definition_deleted {
+        tx.rollback().await?;
+        return Err(DbError::NotFound(format!("workflow {id}")));
+    }
+
+    tx.commit().await?;
+    Ok(WorkflowDeleteOutcome::Deleted {
+        channel_id,
+        definition_deleted,
+    })
 }
 
 // -- Workflow Run CRUD --------------------------------------------------------
@@ -2127,6 +2224,174 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert workflow");
+    }
+
+    async fn insert_workflow_definition_event(
+        pool: &PgPool,
+        community: CommunityId,
+        owner: &[u8],
+        d_tag: &str,
+        created_at: DateTime<Utc>,
+    ) {
+        let event_id = Uuid::new_v4().as_bytes().repeat(2);
+        let tags = serde_json::json!([["d", d_tag]]);
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)",
+        )
+        .bind(community.as_uuid())
+        .bind(event_id)
+        .bind(owner)
+        .bind(created_at)
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(tags)
+        .bind("{}")
+        .bind(vec![0u8; 64])
+        .bind(d_tag)
+        .execute(pool)
+        .await
+        .expect("insert workflow definition event");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_delete_atomically_tombstones_definition() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let workflow_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let owner = vec![0xb2; 32];
+        let d_tag = workflow_id.to_string();
+        let definition_created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+
+        insert_workflow_with_ids(&pool, community, workflow_id, channel_id, "wf-delete").await;
+        insert_workflow_definition_event(&pool, community, &owner, &d_tag, definition_created_at)
+            .await;
+
+        let outcome = delete_workflow_and_definition_for_owner(
+            &pool,
+            community,
+            workflow_id,
+            &owner,
+            &d_tag,
+            definition_created_at.timestamp() + 1,
+        )
+        .await
+        .expect("atomic workflow deletion");
+        assert_eq!(
+            outcome,
+            WorkflowDeleteOutcome::Deleted {
+                channel_id: Some(channel_id),
+                definition_deleted: true,
+            }
+        );
+        assert!(matches!(
+            get_workflow(&pool, community, workflow_id).await,
+            Err(DbError::NotFound(_))
+        ));
+
+        let live_definition_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(&owner)
+        .bind(&d_tag)
+        .fetch_one(&pool)
+        .await
+        .expect("count live definitions");
+        assert_eq!(live_definition_count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_workflow_delete_preserves_definition_and_record() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let workflow_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let owner = vec![0xb2; 32];
+        let d_tag = workflow_id.to_string();
+        let definition_created_at = Utc.timestamp_opt(1_700_000_100, 0).unwrap();
+
+        insert_workflow_with_ids(&pool, community, workflow_id, channel_id, "wf-stale").await;
+        insert_workflow_definition_event(&pool, community, &owner, &d_tag, definition_created_at)
+            .await;
+
+        let outcome = delete_workflow_and_definition_for_owner(
+            &pool,
+            community,
+            workflow_id,
+            &owner,
+            &d_tag,
+            definition_created_at.timestamp() - 1,
+        )
+        .await
+        .expect("stale workflow deletion");
+        assert_eq!(outcome, WorkflowDeleteOutcome::Stale);
+        assert!(get_workflow(&pool, community, workflow_id).await.is_ok());
+
+        let live_definition_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(&owner)
+        .bind(&d_tag)
+        .fetch_one(&pool)
+        .await
+        .expect("count live definitions");
+        assert_eq!(live_definition_count, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_delete_commits_global_row_when_definition_is_already_absent() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xc3; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let workflow_id = create_workflow(
+            &pool,
+            community,
+            None,
+            &owner,
+            "global-workflow",
+            r#"{"trigger":{"on":"schedule"},"steps":[]}"#,
+            &[0u8; 32],
+        )
+        .await
+        .expect("create global workflow");
+        let d_tag = workflow_id.to_string();
+
+        let outcome = delete_workflow_and_definition_for_owner(
+            &pool,
+            community,
+            workflow_id,
+            &owner,
+            &d_tag,
+            Utc::now().timestamp(),
+        )
+        .await
+        .expect("delete global workflow without definition event");
+        assert_eq!(
+            outcome,
+            WorkflowDeleteOutcome::Deleted {
+                channel_id: None,
+                definition_deleted: false,
+            }
+        );
+        assert!(matches!(
+            get_workflow(&pool, community, workflow_id).await,
+            Err(DbError::NotFound(_))
+        ));
     }
 
     /// Issue 4 (workflow identity): the same workflow UUID and channel UUID can
