@@ -106,6 +106,23 @@ async function readOutgoingMentionPubkeys(page: Page, content: string) {
   }, content);
 }
 
+async function emitMockMessage(
+  page: Page,
+  content: string,
+  mentionPubkeys: string[],
+) {
+  await page.evaluate(
+    ({ body, mentions }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: body,
+        mentionPubkeys: mentions,
+      });
+    },
+    { body: content, mentions: mentionPubkeys },
+  );
+}
+
 async function installAudienceFixtures(
   page: Page,
   options: {
@@ -216,6 +233,24 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
       .getByTestId("composer-address-locks")
       .getByRole("button", { name: /^Stop automatically mentioning / }),
   ).toHaveCount(1);
+});
+
+test("primary+Shift+M favors the most recently mentioned eligible agent", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  await emitMockMessage(page, "Please ask Vogue", [AGENT_B]);
+
+  const input = channelComposer(page).getByTestId("message-input");
+  await input.fill("draft text");
+  await pressPrimaryShift(page, "M");
+
+  await expect(input).toHaveText("@Vogue draft text");
+  await pressPrimaryShift(page, "M");
+  await expect(input).toHaveText("draft text");
+  await pressPrimaryShift(page, "M");
+  await expect(input).toHaveText("@Vogue draft text");
 });
 
 test("the mention button opens settings and can undo an address", async ({

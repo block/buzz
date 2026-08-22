@@ -98,6 +98,7 @@ function MessageComposerImpl({
   onSend,
   placeholder,
   profiles,
+  recentMentionPubkeys,
   replyTarget = null,
   mediaController,
   showBackgroundUploadProgress = true,
@@ -154,6 +155,7 @@ function MessageComposerImpl({
   } | null>(null);
   const mentions = useMentions(channelId, undefined, profiles, {
     channelType,
+    recentMentionPubkeys,
   });
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();

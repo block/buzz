@@ -106,6 +106,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
     remove: boolean,
   ) => Promise<void>;
   profiles?: UserProfileLookup;
+  recentMentionPubkeys?: readonly string[];
   replyTargetMessage: TimelineMessage | null;
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
@@ -184,6 +185,7 @@ export function MessageThreadPanel({
   onToggleReaction,
   onUnfollowThread,
   profiles,
+  recentMentionPubkeys,
   replyTargetMessage,
   scrollTargetId,
   scrollTargetHighlights = true,
@@ -851,6 +853,7 @@ export function MessageThreadPanel({
                   : `Reply in thread to ${threadHead.author}`
               }
               profiles={profiles}
+              recentMentionPubkeys={recentMentionPubkeys}
               replyTarget={composerReplyTarget}
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}

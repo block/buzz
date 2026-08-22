@@ -205,6 +205,44 @@ test("pickDefaultAgentCandidate: runnable personas break otherwise equal ties", 
   );
 });
 
+test("pickDefaultAgentCandidate: recent eligible mentions outrank the fallback ranking", () => {
+  const stoppedRecentMember = candidate({
+    displayName: "Ada",
+    isActiveAgent: false,
+    isAgent: true,
+    isMember: true,
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+  const runningNonMember = candidate({
+    displayName: "Bea",
+    isActiveAgent: true,
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate(
+      [runningNonMember, stoppedRecentMember],
+      new Set(),
+      [CHANNEL_BRAIN_PUBKEY],
+    ),
+    stoppedRecentMember,
+  );
+});
+
+test("pickDefaultAgentCandidate: skips recent pubkeys that are not eligible candidates", () => {
+  const runningAgent = candidate({
+    isActiveAgent: true,
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate([runningAgent], new Set(), ["f".repeat(64)]),
+    runningAgent,
+  );
+});
+
 test("pickDefaultAgentCandidate: returns null without an addressable agent", () => {
   assert.equal(pickDefaultAgentCandidate([]), null);
   assert.equal(pickDefaultAgentCandidate([candidate()]), null);

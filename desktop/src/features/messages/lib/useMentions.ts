@@ -66,7 +66,10 @@ import {
 } from "./mentionCandidates";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-type UseMentionsOptions = { channelType?: ChannelType | null };
+type UseMentionsOptions = {
+  channelType?: ChannelType | null;
+  recentMentionPubkeys?: readonly string[];
+};
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -563,6 +566,7 @@ export function useMentions(
       const bestCandidate = pickDefaultAgentCandidate(
         mentionCandidates,
         activePersonaIds,
+        options?.recentMentionPubkeys,
       );
       if (!bestCandidate) return null;
       return mapMentionCandidateToSuggestion({
@@ -580,6 +584,7 @@ export function useMentions(
       currentPubkey,
       mentionCandidates,
       options?.channelType,
+      options?.recentMentionPubkeys,
       ownerProfilesQuery.data?.profiles,
       profiles,
     ]);

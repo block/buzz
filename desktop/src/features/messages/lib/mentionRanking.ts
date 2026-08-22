@@ -55,11 +55,28 @@ function scoreMentionCandidateLabel(
 export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   activePersonaIds: ReadonlySet<string> = new Set(),
+  recentMentionPubkeys: readonly string[] = [],
 ): T | null {
+  const recentMentionRankByPubkey = new Map(
+    recentMentionPubkeys.map((pubkey, index) => [
+      normalizePubkey(pubkey),
+      index,
+    ]),
+  );
   return (
     candidates
       .filter((candidate) => candidate.isAgent && Boolean(candidate.pubkey))
       .sort((left, right) => {
+        const leftRecentRank = left.pubkey
+          ? recentMentionRankByPubkey.get(normalizePubkey(left.pubkey))
+          : undefined;
+        const rightRecentRank = right.pubkey
+          ? recentMentionRankByPubkey.get(normalizePubkey(right.pubkey))
+          : undefined;
+        const recentDiff =
+          (leftRecentRank ?? recentMentionPubkeys.length) -
+          (rightRecentRank ?? recentMentionPubkeys.length);
+        if (recentDiff !== 0) return recentDiff;
         const activeDiff =
           Number(right.isActiveAgent === true) -
           Number(left.isActiveAgent === true);
