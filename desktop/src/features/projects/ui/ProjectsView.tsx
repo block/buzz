@@ -115,7 +115,6 @@ import { useProjectsOverviewAgentContext } from "./useProjectsOverviewAgentConte
 
 const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
-
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
@@ -228,7 +227,6 @@ export function ProjectsView() {
   const profiles = profilesQuery.data?.profiles;
   const deleteProjectMutation = useDeleteProjectMutation();
   const currentPubkey = identityQuery.data?.pubkey;
-
   const handleViewModeChange = React.useCallback(
     (nextViewMode: ProjectsViewMode) => {
       setStoredViewMode(nextViewMode);

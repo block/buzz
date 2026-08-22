@@ -483,9 +483,9 @@ test("buildProjectReadModels ignores a tombstone that predates the live head", (
   );
 });
 
-test("buildProjectReadModels rejects a tombstone signed by a different pubkey", () => {
+test("buildProjectReadModels applies a relay-authorized owner tombstone", () => {
   const owner = "a".repeat(64);
-  const impostor = "b".repeat(64);
+  const agentOwner = "b".repeat(64);
   const projectAddress = `30621:${owner}:platform`;
   const projectEvent = {
     id: "p".repeat(64),
@@ -495,10 +495,10 @@ test("buildProjectReadModels rejects a tombstone signed by a different pubkey", 
     content: "",
     tags: [["d", "platform"]],
   };
-  const foreignDeletion = {
+  const ownerDeletion = {
     id: "d".repeat(64),
     kind: 5,
-    pubkey: impostor,
+    pubkey: agentOwner,
     created_at: 200,
     content: "",
     tags: [["a", projectAddress]],
@@ -507,12 +507,12 @@ test("buildProjectReadModels rejects a tombstone signed by a different pubkey", 
   const projects = buildProjectReadModels({
     projectEvents: [projectEvent],
     repositoryEvents: [],
-    deletionEvents: [foreignDeletion],
+    deletionEvents: [ownerDeletion],
   });
   assert.equal(
     projects.filter((p) => !p.legacy).length,
-    1,
-    "a stranger's tombstone must not delete someone else's project",
+    0,
+    "relay-authorized owner tombstone should delete the agent project",
   );
 });
 

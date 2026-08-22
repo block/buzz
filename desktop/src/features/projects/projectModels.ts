@@ -387,27 +387,18 @@ function repositoryToLegacyProject(repository: Repository): Project {
 }
 
 /**
- * Builds the set of addressable coordinates that have been authoritatively
- * deleted per NIP-09 semantics: the deletion signer must equal the coordinate
- * owner, and the deletion's `created_at` must be ≥ the live head's timestamp.
- * Returns a `Map<coordinate, deletedAt>` for threshold comparison.
+ * Builds deletion thresholds from relay-accepted tombstones. The relay has
+ * already enforced that each signer controls the addressed coordinate,
+ * including Buzz's NIP-OA owner delegation for agent-authored events.
  */
 function buildDeletionThresholds(
   deletionEvents: RelayEvent[],
 ): Map<string, number> {
   const thresholds = new Map<string, number>();
   for (const event of deletionEvents) {
-    const signer = event.pubkey.toLowerCase();
     for (const tag of event.tags) {
       if (tag[0] !== "a" || !tag[1]) continue;
       const coordinate = tag[1];
-      // The signer must be the owner of the coordinate.
-      const firstColon = coordinate.indexOf(":");
-      const secondColon = coordinate.indexOf(":", firstColon + 1);
-      if (firstColon < 0 || secondColon < 0) continue;
-      const owner = coordinate.slice(firstColon + 1, secondColon).toLowerCase();
-      if (owner !== signer) continue;
-      // Keep the latest (most permissive) deletion threshold.
       const existing = thresholds.get(coordinate);
       if (existing === undefined || event.created_at > existing) {
         thresholds.set(coordinate, event.created_at);
