@@ -14,6 +14,7 @@
 
 pub mod agent_definitions;
 pub mod builders;
+pub mod definition_validation;
 pub mod mentions;
 pub mod nip_oa;
 
