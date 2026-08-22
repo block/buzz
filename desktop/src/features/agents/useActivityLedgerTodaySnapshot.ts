@@ -103,10 +103,8 @@ export function isActivityLedgerTodayArchiveFenceError(
   error: unknown,
 ): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return (
-    message.includes("Today snapshot archive revision changed") ||
-    message.includes("Today snapshot archive exclusions changed") ||
-    message.includes("Today snapshot archive fence requires completed backfill")
+  return message.includes(
+    "Today snapshot archive fence requires completed backfill",
   );
 }
 

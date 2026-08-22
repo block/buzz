@@ -10,13 +10,7 @@ import {
   loadActivityLedgerTodayAuthority,
 } from "./useActivityLedgerTodaySnapshot.ts";
 
-test("Today publication retries only transient archive fence changes", () => {
-  assert.equal(
-    isActivityLedgerTodayArchiveFenceError(
-      "Today snapshot archive revision changed: declared 7, current 8",
-    ),
-    true,
-  );
+test("Today publication retries only a transient archive backfill fence", () => {
   assert.equal(
     isActivityLedgerTodayArchiveFenceError(
       new Error("Today snapshot archive fence requires completed backfill"),

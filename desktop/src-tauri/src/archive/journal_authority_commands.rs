@@ -173,12 +173,12 @@ pub async fn query_journal_authority_artifacts(
         .await
 }
 
-fn validate_snapshot_archive_fence(
+fn seal_snapshot_archive_fence(
     snapshot_json: &str,
     current_revision: i64,
     current_unindexed: i64,
-) -> Result<(), String> {
-    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+) -> Result<String, String> {
+    let mut snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
         .map_err(|error| format!("invalid Today snapshot JSON: {error}"))?;
     let projection = snapshot
         .pointer("/surface/snapshotProjection")
@@ -207,17 +207,39 @@ fn validate_snapshot_archive_fence(
     {
         return Err("Today snapshot with excluded observer frames must be bounded".into());
     }
-    if declared_revision != current_revision {
-        return Err(format!(
-            "Today snapshot archive revision changed: declared {declared_revision}, current {current_revision}"
-        ));
+    if current_revision < declared_revision {
+        return Err("Today snapshot archive revision moved backwards".into());
     }
-    if current_unindexed > declared {
-        return Err(format!(
-            "Today snapshot archive exclusions changed: declared {declared}, current {current_unindexed}"
-        ));
+    let revision_drift = current_revision - declared_revision;
+    let current_unindexed = current_unindexed.max(declared);
+    let current_excluded = excluded
+        .checked_add(current_unindexed - declared)
+        .ok_or("Today snapshot exclusion count overflow")?;
+    let projection = snapshot
+        .pointer_mut("/surface/snapshotProjection")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("Today snapshot must include snapshotProjection")?;
+    projection.insert(
+        "archiveRevisionAtPublish".into(),
+        serde_json::Value::from(current_revision),
+    );
+    projection.insert(
+        "archiveRevisionDrift".into(),
+        serde_json::Value::from(revision_drift),
+    );
+    projection.insert(
+        "unindexedObserverFrames".into(),
+        serde_json::Value::from(current_unindexed),
+    );
+    projection.insert(
+        "excludedObserverFrames".into(),
+        serde_json::Value::from(current_excluded),
+    );
+    if revision_drift > 0 || current_excluded > 0 {
+        projection.insert("bounded".into(), serde_json::Value::Bool(true));
     }
-    Ok(())
+    serde_json::to_string(&snapshot)
+        .map_err(|error| format!("serialize fenced Today snapshot: {error}"))
 }
 
 /// Publish under both the process-exclusive archive guard and a SQLite
@@ -246,7 +268,8 @@ pub async fn write_owner_today_snapshot(
             let current_revision = observer_revision::current(&tx, &identity_pk, &relay_url)?;
             let current_unindexed =
                 store::count_unindexed_observer_frames(&tx, &identity_pk, &relay_url)?;
-            validate_snapshot_archive_fence(&snapshot_json, current_revision, current_unindexed)?;
+            let snapshot_json =
+                seal_snapshot_archive_fence(&snapshot_json, current_revision, current_unindexed)?;
             let receipt = today_snapshot::write_owner_today_snapshot(
                 &nest,
                 &keys,
@@ -273,21 +296,25 @@ pub fn read_owner_today_snapshot(state: State<'_, AppState>) -> Result<String, S
 
 #[cfg(test)]
 mod snapshot_fence_tests {
-    use super::validate_snapshot_archive_fence;
+    use super::seal_snapshot_archive_fence;
 
     #[test]
-    fn snapshot_fence_rejects_a_newly_hidden_observer_frame() {
+    fn snapshot_fence_discloses_new_archive_activity() {
         let snapshot = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":true,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
-        assert!(validate_snapshot_archive_fence(snapshot, 7, 2).is_ok());
-        assert!(validate_snapshot_archive_fence(snapshot, 7, 1).is_ok());
-        assert!(validate_snapshot_archive_fence(snapshot, 8, 2)
+        let sealed = seal_snapshot_archive_fence(snapshot, 8, 3).unwrap();
+        let sealed: serde_json::Value = serde_json::from_str(&sealed).unwrap();
+        let projection = &sealed["surface"]["snapshotProjection"];
+        assert_eq!(projection["archiveRevision"], 7);
+        assert_eq!(projection["archiveRevisionAtPublish"], 8);
+        assert_eq!(projection["archiveRevisionDrift"], 1);
+        assert_eq!(projection["unindexedObserverFrames"], 3);
+        assert_eq!(projection["excludedObserverFrames"], 3);
+        assert_eq!(projection["bounded"], true);
+        assert!(seal_snapshot_archive_fence(snapshot, 6, 2)
             .unwrap_err()
-            .contains("revision changed"));
-        assert!(validate_snapshot_archive_fence(snapshot, 7, 3)
-            .unwrap_err()
-            .contains("declared 2, current 3"));
+            .contains("moved backwards"));
         let false_complete = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":false,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
-        assert!(validate_snapshot_archive_fence(false_complete, 7, 2)
+        assert!(seal_snapshot_archive_fence(false_complete, 7, 2)
             .unwrap_err()
             .contains("must be bounded"));
     }

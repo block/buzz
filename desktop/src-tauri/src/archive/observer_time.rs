@@ -173,8 +173,19 @@ pub(super) fn count_unindexed_observer_frames(
 
 /// Read owner-scoped observer events whose decrypted inner timestamps overlap
 /// a half-open time range. The compound outer cursor remains stable for paging.
+pub(super) struct ObserverRangeRow {
+    pub raw_json: String,
+    pub created_at: i64,
+    pub id: String,
+}
+
+pub(super) struct ObserverRangePage {
+    pub rows: Vec<ObserverRangeRow>,
+    pub total_count: i64,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) fn read_archived_observer_events_for_range(
+pub(super) fn read_archived_observer_event_page_for_range(
     conn: &Connection,
     identity_pubkey: &str,
     relay_url: &str,
@@ -185,7 +196,7 @@ pub(super) fn read_archived_observer_events_for_range(
     before_created_at: Option<i64>,
     before_id: Option<&str>,
     limit: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<ObserverRangePage, String> {
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
         Box::new(identity_pubkey.to_owned()),
         Box::new(relay_url.to_owned()),
@@ -223,7 +234,7 @@ pub(super) fn read_archived_observer_events_for_range(
     values.push(Box::new(limit));
     let limit_slot = values.len();
     let sql = format!(
-        "SELECT ae.raw_json
+        "SELECT ae.raw_json, ae.created_at, ae.id, COUNT(*) OVER ()
            FROM archived_events ae
            JOIN archived_event_scopes aes USING (identity_pubkey, relay_url, id)
            JOIN observer_time_index oti USING (identity_pubkey, relay_url, id)
@@ -239,10 +250,54 @@ pub(super) fn read_archived_observer_events_for_range(
         .prepare(&sql)
         .map_err(|error| format!("prepare observer inner-time range: {error}"))?;
     let rows = stmt
-        .query_map(refs.as_slice(), |row| row.get::<_, String>(0))
+        .query_map(refs.as_slice(), |row| {
+            Ok((
+                ObserverRangeRow {
+                    raw_json: row.get(0)?,
+                    created_at: row.get(1)?,
+                    id: row.get(2)?,
+                },
+                row.get::<_, i64>(3)?,
+            ))
+        })
         .map_err(|error| format!("query observer inner-time range: {error}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read observer inner-time range row: {error}"))
+    let collected = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read observer inner-time range row: {error}"))?;
+    let total_count = collected.first().map_or(0, |(_, total)| *total);
+    Ok(ObserverRangePage {
+        rows: collected.into_iter().map(|(row, _)| row).collect(),
+        total_count,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+pub(super) fn read_archived_observer_events_for_range(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    start_created_at: i64,
+    end_created_at: i64,
+    agent_pubkey: Option<&str>,
+    channel_id: Option<&str>,
+    before_created_at: Option<i64>,
+    before_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    read_archived_observer_event_page_for_range(
+        conn,
+        identity_pubkey,
+        relay_url,
+        start_created_at,
+        end_created_at,
+        agent_pubkey,
+        channel_id,
+        before_created_at,
+        before_id,
+        limit,
+    )
+    .map(|page| page.rows.into_iter().map(|row| row.raw_json).collect())
 }
 
 #[cfg(test)]
@@ -398,6 +453,56 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+    }
+
+    #[test]
+    fn range_page_counts_and_cursors_malformed_archived_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(store::SCHEMA).unwrap();
+        let owner = Keys::generate();
+        let owner_pubkey = owner.public_key().to_hex();
+        store::upsert_archived_event(
+            &conn,
+            &owner_pubkey,
+            RELAY,
+            "malformed",
+            24200,
+            "agent",
+            10_000,
+            "{invalid-json",
+            10_000,
+        )
+        .unwrap();
+        store::upsert_event_scope(
+            &conn,
+            &owner_pubkey,
+            RELAY,
+            "malformed",
+            "owner_p",
+            &owner_pubkey,
+            10_000,
+        )
+        .unwrap();
+        upsert(&conn, &owner_pubkey, RELAY, "malformed", Some(20), Some(20)).unwrap();
+
+        let page = read_archived_observer_event_page_for_range(
+            &conn,
+            &owner_pubkey,
+            RELAY,
+            10,
+            30,
+            None,
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
+        assert_eq!(page.total_count, 1);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].raw_json, "{invalid-json");
+        assert_eq!(page.rows[0].created_at, 10_000);
+        assert_eq!(page.rows[0].id, "malformed");
     }
 
     #[test]

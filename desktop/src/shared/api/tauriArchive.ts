@@ -468,6 +468,9 @@ export type ArchivedObserverRangePage = {
   unindexedObserverFrames: number;
   archiveRevision: number;
   restartRequired: boolean;
+  totalObserverFrames: number;
+  returnedObserverFrames: number;
+  rejectedArchiveRows: number;
   hasMore: boolean;
   nextBefore: ArchivedObserverRangeCursor | null;
 };
@@ -497,6 +500,10 @@ export async function readArchivedObserverEventsForRange(opts: {
     unindexedObserverFrames: number;
     archiveRevision: number;
     restartRequired: boolean;
+    totalObserverFrames: number;
+    hasMore: boolean;
+    nextBeforeCreatedAt: number | null;
+    nextBeforeId: string | null;
   }>("read_archived_observer_events_for_range", {
     input: {
       startCreatedAt: opts.startCreatedAt,
@@ -525,7 +532,6 @@ export async function readArchivedObserverEventsForRange(opts: {
       (event): event is import("@/shared/api/types").RelayEvent =>
         event !== null,
     );
-  const oldest = events.at(-1) ?? null;
   if (
     !Number.isSafeInteger(rawPage.unindexedObserverFrames) ||
     rawPage.unindexedObserverFrames < 0
@@ -541,16 +547,35 @@ export async function readArchivedObserverEventsForRange(opts: {
   ) {
     throw new Error("Archived observer range returned an invalid revision.");
   }
+  if (
+    !Number.isSafeInteger(rawPage.totalObserverFrames) ||
+    rawPage.totalObserverFrames < rawPage.events.length ||
+    typeof rawPage.hasMore !== "boolean" ||
+    (rawPage.nextBeforeCreatedAt === null) !==
+      (rawPage.nextBeforeId === null) ||
+    (rawPage.nextBeforeCreatedAt !== null &&
+      !Number.isSafeInteger(rawPage.nextBeforeCreatedAt)) ||
+    (rawPage.nextBeforeId !== null && rawPage.nextBeforeId.length === 0)
+  ) {
+    throw new Error("Archived observer range returned invalid paging data.");
+  }
   return {
     events,
     backfillComplete: rawPage.backfillComplete,
     unindexedObserverFrames: rawPage.unindexedObserverFrames,
     archiveRevision: rawPage.archiveRevision,
     restartRequired: rawPage.restartRequired,
-    hasMore:
-      !rawPage.backfillComplete ||
-      (!rawPage.restartRequired && rawPage.events.length === limit),
-    nextBefore: oldest ? { createdAt: oldest.created_at, id: oldest.id } : null,
+    totalObserverFrames: rawPage.totalObserverFrames,
+    returnedObserverFrames: rawPage.events.length,
+    rejectedArchiveRows: rawPage.events.length - events.length,
+    hasMore: !rawPage.backfillComplete || rawPage.hasMore,
+    nextBefore:
+      rawPage.nextBeforeCreatedAt !== null && rawPage.nextBeforeId !== null
+        ? {
+            createdAt: rawPage.nextBeforeCreatedAt,
+            id: rawPage.nextBeforeId,
+          }
+        : null,
   };
 }
 
@@ -608,6 +633,8 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
 }): AsyncGenerator<{
   events: import("@/shared/api/types").RelayEvent[];
   unindexedObserverFrames: number;
+  rejectedArchiveRows: number;
+  omittedObserverFrames: number;
   archiveRevision: number;
   reset: boolean;
 }> {
@@ -631,26 +658,41 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
     if (!page.backfillComplete) continue;
     if (page.restartRequired) {
       restarts += 1;
-      if (restarts > 3) {
-        throw new Error(
-          "Archived observer range changed repeatedly during reconstruction.",
-        );
-      }
       archiveRevision = page.archiveRevision;
       before = null;
       disclosedUnindexedFrames = 0;
       yield {
         events: [],
         unindexedObserverFrames: 0,
+        rejectedArchiveRows: 0,
+        omittedObserverFrames: 0,
         archiveRevision,
         reset: true,
       };
+      if (restarts > 3) {
+        yield {
+          events: page.events,
+          unindexedObserverFrames: disclosureDelta(
+            page.unindexedObserverFrames,
+          ),
+          rejectedArchiveRows: page.rejectedArchiveRows,
+          omittedObserverFrames: Math.max(
+            0,
+            page.totalObserverFrames - page.returnedObserverFrames,
+          ),
+          archiveRevision,
+          reset: false,
+        };
+        return;
+      }
       continue;
     }
     archiveRevision = page.archiveRevision;
     yield {
       events: page.events,
       unindexedObserverFrames: disclosureDelta(page.unindexedObserverFrames),
+      rejectedArchiveRows: page.rejectedArchiveRows,
+      omittedObserverFrames: 0,
       archiveRevision,
       reset: false,
     };

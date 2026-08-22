@@ -599,9 +599,7 @@ pub async fn read_archived_observer_events_for_channel(
         .await
 }
 
-/// Read a paginated owner-scoped observer page whose decrypted inner observer
-/// timestamps overlap a half-open time range. Pagination still uses the signed
-/// envelope's stable `(created_at, id)` ordering.
+/// Read observer frames by inner time with stable signed-envelope pagination.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchivedObserverRangeInput {
@@ -614,7 +612,6 @@ pub struct ArchivedObserverRangeInput {
     archive_revision: Option<i64>,
     limit: Option<i64>,
 }
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchivedObserverRangeOutput {
@@ -623,8 +620,11 @@ pub struct ArchivedObserverRangeOutput {
     unindexed_observer_frames: i64,
     archive_revision: i64,
     restart_required: bool,
+    total_observer_frames: i64,
+    has_more: bool,
+    next_before_created_at: Option<i64>,
+    next_before_id: Option<String>,
 }
-
 #[tauri::command]
 pub async fn read_archived_observer_events_for_range(
     state: State<'_, AppState>,
@@ -673,24 +673,26 @@ pub async fn read_archived_observer_events_for_range(
                     unindexed_observer_frames: 0,
                     archive_revision: current_revision,
                     restart_required: false,
+                    total_observer_frames: 0,
+                    has_more: false,
+                    next_before_created_at: None,
+                    next_before_id: None,
                 });
             }
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|error| format!("begin observer range snapshot: {error}"))?;
             let current_revision = observer_revision::current(&tx, &identity_pk, &relay_url)?;
-            if archive_revision.is_some_and(|expected| expected != current_revision) {
-                return Ok(ArchivedObserverRangeOutput {
-                    events: Vec::new(),
-                    backfill_complete: true,
-                    unindexed_observer_frames: 0,
-                    archive_revision: current_revision,
-                    restart_required: true,
-                });
-            }
+            let restart_required =
+                archive_revision.is_some_and(|expected| expected != current_revision);
+            let (page_before_created_at, page_before_id) = if restart_required {
+                (None, None)
+            } else {
+                (before_created_at, before_id.as_deref())
+            };
             let unindexed_observer_frames =
                 store::count_unindexed_observer_frames(&tx, &identity_pk, &relay_url)?;
-            let events = store::read_archived_observer_events_for_range(
+            let page = observer_time::read_archived_observer_event_page_for_range(
                 &tx,
                 &identity_pk,
                 &relay_url,
@@ -698,10 +700,14 @@ pub async fn read_archived_observer_events_for_range(
                 end_created_at,
                 agent_pubkey.as_deref(),
                 channel_id.as_deref(),
-                before_created_at,
-                before_id.as_deref(),
+                page_before_created_at,
+                page_before_id,
                 limit,
             )?;
+            let has_more = page.total_count > page.rows.len() as i64;
+            let next_before_created_at = page.rows.last().map(|row| row.created_at);
+            let next_before_id = page.rows.last().map(|row| row.id.clone());
+            let events = page.rows.into_iter().map(|row| row.raw_json).collect();
             tx.commit()
                 .map_err(|error| format!("finish observer range snapshot: {error}"))?;
             Ok(ArchivedObserverRangeOutput {
@@ -709,7 +715,11 @@ pub async fn read_archived_observer_events_for_range(
                 backfill_complete: true,
                 unindexed_observer_frames,
                 archive_revision: current_revision,
-                restart_required: false,
+                restart_required,
+                total_observer_frames: page.total_count,
+                has_more,
+                next_before_created_at,
+                next_before_id,
             })
         })
         .await

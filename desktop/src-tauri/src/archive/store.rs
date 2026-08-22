@@ -13,9 +13,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::time::{Duration, Instant};
 
-pub(super) use super::observer_time::{
-    count_unindexed_observer_frames, read_archived_observer_events_for_range,
-};
+pub(super) use super::observer_time::count_unindexed_observer_frames;
+#[cfg(test)]
+pub(super) use super::observer_time::read_archived_observer_events_for_range;
 use super::store_migrations::apply_schema_migrations;
 
 // ── Schema ─────────────────────────────────────────────────────────────────

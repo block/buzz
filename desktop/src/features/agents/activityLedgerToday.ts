@@ -20,6 +20,8 @@ export type ArchivedObserverEventPage = {
   events: readonly RelayEvent[];
   /** Frames already excluded because no trustworthy inner time was indexable. */
   unindexedObserverFrames: number;
+  rejectedArchiveRows?: number;
+  omittedObserverFrames?: number;
   archiveRevision?: number;
   reset?: boolean;
 };
@@ -39,7 +41,11 @@ export type TodaySnapshotProjection = {
   omittedEvents: number;
   excludedObserverFrames: number;
   unindexedObserverFrames: number;
+  malformedArchivedRows: number;
+  omittedObserverFrames: number;
   archiveRevision: number;
+  archiveRevisionAtPublish: number;
+  archiveRevisionDrift: number;
   textFieldsTruncated: number;
 };
 
@@ -178,6 +184,8 @@ function snapshotSurfaceFromJournals(input: {
   originalEventCount: number;
   excludedObserverFrames: number;
   unindexedObserverFrames: number;
+  malformedArchivedRows: number;
+  omittedObserverFrames: number;
   archiveRevision: number;
   textFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
@@ -254,7 +262,11 @@ function snapshotSurfaceFromJournals(input: {
       omittedEvents,
       excludedObserverFrames: input.excludedObserverFrames,
       unindexedObserverFrames: input.unindexedObserverFrames,
+      malformedArchivedRows: input.malformedArchivedRows,
+      omittedObserverFrames: input.omittedObserverFrames,
       archiveRevision: input.archiveRevision,
+      archiveRevisionAtPublish: input.archiveRevision,
+      archiveRevisionDrift: 0,
       textFieldsTruncated: input.textFieldsTruncated,
     },
   };
@@ -313,6 +325,8 @@ export function buildBoundedTodayActivitySurface(
       originalEventCount,
       excludedObserverFrames: previousProjection?.excludedObserverFrames ?? 0,
       unindexedObserverFrames: previousProjection?.unindexedObserverFrames ?? 0,
+      malformedArchivedRows: previousProjection?.malformedArchivedRows ?? 0,
+      omittedObserverFrames: previousProjection?.omittedObserverFrames ?? 0,
       archiveRevision: previousProjection?.archiveRevision ?? 0,
       textFieldsTruncated,
     });
@@ -383,6 +397,8 @@ function buildArchiveReconstructionCheckpoint(input: {
   originalEventCount: number;
   excludedObserverFrames: number;
   unindexedObserverFrames: number;
+  malformedArchivedRows: number;
+  omittedObserverFrames: number;
   archiveRevision: number;
   previousTextFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
@@ -409,6 +425,8 @@ function buildArchiveReconstructionCheckpoint(input: {
       originalEventCount: input.originalEventCount,
       excludedObserverFrames: input.excludedObserverFrames,
       unindexedObserverFrames: input.unindexedObserverFrames,
+      malformedArchivedRows: input.malformedArchivedRows,
+      omittedObserverFrames: input.omittedObserverFrames,
       archiveRevision: input.archiveRevision,
       textFieldsTruncated,
     });
@@ -575,6 +593,8 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   let originalEventCount = 0;
   let excludedObserverFrames = 0;
   let unindexedObserverFrames = 0;
+  let malformedArchivedRows = 0;
+  let omittedObserverFrames = 0;
   let archiveRevision = 0;
   let textFieldsTruncated = 0;
   let checkpoint: BoundedTodayActivitySurface | null = null;
@@ -588,6 +608,8 @@ async function buildTodayActivityFromArchivedEventPages(input: {
         originalEventCount = 0;
         excludedObserverFrames = 0;
         unindexedObserverFrames = 0;
+        malformedArchivedRows = 0;
+        omittedObserverFrames = 0;
         textFieldsTruncated = 0;
         checkpoint = null;
         archiveRevision = archivedPage.archiveRevision ?? archiveRevision;
@@ -595,7 +617,12 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       }
       archiveRevision = archivedPage.archiveRevision ?? archiveRevision;
       unindexedObserverFrames += archivedPage.unindexedObserverFrames;
-      excludedObserverFrames += archivedPage.unindexedObserverFrames;
+      malformedArchivedRows += archivedPage.rejectedArchiveRows ?? 0;
+      omittedObserverFrames += archivedPage.omittedObserverFrames ?? 0;
+      excludedObserverFrames +=
+        archivedPage.unindexedObserverFrames +
+        (archivedPage.rejectedArchiveRows ?? 0) +
+        (archivedPage.omittedObserverFrames ?? 0);
     }
     const decodedPage: (ObserverEvent[] | null)[] = Array.from(
       { length: page.length },
@@ -697,6 +724,8 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalEventCount,
       excludedObserverFrames,
       unindexedObserverFrames,
+      malformedArchivedRows,
+      omittedObserverFrames,
       archiveRevision,
       previousTextFieldsTruncated: textFieldsTruncated,
     });
@@ -723,6 +752,8 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalEventCount: 0,
       excludedObserverFrames,
       unindexedObserverFrames,
+      malformedArchivedRows,
+      omittedObserverFrames,
       archiveRevision,
       textFieldsTruncated: 0,
     })

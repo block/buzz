@@ -108,6 +108,28 @@ test("Today reconstruction discloses frames excluded before range paging", async
   assert.equal(surface.snapshotProjection.bounded, true);
 });
 
+test("Today reconstruction discloses malformed rows and sustained-ingest fallback omissions", async () => {
+  const surface = await buildTodayActivityFromArchivedPages({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    pages: [
+      {
+        events: [],
+        unindexedObserverFrames: 0,
+        rejectedArchiveRows: 1,
+        omittedObserverFrames: 8,
+        archiveRevision: 12,
+      },
+    ],
+  });
+
+  assert.equal(surface.snapshotProjection.excludedObserverFrames, 9);
+  assert.equal(surface.snapshotProjection.malformedArchivedRows, 1);
+  assert.equal(surface.snapshotProjection.omittedObserverFrames, 8);
+  assert.equal(surface.snapshotProjection.archiveRevision, 12);
+  assert.equal(surface.snapshotProjection.bounded, true);
+});
+
 test("Today reconstruction reports malformed or empty observer batches", async () => {
   const event = relayEvent({
     id: "empty-batch",
