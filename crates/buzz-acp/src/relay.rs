@@ -129,6 +129,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::audit;
 use crate::config::ChannelFilter;
 
 /// Metadata about a channel, populated at discovery time.
@@ -1530,6 +1531,40 @@ async fn execute_connected_command(
             // frame is parked so the post-reconnect drain redelivers it.
             let is_observer = event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME;
             if send_publish_event_frame(ws, &event).await {
+                // Phase B TRANSPORT_PUBLISHED — proves the frame was
+                // actually written to the socket, not merely queued as an
+                // intention to publish. This is buzz-acp's own WS publish
+                // path ONLY: it does NOT represent real agent handoff/chat
+                // publication, and does NOT cover kind:9 messages sent via
+                // `buzz messages send` — those go out through buzz-cli's
+                // independent REST client (see audit::EventType docs).
+                // Skips observer telemetry frames and typing indicators:
+                // neither is even buzz-acp's own causal traffic.
+                if audit::is_enabled() {
+                    let kind = event.kind.as_u16() as u32;
+                    if kind != KIND_AGENT_OBSERVER_FRAME && kind != KIND_TYPING_INDICATOR {
+                        let tags = crate::queue::parse_thread_tags(&event);
+                        let event_id = event.id.to_hex();
+                        let correlation_id = tags
+                            .root_event_id
+                            .clone()
+                            .unwrap_or_else(|| event_id.clone());
+                        audit::record(
+                            audit::EventType::TransportPublished,
+                            audit::AuditFields {
+                                event_id: Some(event_id),
+                                direct_parent_event_id: tags.parent_event_id,
+                                thread_root_event_id: tags.root_event_id,
+                                correlation_id: Some(correlation_id),
+                                workflow_id: audit::workflow_id_for(&event),
+                                sender_pubkey: Some(event.pubkey.to_hex()),
+                                target_pubkey: audit::first_mentioned_pubkey(&event),
+                                ..Default::default()
+                            },
+                            audit::EventDetail::Empty,
+                        );
+                    }
+                }
                 if is_observer {
                     state.track_observer_in_flight(event);
                 }
@@ -2175,6 +2210,36 @@ async fn handle_ws_message(
                                 channel_id,
                                 event: *event,
                             };
+                            // Phase B B4 EVENT_RECEIVED — fires once the
+                            // inbound relay event has been deduped
+                            // (`record_event`) and parsed into `BuzzEvent`,
+                            // before it's forwarded to the harness main
+                            // loop. `target_pubkey` uses this process's own
+                            // confirmed identity (`agent_pubkey_hex`), not a
+                            // tag guess — it IS the recipient here.
+                            if audit::is_enabled() {
+                                let tags = crate::queue::parse_thread_tags(&buzz_event.event);
+                                let event_id = buzz_event.event.id.to_hex();
+                                let correlation_id = tags
+                                    .root_event_id
+                                    .clone()
+                                    .unwrap_or_else(|| event_id.clone());
+                                audit::record(
+                                    audit::EventType::EventReceived,
+                                    audit::AuditFields {
+                                        event_id: Some(event_id),
+                                        direct_parent_event_id: tags.parent_event_id,
+                                        thread_root_event_id: tags.root_event_id,
+                                        correlation_id: Some(correlation_id),
+                                        workflow_id: audit::workflow_id_for(&buzz_event.event),
+                                        sender_pubkey: Some(buzz_event.event.pubkey.to_hex()),
+                                        target_pubkey: Some(agent_pubkey_hex.to_string()),
+                                        channel_id: Some(channel_id.to_string()),
+                                        ..Default::default()
+                                    },
+                                    audit::EventDetail::Empty,
+                                );
+                            }
                             // Warn at 80% capacity.
                             let cap = event_tx.max_capacity();
                             let used = cap - event_tx.capacity();
@@ -2387,6 +2452,25 @@ async fn handle_ws_message(
                     accepted,
                     message,
                 } => {
+                    // Phase B TRANSPORT_ACCEPTED — the relay's NIP-01 OK
+                    // for event_id. Acknowledges buzz-acp's own WS-published
+                    // traffic ONLY — it does NOT represent acceptance of
+                    // real agent chat messages, which are published through
+                    // buzz-cli's REST path and acknowledged via that HTTP
+                    // response, not this WS OK frame (see audit::EventType
+                    // docs). Deliberately no `message` text in the audit
+                    // record (arbitrary relay-supplied content); `accepted`
+                    // alone is the fact this boundary exists to prove.
+                    if audit::is_enabled() {
+                        audit::record(
+                            audit::EventType::TransportAccepted,
+                            audit::AuditFields {
+                                event_id: Some(event_id.clone()),
+                                ..Default::default()
+                            },
+                            audit::EventDetail::RelayAck { accepted },
+                        );
+                    }
                     if !accepted && message.starts_with("auth") {
                         // AUTH OK with accepted=false means auth was rejected.
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");

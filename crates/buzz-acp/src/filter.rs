@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use tracing::{error, warn};
 
+use crate::audit;
+
 /// Errors that can occur during filter expression evaluation.
 #[derive(Debug, thiserror::Error)]
 pub enum FilterError {
@@ -373,6 +375,29 @@ pub async fn match_event(
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
+    // Phase B B5 FILTER_DECISION — computed once per call (not per rule) to
+    // avoid redundant NIP-10 parsing across the loop below. `None` when
+    // auditing is disabled, so no metadata is built at all in that case.
+    let audit_fields = audit::is_enabled().then(|| {
+        let tags = crate::queue::parse_thread_tags(event);
+        let event_id = event.id.to_hex();
+        let correlation_id = tags
+            .root_event_id
+            .clone()
+            .unwrap_or_else(|| event_id.clone());
+        audit::AuditFields {
+            event_id: Some(event_id),
+            direct_parent_event_id: tags.parent_event_id,
+            thread_root_event_id: tags.root_event_id,
+            correlation_id: Some(correlation_id),
+            workflow_id: audit::workflow_id_for(event),
+            sender_pubkey: Some(event.pubkey.to_hex()),
+            target_pubkey: Some(agent_pubkey_hex.to_string()),
+            channel_id: Some(channel_id.to_string()),
+            ..Default::default()
+        }
+    });
+
     for (index, rule) in rules.iter().enumerate() {
         // 1. Channel scope check.
         if !rule.channels.matches(&channel_id) {
@@ -411,6 +436,16 @@ pub async fn match_event(
                      failing closed (no match for any rule)"
                 );
                 // Fail-closed: disabled rule → no match for this event.
+                if let Some(fields) = &audit_fields {
+                    audit::record(
+                        audit::EventType::FilterDecision,
+                        fields.clone(),
+                        audit::EventDetail::FilterDecision {
+                            rule_index: Some(index),
+                            fail_closed: true,
+                        },
+                    );
+                }
                 return None;
             }
 
@@ -432,6 +467,16 @@ pub async fn match_event(
                         "filter expression timed out; failing closed (no match for any rule)"
                     );
                     // Fail-closed: timeout → no match, not next rule.
+                    if let Some(fields) = &audit_fields {
+                        audit::record(
+                            audit::EventType::FilterDecision,
+                            fields.clone(),
+                            audit::EventDetail::FilterDecision {
+                                rule_index: Some(index),
+                                fail_closed: true,
+                            },
+                        );
+                    }
                     return None;
                 }
                 Err(e) => {
@@ -442,6 +487,16 @@ pub async fn match_event(
                         "filter expression error; failing closed (no match for any rule)"
                     );
                     // Fail-closed: any error → no match, not next rule.
+                    if let Some(fields) = &audit_fields {
+                        audit::record(
+                            audit::EventType::FilterDecision,
+                            fields.clone(),
+                            audit::EventDetail::FilterDecision {
+                                rule_index: Some(index),
+                                fail_closed: true,
+                            },
+                        );
+                    }
                     return None;
                 }
             }
@@ -450,12 +505,34 @@ pub async fn match_event(
         // All checks passed — this rule wins.
         let prompt_tag = rule.prompt_tag.clone().unwrap_or_else(|| rule.name.clone());
 
+        if let Some(fields) = &audit_fields {
+            audit::record(
+                audit::EventType::FilterDecision,
+                fields.clone(),
+                audit::EventDetail::FilterDecision {
+                    rule_index: Some(index),
+                    fail_closed: false,
+                },
+            );
+        }
         return Some(MatchedRule {
             rule_index: index,
             prompt_tag,
         });
     }
 
+    // No rule matched (and no fail-closed return above fired) — a normal,
+    // non-error non-match.
+    if let Some(fields) = &audit_fields {
+        audit::record(
+            audit::EventType::FilterDecision,
+            fields.clone(),
+            audit::EventDetail::FilterDecision {
+                rule_index: None,
+                fail_closed: false,
+            },
+        );
+    }
     None
 }
 
