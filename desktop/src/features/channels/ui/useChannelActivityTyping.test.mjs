@@ -12,6 +12,7 @@ import {
   channelScopedBotTypingPubkeyKey,
   mergeMemberAgentFlagsIntoProfiles,
 } from "./useChannelActivityTyping.ts";
+import { getChannelAgentSessionAgents } from "./useChannelAgentSessions.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
@@ -40,6 +41,68 @@ describe("channelScopedBotTypingPubkeyKey", () => {
       { pubkey: AGENT, threadHeadId: null },
     ]);
     assert.equal(key, `${AGENT},${AGENT_2}`);
+  });
+});
+
+describe("DM agent typing classification", () => {
+  it("admits a known relay agent who participates in the active DM", () => {
+    const dm = {
+      id: "dm-1",
+      name: "Sigma DM",
+      channelType: "dm",
+      participantPubkeys: [AGENT, AGENT_2],
+    };
+    const agents = [
+      {
+        pubkey: AGENT,
+        name: "Sigma",
+        status: "deployed",
+        agentSource: "relay",
+        canInterruptTurn: false,
+        channelIds: [],
+        channels: [],
+      },
+    ];
+
+    assert.deepEqual(
+      getChannelAgentSessionAgents({
+        activeChannel: dm,
+        activeChannelId: dm.id,
+        agents,
+        channelMembers: [],
+      }),
+      agents,
+    );
+  });
+
+  it("does not admit a known agent who is not a DM participant", () => {
+    const dm = {
+      id: "dm-1",
+      name: "Sigma DM",
+      channelType: "dm",
+      participantPubkeys: [AGENT_2],
+    };
+    const agents = [
+      {
+        pubkey: AGENT,
+        name: "Sigma",
+        status: "deployed",
+        agentSource: "relay",
+        canInterruptTurn: false,
+        channelIds: [],
+        channels: [],
+      },
+    ];
+
+    assert.deepEqual(
+      getChannelAgentSessionAgents({
+        activeChannel: dm,
+        activeChannelId: dm.id,
+        agents,
+        channelMembers: [],
+      }),
+      [],
+    );
   });
 });
 
