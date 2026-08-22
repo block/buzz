@@ -1301,7 +1301,11 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
+            // Mentions mode also accepts direct thread replies whose parent was
+            // authored by this agent. NIP-01 cannot express "#p OR reply to one
+            // of my events" in a single filter, so receive the bounded message
+            // kinds and enforce the mention/reply union in the application gate.
+            let require_mention = false;
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1406,7 +1410,9 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            // See resolve_channel_filters(): direct-reply routing requires the
+            // application gate to see unmentioned reply candidates.
+            require_mention: false,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1548,7 +1554,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         for ch in &channels {
             let f = result.get(ch).expect("channel should be present");
-            assert!(f.require_mention, "mentions mode requires mention");
+            assert!(
+                !f.require_mention,
+                "mentions mode must receive thread replies so the application gate can admit only replies to this agent"
+            );
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));

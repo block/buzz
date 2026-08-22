@@ -302,6 +302,64 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// Return true when `event` is a direct thread reply to an event authored by
+/// this agent in the same channel.
+///
+/// Mentions mode subscribes to the bounded channel-message kinds without a
+/// relay-side `#p` filter so direct replies can reach this check. The normal
+/// mention matcher still handles DMs and explicit mentions; this is the narrow
+/// fallback for an unmentioned reply. Parent lookup is fail-closed: malformed
+/// tags, timeout/query failure, a missing parent, a signature/id mismatch, a
+/// different author, or a cross-channel parent all return false.
+async fn is_direct_reply_to_agent(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    rest_client: &relay::RestClient,
+) -> bool {
+    let Some(parent_hex) = queue::parse_thread_tags(event).parent_event_id else {
+        return false;
+    };
+    let Ok(parent_id) = nostr::EventId::from_hex(&parent_hex) else {
+        return false;
+    };
+    let filter = nostr::Filter::new().id(parent_id);
+    let response = match tokio::time::timeout(Duration::from_secs(2), rest_client.query(&[filter]))
+        .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::debug!(parent_event_id = %parent_hex, "reply parent lookup failed: {error}");
+            return false;
+        }
+        Err(_) => {
+            tracing::debug!(parent_event_id = %parent_hex, "reply parent lookup timed out");
+            return false;
+        }
+    };
+    let Some(values) = response.as_array() else {
+        return false;
+    };
+    let channel_hex = channel_id.to_string();
+
+    values.iter().any(|value| {
+        let Ok(parent) = serde_json::from_value::<nostr::Event>(value.clone()) else {
+            return false;
+        };
+        if parent.id != parent_id
+            || parent.pubkey.to_hex() != agent_pubkey_hex
+            || buzz_core::verify_event(&parent).is_err()
+        {
+            return false;
+        }
+        parent.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.first().map(String::as_str) == Some("h")
+                && parts.get(1).map(String::as_str) == Some(channel_hex.as_str())
+        })
+    })
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
@@ -2896,6 +2954,17 @@ async fn tokio_main() -> Result<()> {
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
+                                None if config.subscribe_mode == SubscribeMode::Mentions
+                                    && is_direct_reply_to_agent(
+                                        &buzz_event.event,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        &ctx.rest_client,
+                                    )
+                                    .await =>
+                                {
+                                    "@reply".to_string()
+                                }
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
                                     continue;
@@ -5701,6 +5770,110 @@ mod author_gate_tests {
         assert!(
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reply_routing_tests {
+    use super::*;
+    use nostr::{EventBuilder, Kind, Tag};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn channel_message(
+        keys: &nostr::Keys,
+        channel_id: Uuid,
+        content: &str,
+        reply_to: Option<nostr::EventId>,
+    ) -> nostr::Event {
+        let mut tags = vec![Tag::parse(["h", &channel_id.to_string()]).unwrap()];
+        if let Some(parent) = reply_to {
+            tags.push(Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap());
+        }
+        EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    async fn rest_client_returning(
+        events: serde_json::Value,
+    ) -> (relay::RestClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = events.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept query");
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (
+            relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn direct_reply_to_agent_is_routable_without_mention() {
+        let agent = nostr::Keys::generate();
+        let human = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let parent = channel_message(&agent, channel_id, "agent answer", None);
+        let reply = channel_message(&human, channel_id, "follow-up", Some(parent.id));
+        let (rest, server) = rest_client_returning(serde_json::json!([parent])).await;
+
+        assert!(
+            is_direct_reply_to_agent(&reply, channel_id, &agent.public_key().to_hex(), &rest,)
+                .await
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reply_to_another_author_is_not_routable() {
+        let agent = nostr::Keys::generate();
+        let human = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let parent = channel_message(&human, channel_id, "human message", None);
+        let reply = channel_message(&human, channel_id, "human follow-up", Some(parent.id));
+        let (rest, server) = rest_client_returning(serde_json::json!([parent])).await;
+
+        assert!(
+            !is_direct_reply_to_agent(&reply, channel_id, &agent.public_key().to_hex(), &rest,)
+                .await
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn top_level_unmentioned_message_is_not_routable() {
+        let agent = nostr::Keys::generate();
+        let human = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let message = channel_message(&human, channel_id, "ordinary chatter", None);
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:0".into(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+
+        assert!(
+            !is_direct_reply_to_agent(&message, channel_id, &agent.public_key().to_hex(), &rest,)
+                .await
         );
     }
 }
