@@ -216,7 +216,7 @@ Agents are project members with npubs, contribution histories, and reputations. 
 | **Review** | Patches (kind:1617) | First-pass code review, style checks, dependency audit |
 | **Docs** | Ref updates (kind:30618) | Keeps docs in sync after merges |
 | **Merge coordinator** | CI results | Runs the merge train, requests human sign-off |
-| **Coding agent** | Jobs (kind:43001) | Implements tasks, submits patches for review |
+| **Coding agent** | Job projections (kinds:43001-43006, [NIP-AJ](docs/nips/NIP-AJ.md)) | Implements only after separate authenticated Wilson/MotifOS authorization; submits patches for review |
 
 ---
 
@@ -233,7 +233,7 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 | **Agent identity** | 0 (NIP-01 profile) | — | Agents are npubs |
 | **Artifacts** | 1063 (NIP-94) | — | Build outputs on Blossom/S3 |
 | **Workflows** | — | 46001-46012 | No NIP equivalent |
-| **Job dispatch** | — | 43001-43006 | Delegation trees |
+| **Agent job projections** | — | 43001-43006 ([NIP-AJ](docs/nips/NIP-AJ.md)) | Task/run visibility; no launch authority |
 | **Project binding** | 30617 (NIP-34) | `buzz-` tags | Channel, visibility |
 | **Multi-repo projects** | — | 30621 ([NIP-MP](docs/nips/NIP-MP.md)) | Cross-owner grouping is unexpressible in per-repo tags |
 | **Audit** | — | 48001 | Hash-chain tamper-evident log |
