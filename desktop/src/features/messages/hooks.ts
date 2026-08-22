@@ -31,7 +31,7 @@ import {
 
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
-import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
+import { resolveMessageRecipientPubkeys } from "@/extensions/messages/dmRecipientHydration";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
   clearTimeoutState,
@@ -505,11 +505,12 @@ export function useSendMessageMutation(
         mentionTags,
         linkPreviewTags,
       } = splitOutgoingTags(mediaTags);
-      const recipientPubkeys = messageMentionPubkeys(
-        effectiveChannel,
-        identity.pubkey,
-        mentionPubkeys,
-      );
+      const recipientPubkeys = await resolveMessageRecipientPubkeys({
+        channel: effectiveChannel,
+        senderPubkey: identity.pubkey,
+        explicitMentions: mentionPubkeys,
+        queryClient,
+      });
       if (sentFromThreadRootId && parentEventId) {
         throw new Error(
           "A thread message can only be sent as a top-level message.",
