@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1104,6 +1104,62 @@ mod tests {
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
     }
 
+    /// 0033 introduces the task system. The load-bearing properties are that it
+    /// is purely additive (no existing table is altered, so brownfield
+    /// checksums are untouched), that both tables are tenant-scoped with
+    /// `community_id`-leading keys, that both are explicitly attached to the
+    /// universal community write fence, and that `schema/schema.sql` mirrors
+    /// them so the desired-state schema stays authoritative.
+    #[test]
+    fn task_system_tables_are_additive_tenant_scoped_and_fenced() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        assert_eq!(migrations[32].version, 33);
+        let sql = migrations[32].sql.as_str();
+        assert!(sql.contains("CREATE TABLE tasks"));
+        assert!(sql.contains("CREATE TABLE task_events"));
+        assert!(sql.contains("SET LOCAL lock_timeout = '5s'"));
+
+        // Additive only: touching a populated table would rewrite history that
+        // brownfield relays have already applied.
+        assert!(!normalize_sql(sql).contains("alter table"));
+        assert!(!normalize_sql(sql).contains("drop table"));
+
+        // Tenant scoping: composite keys led by community_id, never a bare id.
+        assert!(sql.contains("PRIMARY KEY (community_id, id)"));
+        assert!(sql.contains("REFERENCES channels (community_id, id)"));
+        assert!(sql.contains("REFERENCES users (community_id, pubkey)"));
+        assert!(sql.contains("REFERENCES tasks (community_id, id)"));
+        assert!(scoped_constraint_violations(sql).is_empty());
+
+        // Closed status lifecycle; `source`/`action` stay additive TEXT.
+        assert!(sql.contains("'todo', 'in_progress', 'blocked', 'done', 'cancelled'"));
+        assert!(sql.contains("CHECK ((status = 'done') = (done_at IS NOT NULL))"));
+
+        // At most one persisted summary per task, enforced by the database.
+        assert!(sql.contains("idx_task_events_one_summary_per_task"));
+        assert!(sql.contains("WHERE action = 'summary_persisted'"));
+
+        // Universal write fence: a fenced or mid-deletion tenant must not be
+        // able to accept task writes.
+        assert!(sql.contains("SELECT attach_community_write_fence('tasks')"));
+        assert!(sql.contains("SELECT attach_community_write_fence('task_events')"));
+
+        // 0001 must never carry the task system — folding it in would change
+        // 0001's checksum and break brownfield startup (sqlx VersionMismatch).
+        assert!(!migrations[0].sql.as_str().contains("CREATE TABLE tasks"));
+
+        // The desired-state schema mirrors both tables.
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("CREATE TABLE tasks"));
+        assert!(desired_schema.contains("CREATE TABLE task_events"));
+
+        // Deletion must not silently skip the new tenant tables.
+        assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"tasks"));
+        assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"task_events"));
+    }
+
     #[test]
     fn migration_lint_detects_tables_missing_community_id_by_default() {
         let sql = r#"
@@ -1542,6 +1598,14 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // Tenant tables introduced after 0029 declare their own fence
+        // attachment in their own migration and in schema.sql. Enumerate them
+        // here so the comparison below stays an exact equality: a new scoped
+        // table that forgets its fence line still fails this test, and a fence
+        // line for a table nobody registered here fails it too.
+        for post_0029_scoped_table in ["tasks", "task_events"] {
+            expected_fences.insert(post_0029_scoped_table.to_owned());
+        }
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

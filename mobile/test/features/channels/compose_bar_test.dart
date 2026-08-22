@@ -4271,6 +4271,97 @@ void main() {
     });
   });
 
+  group('ComposeBar task action', () {
+    testWidgets('sits alongside the existing composer actions', (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      expect(find.byIcon(LucideIcons.listTodo), findsOneWidget);
+      expect(find.byTooltip('Create task'), findsOneWidget);
+      // The four original actions keep their places; the task action is added,
+      // not substituted.
+      expect(find.byIcon(LucideIcons.atSign), findsOneWidget);
+      expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+      expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
+      expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+    });
+
+    testWidgets('is hidden until the composer is expanded', (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      // Collapsed, the bar carries only the attachment trigger, the draft
+      // preview and send — the action row is behind the expansion.
+      expect(find.byTooltip('Create task').hitTestable(), findsNothing);
+    });
+
+    testWidgets('opens the New task sheet', (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      await tester.tap(find.byTooltip('Create task'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('create-task-title')), findsOneWidget);
+      expect(find.byKey(const ValueKey('create-task-submit')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the fifth action still fits a narrow phone', (tester) async {
+      // Five 36px actions plus the attachment trigger and send button is the
+      // tightest the row gets; 320dp is the narrowest phone width shipped.
+      await tester.binding.setSurfaceSize(const Size(320, 640));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      expect(find.byTooltip('Create task').hitTestable(), findsOneWidget);
+      // A RenderFlex overflow is reported as a framework exception, so a null
+      // here is the assertion that the row did not overflow.
+      expect(tester.takeException(), isNull);
+    });
+  });
+
   group('findTrigger', () {
     test('finds @ at start of text', () {
       expect(findTrigger('@alice', 6, '@', stopAtSpace: false), 0);

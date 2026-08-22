@@ -19,6 +19,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/tasks/create_task_sheet.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
@@ -56,6 +57,7 @@ part 'compose_bar/ios_photo_picker.dart';
 part 'compose_bar/ios_attachment_popover.dart';
 part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
+part 'compose_bar/task_action.dart';
 part 'compose_bar/layout.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/compose_bar_widget.dart';
