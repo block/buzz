@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
 use crate::managed_agents::{
-    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
+    resolve_command, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
 use crate::secret_store::{KeyringProbe, SecretStore};
 
@@ -651,11 +651,22 @@ fn maybe_rotate_log(path: &Path) {
     let _ = fs::rename(path, &rotated);
 }
 
+/// Open a managed-agent runtime log for appending, owner-only on Unix.
+///
+/// Agent stdout/stderr can echo installers' and CLIs' credentials, so like
+/// `open_install_log` the mode is set *in the create* — never chmod'd after, so
+/// the file is not briefly readable to other local users. An existing file's
+/// mode is left as-is, since `OpenOptions::mode` only applies on creation.
 pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
     maybe_rotate_log(path);
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
         .open(path)
         .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
 }
@@ -719,6 +730,32 @@ fn open_install_log(path: &Path, truncate: bool) -> Result<File, String> {
 pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String> {
     let mut file = open_log_file(path)?;
     writeln!(file, "{message}").map_err(|error| format!("failed to write log marker: {error}"))
+}
+
+/// Resolve `command` to a full path (DMG launches have a minimal PATH), append
+/// the resolved-launch marker, and return the resolved command for the spawn
+/// env (`BUZZ_ACP_AGENT_COMMAND`). The marker records the agent command and
+/// the argument count, and nothing else: `agent_args` is user-controlled and
+/// may legally carry credentials (`--token=...`), and the runtime log is
+/// retrievable end-to-end via `get_managed_agent_log`, so no argument value
+/// may ever be serialized — mirroring the `spawn_snapshot::diff` policy,
+/// which masks `args` as `MaskedBare` for exactly this reason. When
+/// resolution fails, both the marker and the return value carry the
+/// unresolved command verbatim.
+pub(crate) fn append_resolved_launch_marker(
+    path: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<String, String> {
+    let resolved = resolve_command(command)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| command.to_string());
+    let marker = format!(
+        "resolved launch: agent_command={resolved:?} args_count={}",
+        args.len()
+    );
+    append_log_marker(path, &marker)?;
+    Ok(resolved)
 }
 
 fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
