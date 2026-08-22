@@ -379,19 +379,25 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     0,
   );
   await expect(relayRow).toContainText("agent");
-  await expect(
-    relayRow.getByTestId("mention-agent-provenance"),
-  ).toHaveAttribute("aria-label", "From another Buzz setup");
-  await expect(
-    relayRow.getByText("Other setup", { exact: true }),
-  ).toBeVisible();
+  const relayProvenanceMarker = relayRow.getByTestId(
+    "mention-agent-provenance",
+  );
+  await expect(relayProvenanceMarker).toHaveAttribute(
+    "aria-label",
+    "From another Buzz setup",
+  );
+  await expect(relayProvenanceMarker).toHaveAttribute(
+    "title",
+    "From another Buzz setup",
+  );
+  await expect(relayProvenanceMarker).toBeVisible();
+  await expect(relayProvenanceMarker).toHaveText("");
+  await expect(relayProvenanceMarker.locator("svg")).toBeVisible();
   await expect(managedRow).not.toContainText("managed by you");
   await expect(relayRow).not.toContainText("managed by you");
 
   await page.setViewportSize({ width: 760, height: 640 });
-  await expect(
-    relayRow.getByText("Other setup", { exact: true }),
-  ).toBeVisible();
+  await expect(relayProvenanceMarker).toBeVisible();
   const rowBox = await relayRow.boundingBox();
   const dropdownBox = await dropdown.boundingBox();
   expect(rowBox).not.toBeNull();
@@ -464,7 +470,8 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     "aria-label",
     "From another Buzz setup",
   );
-  await expect(remoteSidebarMarker).toHaveText("Other setup");
+  await expect(remoteSidebarMarker).toHaveText("");
+  await expect(remoteSidebarMarker.locator("svg")).toBeVisible();
   const remoteSidebarRow = page.getByTestId(`sidebar-member-${relayPubkey}`);
   const localSidebarMarker = page.getByTestId(
     `sidebar-member-agent-provenance-${managedPubkey}`,
