@@ -340,6 +340,13 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # git-sign-nostr: BIP-340 structural checks live here (NIP-GS sign/verify
+        # paths). Pure in-process tests, no infra. Enumerated explicitly because
+        # nothing in CI runs `cargo test --workspace` — without this gate a
+        # nostr-bump regression that breaks the off-curve rejection (issue
+        # #6175) ships green because the only consumer of the test is a manual
+        # workspace run.
+        cargo nextest run -p git-sign-nostr --lib
     else
         ./scripts/run-tests.sh unit
     fi
