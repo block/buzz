@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, KIND_WORKFLOW_UPDATE,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1629,6 +1629,30 @@ pub fn build_workflow_update(
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml).tags(tags))
 }
 
+/// Build a workflow update request (kind 46021) for an existing workflow.
+///
+/// The request is signed by the managing actor. The `a` tag retains the
+/// original workflow owner's kind:30620 coordinate so the relay can authorize
+/// an owning human without changing workflow authorship or execution authority.
+pub fn build_workflow_update_request(
+    owner_pubkey: &str,
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    yaml: &str,
+    expected_revision: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_content(yaml, 64 * 1024)?;
+    let owner = check_pubkey_hex(owner_pubkey, "workflow owner")?;
+    let revision = check_hex_exact(expected_revision, 64, "expected revision")?;
+    let coordinate = format!("{KIND_WORKFLOW_DEF}:{owner}:{workflow_id}");
+    let tags = vec![
+        tag(&["a", &coordinate])?,
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["expected-revision", &revision])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_UPDATE as u16), yaml).tags(tags))
+}
+
 /// Build a NIP-09 deletion event targeting a workflow definition (kind 5).
 ///
 /// The `a`-tag addresses the parameterized replaceable event
@@ -1636,8 +1660,13 @@ pub fn build_workflow_update(
 pub fn build_workflow_delete(
     author_pubkey: &str,
     workflow_id: Uuid,
+    expected_revision: &str,
 ) -> Result<EventBuilder, SdkError> {
-    build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())
+    let revision = check_hex_exact(expected_revision, 64, "expected revision")?;
+    Ok(
+        build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())?
+            .tag(tag(&["expected-revision", &revision])?),
+    )
 }
 
 /// Build a workflow trigger event (kind 46020).
@@ -3983,6 +4012,22 @@ mod tests {
     }
 
     #[test]
+    fn workflow_update_request_addresses_owner_definition() {
+        let cid = uuid();
+        let wid = uuid();
+        let owner = "b".repeat(64);
+        let revision = "a".repeat(64);
+        let ev = sign(
+            build_workflow_update_request(&owner, cid, wid, "name: updated", &revision).unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), 46021);
+        assert_eq!(tag_values(&ev, "a"), vec![format!("30620:{owner}:{wid}")]);
+        assert_eq!(tag_values(&ev, "h"), vec![cid.to_string()]);
+        assert_eq!(tag_values(&ev, "expected-revision"), vec![revision]);
+    }
+
+    #[test]
     fn workflow_update_rejects_oversized_yaml() {
         let big = "x".repeat(65 * 1024);
         let err = build_workflow_update(uuid(), uuid(), &big, &"a".repeat(64)).unwrap_err();
@@ -3993,17 +4038,19 @@ mod tests {
     fn workflow_delete_happy_path() {
         let pk = "a".repeat(64);
         let wid = uuid();
-        let ev = sign(build_workflow_delete(&pk, wid).unwrap());
+        let revision = "b".repeat(64);
+        let ev = sign(build_workflow_delete(&pk, wid, &revision).unwrap());
         assert_eq!(ev.kind.as_u16(), 5);
         let a_vals = tag_values(&ev, "a");
         assert_eq!(a_vals.len(), 1);
         assert!(a_vals[0].starts_with("30620:"));
         assert!(a_vals[0].contains(&wid.to_string()));
+        assert_eq!(tag_values(&ev, "expected-revision"), vec![revision]);
     }
 
     #[test]
     fn workflow_delete_rejects_bad_pubkey() {
-        let err = build_workflow_delete("bad", uuid()).unwrap_err();
+        let err = build_workflow_delete("bad", uuid(), &"a".repeat(64)).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 

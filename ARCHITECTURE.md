@@ -96,6 +96,8 @@ buzz-test-client    (integration test harness + manual CLI)
 
 **Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
+Workflow management follows the same command/state split as channel management. A managing actor signs a workflow command with their own key; the relay validates direct ownership or the existing NIP-OA agent-owner relationship, mutates the authoritative workflow row, and publishes relay-signed kind `30623` current state. NIP-OA grants management authority only: it does not transfer the workflow owner, execution authority, or event authorship to the human. ACP remains a stateless transport and has no workflow ownership policy.
+
 ---
 
 ## 2. The Protocol

@@ -760,7 +760,7 @@ mod workflows;
 
 pub use workflows::{
     build_approval_deny, build_approval_grant, build_workflow_definition, build_workflow_delete,
-    build_workflow_trigger,
+    build_workflow_trigger, build_workflow_update,
 };
 
 // ── Transport ────────────────────────────────────────────────────────────────

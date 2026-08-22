@@ -21,13 +21,41 @@ pub fn build_workflow_definition(
     Ok(EventBuilder::new(Kind::Custom(30620), yaml_definition.to_string()).tags(tags))
 }
 
+/// Kind 46021 — request an update to a workflow at its original owner's
+/// kind:30620 coordinate. The relay authorizes the signing actor and publishes
+/// the resulting current state.
+pub fn build_workflow_update(
+    workflow_id: &str,
+    channel_id: &str,
+    owner_pubkey_hex: &str,
+    yaml_definition: &str,
+    expected_revision: &str,
+) -> Result<EventBuilder, String> {
+    check_content(yaml_definition)?;
+    nostr::PublicKey::from_hex(owner_pubkey_hex)
+        .map_err(|_| "invalid workflow owner pubkey".to_string())?;
+    EventId::from_hex(expected_revision).map_err(|_| "invalid workflow revision".to_string())?;
+    let coordinate = format!("30620:{owner_pubkey_hex}:{workflow_id}");
+    let tags = vec![
+        tag(vec!["a", &coordinate])?,
+        tag(vec!["h", channel_id])?,
+        tag(vec!["expected-revision", expected_revision])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(46021), yaml_definition.to_string()).tags(tags))
+}
+
 /// Kind 5 — NIP-09 deletion targeting a kind:30620 workflow definition.
 pub fn build_workflow_delete(
     workflow_id: &str,
     owner_pubkey_hex: &str,
+    expected_revision: &str,
 ) -> Result<EventBuilder, String> {
+    EventId::from_hex(expected_revision).map_err(|_| "invalid workflow revision".to_string())?;
     let coord = format!("30620:{owner_pubkey_hex}:{workflow_id}");
-    let tags = vec![tag(vec!["a", &coord])?];
+    let tags = vec![
+        tag(vec!["a", &coord])?,
+        tag(vec!["expected-revision", expected_revision])?,
+    ];
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
@@ -47,4 +75,68 @@ pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuil
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
     let tags = vec![tag(vec!["t", token])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::Keys;
+
+    #[test]
+    fn update_targets_the_original_owner_coordinate() {
+        let owner = Keys::generate();
+        let actor = Keys::generate();
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let revision = EventBuilder::new(Kind::TextNote, "revision")
+            .tags([])
+            .sign_with_keys(&owner)
+            .expect("sign revision")
+            .id
+            .to_hex();
+        let event = build_workflow_update(
+            &workflow_id,
+            &channel_id,
+            &owner.public_key().to_hex(),
+            "name: update\nsteps: []\n",
+            &revision,
+        )
+        .expect("build")
+        .sign_with_keys(&actor)
+        .expect("sign");
+
+        assert_eq!(event.kind.as_u16(), 46021);
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags.contains(&vec![
+            "a".into(),
+            format!("30620:{}:{workflow_id}", owner.public_key().to_hex())
+        ]));
+        assert!(tags.contains(&vec!["h".into(), channel_id]));
+        assert!(tags.contains(&vec!["expected-revision".into(), revision]));
+    }
+
+    #[test]
+    fn delete_carries_the_loaded_revision() {
+        let owner = Keys::generate();
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let revision = EventBuilder::new(Kind::TextNote, "revision")
+            .tags([])
+            .sign_with_keys(&owner)
+            .expect("sign revision")
+            .id
+            .to_hex();
+        let event = build_workflow_delete(&workflow_id, &owner.public_key().to_hex(), &revision)
+            .expect("build delete")
+            .sign_with_keys(&owner)
+            .expect("sign delete");
+
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["expected-revision".to_string(), revision.clone()] }));
+    }
 }

@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1102,6 +1102,28 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+    }
+
+    #[test]
+    fn workflow_revision_migration_backfills_accepted_request_ids() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 33)
+            .expect("workflow revision migration");
+        let sql = migration.sql.as_str();
+
+        assert!(sql.contains("ALTER TABLE workflows ADD COLUMN revision_event_id BYTEA"));
+        assert!(sql.contains("WHERE kind = 30620"));
+        assert!(sql.contains("definition.id"));
+        assert!(sql.contains("octet_length(revision_event_id) = 32"));
+        // `events` is partitioned by created_at, so PostgreSQL cannot enforce a
+        // unique workflow coordinate without weakening it with that partition
+        // key. The relay serializes projection writers with an advisory lock.
+        assert!(!sql.contains("events_live_workflow_state_coordinate_idx"));
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("revision_event_id BYTEA CHECK"));
+        assert!(desired_schema.contains("octet_length(revision_event_id) = 32"));
+        assert!(!desired_schema.contains("events_live_workflow_state_coordinate_idx"));
     }
 
     #[test]

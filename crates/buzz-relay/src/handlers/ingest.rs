@@ -33,8 +33,8 @@ use buzz_core::kind::{
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
     KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
     KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_WORKFLOW_UPDATE, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -540,7 +540,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_GIT_STATUS_DRAFT => Ok(Scope::MessagesWrite),
         // Command kinds — DM management, workflows, approvals
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
-        KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
+        KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER | KIND_WORKFLOW_UPDATE => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
@@ -698,6 +698,14 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
     )
+}
+
+/// Only moderation and relay-admin commands bypass the shared timeout gate;
+/// their handlers perform their own durable ban checks so those tools remain
+/// usable to lift restrictions. Ordinary transactional commands are writes and
+/// must pass through the same gate as stored events.
+fn is_restriction_gate_exempt(kind: u32) -> bool {
+    buzz_core::kind::is_moderation_command_kind(kind) || is_relay_admin_kind(kind)
 }
 
 /// Kinds that require an `h` tag for channel scoping.
@@ -2273,12 +2281,6 @@ async fn ingest_event_inner(
         )));
     }
 
-    // Command kinds are routed AFTER signature verification, timestamp check,
-    // pubkey/auth match, and scope validation — never before.
-    if buzz_core::kind::is_command_kind(kind_u32) {
-        return super::command_executor::handle_command(tenant, state, event, auth).await;
-    }
-
     // Product feedback is sidecarred directly into its private deployment table.
     // It never enters ordinary event storage or subscription fan-out.
     if kind_u32 == KIND_PRODUCT_FEEDBACK {
@@ -2357,7 +2359,7 @@ async fn ingest_event_inner(
     // plumbing it through the whole transport boundary; the follow-up shape is
     // the restriction-state cache (see should-fix), which can fold in owner
     // resolution without a per-write DB round-trip.
-    if !buzz_core::kind::is_moderation_command_kind(kind_u32) && !is_relay_admin_kind(kind_u32) {
+    if !is_restriction_gate_exempt(kind_u32) {
         match state
             .db
             .moderation_restriction_state(tenant.community(), auth.pubkey().as_bytes())
@@ -2388,6 +2390,19 @@ async fn ingest_event_inner(
         }
     }
 
+    // Transactional command kinds are routed only after the durable moderation
+    // gate. Their handlers assume signature, timestamp, identity, scope, and
+    // current ban/timeout authorization have all been checked here.
+    if buzz_core::kind::is_command_kind(kind_u32) {
+        return super::command_executor::handle_command(tenant, state, event, auth).await;
+    }
+
+    let workflow_delete_target = if kind_u32 == KIND_DELETION {
+        super::command_executor::resolve_workflow_delete_target(tenant, state, &event).await?
+    } else {
+        None
+    };
+
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(tenant.community(), &state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
@@ -2415,39 +2430,45 @@ async fn ingest_event_inner(
         // kind:5 events don't carry an h-tag, so we look up the target event
         // and use its channel_id. This ensures token-channel, membership, and
         // archived checks run against the correct channel.
-        let target_hex = event.tags.iter().find_map(|t| {
-            if t.kind().to_string() == "e" {
-                t.content().and_then(|v| {
-                    if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
-                        Some(v.to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            }
-        });
-        match target_hex {
-            Some(hex) => {
-                let target_bytes = hex::decode(&hex).map_err(|_| {
-                    IngestError::Rejected("invalid: malformed deletion target id".into())
-                })?;
-                match state
-                    .db
-                    .get_event_by_id(tenant.community(), &target_bytes)
-                    .await
-                {
-                    Ok(Some(target)) => target.channel_id,
-                    Ok(None) => None, // target not found — validate_standard_deletion will catch this
-                    Err(e) => {
-                        return Err(IngestError::Internal(format!(
-                            "error: looking up deletion target: {e}"
-                        )));
+        if workflow_delete_target.is_some() {
+            workflow_delete_target
+                .as_ref()
+                .and_then(|workflow| workflow.channel_id)
+        } else {
+            let target_hex = event.tags.iter().find_map(|t| {
+                if t.kind().to_string() == "e" {
+                    t.content().and_then(|v| {
+                        if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
+                            Some(v.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            });
+            match target_hex {
+                Some(hex) => {
+                    let target_bytes = hex::decode(&hex).map_err(|_| {
+                        IngestError::Rejected("invalid: malformed deletion target id".into())
+                    })?;
+                    match state
+                        .db
+                        .get_event_by_id(tenant.community(), &target_bytes)
+                        .await
+                    {
+                        Ok(Some(target)) => target.channel_id,
+                        Ok(None) => None, // target not found — validate_standard_deletion will catch this
+                        Err(e) => {
+                            return Err(IngestError::Internal(format!(
+                                "error: looking up deletion target: {e}"
+                            )));
+                        }
                     }
                 }
+                None => None, // no e-tag — will be caught by single-target enforcement (step 12)
             }
-            None => None, // no e-tag — will be caught by single-target enforcement (step 12)
         }
     } else {
         extract_channel_id(&event)
@@ -2476,6 +2497,22 @@ async fn ingest_event_inner(
     }
 
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
+    if let Some(workflow) = &workflow_delete_target {
+        let Some(workflow_channel) = workflow.channel_id else {
+            return Err(IngestError::Rejected(
+                "forbidden: workflow has no channel scope".into(),
+            ));
+        };
+        let is_member = state
+            .is_member_cached(tenant.community(), workflow_channel, &pubkey_bytes)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+        if !is_member {
+            return Err(IngestError::Rejected(
+                "forbidden: not a member of this channel".into(),
+            ));
+        }
+    }
     // E1 (§4.8): fetch the community-scoped channel row once per request and
     // thread it through the gates below (membership open-fallback, archived
     // check, join visibility) instead of re-SELECTing it at each. `None` when
@@ -2707,6 +2744,17 @@ async fn ingest_event_inner(
                 "invalid: deletion events must reference exactly one target via e or a tag (got e={e_count}, a={a_count})"
             )));
         }
+    }
+
+    // Workflow deletions are command-like mutations even though NIP-09 uses
+    // kind 5. Store the signed request, delete the workflow row, and write the
+    // relay tombstone in one transaction instead of relying on post-storage
+    // side effects.
+    if let Some(workflow) = workflow_delete_target {
+        return super::command_executor::handle_workflow_delete(
+            tenant, state, &event, &auth, workflow,
+        )
+        .await;
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
@@ -3774,6 +3822,29 @@ mod tests {
                 "kind {kind} should require MessagesWrite scope"
             );
         }
+    }
+
+    #[test]
+    fn workflow_commands_are_not_exempt_from_moderation_restrictions() {
+        for kind in [
+            KIND_WORKFLOW_DEF,
+            KIND_WORKFLOW_UPDATE,
+            KIND_WORKFLOW_TRIGGER,
+        ] {
+            assert!(buzz_core::kind::is_command_kind(kind));
+            assert!(
+                !is_restriction_gate_exempt(kind),
+                "workflow command {kind} must honor bans and timeouts"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_update_command_requires_messages_write_scope() {
+        assert_eq!(
+            required_scope_for_kind(KIND_WORKFLOW_UPDATE, &make_dummy_event()),
+            Ok(Scope::MessagesWrite)
+        );
     }
 
     #[test]

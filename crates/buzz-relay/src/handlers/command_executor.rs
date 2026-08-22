@@ -1,6 +1,6 @@
 //! Command executor — transactional event processing for command kinds.
 //!
-//! Command kinds (41010–41012, 30620, 46020, 46030–46031) are processed
+//! Command kinds (41010–41012, 30620, 46020–46021, 46030–46031) are processed
 //! transactionally: validate → begin tx → insert event → execute mutations → commit.
 //!
 //! SECURITY: This module is only reachable AFTER the ingest pipeline has verified:
@@ -8,6 +8,7 @@
 //! 2. Timestamp freshness (±15 min)
 //! 3. Pubkey/auth identity match
 //! 4. Per-kind scope authorization
+//! 5. Durable community ban and timeout authorization
 
 use std::sync::Arc;
 
@@ -27,11 +28,13 @@ use buzz_workflow::executor::TriggerContext;
 use crate::state::AppState;
 use crate::webhook_secret;
 
+use super::event::dispatch_persistent_event;
 use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
     publish_dm_visibility_snapshot,
 };
+use super::workflow_state::{build_workflow_state, store_workflow_state, WorkflowStateStatus};
 
 /// Route a command-kind event to the appropriate handler.
 pub async fn handle_command(
@@ -67,6 +70,7 @@ pub async fn handle_command(
         KIND_DM_ADD_MEMBER => handle_dm_add_member(tenant, state, &event, &auth).await,
         KIND_DM_HIDE => handle_dm_hide(tenant, state, &event, &auth).await,
         KIND_WORKFLOW_DEF => handle_workflow_def(tenant, state, &event, &auth).await,
+        KIND_WORKFLOW_UPDATE => handle_workflow_update(tenant, state, &event, &auth).await,
         KIND_WORKFLOW_TRIGGER => handle_workflow_trigger(tenant, state, &event, &auth).await,
         KIND_APPROVAL_GRANT => handle_approval_grant(tenant, state, &event, &auth).await,
         KIND_APPROVAL_DENY => handle_approval_deny(tenant, state, &event, &auth).await,
@@ -289,6 +293,125 @@ fn validate_workflow_revision(
         )),
         (Some(_), Some(_)) => Ok(()),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkflowUpdateTarget {
+    workflow_id: Uuid,
+    channel_id: Uuid,
+    owner_pubkey: Vec<u8>,
+    expected_revision: Vec<u8>,
+}
+
+fn parse_workflow_update_target(event: &Event) -> Result<WorkflowUpdateTarget, IngestError> {
+    fn one_tag(event: &Event, name: &str) -> Result<String, IngestError> {
+        let values: Vec<String> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some(name))
+                    .then(|| parts.get(1).map(ToString::to_string))
+                    .flatten()
+            })
+            .collect();
+        match values.as_slice() {
+            [value] => Ok(value.clone()),
+            _ => Err(IngestError::Rejected(format!(
+                "invalid: workflow update requires exactly one {name} tag"
+            ))),
+        }
+    }
+
+    let coordinate = one_tag(event, "a")?;
+    let parts: Vec<&str> = coordinate.splitn(3, ':').collect();
+    if parts.len() != 3 || parts[0] != KIND_WORKFLOW_DEF.to_string() {
+        return Err(IngestError::Rejected(
+            "invalid: workflow update a tag must target kind 30620".into(),
+        ));
+    }
+    let owner_pubkey = hex::decode(parts[1])
+        .map_err(|_| IngestError::Rejected("invalid: bad workflow owner pubkey".into()))?;
+    if owner_pubkey.len() != 32 {
+        return Err(IngestError::Rejected(
+            "invalid: bad workflow owner pubkey".into(),
+        ));
+    }
+    let workflow_id = Uuid::parse_str(parts[2])
+        .map_err(|_| IngestError::Rejected("invalid: bad workflow_id format".into()))?;
+    let channel_id = Uuid::parse_str(&one_tag(event, "h")?)
+        .map_err(|_| IngestError::Rejected("invalid: bad channel_id format".into()))?;
+    let expected_revision = hex::decode(one_tag(event, "expected-revision")?)
+        .map_err(|_| IngestError::Rejected("invalid: bad expected workflow revision".into()))?;
+    if expected_revision.len() != 32 {
+        return Err(IngestError::Rejected(
+            "invalid: bad expected workflow revision".into(),
+        ));
+    }
+
+    Ok(WorkflowUpdateTarget {
+        workflow_id,
+        channel_id,
+        owner_pubkey,
+        expected_revision,
+    })
+}
+
+/// Resolve a kind-5 `a` coordinate when it targets a workflow definition.
+/// Other deletion coordinates return `None` and continue through ordinary
+/// NIP-09 handling.
+pub(crate) async fn resolve_workflow_delete_target(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<Option<buzz_db::workflow::WorkflowRecord>, IngestError> {
+    let Some(coordinate) = event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().map(String::as_str) == Some("a"))
+            .then(|| parts.get(1).map(String::as_str))
+            .flatten()
+    }) else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = coordinate.splitn(3, ':').collect();
+    if parts.first().copied() != Some("30620") {
+        return Ok(None);
+    }
+    if parts.len() != 3 {
+        return Err(IngestError::Rejected(
+            "invalid: malformed workflow deletion coordinate".into(),
+        ));
+    }
+    let owner = hex::decode(parts[1])
+        .map_err(|_| IngestError::Rejected("invalid: bad workflow owner pubkey".into()))?;
+    if owner.len() != 32 {
+        return Err(IngestError::Rejected(
+            "invalid: bad workflow owner pubkey".into(),
+        ));
+    }
+    let workflow = if let Ok(workflow_id) = Uuid::parse_str(parts[2]) {
+        state
+            .db
+            .get_workflow(tenant.community(), workflow_id)
+            .await
+            .map(Some)
+    } else {
+        state
+            .db
+            .find_workflow_by_owner_and_name(tenant.community(), &owner, parts[2])
+            .await
+    }
+    .map_err(|error| match error {
+        DbError::NotFound(_) => IngestError::Rejected("not found: workflow".into()),
+        other => IngestError::Internal(format!("error: resolve workflow deletion: {other}")),
+    })?
+    .ok_or_else(|| IngestError::Rejected("not found: workflow".into()))?;
+    if workflow.owner_pubkey != owner {
+        return Err(IngestError::Rejected(
+            "forbidden: workflow owner does not match deletion coordinate".into(),
+        ));
+    }
+    Ok(Some(workflow))
 }
 
 /// Extract all `p` tag values (hex pubkeys) from an event.
@@ -808,9 +931,34 @@ async fn handle_workflow_def(
     let definition_json_final = serde_json::to_string(&definition_json)
         .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
     let hash = compute_definition_hash(&definition_json_final);
+    let expected_revision = extract_tag(event, "expected-revision")
+        .map(|revision| {
+            let decoded = hex::decode(revision).map_err(|_| {
+                IngestError::Rejected("invalid: bad expected workflow revision".into())
+            })?;
+            if decoded.len() != 32 {
+                return Err(IngestError::Rejected(
+                    "invalid: bad expected workflow revision".into(),
+                ));
+            }
+            Ok(decoded)
+        })
+        .transpose()?;
+
+    let state_event = build_workflow_state(
+        &state.relay_keypair,
+        workflow_id,
+        channel_id,
+        &self_bytes,
+        &self_bytes,
+        event.id,
+        &event.content,
+        WorkflowStateStatus::Active,
+    )
+    .map_err(|e| IngestError::Internal(format!("error: build workflow state: {e}")))?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let mut tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -839,24 +987,32 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
-    state
-        .db
-        .upsert_workflow(
-            community_id,
-            workflow_id,
-            Some(channel_id),
-            &self_bytes,
-            &workflow_name,
-            &definition_json_final,
-            &hash,
-        )
+    buzz_db::workflow::upsert_workflow_with_revision(
+        &mut tx,
+        community_id,
+        workflow_id,
+        Some(channel_id),
+        &self_bytes,
+        &workflow_name,
+        &definition_json_final,
+        &hash,
+        expected_revision.as_deref(),
+        event.id.as_bytes().as_slice(),
+    )
+    .await
+    .map_err(|e| match e {
+        DbError::AccessDenied(_) => IngestError::Rejected(
+            "forbidden: workflow belongs to a different owner or channel".into(),
+        ),
+        DbError::WorkflowRevisionConflict(_) => IngestError::Rejected(
+            "conflict: workflow changed since it was loaded; refresh and try again".into(),
+        ),
+        other => IngestError::Internal(format!("error: db upsert workflow: {other}")),
+    })?;
+
+    let stored_state = store_workflow_state(&mut tx, community_id, &state_event, channel_id)
         .await
-        .map_err(|e| match e {
-            DbError::AccessDenied(_) => IngestError::Rejected(
-                "forbidden: workflow belongs to a different owner or channel".into(),
-            ),
-            other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
-        })?;
+        .map_err(|e| IngestError::Internal(format!("error: store workflow state: {e}")))?;
 
     // Drop the trigger-path cache entry so the new/updated definition fires on
     // the next matching event instead of after the cache TTL.
@@ -868,6 +1024,17 @@ async fn handle_workflow_def(
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+
+    let relay_pubkey = state.relay_keypair.public_key().to_hex();
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored_state,
+        KIND_WORKFLOW_STATE,
+        &relay_pubkey,
+        None,
+    )
+    .await;
 
     // 5. Return response
     let mut resp = serde_json::json!({
@@ -881,6 +1048,165 @@ async fn handle_workflow_def(
         event_id: event.id.to_hex(),
         accepted: true,
         message: format!("response:{}", resp),
+    })
+}
+
+async fn handle_workflow_update(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+) -> Result<IngestResult, IngestError> {
+    let actor = auth.pubkey().to_bytes().to_vec();
+    let target = parse_workflow_update_target(event)?;
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), target.workflow_id)
+        .await
+        .map_err(|e| match e {
+            DbError::NotFound(_) => IngestError::Rejected("not found: workflow".into()),
+            other => IngestError::Internal(format!("error: db get_workflow: {other}")),
+        })?;
+
+    if workflow.owner_pubkey != target.owner_pubkey
+        || workflow.channel_id != Some(target.channel_id)
+    {
+        return Err(IngestError::Rejected(
+            "forbidden: workflow owner or channel does not match target".into(),
+        ));
+    }
+    if !can_manage_workflow(
+        &state.db,
+        tenant.community(),
+        &workflow.owner_pubkey,
+        &actor,
+    )
+    .await?
+    {
+        return Err(IngestError::Rejected(
+            "forbidden: only the workflow owner or its verified human owner may update it".into(),
+        ));
+    }
+    let is_member = state
+        .is_member_cached(tenant.community(), target.channel_id, &actor)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+    if !is_member {
+        return Err(IngestError::Rejected(
+            "forbidden: not a member of this channel".into(),
+        ));
+    }
+
+    let (definition, definition_json_str) =
+        buzz_workflow::WorkflowEngine::parse_yaml(&event.content).map_err(|e| {
+            IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}"))
+        })?;
+    let workflow_name = extract_tag(event, "name").unwrap_or_else(|| definition.name.clone());
+
+    // The workflow continues to execute as its original owner. Validate
+    // elevated actions against that identity, never the human manager.
+    if definition.requires_elevated_authority() {
+        let role = state
+            .db
+            .get_member_role(
+                tenant.community(),
+                target.channel_id,
+                &workflow.owner_pubkey,
+            )
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: role check: {e}")))?;
+        if !matches!(role.as_deref(), Some("owner") | Some("admin")) {
+            return Err(IngestError::Rejected(
+                "forbidden: workflows with call_webhook actions require the workflow owner to have the owner or admin role".into(),
+            ));
+        }
+    }
+
+    let mut definition_json: serde_json::Value = serde_json::from_str(&definition_json_str)
+        .map_err(|e| IngestError::Internal(format!("error: json parse of definition: {e}")))?;
+    let webhook_secret = if matches!(definition.trigger, buzz_workflow::TriggerDef::Webhook) {
+        let existing_secret = webhook_secret::extract_secret(&workflow.definition);
+        let is_new_secret = existing_secret.is_none();
+        let secret = existing_secret.unwrap_or_else(webhook_secret::generate_webhook_secret);
+        webhook_secret::inject_secret(&mut definition_json, &secret);
+        is_new_secret.then_some(secret)
+    } else {
+        None
+    };
+    let definition_json_final = serde_json::to_string(&definition_json)
+        .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
+    let hash = compute_definition_hash(&definition_json_final);
+    let state_event = build_workflow_state(
+        &state.relay_keypair,
+        target.workflow_id,
+        target.channel_id,
+        &workflow.owner_pubkey,
+        &actor,
+        event.id,
+        &event.content,
+        WorkflowStateStatus::Active,
+    )
+    .map_err(|e| IngestError::Internal(format!("error: build workflow state: {e}")))?;
+
+    let mut tx =
+        match persist_command_event(&state.db, tenant, event, Some(target.channel_id)).await? {
+            PersistResult::Duplicate => {
+                return Ok(IngestResult {
+                    event_id: event.id.to_hex(),
+                    accepted: true,
+                    message: "duplicate: already processed".into(),
+                });
+            }
+            PersistResult::Inserted(tx) => tx,
+        };
+
+    buzz_db::workflow::update_workflow_if_revision(
+        &mut tx,
+        tenant.community(),
+        target.workflow_id,
+        &target.expected_revision,
+        event.id.as_bytes().as_slice(),
+        &workflow_name,
+        &definition_json_final,
+        &hash,
+    )
+    .await
+    .map_err(|e| match e {
+        DbError::WorkflowRevisionConflict(_) => IngestError::Rejected(
+            "conflict: workflow changed since it was loaded; refresh and try again".into(),
+        ),
+        other => IngestError::Internal(format!("error: db update workflow: {other}")),
+    })?;
+    let stored_state =
+        store_workflow_state(&mut tx, tenant.community(), &state_event, target.channel_id)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: store workflow state: {e}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+
+    state
+        .workflow_engine
+        .invalidate_channel_workflows(tenant.community(), target.channel_id);
+    let relay_pubkey = state.relay_keypair.public_key().to_hex();
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored_state,
+        KIND_WORKFLOW_STATE,
+        &relay_pubkey,
+        None,
+    )
+    .await;
+
+    let mut response = serde_json::json!({ "workflow_id": target.workflow_id.to_string() });
+    if let Some(secret) = webhook_secret {
+        response["webhook_secret"] = serde_json::Value::String(secret);
+    }
+    Ok(IngestResult {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message: format!("response:{response}"),
     })
 }
 
@@ -915,7 +1241,7 @@ async fn handle_workflow_trigger(
     // 3. Manual triggers execute with the workflow owner's authority, so only
     // the owner may start them. Channel membership alone is insufficient: a
     // member could otherwise invoke another user's webhook or message actions.
-    if workflow.owner_pubkey != self_bytes {
+    if !can_manage_workflow(&state.db, community_id, &workflow.owner_pubkey, &self_bytes).await? {
         return Err(IngestError::Rejected(
             "forbidden: not authorized to trigger this workflow".into(),
         ));
@@ -938,6 +1264,15 @@ async fn handle_workflow_trigger(
             "forbidden: workflow has no channel scope".into(),
         ));
     };
+    let is_member = state
+        .is_member_cached(community_id, wf_channel_id, &self_bytes)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+    if !is_member {
+        return Err(IngestError::Rejected(
+            "forbidden: not a member of this channel".into(),
+        ));
+    }
     state
         .workflow_engine
         .check_owner_authority(community_id, wf_channel_id, &workflow.owner_pubkey, &def)
@@ -1055,6 +1390,159 @@ async fn handle_workflow_trigger(
             })
         ),
     })
+}
+
+/// Transactionally apply a workflow kind-5 request. Ingest resolves the target
+/// and performs the standard NIP-09 envelope checks before entering here.
+pub(crate) async fn handle_workflow_delete(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    workflow: buzz_db::workflow::WorkflowRecord,
+) -> Result<IngestResult, IngestError> {
+    let actor = auth.pubkey().to_bytes().to_vec();
+    if !can_manage_workflow(
+        &state.db,
+        tenant.community(),
+        &workflow.owner_pubkey,
+        &actor,
+    )
+    .await?
+    {
+        return Err(IngestError::Rejected(
+            "forbidden: only the workflow owner or its verified human owner may delete it".into(),
+        ));
+    }
+    let channel_id = workflow
+        .channel_id
+        .ok_or_else(|| IngestError::Rejected("forbidden: workflow has no channel scope".into()))?;
+    let is_member = state
+        .is_member_cached(tenant.community(), channel_id, &actor)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+    if !is_member {
+        return Err(IngestError::Rejected(
+            "forbidden: not a member of this channel".into(),
+        ));
+    }
+
+    let revisions: Vec<&str> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("expected-revision"))
+                .then(|| parts.get(1).map(String::as_str))
+                .flatten()
+        })
+        .collect();
+    let expected_revision = match revisions.as_slice() {
+        [] => None,
+        [revision] => {
+            let bytes = hex::decode(revision).map_err(|_| {
+                IngestError::Rejected("invalid: bad expected workflow revision".into())
+            })?;
+            if bytes.len() != 32 {
+                return Err(IngestError::Rejected(
+                    "invalid: bad expected workflow revision".into(),
+                ));
+            }
+            Some(bytes)
+        }
+        _ => {
+            return Err(IngestError::Rejected(
+                "invalid: workflow deletion permits at most one expected-revision tag".into(),
+            ));
+        }
+    };
+
+    let state_event = build_workflow_state(
+        &state.relay_keypair,
+        workflow.id,
+        channel_id,
+        &workflow.owner_pubkey,
+        &actor,
+        event.id,
+        "",
+        WorkflowStateStatus::Deleted,
+    )
+    .map_err(|e| IngestError::Internal(format!("error: build workflow tombstone: {e}")))?;
+
+    let mut tx = match persist_command_event(&state.db, tenant, event, Some(channel_id)).await? {
+        PersistResult::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        PersistResult::Inserted(tx) => tx,
+    };
+    buzz_db::workflow::delete_workflow_for_owner_in_tx(
+        &mut tx,
+        tenant.community(),
+        workflow.id,
+        &workflow.owner_pubkey,
+        expected_revision.as_deref(),
+        event.created_at.as_secs() as i64,
+    )
+    .await
+    .map_err(|error| match error {
+        DbError::WorkflowRevisionConflict(_) => IngestError::Rejected(
+            "conflict: workflow changed since it was loaded; refresh and try again".into(),
+        ),
+        DbError::AccessDenied(_) => {
+            IngestError::Rejected("forbidden: workflow belongs to a different owner".into())
+        }
+        DbError::NotFound(_) => IngestError::Rejected("not found: workflow".into()),
+        other => IngestError::Internal(format!("error: delete workflow: {other}")),
+    })?;
+    let stored_state = store_workflow_state(&mut tx, tenant.community(), &state_event, channel_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: store workflow tombstone: {e}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: commit workflow deletion: {e}")))?;
+
+    state
+        .workflow_engine
+        .invalidate_channel_workflows(tenant.community(), channel_id);
+    let relay_pubkey = state.relay_keypair.public_key().to_hex();
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored_state,
+        KIND_WORKFLOW_STATE,
+        &relay_pubkey,
+        None,
+    )
+    .await;
+
+    Ok(IngestResult {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message: "{}".into(),
+    })
+}
+
+/// Return whether `actor` may manage a workflow owned by `workflow_owner`.
+///
+/// Direct ownership remains the fast path. The only delegated path is the
+/// community-scoped NIP-OA mapping already persisted by relay authentication;
+/// this grants management authority without changing workflow ownership.
+async fn can_manage_workflow(
+    db: &buzz_db::Db,
+    community: CommunityId,
+    workflow_owner: &[u8],
+    actor: &[u8],
+) -> Result<bool, IngestError> {
+    if workflow_owner == actor {
+        return Ok(true);
+    }
+    db.is_agent_owner(community, workflow_owner, actor)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: workflow owner lookup: {e}")))
 }
 
 /// Enforce the approver_spec field against the requesting pubkey.
@@ -1446,7 +1934,7 @@ mod tests {
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials from .env.example
         let pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect workflow persistence test database");
@@ -1632,8 +2120,65 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_manager_accepts_direct_and_verified_agent_owners_only() {
+        let (db, tenant) = persistence_test_context().await;
+        let owner = Keys::generate().public_key().to_bytes().to_vec();
+        let agent = Keys::generate().public_key().to_bytes().to_vec();
+        let stranger = Keys::generate().public_key().to_bytes().to_vec();
+        for pubkey in [&owner, &agent, &stranger] {
+            db.ensure_user(tenant.community(), pubkey)
+                .await
+                .expect("ensure workflow actor");
+        }
+        db.set_agent_owner(tenant.community(), &agent, &owner)
+            .await
+            .expect("set verified owner");
+
+        assert!(can_manage_workflow(&db, tenant.community(), &owner, &owner)
+            .await
+            .expect("direct ownership check"));
+        assert!(can_manage_workflow(&db, tenant.community(), &agent, &owner)
+            .await
+            .expect("agent ownership check"));
+        assert!(
+            !can_manage_workflow(&db, tenant.community(), &agent, &stranger)
+                .await
+                .expect("stranger ownership check")
+        );
+        assert!(
+            !can_manage_workflow(&db, tenant.community(), &owner, &stranger)
+                .await
+                .expect("unrelated human check")
+        );
+    }
+
     #[test]
     fn revision_tag_does_not_change_other_command_kinds() {
         assert!(validate_workflow_revision(KIND_DM_OPEN as i32, Some("not-hex"), None).is_ok());
+    }
+
+    #[test]
+    fn workflow_update_target_uses_original_owner_coordinate() {
+        let owner = "11".repeat(32);
+        let workflow_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let revision = "22".repeat(32);
+        let coordinate = format!("{KIND_WORKFLOW_DEF}:{owner}:{workflow_id}");
+        let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_UPDATE as u16), "name: update")
+            .tags([
+                Tag::parse(["a", coordinate.as_str()]).expect("a tag"),
+                Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+                Tag::parse(["expected-revision", revision.as_str()]).expect("revision tag"),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign update");
+
+        let target = parse_workflow_update_target(&event).expect("parse update target");
+        assert_eq!(target.workflow_id, workflow_id);
+        assert_eq!(target.channel_id, channel_id);
+        assert_eq!(target.owner_pubkey, vec![0x11; 32]);
+        assert_eq!(target.expected_revision, vec![0x22; 32]);
     }
 }

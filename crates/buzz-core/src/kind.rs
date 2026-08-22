@@ -440,6 +440,8 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
+/// Relay-signed current workflow state (parameterized replaceable, d=workflow_uuid).
+pub const KIND_WORKFLOW_STATE: u32 = 30623;
 
 /// NIP-DV: per-viewer DM visibility snapshot (relay-signed, parameterized
 /// replaceable, d=viewer_pubkey). Carries one `h` tag per DM the viewer has
@@ -556,6 +558,8 @@ pub const KIND_FORUM_COMMENT: u32 = 45003;
 // Workflow engine (46000–46999)
 /// Trigger workflow execution.
 pub const KIND_WORKFLOW_TRIGGER: u32 = 46020;
+/// Request an update to an existing workflow definition.
+pub const KIND_WORKFLOW_UPDATE: u32 = 46021;
 /// Grant pending approval.
 pub const KIND_APPROVAL_GRANT: u32 = 46030;
 /// Deny pending approval.
@@ -726,6 +730,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_STATE,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
     KIND_READ_STATE,
@@ -733,6 +738,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
+    KIND_WORKFLOW_UPDATE,
     KIND_APPROVAL_GRANT,
     KIND_APPROVAL_DENY,
     KIND_WORKFLOW_TRIGGERED,
@@ -816,6 +822,7 @@ pub const fn is_command_kind(kind: u32) -> bool {
     matches!(
         kind,
         KIND_WORKFLOW_DEF
+            | KIND_WORKFLOW_UPDATE
             | KIND_DM_OPEN
             | KIND_DM_ADD_MEMBER
             | KIND_DM_HIDE
@@ -836,6 +843,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_WORKFLOW_STATE
     )
 }
 
@@ -859,6 +867,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 3017
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_STATE)); // 30623 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
@@ -921,6 +930,17 @@ mod tests {
         assert!(is_parameterized_replaceable(39000)); // NIP-29 group metadata
         assert!(is_parameterized_replaceable(39999));
         assert!(!is_parameterized_replaceable(40000));
+    }
+
+    #[test]
+    fn owner_managed_workflow_kinds_have_expected_contracts() {
+        assert_eq!(KIND_WORKFLOW_STATE, 30623);
+        assert!(is_parameterized_replaceable(KIND_WORKFLOW_STATE));
+        assert!(is_relay_only_kind(KIND_WORKFLOW_STATE));
+
+        assert_eq!(KIND_WORKFLOW_UPDATE, 46021);
+        assert!(is_command_kind(KIND_WORKFLOW_UPDATE));
+        assert!(!is_relay_only_kind(KIND_WORKFLOW_UPDATE));
     }
 
     #[test]
