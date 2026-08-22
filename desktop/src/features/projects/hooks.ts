@@ -662,12 +662,13 @@ export const PROJECT_WORK_ITEMS_STALE_TIME_MS = 2 * 60_000;
 export const PROJECT_ACTIVITY_STALE_TIME_MS = 2 * 60_000;
 export const PROJECT_LOCAL_REPOS_STALE_TIME_MS = 2 * 60_000;
 
-export function useProjectsQuery() {
+export function useProjectsQuery(enabled = true) {
   return useQuery({
     queryKey: projectsQueryKey,
     queryFn: ({ signal }) => fetchProjects(undefined, signal),
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
+    enabled,
   });
 }
 
