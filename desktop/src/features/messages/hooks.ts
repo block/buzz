@@ -598,7 +598,7 @@ export function useSendMessageMutation(
               effectiveChannel.id,
               identity.pubkey,
               parentEventId,
-              result.rootEventId,
+              result.rootEventId ?? parentEventId,
               recipientPubkeys,
             )
           : [];

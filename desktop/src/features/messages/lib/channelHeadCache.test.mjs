@@ -1,12 +1,56 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { QueryClient } from "@tanstack/react-query";
+import { after, afterEach, before, test } from "node:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { JSDOM } from "jsdom";
+import React from "react";
 import {
   consumeHydratedChannel,
   hydrateChannelHeads,
 } from "./channelHeadCache.ts";
 import { channelMessagesKey } from "./messageQueryKeys.ts";
-import { reconcileFetchedChannelWindow } from "../hooks.ts";
+import {
+  reconcileFetchedChannelWindow,
+  useChannelMessagesQuery,
+} from "../hooks.ts";
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  url: "http://localhost",
+});
+const channel = {
+  id: "channel-a",
+  name: "general",
+  channelType: "stream",
+  visibility: "open",
+  description: "",
+  topic: null,
+  purpose: null,
+  memberCount: 1,
+  memberPubkeys: [],
+  lastMessageAt: null,
+  archivedAt: null,
+  participants: [],
+  participantPubkeys: [],
+  isMember: true,
+  ttlSeconds: null,
+  ttlDeadline: null,
+};
+let channelWindowCalls = 0;
+let channelWindowEvents = [];
+
+before(() => {
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    window: dom.window,
+  });
+});
+
+afterEach(async () => {
+  const { cleanup } = await import("@testing-library/react");
+  cleanup();
+});
+
+after(() => dom.window.close());
 const channelId = "channel-a";
 const root = {
   id: "a".repeat(64),
@@ -38,14 +82,79 @@ function bounds() {
   };
 }
 function install(entries) {
-  globalThis.window = {
-    localStorage: { getItem: () => null },
-    __TAURI_INTERNALS__: {
-      invoke: async (command) =>
-        command === "channel_head_cache_load" ? entries : null,
+  channelWindowCalls = 0;
+  channelWindowEvents = [replacement, bounds()];
+  window.localStorage.clear();
+  window.__TAURI_INTERNALS__ = {
+    invoke: async (command) => {
+      if (command === "channel_head_cache_load") return entries;
+      if (command === "get_channel_window") {
+        channelWindowCalls += 1;
+        return channelWindowEvents;
+      }
+      return null;
     },
   };
 }
+
+async function mountChannelQuery(client) {
+  const { renderHook, waitFor } = await import("@testing-library/react");
+  const view = renderHook(() => useChannelMessagesQuery(channel), {
+    wrapper: ({ children }) =>
+      React.createElement(QueryClientProvider, { client }, children),
+  });
+  await waitFor(() => assert.equal(view.result.current.isSuccess, true));
+  return view;
+}
+test("mount fetches cold and prefetched channels but consumes hydrated data", async () => {
+  install([]);
+  const coldClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const coldView = await mountChannelQuery(coldClient);
+  assert.equal(channelWindowCalls, 1);
+
+  install([]);
+  const prefetchedClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  prefetchedClient.setQueryData(channelMessagesKey(channelId), [root], {
+    updatedAt: 0,
+  });
+  const prefetchedView = await mountChannelQuery(prefetchedClient);
+  assert.equal(channelWindowCalls, 1);
+
+  install([
+    { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },
+  ]);
+  const hydratedClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  await hydrateChannelHeads(hydratedClient, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  const hydratedView = await mountChannelQuery(hydratedClient);
+  assert.equal(channelWindowCalls, 0);
+  assert.deepEqual(hydratedView.result.current.data, [root]);
+
+  await hydratedClient.invalidateQueries({
+    queryKey: channelMessagesKey(channelId),
+    exact: true,
+    refetchType: "active",
+  });
+  assert.equal(channelWindowCalls, 1);
+  assert.deepEqual(hydratedClient.getQueryData(channelMessagesKey(channelId)), [
+    replacement,
+  ]);
+  hydratedView.unmount();
+  coldView.unmount();
+  prefetchedView.unmount();
+  coldClient.clear();
+  prefetchedClient.clear();
+  hydratedClient.clear();
+});
+
 test("hydrates stale data and consumes its mount gate once", async () => {
   install([
     { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },

@@ -11,6 +11,7 @@ import {
 } from "./channelWindowStore";
 import { reconcileChannelWindowMessages } from "./channelWindowReconciliation";
 const hydratedChannels = new WeakMap<QueryClient, Set<string>>();
+const persistedHydratedChannels = new WeakMap<QueryClient, Set<string>>();
 const cacheScopes = new WeakMap<QueryClient, ChannelHeadScope>();
 export function isChannelHeadCacheEnabled(): boolean {
   if (typeof window === "undefined") return false;
@@ -31,11 +32,11 @@ export function consumeHydratedChannel(
   if (channels.size === 0) hydratedChannels.delete(queryClient);
   return true;
 }
-export function hasHydratedChannel(
+export function hasPersistedHydratedChannel(
   queryClient: QueryClient,
   channelId: string,
 ): boolean {
-  return hydratedChannels.get(queryClient)?.has(channelId) ?? false;
+  return persistedHydratedChannels.get(queryClient)?.has(channelId) ?? false;
 }
 export async function hydrateChannelHeads(
   queryClient: QueryClient,
@@ -72,5 +73,8 @@ export async function hydrateChannelHeads(
       );
     }
   }
-  if (hydrated.size > 0) hydratedChannels.set(queryClient, hydrated);
+  if (hydrated.size > 0) {
+    hydratedChannels.set(queryClient, hydrated);
+    persistedHydratedChannels.set(queryClient, new Set(hydrated));
+  }
 }

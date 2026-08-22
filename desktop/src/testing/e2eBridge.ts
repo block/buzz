@@ -370,6 +370,8 @@ type E2eConfig = {
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
+    /** Delay (ms) applied to newest-page channel-window requests. */
+    channelHeadDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     /** Override whether get_profile reports a real kind:0 event. */
@@ -5546,19 +5548,20 @@ async function handleGetChannelWindow(
     return relayQuery(config, [filter]);
   };
 
-  if (!args.cursor) {
-    return execute();
-  }
-
   const probe = window as unknown as {
     __CHANNEL_WINDOW_FETCH_COUNT__?: number;
     __CHANNEL_WINDOW_INFLIGHT__?: number;
     __CHANNEL_WINDOW_INFLIGHT_PEAK__?: number;
   };
-  probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
-    (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
+  if (args.cursor !== null) {
+    probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
+      (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
+  }
 
-  const delayMs = getConfig()?.mock?.channelWindowDelayMs ?? 0;
+  const delayMs =
+    args.cursor === null
+      ? (getConfig()?.mock?.channelHeadDelayMs ?? 0)
+      : (getConfig()?.mock?.channelWindowDelayMs ?? 0);
   if (delayMs <= 0) {
     return execute();
   }

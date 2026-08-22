@@ -99,6 +99,7 @@ export default defineConfig({
         "**/scroll-history.spec.ts",
         "**/channel-dense-second-reach.spec.ts",
         "**/channel-window-mock-paging.spec.ts",
+        "**/channel-head-restart.spec.ts",
         "**/live-broadcast-reply-timeline.spec.ts",
         "**/markdown-parse-cache.spec.ts",
         "**/overscroll-boundary.spec.ts",
