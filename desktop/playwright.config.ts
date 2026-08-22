@@ -104,6 +104,7 @@ export default defineConfig({
         "**/overscroll-boundary.spec.ts",
         "**/terminal-wheel.spec.ts",
         "**/cold-switch-longtask.perf.ts",
+        "**/switch-settle-after-paint.spec.ts",
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
         "**/empty-edit-delete.spec.ts",

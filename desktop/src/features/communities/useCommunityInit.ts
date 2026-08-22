@@ -34,6 +34,7 @@ import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { resetChannelSwitchTrace } from "@/shared/lib/channelSwitchPerf";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
@@ -57,6 +58,10 @@ async function resetCommunityState({
   resetAvatarState: boolean;
 }): Promise<void> {
   relayClient.disconnect();
+  // Before the first await: the trace singleton must not survive into the
+  // async teardown window — queued frame callbacks could still record against
+  // it, and a rejection below would skip any reset placed after the await.
+  resetChannelSwitchTrace();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();

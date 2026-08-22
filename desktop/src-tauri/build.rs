@@ -8,6 +8,34 @@ include!("src/managed_agents/reserved_env_keys.rs");
 use base64::Engine as _;
 
 fn main() {
+    // Bake the source git revision into the binary so diagnostics (the
+    // switch-perf JSONL sink) can attribute records to the build that wrote
+    // them. Reruns key off the reflog, which updates on every checkout,
+    // commit, and rebase. `--dirty` marks uncommitted worktrees but is only
+    // as fresh as the last build-script run: plain source edits between
+    // builds do not re-stamp it. Checkout-based A/B flows (the intended use)
+    // always update the reflog and re-stamp.
+    if let Ok(git_dir) = std::process::Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output()
+    {
+        if git_dir.status.success() {
+            let dir = String::from_utf8_lossy(&git_dir.stdout).trim().to_string();
+            println!("cargo:rerun-if-changed={dir}/HEAD");
+            println!("cargo:rerun-if-changed={dir}/logs/HEAD");
+        }
+    }
+    if let Some(git_sha) = std::process::Command::new("git")
+        .args(["describe", "--always", "--dirty", "--abbrev=12"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+    {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_GIT_SHA={git_sha}");
+    }
+
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");

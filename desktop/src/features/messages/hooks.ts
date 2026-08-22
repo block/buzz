@@ -38,6 +38,7 @@ import {
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
 import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
+import { traceChannelWindowFetch } from "@/shared/lib/channelSwitchPerf";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -271,14 +272,27 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       if (!channel) throw new Error("No channel selected.");
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const fetchStartedAt = performance.now();
       const events = await getChannelWindowEvents(channel.id);
-      return reconcileFetchedChannelWindow(
+      const fetchDurationMs = performance.now() - fetchStartedAt;
+      const result = reconcileFetchedChannelWindow(
         queryClient,
         channel.id,
         events,
         previousMessages,
         signal,
       );
+      // Attribute only ACCEPTED fetches: reconciliation throws for aborted
+      // requests, and a canceled fetch that claimed the trace's one-shot
+      // attribution slot would block the accepted replacement from being
+      // recorded. Duration still measures the fetch alone, captured above.
+      traceChannelWindowFetch(
+        channel.id,
+        events.length,
+        fetchDurationMs,
+        fetchStartedAt,
+      );
+      return result;
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
