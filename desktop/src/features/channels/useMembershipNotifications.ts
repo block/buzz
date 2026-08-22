@@ -6,6 +6,7 @@ import { getChannelIdFromTags } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
+  KIND_DM_VISIBILITY,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
 } from "@/shared/constants/kinds";
@@ -22,6 +23,9 @@ export function useMembershipNotifications(currentPubkey?: string) {
       const channelId = getChannelIdFromTags(event.tags);
 
       void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      if (event.kind === KIND_DM_VISIBILITY) {
+        return;
+      }
       if (!channelId) {
         return;
       }
@@ -50,6 +54,7 @@ export function useMembershipNotifications(currentPubkey?: string) {
         const nextDispose = await relayClient.subscribeLive(
           {
             kinds: [
+              KIND_DM_VISIBILITY,
               KIND_MEMBER_ADDED_NOTIFICATION,
               KIND_MEMBER_REMOVED_NOTIFICATION,
             ],
@@ -70,7 +75,10 @@ export function useMembershipNotifications(currentPubkey?: string) {
         dispose = nextDispose;
         return true;
       } catch (error) {
-        console.error("Failed to subscribe to membership notifications", error);
+        console.error(
+          "Failed to subscribe to channel-list notifications",
+          error,
+        );
         return false;
       }
     };

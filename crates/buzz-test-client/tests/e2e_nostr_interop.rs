@@ -80,11 +80,16 @@ async fn create_test_channel(keys: &Keys) -> String {
     channel_uuid.to_string()
 }
 
-/// Send a message via a signed kind:9 event and return the event_id hex.
-async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> String {
+/// Send a message with an explicit supported message kind and return its event id.
+async fn send_rest_message_with_kind(
+    keys: &Keys,
+    channel_id: &str,
+    content: &str,
+    kind: u16,
+) -> String {
     let client = reqwest::Client::new();
     let pubkey_hex = keys.public_key().to_hex();
-    let event = EventBuilder::new(Kind::Custom(9), content)
+    let event = EventBuilder::new(Kind::Custom(kind), content)
         .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
         .sign_with_keys(keys)
         .unwrap();
@@ -105,17 +110,26 @@ async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> Stri
     body["event_id"].as_str().expect("event_id").to_string()
 }
 
+/// Send the legacy kind:9 stream-message form used by most interop fixtures.
+async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> String {
+    send_rest_message_with_kind(keys, channel_id, content, 9).await
+}
+
 /// Create a DM via a signed kind:41010 (DM open) command event and return the
 /// channel_id UUID string parsed from the relay's `response:{...}` message.
-async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
+async fn create_group_dm(requester_keys: &Keys, other_pubkey_hexes: &[String]) -> String {
     let client = reqwest::Client::new();
     let pubkey_hex = requester_keys.public_key().to_hex();
     // Backdate the initial open so a later re-open kind:41010 with identical
     // tags in the same wall-clock second does not produce an identical event id
     // (which the relay would dedupe as "duplicate: already processed").
     let backdated = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 10);
+    let tags = other_pubkey_hexes
+        .iter()
+        .map(|pubkey| Tag::parse(["p", pubkey]).unwrap())
+        .collect::<Vec<_>>();
     let event = EventBuilder::new(Kind::Custom(41010), "")
-        .tags(vec![Tag::parse(["p", other_pubkey_hex]).unwrap()])
+        .tags(tags)
         .custom_created_at(backdated)
         .sign_with_keys(requester_keys)
         .unwrap();
@@ -144,6 +158,10 @@ async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
         .as_str()
         .expect("channel_id")
         .to_string()
+}
+
+async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
+    create_group_dm(requester_keys, &[other_pubkey_hex.to_string()]).await
 }
 
 /// Submit a signed command event via REST and assert it was accepted.
@@ -1307,6 +1325,101 @@ async fn test_nipdv_hide_then_reopen_updates_snapshot() {
     );
 
     client_a.disconnect().await.expect("disconnect");
+}
+
+/// A real inbound DM message is new activity, so it must remove that DM from
+/// the recipient's hidden set. The sender remains hidden if they independently
+/// closed the row: visibility is per viewer and delivery must not rewrite the
+/// author's own preference.
+///
+/// Parameterized over every human-visible message kind the relay accepts as a
+/// channel write (`is_human_visible_message_kind`): kinds 9/40002 plus forum
+/// post/comment 45001/45003. A stale or custom client can post a forum event
+/// into a DM, and both clients render it, so all four must resurface a hidden
+/// DM. Dropping either forum kind from the ingest predicate fails this test.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_supported_message_kinds_resurface_hidden_dm_for_recipient() {
+    for kind in [9u16, 40002, 45001, 45003] {
+        let keys_a = Keys::generate();
+        let keys_b = Keys::generate();
+        let keys_c = Keys::generate();
+        let a_pubkey_hex = keys_a.public_key().to_hex();
+        let b_pubkey_hex = keys_b.public_key().to_hex();
+        let c_pubkey_hex = keys_c.public_key().to_hex();
+        let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+        let unrelated_channel_id = create_dm(&keys_b, &c_pubkey_hex).await;
+
+        for keys in [&keys_a, &keys_b] {
+            post_signed_event(keys, 41012, vec![Tag::parse(["h", &channel_id]).unwrap()]).await;
+        }
+        post_signed_event(
+            &keys_b,
+            41012,
+            vec![Tag::parse(["h", &unrelated_channel_id]).unwrap()],
+        )
+        .await;
+
+        send_rest_message_with_kind(&keys_a, &channel_id, "new inbound activity", kind).await;
+
+        let mut client_a = BuzzTestClient::connect(&relay_url(), &keys_a)
+            .await
+            .expect("client A connect");
+        let a_hidden = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+        assert!(
+            a_hidden.contains(&channel_id),
+            "kind {kind} sending must not rewrite the author's hidden state; A sees: {a_hidden:?}"
+        );
+        client_a.disconnect().await.expect("disconnect A");
+
+        let mut client_b = BuzzTestClient::connect(&relay_url(), &keys_b)
+            .await
+            .expect("client B connect");
+        let b_hidden = read_hidden_dms(&mut client_b, &b_pubkey_hex).await;
+        assert!(
+            !b_hidden.contains(&channel_id),
+            "kind {kind} inbound activity must resurface the DM for B; B sees: {b_hidden:?}"
+        );
+        assert!(
+            b_hidden.contains(&unrelated_channel_id),
+            "kind {kind} activity in one DM must not resurface an unrelated DM; B sees: {b_hidden:?}"
+        );
+        client_b.disconnect().await.expect("disconnect B");
+    }
+}
+
+/// Group-DM delivery resurfaces the row for every hidden recipient, not only
+/// the first member returned by the roster query.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_group_message_resurfaces_all_hidden_recipients() {
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let keys_c = Keys::generate();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+    let c_pubkey_hex = keys_c.public_key().to_hex();
+    let channel_id = create_group_dm(&keys_a, &[b_pubkey_hex.clone(), c_pubkey_hex.clone()]).await;
+
+    for keys in [&keys_b, &keys_c] {
+        post_signed_event(keys, 41012, vec![Tag::parse(["h", &channel_id]).unwrap()]).await;
+    }
+
+    send_rest_message(&keys_a, &channel_id, "group activity").await;
+
+    for (label, keys, pubkey) in [("B", &keys_b, &b_pubkey_hex), ("C", &keys_c, &c_pubkey_hex)] {
+        let mut client = BuzzTestClient::connect(&relay_url(), keys)
+            .await
+            .unwrap_or_else(|error| panic!("client {label} connect: {error}"));
+        let hidden = read_hidden_dms(&mut client, pubkey).await;
+        assert!(
+            !hidden.contains(&channel_id),
+            "new group activity must resurface the DM for {label}; hidden: {hidden:?}"
+        );
+        client
+            .disconnect()
+            .await
+            .unwrap_or_else(|error| panic!("disconnect {label}: {error}"));
+    }
 }
 
 /// NIP-DV monotonicity regression: a hide immediately followed by a re-open

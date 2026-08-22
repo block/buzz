@@ -160,6 +160,37 @@ CREATE TABLE channel_members (
 CREATE INDEX idx_channel_members_pubkey ON channel_members (community_id, pubkey)
     WHERE removed_at IS NULL;
 
+-- Durable retry queue for relay-authored kind:30622 DM visibility snapshots.
+CREATE TABLE dm_visibility_dirty_viewers (
+    community_id   UUID        NOT NULL REFERENCES communities(id),
+    viewer          BYTEA       NOT NULL CHECK (length(viewer) = 32),
+    generation      BIGINT      NOT NULL DEFAULT 1 CHECK (generation > 0),
+    state           TEXT        NOT NULL DEFAULT 'pending'
+                                CHECK (state IN ('pending', 'publishing')),
+    dirty_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claim_id        UUID,
+    lease_until     TIMESTAMPTZ,
+    attempts        INTEGER     NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    PRIMARY KEY (community_id, viewer),
+    CHECK (
+        (state = 'pending' AND claim_id IS NULL AND lease_until IS NULL)
+        OR (state = 'publishing' AND claim_id IS NOT NULL AND lease_until IS NOT NULL)
+    )
+);
+
+CREATE INDEX dm_visibility_dirty_viewers_fresh
+    ON dm_visibility_dirty_viewers (dirty_at, community_id, viewer)
+    WHERE state = 'pending' AND attempts = 0;
+
+CREATE INDEX dm_visibility_dirty_viewers_retry
+    ON dm_visibility_dirty_viewers (next_attempt_at, dirty_at, community_id, viewer)
+    WHERE state = 'pending' AND attempts > 0;
+
+CREATE INDEX dm_visibility_dirty_viewers_recovery
+    ON dm_visibility_dirty_viewers (lease_until, community_id, viewer)
+    WHERE state = 'publishing';
+
 -- ── Users ─────────────────────────────────────────────────────────────────────
 -- Conformance: "Users, profiles, NIP-05, and user search". One profile per
 -- (community, pubkey): the same key reposts kind:0 in each community it joins.
@@ -1726,6 +1757,7 @@ SELECT attach_community_write_fence('channel_members');
 SELECT attach_community_write_fence('channels');
 SELECT attach_community_write_fence('community_bans');
 SELECT attach_community_write_fence('delivery_log');
+SELECT attach_community_write_fence('dm_visibility_dirty_viewers');
 SELECT attach_community_write_fence('event_mentions');
 SELECT attach_community_write_fence('events');
 SELECT attach_community_write_fence('git_repo_names');

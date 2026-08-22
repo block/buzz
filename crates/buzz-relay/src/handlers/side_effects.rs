@@ -1112,10 +1112,24 @@ pub async fn emit_group_discovery_events(
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
     let channel = state.db.get_channel(tenant.community(), channel_id).await?;
-    let members = state.db.get_members(tenant.community(), channel_id).await?;
-
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
+
+    // Establish the authoritative roster first, from one membership snapshot
+    // held behind the writer lock. Metadata/admin discovery is emitted only
+    // after that transaction commits, so a roster validation failure cannot
+    // strand a partial 39000/39001 generation without kind 39002. Keeping the
+    // captured members for all three events also prevents cross-query drift.
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    let mut member_snapshot = state
+        .db
+        .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
+        .await?;
+    let members = member_snapshot.members.clone();
+    let stored_members =
+        store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
+    member_snapshot.release().await?;
+    dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
@@ -1199,19 +1213,6 @@ pub async fn emit_group_discovery_events(
         )
         .await?;
     }
-
-    // Re-capture membership behind the writer lock immediately before the
-    // authoritative 39002 replacement. Metadata/admin snapshots retain their
-    // existing behavior; only membership publication needs this freshness fence.
-    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
-    let mut member_snapshot = state
-        .db
-        .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
-        .await?;
-    let stored_members =
-        store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
-    member_snapshot.release().await?;
-    dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
     Ok(())
 }
@@ -3391,81 +3392,112 @@ pub async fn publish_dm_visibility_snapshot(
     state: &Arc<AppState>,
     viewer: &[u8],
 ) -> anyhow::Result<()> {
-    let viewer_hex = hex::encode(viewer);
-    let hidden = state.db.list_hidden_dms(tenant.community(), viewer).await?;
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
-
-    let mut tags: Vec<Tag> = Vec::with_capacity(hidden.len() + 2);
-    tags.push(
-        Tag::parse(["d", &viewer_hex])
-            .map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
-    );
-    // `p` = viewer so the relay's `#p`-gated read path scopes the snapshot to
-    // its owner; no one else may query another viewer's hidden-DM set.
-    tags.push(
-        Tag::parse(["p", &viewer_hex])
-            .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-    );
-    for channel_id in &hidden {
-        tags.push(
-            Tag::parse(["h", &channel_id.to_string()])
-                .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?,
-        );
-    }
-
-    // Force created_at strictly past any prior snapshot for this viewer: a same-second
-    // replacement whose random event id sorts higher is rejected by stale-write
-    // protection, so a hide→re-open within one second could otherwise strand the stale
-    // snapshot. Same guard as emit_addressable_discovery_event.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let ts = {
-        let existing = state
-            .db
-            .query_events(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
-                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
-                d_tag: Some(viewer_hex.clone()),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now)
-    };
-
-    let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
-
-    let (stored, was_inserted) = state
+    let viewer_hex = hex::encode(viewer);
+    let (stored, hidden_count) = state
         .db
-        .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
+        .publish_dm_visibility_locked(tenant.community(), viewer, &state.relay_keypair)
         .await?;
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_DM_VISIBILITY,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
-    }
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored,
+        KIND_DM_VISIBILITY,
+        &relay_pubkey_hex,
+        None,
+    )
+    .await;
 
     info!(
         viewer = %viewer_hex,
-        hidden_count = hidden.len(),
+        hidden_count,
         "NIP-DV DM visibility snapshot published"
     );
+    Ok(())
+}
+
+/// Publish one bounded batch from the durable DM visibility dirty-viewer queue.
+///
+/// Hide/unhide mutations enqueue their viewer in the same transaction as the
+/// canonical membership change. This worker therefore does work proportional
+/// to failed projections and never scans deployment-wide DM history.
+pub async fn reconcile_dm_visibility_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
+    const BATCH_LIMIT: i64 = 100;
+    const CLAIM_LEASE_SECONDS: i64 = 60;
+
+    let claims = state
+        .db
+        .claim_dm_visibility_dirty_viewers(BATCH_LIMIT, CLAIM_LEASE_SECONDS)
+        .await?;
+    let mut reconciled = 0usize;
+
+    for claim in claims {
+        let tenant = TenantContext::resolved(claim.community_id, claim.community_host.clone());
+        match publish_dm_visibility_snapshot(&tenant, state, &claim.viewer).await {
+            Ok(()) => reconciled += 1,
+            Err(error) => {
+                metrics::counter!("buzz_dm_visibility_reconciliation_failures_total").increment(1);
+                if let Err(retry_error) = state
+                    .db
+                    .retry_dm_visibility_dirty_viewer(
+                        claim.community_id,
+                        &claim.viewer,
+                        claim.claim_id,
+                    )
+                    .await
+                {
+                    warn!(
+                        community_id = %claim.community_id,
+                        viewer = %hex::encode(&claim.viewer),
+                        %retry_error,
+                        "DM visibility retry release failed; claim lease will recover it"
+                    );
+                }
+                warn!(
+                    community_id = %claim.community_id,
+                    host = %claim.community_host,
+                    viewer = %hex::encode(&claim.viewer),
+                    %error,
+                    "DM visibility snapshot reconciliation failed"
+                );
+            }
+        }
+    }
+
+    metrics::counter!("buzz_dm_visibility_reconciliations_total").increment(reconciled as u64);
+    Ok(reconciled)
+}
+
+/// Publish fresh NIP-DV snapshots after recipient visibility mutations commit.
+///
+/// The caller supplies only viewers whose canonical hidden state changed in
+/// the accepted-message transaction. Publication remains recoverable through
+/// the durable dirty-viewer queue if any snapshot attempt fails.
+pub async fn publish_dm_visibility_snapshots_for_recipients(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    recipients: &[Vec<u8>],
+) -> anyhow::Result<()> {
+    let results = futures_util::future::join_all(
+        recipients
+            .iter()
+            .map(|recipient| publish_dm_visibility_snapshot(tenant, state, recipient)),
+    )
+    .await;
+
+    let failures = results
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "failed to publish {} DM visibility snapshot(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
     Ok(())
 }
 

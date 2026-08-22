@@ -13,10 +13,11 @@ use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::handlers::event::dispatch_persistent_event;
+use crate::handlers::side_effects::publish_dm_visibility_snapshots_for_recipients;
 use crate::state::AppState;
 
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
@@ -387,20 +388,49 @@ impl ActionSink for RelayActionSink {
                 },
             });
 
-            let (stored_event, was_inserted) = state
-                .db
-                .insert_event_with_thread_metadata(
-                    tenant.community(),
-                    &event,
-                    Some(channel_uuid),
-                    thread_meta,
-                )
-                .await
+            let (stored_event, was_inserted, resurfaced_viewers) =
+                if channel.channel_type == "dm" {
+                    state
+                        .db
+                        .insert_dm_event_with_thread_metadata(
+                            tenant.community(),
+                            &event,
+                            channel_uuid,
+                            thread_meta,
+                            &author_pubkey_bytes,
+                        )
+                        .await
+                } else {
+                    state
+                        .db
+                        .insert_event_with_thread_metadata(
+                            tenant.community(),
+                            &event,
+                            Some(channel_uuid),
+                            thread_meta,
+                        )
+                        .await
+                        .map(|(stored, inserted)| (stored, inserted, Vec::new()))
+                }
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
 
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
             if was_inserted {
+                if let Err(e) = publish_dm_visibility_snapshots_for_recipients(
+                    &tenant,
+                    &state,
+                    &resurfaced_viewers,
+                )
+                .await
+                {
+                    warn!(
+                        event_id = %event_id_hex,
+                        channel_id = %channel_uuid,
+                        "Workflow DM visibility snapshot publication failed: {e}"
+                    );
+                }
+
                 let _ = dispatch_persistent_event(
                     &tenant,
                     &state,

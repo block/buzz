@@ -29,7 +29,11 @@ use buzz_core::kind::{event_kind_u32, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::TenantContext;
 
 use super::event::dispatch_persistent_event;
-use super::side_effects::emit_group_discovery_events;
+#[cfg(test)]
+use super::side_effects::publish_dm_visibility_snapshot;
+use super::side_effects::{
+    emit_group_discovery_events, publish_dm_visibility_snapshots_for_recipients,
+};
 use crate::state::AppState;
 
 /// Tag naming the moderation source row (report/action) a notice was derived
@@ -94,6 +98,35 @@ pub async fn send_moderation_notice(
         return Ok(());
     }
 
+    // A crash retry for an already-delivered source must be a complete no-op,
+    // including preserving a later user hide. `open_dm` deliberately unhides
+    // an existing thread, so perform this check before calling it.
+    let source_id = notice.source_id();
+    let participant_hash =
+        buzz_db::dm::compute_participant_hash(&[recipient_pubkey, relay_pubkey_bytes.as_slice()]);
+    if let Some(existing_dm) = state
+        .db
+        .find_dm_by_participants(tenant.community(), &participant_hash)
+        .await?
+    {
+        if notice_already_sent(
+            state,
+            tenant,
+            existing_dm.id,
+            &relay_pubkey_bytes,
+            source_id,
+        )
+        .await?
+        {
+            // A prior attempt may have committed the notice before a
+            // transient discovery failure. Duplicate delivery is still a
+            // content no-op, but retry the idempotent discovery generation so
+            // the channel eventually has a complete 39000/39001/39002 set.
+            emit_group_discovery_events(tenant, state, existing_dm.id).await?;
+            return Ok(());
+        }
+    }
+
     // 1. Create/reuse the two-party DM channel {relay mod key, recipient}.
     //    `open_dm` is participant-hash idempotent, so re-delivery to the same
     //    user reuses the one thread per (community, user).
@@ -118,43 +151,12 @@ pub async fn send_moderation_notice(
         .increment(1);
     }
 
-    // Resurface the moderation DM for the recipient. `open_dm` only clears
-    // `hidden_at` for `created_by` (the relay key), so a user who hid the
-    // "{host} Moderation" thread would never see a later ban/resolution notice.
-    // The closed-loop trust requirement needs the notice to reappear.
-    state
-        .db
-        .unhide_dm(tenant.community(), dm_channel_id, recipient_pubkey)
-        .await?;
-
-    // Idempotency: a notice for this source id already exists in this DM ⇒ no-op.
-    // The source (report/action) row id is carried in a `moderation_source` tag
-    // (NOT `e` — `e` is reserved for 32-byte event ids; this is an opaque row
-    // UUID). Keyed on it, a retry after a crash between insert and fan-out is a
-    // safe no-op. Note: this is query-then-insert, so it is crash-retry safe but
-    // not concurrency-safe — two simultaneous deliveries for the same source can
-    // both miss the pre-query. Callers invoke this once per action from
-    // already-serialized side-effect paths; hard per-source serialization is a
-    // noted follow-up, not done here.
-    let source_id = notice.source_id();
-    if notice_already_sent(state, tenant, dm_channel_id, &relay_pubkey_bytes, source_id).await? {
-        return Ok(());
-    }
-
-    // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists, and 3.
-    //    the DM's kind:39000 discovery (with `hidden` / `t=dm` / `p`). Both are
-    //    replaceable events, so we emit them on EVERY send rather than gating on
-    //    first creation: if discovery failed on the first delivery (it is
-    //    `?`-propagated), a `was_created`-gated retry would skip it forever and
-    //    leave the thread permanently undiscoverable — a notice delivered into a
-    //    channel no client can render. Notices are rare; unconditional re-emit is
-    //    cheap and `replace_addressable_event` makes it idempotent.
+    // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists.
     if let Err(e) = publish_moderation_profile(tenant, state, &relay_pubkey_hex).await {
         warn!(error = %e, "moderation profile publish failed (continuing)");
     }
-    emit_group_discovery_events(tenant, state, dm_channel_id).await?;
 
-    // 4. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and a
+    // 3. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and a
     //    `moderation_source` tag naming the source row id (idempotency +
     //    client linking).
     let tags = vec![
@@ -169,13 +171,36 @@ pub async fn send_moderation_notice(
     .sign_with_keys(&state.relay_keypair)
     .map_err(|e| anyhow::anyhow!("failed to sign moderation notice: {e}"))?;
 
-    let (stored, _inserted) = state
+    // Commit the accepted notice and recipient resurface together. Discovery
+    // runs first, so any failure before this transaction leaves a previously
+    // hidden moderation conversation hidden rather than exposing stale content.
+    let (stored, _inserted, resurfaced_viewers) = state
         .db
-        .insert_event(tenant.community(), &event, Some(dm_channel_id))
+        .insert_dm_event_with_thread_metadata(
+            tenant.community(),
+            &event,
+            dm_channel_id,
+            None,
+            relay_pubkey_bytes.as_slice(),
+        )
         .await?;
+
+    if let Err(e) =
+        publish_dm_visibility_snapshots_for_recipients(tenant, state, &resurfaced_viewers).await
+    {
+        warn!(error = %e, "moderation DM visibility snapshot failed (continuing)");
+    }
 
     let kind_u32 = event_kind_u32(&stored.event);
     dispatch_persistent_event(tenant, state, &stored, kind_u32, &relay_pubkey_hex, None).await;
+
+    // 4. Publish the idempotent discovery generation after the notice is
+    // durable. The roster is established first inside the helper, so a roster
+    // failure cannot leave metadata/admin heads without kind 39002. Propagate
+    // any remaining failure after the notice commit; an idempotent caller retry
+    // takes the duplicate path above and repairs discovery without reinserting
+    // or resurfacing the notice.
+    emit_group_discovery_events(tenant, state, dm_channel_id).await?;
 
     Ok(())
 }
@@ -394,5 +419,319 @@ mod tests {
         .body(&t);
         assert!(body.contains("took action on your content"));
         assert!(body.contains("Off-topic."));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delivered_notice_retry_preserves_a_later_user_hide() {
+        use nostr::Keys;
+        use sqlx::{PgPool, Row};
+
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+        let admin = PgPool::connect(&admin_url).await.expect("connect admin");
+        let scratch_name = format!("moderation_notice_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE {scratch_name}"
+        )))
+        .execute(&admin)
+        .await
+        .expect("create scratch database");
+        let slash = admin_url.rfind('/').expect("database URL path");
+        let scratch_url = format!("{}/{}", &admin_url[..slash], scratch_name);
+        let pool = PgPool::connect(&scratch_url)
+            .await
+            .expect("connect scratch database");
+        buzz_db::migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch database");
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("moderation-{}.example", community_uuid.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let tenant =
+            TenantContext::resolved(buzz_core::CommunityId::from_uuid(community_uuid), host);
+        let relay_keys = Keys::generate();
+        let recipient = Keys::generate();
+        let recipient_bytes = recipient.public_key().to_bytes();
+
+        let mut config = crate::config::Config::from_env().expect("default config");
+        config.database_url = scratch_url;
+        config.read_database_url = None;
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".into();
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            relay_keys.clone(),
+            media_storage,
+        );
+        let state = Arc::new(state);
+
+        let notice = ModerationNotice::Restriction {
+            action_id: Uuid::new_v4(),
+            kind: "timeout".into(),
+            public_reason: "Cool off.".into(),
+        };
+
+        let relay_pubkey_bytes = relay_keys.public_key().to_bytes();
+        let (preexisting_dm, _) = state
+            .db
+            .open_dm(
+                tenant.community(),
+                &[recipient_bytes.as_slice()],
+                relay_pubkey_bytes.as_slice(),
+            )
+            .await
+            .expect("open moderation DM before injected failure");
+        state
+            .db
+            .hide_dm(
+                tenant.community(),
+                preexisting_dm.id,
+                recipient_bytes.as_slice(),
+            )
+            .await
+            .expect("hide moderation DM before injected failure");
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_moderation_notice_insert() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN \
+               IF NEW.kind = 9 THEN RAISE EXCEPTION 'injected notice failure'; END IF; \
+               RETURN NEW; \
+             END $$; \
+             CREATE TRIGGER fail_moderation_notice_insert \
+             BEFORE INSERT ON events FOR EACH ROW \
+             EXECUTE FUNCTION fail_moderation_notice_insert();",
+        )
+        .execute(&pool)
+        .await
+        .expect("install notice failure injection");
+        send_moderation_notice(&tenant, &state, recipient_bytes.as_slice(), notice.clone())
+            .await
+            .expect_err("notice insertion failure must be returned");
+        let hidden_after_failure: bool = sqlx::query_scalar(
+            "SELECT hidden_at IS NOT NULL FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(preexisting_dm.id)
+        .bind(recipient_bytes.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read hidden state after notice failure");
+        assert!(
+            hidden_after_failure,
+            "failed notice insertion must not expose stale moderation content"
+        );
+        let discovery_after_failure: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE community_id = $1 AND channel_id = $2 \
+               AND kind IN (39000, 39001, 39002) AND deleted_at IS NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(preexisting_dm.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count discovery after failed notice");
+        assert_eq!(
+            discovery_after_failure, 0,
+            "a rejected notice must not publish a partial discovery generation"
+        );
+        sqlx::raw_sql(
+            "DROP TRIGGER fail_moderation_notice_insert ON events; \
+             DROP FUNCTION fail_moderation_notice_insert();",
+        )
+        .execute(&pool)
+        .await
+        .expect("remove notice failure injection");
+
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_moderation_metadata_insert() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN \
+               IF NEW.kind = 39000 THEN RAISE EXCEPTION 'injected discovery failure'; END IF; \
+               RETURN NEW; \
+             END $$; \
+             CREATE TRIGGER fail_moderation_metadata_insert \
+             BEFORE INSERT ON events FOR EACH ROW \
+             EXECUTE FUNCTION fail_moderation_metadata_insert();",
+        )
+        .execute(&pool)
+        .await
+        .expect("install discovery failure injection");
+        send_moderation_notice(&tenant, &state, recipient_bytes.as_slice(), notice.clone())
+            .await
+            .expect_err("post-commit discovery failure must request a retry");
+        let partial_discovery_kinds: Vec<i32> = sqlx::query_scalar(
+            "SELECT kind FROM events \
+             WHERE community_id = $1 AND channel_id = $2 \
+               AND kind IN (39000, 39001, 39002) AND deleted_at IS NULL \
+             ORDER BY kind",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(preexisting_dm.id)
+        .fetch_all(&pool)
+        .await
+        .expect("read roster-first discovery state");
+        assert_eq!(
+            partial_discovery_kinds,
+            vec![39002],
+            "metadata failure must not strand 39000/39001 without a roster"
+        );
+        let notice_count_after_discovery_failure: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE community_id = $1 AND channel_id = $2 AND kind = 9 \
+               AND deleted_at IS NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(preexisting_dm.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count durable notice after discovery failure");
+        assert_eq!(notice_count_after_discovery_failure, 1);
+        sqlx::raw_sql(
+            "DROP TRIGGER fail_moderation_metadata_insert ON events; \
+             DROP FUNCTION fail_moderation_metadata_insert();",
+        )
+        .execute(&pool)
+        .await
+        .expect("remove discovery failure injection");
+
+        send_moderation_notice(&tenant, &state, recipient_bytes.as_slice(), notice.clone())
+            .await
+            .expect("duplicate retry repairs discovery");
+        let discovery_kinds: Vec<i32> = sqlx::query_scalar(
+            "SELECT kind FROM events \
+             WHERE community_id = $1 AND channel_id = $2 \
+               AND kind IN (39000, 39001, 39002) AND deleted_at IS NULL \
+             ORDER BY kind",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(preexisting_dm.id)
+        .fetch_all(&pool)
+        .await
+        .expect("read converged moderation discovery");
+        assert_eq!(discovery_kinds, vec![39000, 39001, 39002]);
+
+        let participant_hash = buzz_db::dm::compute_participant_hash(&[
+            recipient_bytes.as_slice(),
+            relay_keys.public_key().to_bytes().as_slice(),
+        ]);
+        let dm = state
+            .db
+            .find_dm_by_participants(tenant.community(), &participant_hash)
+            .await
+            .expect("find moderation DM")
+            .expect("moderation DM exists");
+        state
+            .db
+            .hide_dm(tenant.community(), dm.id, recipient_bytes.as_slice())
+            .await
+            .expect("hide moderation DM");
+        publish_dm_visibility_snapshot(&tenant, &state, recipient_bytes.as_slice())
+            .await
+            .expect("publish hidden snapshot");
+
+        let notice_count_before: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND channel_id = $2 AND kind = $3 \
+               AND pubkey = $4 AND deleted_at IS NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(dm.id)
+        .bind(KIND_STREAM_MESSAGE as i32)
+        .bind(relay_keys.public_key().to_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count notices before retry");
+
+        send_moderation_notice(&tenant, &state, recipient_bytes.as_slice(), notice)
+            .await
+            .expect("retry delivered notice");
+
+        let hidden: bool = sqlx::query(
+            "SELECT hidden_at IS NOT NULL AS hidden FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(dm.id)
+        .bind(recipient_bytes.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read hidden state")
+        .try_get("hidden")
+        .expect("decode hidden state");
+        assert!(hidden, "duplicate notice must preserve the user's hide");
+
+        let snapshot = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_DM_VISIBILITY as i32]),
+                pubkey: Some(relay_keys.public_key().to_bytes().to_vec()),
+                d_tag: Some(recipient.public_key().to_hex()),
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("read visibility snapshot")
+            .into_iter()
+            .next()
+            .expect("visibility snapshot exists");
+        assert!(snapshot.event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() >= 2 && parts[0] == "h" && parts[1] == dm.id.to_string()
+        }));
+
+        let notice_count_after: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND channel_id = $2 AND kind = $3 \
+               AND pubkey = $4 AND deleted_at IS NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(dm.id)
+        .bind(KIND_STREAM_MESSAGE as i32)
+        .bind(relay_keys.public_key().to_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count notices after retry");
+        assert_eq!(notice_count_after, notice_count_before);
+
+        audit_shutdown
+            .drain(std::time::Duration::from_secs(5))
+            .await;
+        drop(state);
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {scratch_name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
     }
 }

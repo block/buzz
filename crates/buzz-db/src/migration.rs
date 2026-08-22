@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1105,6 +1105,27 @@ mod tests {
     }
 
     #[test]
+    fn dm_visibility_dirty_viewers_is_a_bounded_community_scoped_queue() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 33)
+            .expect("DM visibility queue migration");
+        let sql = migration.sql.as_str();
+        assert!(sql.contains("CREATE TABLE dm_visibility_dirty_viewers"));
+        assert!(sql.contains("PRIMARY KEY (community_id, viewer)"));
+        assert!(sql.contains("dm_visibility_dirty_viewers_fresh"));
+        assert!(sql.contains("dm_visibility_dirty_viewers_retry"));
+        assert!(sql.contains("attempts = 0"));
+        assert!(sql.contains("attempts > 0"));
+        assert!(sql.contains("GROUP BY cm.community_id, cm.pubkey"));
+        assert!(sql.contains("attach_community_write_fence('dm_visibility_dirty_viewers')"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("CREATE TABLE dm_visibility_dirty_viewers"));
+        assert!(desired_schema.contains("dm_visibility_dirty_viewers_recovery"));
+    }
+
+    #[test]
     fn migration_lint_detects_tables_missing_community_id_by_default() {
         let sql = r#"
             CREATE TABLE communities (id UUID PRIMARY KEY);
@@ -1542,6 +1563,9 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // Added after the deletion control plane; migration 0033 attaches the
+        // same universal write fence when upgrading an existing database.
+        expected_fences.insert("dm_visibility_dirty_viewers".into());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -1966,6 +1990,117 @@ mod tests {
         .await
         .expect("read post-push search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pre_0033_dm_visibility_state_is_enqueued_and_reconciled() {
+        use crate::{CommunityId, Db};
+        use nostr::Keys;
+
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(32, &pool)
+            .await
+            .expect("apply migrations through channel roster fence");
+
+        let community_id = uuid::Uuid::new_v4();
+        let channel_id = uuid::Uuid::new_v4();
+        let viewer = Keys::generate();
+        let relay = Keys::generate();
+        let viewer_bytes = viewer.public_key().to_bytes();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("pre-0033-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO channels \
+             (id, community_id, name, channel_type, visibility, created_by) \
+             VALUES ($1, $2, 'legacy DM', 'dm', 'private', $3)",
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(viewer_bytes.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert legacy DM");
+        sqlx::query(
+            "INSERT INTO channel_members \
+             (community_id, channel_id, pubkey, hidden_at) \
+             VALUES ($1, $2, $3, NOW())",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(viewer_bytes.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert hidden legacy viewer");
+        sqlx::query("UPDATE communities SET archived_at = NOW() WHERE id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("archive community before queue migration");
+
+        run_migrations(&pool)
+            .await
+            .expect("apply DM visibility queue migration");
+        let db = Db::from_pool(pool.clone());
+        let queued_while_archived: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dm_visibility_dirty_viewers WHERE community_id = $1",
+        )
+        .bind(community_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count archived brownfield viewer");
+        assert_eq!(queued_while_archived, 1);
+        assert!(
+            db.claim_dm_visibility_dirty_viewers(100, 60)
+                .await
+                .expect("defer archived viewer")
+                .is_empty(),
+            "archived communities must retain repair work without publishing"
+        );
+        sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("unarchive community after migration");
+        let claims = db
+            .claim_dm_visibility_dirty_viewers(100, 60)
+            .await
+            .expect("claim brownfield viewer");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].viewer, viewer_bytes.to_vec());
+
+        db.publish_dm_visibility_locked(
+            CommunityId::from_uuid(community_id),
+            viewer_bytes.as_slice(),
+            &relay,
+        )
+        .await
+        .expect("reconcile brownfield visibility snapshot");
+        let tags: serde_json::Value = sqlx::query_scalar(
+            "SELECT tags FROM events \
+             WHERE community_id = $1 AND kind = 30622 AND deleted_at IS NULL",
+        )
+        .bind(community_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read reconciled visibility snapshot");
+        let channel_id_text = channel_id.to_string();
+        assert!(
+            tags.as_array().is_some_and(|tags| tags.iter().any(|tag| {
+                tag.as_array().is_some_and(|parts| {
+                    parts.first().and_then(serde_json::Value::as_str) == Some("h")
+                        && parts.get(1).and_then(serde_json::Value::as_str)
+                            == Some(channel_id_text.as_str())
+                })
+            })),
+            "brownfield hidden DM must be present in the repaired snapshot"
+        );
     }
 
     #[tokio::test]

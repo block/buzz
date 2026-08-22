@@ -78,12 +78,14 @@ void main() {
       await container.read(channelsProvider.future);
 
       // One subscription per joined, non-archived channel.
-      expect(session.subscribeFilters, hasLength(2));
+      expect(session.channelSubscribeFilters, hasLength(2));
       expect(
-        session.subscribeFilters.map((f) => f.tags['#h']?.single).toSet(),
+        session.channelSubscribeFilters
+            .map((f) => f.tags['#h']?.single)
+            .toSet(),
         {_channelA, _channelB},
       );
-      for (final filter in session.subscribeFilters) {
+      for (final filter in session.channelSubscribeFilters) {
         expect(filter.kinds, EventKind.channelEventKinds);
         expect(filter.limit, 0);
       }
@@ -132,7 +134,7 @@ void main() {
 
       expect(session.totalSubscribeCount, initialSubscribeCount);
       expect(session.unsubscribeCount, 0);
-      expect(session.subscribeFilters, hasLength(2));
+      expect(session.channelSubscribeFilters, hasLength(2));
     },
   );
 
@@ -164,10 +166,10 @@ void main() {
 
       await container.read(channelsProvider.notifier).refresh();
 
-      expect(session.totalSubscribeCount, 3);
+      expect(session.totalSubscribeCount, 4);
       expect(session.unsubscribeCount, 1);
       expect(
-        session.subscribeFilters
+        session.channelSubscribeFilters
             .map((filter) => filter.tags['#h']!.single)
             .toSet(),
         {_channelB, _channelD},
@@ -198,7 +200,7 @@ void main() {
       await container.read(channelsProvider.notifier).refresh();
 
       expect(session.activeChannels, isEmpty);
-      expect(session.activeSubscriptionCount, 0);
+      expect(session.activeChannelSubscriptionCount, 0);
       expect(session.unsubscribeCount, 2);
     },
   );
@@ -239,7 +241,7 @@ void main() {
       await Future.wait([firstRefresh, secondRefresh]);
 
       expect(session.activeChannels, {_channelA, _channelB, _channelD});
-      expect(session.activeSubscriptionCount, 3);
+      expect(session.activeChannelSubscriptionCount, 3);
     },
   );
 
@@ -272,8 +274,8 @@ void main() {
       );
 
       expect(session.activeChannels, {_channelB});
-      expect(session.activeSubscriptionCount, 1);
-      expect(session.unsubscribeCount, 1);
+      expect(session.activeChannelSubscriptionCount, 1);
+      expect(session.unsubscribeCount, 2);
     },
   );
 
@@ -442,6 +444,87 @@ void main() {
     );
   });
 
+  test('visibility snapshots refresh and resubscribe a hidden DM', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk), _membership(_channelB, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'Alice', channelType: 'dm'),
+        _meta(id: _channelB, name: 'Bob', channelType: 'dm'),
+      ],
+      hiddenDmEvents: [
+        _hiddenDms([_channelA], pubkey: myPk),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    expect(
+      (await container.read(
+        channelsProvider.future,
+      )).map((channel) => channel.id),
+      [_channelB],
+    );
+    expect(session.dmVisibilitySubscribeFilters, hasLength(1));
+    expect(session.dmVisibilitySubscribeFilters.single.tags['#p'], [myPk]);
+    expect(session.dmVisibilitySubscribeFilters.single.limit, 1);
+
+    final visibleSnapshot = _hiddenDms(const [], pubkey: myPk);
+    session.hiddenDmEvents = [visibleSnapshot];
+    session.emit(visibleSnapshot);
+
+    await _waitUntil(
+      () =>
+          container
+              .read(channelsProvider)
+              .value
+              ?.map((channel) => channel.id)
+              .toSet()
+              .containsAll({_channelA, _channelB}) ==
+          true,
+    );
+    expect(session.activeChannels, {_channelA, _channelB});
+    expect(session.dmVisibilitySubscribeFilters, hasLength(1));
+  });
+
+  test(
+    'visibility subscription replays a snapshot published during setup',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'Alice', channelType: 'dm'),
+          _meta(id: _channelB, name: 'Bob', channelType: 'dm'),
+        ],
+        hiddenDmEvents: [
+          _hiddenDms([_channelA], pubkey: myPk),
+        ],
+      )..pauseNextSubscribe();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final initialLoad = container.read(channelsProvider.future);
+      await session.nextSubscribeStarted;
+      session.hiddenDmEvents = [_hiddenDms(const [], pubkey: myPk)];
+      session.resumePausedSubscribe();
+
+      await initialLoad;
+      await _waitUntil(
+        () =>
+            container
+                .read(channelsProvider)
+                .value
+                ?.map((channel) => channel.id)
+                .toSet()
+                .containsAll({_channelA, _channelB}) ==
+            true,
+      );
+      expect(session.activeChannels, {_channelA, _channelB});
+    },
+  );
+
   test(
     'archived kind:39000 metadata sets Channel.isArchived (covers TTL auto-archive)',
     () async {
@@ -556,13 +639,13 @@ void main() {
 
       final initial = await container.read(channelsProvider.future);
       expect(initial.single.name, 'general');
-      expect(session.subscribeFilters, hasLength(1));
+      expect(session.channelSubscribeFilters, hasLength(1));
 
       session.setStatus(SessionStatus.reconnecting);
       final reconnecting = await container.read(channelsProvider.future);
 
       expect(reconnecting.single.name, 'general');
-      expect(session.subscribeFilters, hasLength(1));
+      expect(session.channelSubscribeFilters, hasLength(1));
       expect(session.unsubscribeCount, 0);
     },
   );
@@ -652,7 +735,7 @@ void main() {
     expect(session.historyFilters[1].tags['#d'], [_channelA]);
 
     // And one live subscription on the resulting channel.
-    expect(session.subscribeFilters, hasLength(1));
+    expect(session.channelSubscribeFilters, hasLength(1));
   });
 }
 
@@ -751,7 +834,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   List<NostrEvent> memberships;
   List<NostrEvent> metadata;
-  final List<NostrEvent> hiddenDmEvents;
+  List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> recentMessages;
   int membershipFailures;
 
@@ -765,11 +848,23 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int unsubscribeCount = 0;
   int totalSubscribeCount = 0;
 
+  List<NostrFilter> get channelSubscribeFilters => [
+    for (final filter in subscribeFilters)
+      if (filter.tags['#h'] != null) filter,
+  ];
+
+  List<NostrFilter> get dmVisibilitySubscribeFilters => [
+    for (final filter in subscribeFilters)
+      if (filter.kinds.contains(EventKind.dmVisibility)) filter,
+  ];
+
   Set<String> get activeChannels => {
     for (final (filter, _) in _subscriptions.values) ?filter.tags['#h']?.single,
   };
 
-  int get activeSubscriptionCount => _subscriptions.length;
+  int get activeChannelSubscriptionCount => _subscriptions.values
+      .where((subscription) => subscription.$1.tags['#h'] != null)
+      .length;
 
   Future<void> get nextSubscribeStarted async {
     final started = _subscribeStarted;
@@ -871,6 +966,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
     }
     final subscriptionKey = ++_nextSubscriptionKey;
     _subscriptions[subscriptionKey] = (filter, onEvent);
+    if (filter.kinds.contains(EventKind.dmVisibility) && filter.limit > 0) {
+      for (final event in hiddenDmEvents.take(filter.limit)) {
+        onEvent(event);
+      }
+    }
     return () {
       final subscription = _subscriptions.remove(subscriptionKey);
       if (subscription == null) return;

@@ -811,6 +811,22 @@ pub const fn is_identity_archive_request_kind(kind: u32) -> bool {
     matches!(kind, KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST)
 }
 
+/// Returns `true` if `kind` is a human-visible channel message.
+///
+/// This is the set clients render as timeline content and count toward unreads
+/// (`CHANNEL_MESSAGE_EVENT_KINDS` in Desktop, the equivalent Mobile set). It is
+/// the authoritative trigger for DM resurfacing: a hidden DM must reappear when
+/// any human-visible message arrives, regardless of which supported kind a
+/// client uses. Reactions, edits, diffs, pins, deletions, and system messages
+/// are deliberately excluded — they can land after the last real message and
+/// must not resurface a conversation the recipient hid.
+pub const fn is_human_visible_message_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 | KIND_FORUM_POST | KIND_FORUM_COMMENT
+    )
+}
+
 /// Returns `true` if `kind` is a Buzz command kind that requires transactional execution.
 pub const fn is_command_kind(kind: u32) -> bool {
     matches!(
@@ -911,6 +927,39 @@ mod tests {
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
+    }
+
+    #[test]
+    fn human_visible_message_kinds_cover_every_rendered_message() {
+        // Exactly the client `CHANNEL_MESSAGE_EVENT_KINDS` set — the set that
+        // must resurface a hidden DM. Forum posts/comments count: the relay
+        // accepts them as channel writes and both clients render them.
+        for kind in [
+            KIND_STREAM_MESSAGE,
+            KIND_STREAM_MESSAGE_V2,
+            KIND_FORUM_POST,
+            KIND_FORUM_COMMENT,
+        ] {
+            assert!(
+                is_human_visible_message_kind(kind),
+                "kind {kind} must be human-visible"
+            );
+        }
+        // Non-message activity in a channel must not resurface a hidden DM.
+        for kind in [
+            KIND_REACTION,
+            KIND_STREAM_MESSAGE_EDIT,
+            KIND_STREAM_MESSAGE_DIFF,
+            KIND_STREAM_MESSAGE_PINNED,
+            KIND_SYSTEM_MESSAGE,
+            KIND_DELETION,
+            KIND_FORUM_VOTE,
+        ] {
+            assert!(
+                !is_human_visible_message_kind(kind),
+                "kind {kind} must not be human-visible"
+            );
+        }
     }
 
     #[test]

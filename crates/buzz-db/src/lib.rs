@@ -2265,6 +2265,48 @@ impl Db {
         Ok(result)
     }
 
+    /// Atomically inserts a DM message, its optional thread metadata, and the
+    /// recipient visibility mutations that make the accepted message visible.
+    ///
+    /// Duplicate events do not repeat the visibility mutation. The returned
+    /// viewers are the recipients whose canonical hidden state changed and
+    /// whose relay-authored visibility snapshots should be published after
+    /// this transaction commits.
+    #[datastore_span(name = "insert_dm_event_with_thread_metadata", system = "postgresql")]
+    pub async fn insert_dm_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        sender_pubkey: &[u8],
+    ) -> Result<(StoredEvent, bool, Vec<Vec<u8>>)> {
+        let mut tx = self.pool.begin().await?;
+        let (stored_event, was_inserted) = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            Some(channel_id),
+            thread_meta,
+        )
+        .await?;
+        let resurfaced_viewers = if was_inserted {
+            dm::unhide_dm_recipients_tx(&mut tx, community_id, channel_id, sender_pubkey).await?
+        } else {
+            Vec::new()
+        };
+        tx.commit().await?;
+
+        if was_inserted {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, Some(channel_id)).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+
+        Ok((stored_event, was_inserted, resurfaced_viewers))
+    }
+
     /// Atomically insert a kind:7 reaction event and its reaction row.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(
@@ -2897,6 +2939,20 @@ impl Db {
         dm::unhide_dm(&self.pool, community_id, channel_id, pubkey).await
     }
 
+    /// Unhide a DM for every active recipient other than the message sender.
+    ///
+    /// Returns the pubkeys whose hidden state changed so the relay can publish
+    /// a fresh per-viewer visibility snapshot only where one is needed.
+    #[datastore_span(name = "unhide_dm_recipients", system = "postgresql")]
+    pub async fn unhide_dm_recipients(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        sender_pubkey: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
+        dm::unhide_dm_recipients(&self.pool, community_id, channel_id, sender_pubkey).await
+    }
+
     /// List the channel IDs of all DMs the given user currently has hidden.
     #[datastore_span(name = "list_hidden_dms", system = "postgresql")]
     pub async fn list_hidden_dms(
@@ -2905,6 +2961,211 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
         dm::list_hidden_dms(&self.pool, community_id, pubkey).await
+    }
+
+    /// Claim a bounded batch from the durable DM visibility retry queue.
+    #[datastore_span(name = "claim_dm_visibility_dirty_viewers", system = "postgresql")]
+    pub async fn claim_dm_visibility_dirty_viewers(
+        &self,
+        limit: i64,
+        lease_seconds: i64,
+    ) -> Result<Vec<dm::ClaimedDmVisibilityViewer>> {
+        dm::claim_dm_visibility_dirty_viewers(&self.pool, limit, lease_seconds).await
+    }
+
+    /// Release a failed DM visibility claim without overwriting newer work.
+    #[datastore_span(name = "retry_dm_visibility_dirty_viewer", system = "postgresql")]
+    pub async fn retry_dm_visibility_dirty_viewer(
+        &self,
+        community_id: CommunityId,
+        viewer: &[u8],
+        claim_id: Uuid,
+    ) -> Result<()> {
+        dm::retry_dm_visibility_dirty_viewer(&self.pool, community_id, viewer, claim_id).await
+    }
+
+    /// Atomically rebuild one viewer's relay-authored DM visibility snapshot.
+    ///
+    /// The per-viewer advisory lock is acquired before reading hidden DMs and
+    /// held through event replacement. Concurrent publishers therefore rebuild
+    /// from canonical state in lock order instead of racing stale snapshots.
+    #[datastore_span(name = "publish_dm_visibility_locked", system = "postgresql")]
+    pub async fn publish_dm_visibility_locked(
+        &self,
+        community_id: CommunityId,
+        viewer: &[u8],
+        relay_keypair: &nostr::Keys,
+    ) -> Result<(StoredEvent, usize)> {
+        self.publish_dm_visibility_locked_with_hook(community_id, viewer, relay_keypair, || {
+            std::future::ready(())
+        })
+        .await
+    }
+
+    async fn publish_dm_visibility_locked_with_hook<F, Fut>(
+        &self,
+        community_id: CommunityId,
+        viewer: &[u8],
+        relay_keypair: &nostr::Keys,
+        after_read: F,
+    ) -> Result<(StoredEvent, usize)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let kind_i32 = buzz_core::kind::KIND_DM_VISIBILITY as i32;
+        let relay_pubkey = relay_keypair.public_key();
+        let relay_pubkey_bytes = relay_pubkey.to_bytes();
+        let viewer_hex = hex::encode(viewer);
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            b"dm-visibility-viewer",
+            Some(viewer_hex.as_bytes()),
+        );
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let dirty_generation: Option<i64> = sqlx::query_scalar(
+            "SELECT generation FROM dm_visibility_dirty_viewers \
+             WHERE community_id = $1 AND viewer = $2",
+        )
+        .bind(community_id.as_uuid())
+        .bind(viewer)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let hidden = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT cm.channel_id
+            FROM channel_members cm
+            JOIN channels c
+              ON c.community_id = cm.community_id
+             AND c.id = cm.channel_id
+            WHERE cm.community_id = $1
+              AND cm.pubkey = $2
+              AND cm.removed_at IS NULL
+              AND cm.hidden_at IS NOT NULL
+              AND c.channel_type = 'dm'
+              AND c.deleted_at IS NULL
+            ORDER BY cm.channel_id
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(viewer)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        // The viewer coordinate is authoritative across relay-key rotation.
+        // Advance past every prior author so an old-key future-dated head can
+        // never beat the first snapshot signed by the replacement key.
+        let previous_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT MAX(created_at) FROM events \
+             WHERE community_id = $1 AND kind = $2 \
+               AND d_tag = $3 AND channel_id IS NULL AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(&viewer_hex)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let mut tags = Vec::with_capacity(hidden.len() + 2);
+        tags.push(Tag::parse(["d", &viewer_hex]).map_err(|error| {
+            DbError::InvalidData(format!("failed to build DM visibility d tag: {error}"))
+        })?);
+        tags.push(Tag::parse(["p", &viewer_hex]).map_err(|error| {
+            DbError::InvalidData(format!("failed to build DM visibility p tag: {error}"))
+        })?);
+        for channel_id in &hidden {
+            tags.push(Tag::parse(["h", &channel_id.to_string()]).map_err(|error| {
+                DbError::InvalidData(format!("failed to build DM visibility h tag: {error}"))
+            })?);
+        }
+
+        let now = nostr::Timestamp::now().as_secs();
+        let created_at = match previous_created_at {
+            Some(timestamp) => {
+                let previous = u64::try_from(timestamp.timestamp())
+                    .map_err(|_| DbError::InvalidData("negative DM visibility timestamp".into()))?;
+                previous
+                    .checked_add(1)
+                    .ok_or(DbError::InvalidTimestamp(timestamp.timestamp()))?
+                    .max(now)
+            }
+            None => now,
+        };
+        let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(relay_keypair)
+            .map_err(|error| {
+                DbError::InvalidData(format!("failed to sign kind:{kind_i32}: {error}"))
+            })?;
+
+        // Tests can hold a publisher after its canonical read while another
+        // mutation lands. The advisory lock must force the later publisher to
+        // wait and then rebuild from the newer state.
+        after_read().await;
+
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 \
+               AND d_tag = $3 AND channel_id IS NULL AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(&viewer_hex)
+        .execute(&mut *tx)
+        .await?;
+
+        let created_at_db = DateTime::from_timestamp(created_at as i64, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at as i64))?;
+        let received_at = Utc::now();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let sig_bytes = event.sig.serialize();
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(relay_pubkey_bytes.as_slice())
+        .bind(created_at_db)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(&viewer_hex)
+        .execute(&mut *tx)
+        .await?;
+
+        insert_mentions_in_transaction(&mut tx, community_id, &event, None).await?;
+        if let Some(generation) = dirty_generation {
+            sqlx::query(
+                "DELETE FROM dm_visibility_dirty_viewers \
+                 WHERE community_id = $1 AND viewer = $2 AND generation = $3",
+            )
+            .bind(community_id.as_uuid())
+            .bind(viewer)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        Ok((
+            StoredEvent::with_received_at(event, received_at, None, true),
+            hidden.len(),
+        ))
     }
 
     /// Insert thread metadata.
@@ -7279,6 +7540,566 @@ mod tests {
             groups_a_after.is_empty(),
             "A's reaction must be gone after A removes it"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_event_insert_and_recipient_resurface_roll_back_together() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "dm_insert_resurface").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        let dm_channel = Uuid::new_v4();
+        let unrelated_dm = Uuid::new_v4();
+        let sender = Keys::generate();
+        let recipient = Keys::generate();
+        let sender_bytes = sender.public_key().to_bytes();
+        let recipient_bytes = recipient.public_key().to_bytes();
+
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!("dm-insert-{}.example", community_uuid.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        for channel_id in [dm_channel, unrelated_dm] {
+            sqlx::query(
+                "INSERT INTO channels \
+                 (id, community_id, name, channel_type, visibility, created_by) \
+                 VALUES ($1, $2, 'atomic DM', 'dm', 'private', $3)",
+            )
+            .bind(channel_id)
+            .bind(community_uuid)
+            .bind(sender_bytes.as_slice())
+            .execute(&pool)
+            .await
+            .expect("insert DM");
+        }
+        for (channel_id, pubkey) in [
+            (dm_channel, sender_bytes.as_slice()),
+            (dm_channel, recipient_bytes.as_slice()),
+            (unrelated_dm, recipient_bytes.as_slice()),
+        ] {
+            sqlx::query(
+                "INSERT INTO channel_members \
+                 (community_id, channel_id, pubkey, hidden_at) \
+                 VALUES ($1, $2, $3, NOW())",
+            )
+            .bind(community_uuid)
+            .bind(channel_id)
+            .bind(pubkey)
+            .execute(&pool)
+            .await
+            .expect("insert hidden DM member");
+        }
+
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_dm_visibility_enqueue() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected enqueue failure'; END $$; \
+             CREATE TRIGGER fail_dm_visibility_enqueue \
+             BEFORE INSERT OR UPDATE ON dm_visibility_dirty_viewers \
+             FOR EACH ROW EXECUTE FUNCTION fail_dm_visibility_enqueue();",
+        )
+        .execute(&pool)
+        .await
+        .expect("install visibility failure injection");
+
+        let event = EventBuilder::new(Kind::Custom(9), "accepted DM")
+            .tags(vec![
+                Tag::parse(["h", &dm_channel.to_string()]).expect("h tag")
+            ])
+            .sign_with_keys(&sender)
+            .expect("sign DM event");
+        db.insert_dm_event_with_thread_metadata(
+            community,
+            &event,
+            dm_channel,
+            None,
+            sender_bytes.as_slice(),
+        )
+        .await
+        .expect_err("injected enqueue failure must abort accepted-message transaction");
+
+        let persisted_after_failure: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(persisted_after_failure, 0);
+        let hidden_after_failure: bool = sqlx::query_scalar(
+            "SELECT hidden_at IS NOT NULL FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_uuid)
+        .bind(dm_channel)
+        .bind(recipient_bytes.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read recipient after rollback");
+        assert!(hidden_after_failure);
+
+        sqlx::raw_sql(
+            "DROP TRIGGER fail_dm_visibility_enqueue ON dm_visibility_dirty_viewers; \
+             DROP FUNCTION fail_dm_visibility_enqueue();",
+        )
+        .execute(&pool)
+        .await
+        .expect("remove visibility failure injection");
+        let (_stored, inserted, resurfaced) = db
+            .insert_dm_event_with_thread_metadata(
+                community,
+                &event,
+                dm_channel,
+                None,
+                sender_bytes.as_slice(),
+            )
+            .await
+            .expect("retry accepted DM transaction");
+        assert!(inserted);
+        assert_eq!(resurfaced, vec![recipient_bytes.to_vec()]);
+
+        let hidden_states: Vec<(Uuid, Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT channel_id, pubkey, hidden_at IS NOT NULL \
+             FROM channel_members WHERE community_id = $1 ORDER BY channel_id, pubkey",
+        )
+        .bind(community_uuid)
+        .fetch_all(&pool)
+        .await
+        .expect("read final hidden states");
+        assert!(hidden_states
+            .iter()
+            .any(|(channel, pubkey, hidden)| *channel == dm_channel
+                && pubkey == sender_bytes.as_slice()
+                && *hidden));
+        assert!(hidden_states
+            .iter()
+            .any(|(channel, pubkey, hidden)| *channel == dm_channel
+                && pubkey == recipient_bytes.as_slice()
+                && !*hidden));
+        assert!(hidden_states
+            .iter()
+            .any(|(channel, pubkey, hidden)| *channel == unrelated_dm
+                && pubkey == recipient_bytes.as_slice()
+                && *hidden));
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_visibility_fresh_claims_are_not_starved_by_poison_retries() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "dm_visibility_fairness").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!("dm-fairness-{}.example", community_uuid.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        sqlx::query(
+            "INSERT INTO dm_visibility_dirty_viewers \
+             (community_id, viewer, attempts, dirty_at, next_attempt_at) \
+             SELECT $1, decode(lpad(to_hex(series), 64, '0'), 'hex'), 1, \
+                    NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '5 minutes' \
+             FROM generate_series(1, 100) AS series",
+        )
+        .bind(community_uuid)
+        .execute(&pool)
+        .await
+        .expect("insert persistent retry rows");
+        let fresh_viewer = vec![0xff_u8; 32];
+        sqlx::query(
+            "INSERT INTO dm_visibility_dirty_viewers (community_id, viewer) VALUES ($1, $2)",
+        )
+        .bind(community_uuid)
+        .bind(&fresh_viewer)
+        .execute(&pool)
+        .await
+        .expect("insert later fresh viewer");
+
+        let claims = db
+            .claim_dm_visibility_dirty_viewers(100, 60)
+            .await
+            .expect("claim fair batch");
+        assert!(
+            claims.iter().any(|claim| claim.viewer == fresh_viewer),
+            "a full set of older poison retries must not starve newer work"
+        );
+        assert_eq!(
+            claims.len(),
+            100,
+            "reserved fairness capacity must not leave the rest of the batch idle"
+        );
+
+        let retry_claim = claims
+            .iter()
+            .find(|claim| claim.viewer != fresh_viewer)
+            .expect("retry claim");
+        db.retry_dm_visibility_dirty_viewer(
+            retry_claim.community_id,
+            &retry_claim.viewer,
+            retry_claim.claim_id,
+        )
+        .await
+        .expect("release retry claim");
+        let retry_delay_seconds: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (next_attempt_at - NOW()))::DOUBLE PRECISION \
+             FROM dm_visibility_dirty_viewers \
+             WHERE community_id = $1 AND viewer = $2",
+        )
+        .bind(community_uuid)
+        .bind(&retry_claim.viewer)
+        .fetch_one(&pool)
+        .await
+        .expect("read exponential retry delay");
+        assert!(
+            (8.0..=11.0).contains(&retry_delay_seconds),
+            "second failure should back off for about ten seconds, got {retry_delay_seconds}"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_visibility_failed_publication_is_discovered_and_reconciled() {
+        use nostr::Keys;
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "dm_visibility_retry").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!("dm-visibility-{}.example", community_uuid.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let community = CommunityId::from_uuid(community_uuid);
+        let relay = Keys::generate();
+        let viewer = Keys::generate();
+        let sender = Keys::generate();
+        let viewer_bytes = viewer.public_key().to_bytes();
+        let sender_bytes = sender.public_key().to_bytes();
+        let dm = db
+            .create_dm(
+                community,
+                &[viewer_bytes.as_slice(), sender_bytes.as_slice()],
+                sender_bytes.as_slice(),
+            )
+            .await
+            .expect("create DM");
+
+        db.hide_dm(community, dm.id, viewer_bytes.as_slice())
+            .await
+            .expect("hide DM");
+        db.publish_dm_visibility_locked(community, viewer_bytes.as_slice(), &relay)
+            .await
+            .expect("publish initial hidden snapshot");
+        db.unhide_dm(community, dm.id, viewer_bytes.as_slice())
+            .await
+            .expect("commit canonical unhide");
+
+        sqlx::query(
+            "CREATE FUNCTION reject_dm_visibility_event() RETURNS trigger AS $$ \
+             BEGIN IF NEW.kind = 30622 THEN \
+               RAISE EXCEPTION 'injected DM visibility failure'; \
+             END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_dm_visibility_event BEFORE INSERT ON events \
+             FOR EACH ROW EXECUTE FUNCTION reject_dm_visibility_event()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure trigger");
+
+        assert!(
+            db.publish_dm_visibility_locked(community, viewer_bytes.as_slice(), &relay)
+                .await
+                .is_err(),
+            "injected event failure must fail publication after canonical mutation"
+        );
+        let claimed = db
+            .claim_dm_visibility_dirty_viewers(100, 60)
+            .await
+            .expect("claim dirty viewer after failure");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].community_id, community);
+        assert_eq!(claimed[0].viewer, viewer_bytes.to_vec());
+
+        sqlx::query("DROP TRIGGER reject_dm_visibility_event ON events")
+            .execute(&pool)
+            .await
+            .expect("remove failure trigger");
+        db.publish_dm_visibility_locked(community, viewer_bytes.as_slice(), &relay)
+            .await
+            .expect("reconcile visibility snapshot");
+        assert!(
+            db.claim_dm_visibility_dirty_viewers(100, 60)
+                .await
+                .expect("claim after reconciliation")
+                .is_empty(),
+            "successful publication must remove its durable dirty marker"
+        );
+        let snapshot = db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_DM_VISIBILITY as i32]),
+                pubkey: Some(relay.public_key().to_bytes().to_vec()),
+                d_tag: Some(viewer.public_key().to_hex()),
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            })
+            .await
+            .expect("read reconciled snapshot")
+            .into_iter()
+            .next()
+            .expect("snapshot present");
+        assert!(
+            snapshot
+                .event
+                .tags
+                .iter()
+                .all(|tag| tag.as_slice().first().map(String::as_str) != Some("h")),
+            "reconciled snapshot must remove the stale hidden-DM tag"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_visibility_publishers_serialize_and_rebuild_after_concurrent_unhides() {
+        use nostr::Keys;
+        use std::sync::Arc;
+        use tokio::sync::{oneshot, Notify};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "dm_visibility_race").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!("dm-visibility-{}.example", community_uuid.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let community = CommunityId::from_uuid(community_uuid);
+        let relay = Keys::generate();
+        let viewer = Keys::generate();
+        let sender_a = Keys::generate();
+        let sender_b = Keys::generate();
+        let viewer_bytes = viewer.public_key().to_bytes();
+        let sender_a_bytes = sender_a.public_key().to_bytes();
+        let sender_b_bytes = sender_b.public_key().to_bytes();
+        let dm_a = db
+            .create_dm(
+                community,
+                &[viewer_bytes.as_slice(), sender_a_bytes.as_slice()],
+                sender_a_bytes.as_slice(),
+            )
+            .await
+            .expect("create first DM");
+        let dm_b = db
+            .create_dm(
+                community,
+                &[viewer_bytes.as_slice(), sender_b_bytes.as_slice()],
+                sender_b_bytes.as_slice(),
+            )
+            .await
+            .expect("create second DM");
+        for channel_id in [dm_a.id, dm_b.id] {
+            db.hide_dm(community, channel_id, viewer_bytes.as_slice())
+                .await
+                .expect("hide DM");
+        }
+        db.publish_dm_visibility_locked(community, viewer_bytes.as_slice(), &relay)
+            .await
+            .expect("publish initial two-DM snapshot");
+
+        db.unhide_dm(community, dm_a.id, viewer_bytes.as_slice())
+            .await
+            .expect("unhide first DM");
+        let (arrived_tx, arrived_rx) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        let first_db = db.clone();
+        let first_relay = relay.clone();
+        let first_viewer = viewer_bytes.to_vec();
+        let first_release = Arc::clone(&release);
+        let first = tokio::spawn(async move {
+            first_db
+                .publish_dm_visibility_locked_with_hook(
+                    community,
+                    &first_viewer,
+                    &first_relay,
+                    || async move {
+                        let _ = arrived_tx.send(());
+                        first_release.notified().await;
+                    },
+                )
+                .await
+        });
+        arrived_rx
+            .await
+            .expect("first publisher reached stale-read barrier");
+
+        db.unhide_dm(community, dm_b.id, viewer_bytes.as_slice())
+            .await
+            .expect("unhide second DM");
+        let second_db = db.clone();
+        let second_relay = relay.clone();
+        let second_viewer = viewer_bytes.to_vec();
+        let mut second = tokio::spawn(async move {
+            second_db
+                .publish_dm_visibility_locked(community, &second_viewer, &second_relay)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut second)
+                .await
+                .is_err(),
+            "second publisher must block behind the per-viewer advisory lock"
+        );
+
+        release.notify_one();
+        first
+            .await
+            .expect("join first publisher")
+            .expect("publish first snapshot");
+        second
+            .await
+            .expect("join second publisher")
+            .expect("publish final snapshot");
+
+        let snapshot = db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_DM_VISIBILITY as i32]),
+                pubkey: Some(relay.public_key().to_bytes().to_vec()),
+                d_tag: Some(viewer.public_key().to_hex()),
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            })
+            .await
+            .expect("read final snapshot")
+            .into_iter()
+            .next()
+            .expect("snapshot present");
+        assert!(
+            snapshot
+                .event
+                .tags
+                .iter()
+                .all(|tag| tag.as_slice().first().map(String::as_str) != Some("h")),
+            "the later locked publisher must rebuild after both DMs are unhidden"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_visibility_key_rotation_supersedes_future_dated_old_key_snapshot() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "dm_visibility_rotation").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!("dm-visibility-{}.example", community_uuid.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let community = CommunityId::from_uuid(community_uuid);
+        let old_relay = Keys::generate();
+        let new_relay = Keys::generate();
+        let viewer = Keys::generate();
+        let sender = Keys::generate();
+        let viewer_bytes = viewer.public_key().to_bytes();
+        let sender_bytes = sender.public_key().to_bytes();
+        let viewer_hex = viewer.public_key().to_hex();
+        let dm = db
+            .create_dm(
+                community,
+                &[viewer_bytes.as_slice(), sender_bytes.as_slice()],
+                sender_bytes.as_slice(),
+            )
+            .await
+            .expect("create DM");
+
+        db.hide_dm(community, dm.id, viewer_bytes.as_slice())
+            .await
+            .expect("hide DM");
+        let future_timestamp = nostr::Timestamp::now().as_secs() + 3_600;
+        let old_head =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_VISIBILITY as u16), "")
+                .tags(vec![
+                    Tag::parse(["d", &viewer_hex]).expect("d tag"),
+                    Tag::parse(["p", &viewer_hex]).expect("p tag"),
+                    Tag::parse(["h", &dm.id.to_string()]).expect("h tag"),
+                ])
+                .custom_created_at(nostr::Timestamp::from(future_timestamp))
+                .sign_with_keys(&old_relay)
+                .expect("sign old-key snapshot");
+        db.replace_parameterized_event(community, &old_head, &viewer_hex, None)
+            .await
+            .expect("store old-key snapshot");
+
+        db.unhide_dm(community, dm.id, viewer_bytes.as_slice())
+            .await
+            .expect("unhide under new relay key");
+        let (new_head, _) = db
+            .publish_dm_visibility_locked(community, viewer_bytes.as_slice(), &new_relay)
+            .await
+            .expect("publish first new-key snapshot");
+
+        assert!(
+            new_head.event.created_at.as_secs() > future_timestamp,
+            "new relay key must advance past every prior author at this viewer coordinate"
+        );
+        assert!(
+            new_head
+                .event
+                .tags
+                .iter()
+                .all(|tag| tag.as_slice().first().map(String::as_str) != Some("h")),
+            "new-key repair must project canonical unhidden state"
+        );
+        let old_live = db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_DM_VISIBILITY as i32]),
+                pubkey: Some(old_relay.public_key().to_bytes().to_vec()),
+                d_tag: Some(viewer_hex),
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            })
+            .await
+            .expect("query old-key head");
+        assert!(old_live.is_empty(), "old-key head must be retired");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     // ---- Read-replica routing ------------------------------------------------
