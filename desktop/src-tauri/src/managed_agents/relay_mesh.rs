@@ -59,9 +59,12 @@ pub fn apply_relay_mesh_env(
     // may deliberately choose a smaller cap or a different effort. This function
     // runs after those layers during readiness, so never clobber their values.
     insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
-    // Mesh agents run on small local models, which are the ones most likely to
-    // do the work and then end the turn without publishing it — the failure the
-    // reply guard exists to catch. Everywhere else it stays opt-in and unset.
+    // Redundant with the buzz-agent binary's own default, which is now on, and
+    // kept deliberately. Mesh agents run on small local models — the ones most
+    // likely to do the work and then end the turn without publishing it, which
+    // is the failure the reply guard exists to catch — so this line states the
+    // requirement at the layer that knows about it, rather than inheriting it
+    // from a default another crate could reasonably revisit.
     // A default, not policy: an explicit `0` from the agent/persona/global env
     // survives (see `insert_default_if_unset`, and the copy-forward list in
     // `relay_mesh_process_env` that preserves it through the spawn path).

@@ -15,6 +15,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+/// A `cwd` value that `Path::is_absolute()` accepts on every platform this
+/// suite runs on. `/tmp` is absolute on Unix but not on Windows (it lacks a
+/// drive prefix), so `session/new` rejects it there with "cwd must be an
+/// absolute path" before the test ever reaches the behavior under test.
+fn test_cwd() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
 struct CapturingLlm {
     url: String,
     captured: Arc<Mutex<Vec<Value>>>,
@@ -105,7 +113,29 @@ struct Harness {
 }
 
 impl Harness {
+    /// Pins the reply guard off by default. Most of this suite predates the
+    /// guard and asserts exact LLM-call counts that a nag would inflate; an
+    /// explicit `BUZZ_AGENT_REQUIRE_REPLY` in `extra` still overrides this,
+    /// since `extra` is applied after. The one test that needs the real
+    /// unset default (`reply_guard_on_by_default`) uses
+    /// `spawn_with_true_env_defaults` instead.
     async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env_inner(base_url, extra, true).await
+    }
+
+    /// Like `spawn_with_env`, but sends no reply-guard override at all — not
+    /// even the off-by-default pin — so the guard's actual compiled-in
+    /// default reaches the process. Only `reply_guard_on_by_default` should
+    /// call this; every other test wants `spawn_with_env` or `spawn`.
+    async fn spawn_with_true_env_defaults(base_url: &str, extra: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env_inner(base_url, extra, false).await
+    }
+
+    async fn spawn_with_env_inner(
+        base_url: &str,
+        extra: &[(&str, &str)],
+        pin_reply_guard_off: bool,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", "openai")
@@ -116,6 +146,9 @@ impl Harness {
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "8")
             .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2");
+        if pin_reply_guard_off {
+            cmd.env("BUZZ_AGENT_REQUIRE_REPLY", "0");
+        }
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -279,7 +312,7 @@ async fn init_session(h: &mut Harness, mcp_servers: Value) -> String {
     let _ = h.recv().await;
     h.send(
         "session/new",
-        json!({"cwd":"/tmp","mcpServers": mcp_servers}),
+        json!({"cwd": test_cwd(), "mcpServers": mcp_servers}),
     )
     .await;
     let r = h
@@ -352,7 +385,7 @@ async fn mcp_init_timeout_kills_child() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "stuck",
                 "command": fake_mcp,
@@ -397,7 +430,7 @@ async fn tool_metadata_caps_enforced() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "many",
                 "command": fake_mcp,
@@ -470,8 +503,11 @@ async fn mcp_server_count_cap() {
             })
         })
         .collect();
-    h.send("session/new", json!({"cwd":"/tmp","mcpServers": servers}))
-        .await;
+    h.send(
+        "session/new",
+        json!({"cwd": test_cwd(), "mcpServers": servers}),
+    )
+    .await;
     let r = h
         .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
         .await;
@@ -649,7 +685,7 @@ async fn per_turn_tool_call_cap_enforced() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "many",
                 "command": fake_mcp,
@@ -724,7 +760,7 @@ async fn description_clamping_enforced() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "big",
                 "command": fake_mcp,
@@ -790,7 +826,7 @@ async fn init_session_with_fake_mcp(h: &mut Harness, extra_mcp_env: &[(&str, &st
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "fake",
                 "command": fake_mcp,
@@ -1918,23 +1954,34 @@ async fn prompt_to_completion(h: &mut Harness, sid: &str) -> Value {
     }
 }
 
-/// Default off: a silent turn ends on the first end_turn with no extra round.
-/// This is the invariant that keeps the feature free for everyone who hasn't
-/// opted in.
+/// Default ON: a turn that ends without publishing is reminded once before it
+/// is allowed to end. This is the inverse of the invariant this test asserted
+/// while the guard was opt-in, and it is the contract that makes the guard
+/// reach runs Desktop's mesh launcher never touches — manual runs, dev runs,
+/// and non-Desktop harnesses.
+///
+/// The reminder is bounded (`MAX_REPLY_NAGS`) and explicitly licenses silence,
+/// so this costs a silent turn one extra round, not a forced reply.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reply_guard_off_by_default() {
-    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("unexpected")]).await;
-    let mut h = Harness::spawn(&llm.url).await;
+async fn reply_guard_on_by_default() {
+    let llm = spawn_capturing_llm(vec![
+        openai_text("done"),
+        openai_text("still done"),
+        openai_text("truly done"),
+    ])
+    .await;
+    // Not `spawn`/`spawn_with_env` — both pin the guard off for the rest of
+    // this suite. This test exists to prove the *unset* compiled-in default.
+    let mut h = Harness::spawn_with_true_env_defaults(&llm.url, &[]).await;
     let sid = init_session(&mut h, json!([])).await;
 
     let r = prompt_to_completion(&mut h, &sid).await;
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
     let captured = llm.captured.lock().await;
-    assert_eq!(
-        captured.len(),
-        1,
-        "guard must be inert when unset, got {} LLM calls",
+    assert!(
+        captured.len() > 1,
+        "guard must nag an unpublished turn when unset, got {} LLM call(s)",
         captured.len()
     );
     h.shutdown().await;
@@ -3563,7 +3610,7 @@ async fn handoff_cap_binds_within_a_single_turn() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "cap_test",
                 "command": fake_mcp,
@@ -3759,7 +3806,7 @@ async fn failed_summarize_burns_handoff_attempt_budget() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "budget_test",
                 "command": fake_mcp,
