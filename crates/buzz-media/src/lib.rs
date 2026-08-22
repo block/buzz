@@ -19,7 +19,7 @@ pub use bucket_index::{
     TaxonomySweepOutcome,
 };
 pub use config::{MediaConfig, S3AddressingStyle};
-pub use error::MediaError;
+pub use error::{classify_body_error, BodyErrorKind, MediaError};
 pub use storage::{BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
