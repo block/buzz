@@ -371,6 +371,7 @@ jobs:
             -p buzz-relay \
             -p buzz-test-client \
             --lib \
+            --bin buzz-relay \
             --test e2e_event_reminder \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Save relay artifacts cache
@@ -741,6 +742,30 @@ jobs:
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-db) and test(coordinate_delete_spares_head_newer_than_the_deletion)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Writer session timeout guardrails
+        # Proves the buzz-db writer-pool session timeouts (lock_timeout /
+        # idle_in_transaction_session_timeout / statement_timeout) install
+        # through Db::new(), bound contended lock waits with SQLSTATE 55P03,
+        # and that Db::migrate()'s schema-destruction advisory lock is exempt
+        # from lock_timeout.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(session_timeouts_install_through_db_new_and_bound_lock_waits)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Audit writer session timeout guardrails
+        # Keep this separate from the buzz-db guard so nextest fails when the
+        # relay binary test is absent from the archive instead of silently
+        # succeeding because the buzz-db half of a combined filter matched.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits)' \
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz

@@ -82,6 +82,20 @@ where
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
     let mut lock_conn = pool.acquire().await?.detach();
+    // Exempt this connection from the lock/statement writer-session timeouts.
+    // Migrations and schema-destruction ops are the two legitimate long-lock
+    // paths: the advisory-lock acquisition below is *designed* to park until
+    // the current holder finishes (a non-winning boot pod waiting out the
+    // migration winner must wait, not crash-loop on SQLSTATE 55P03), and the
+    // DDL that runs on this connection may legitimately exceed lock/statement
+    // budgets sized for runtime traffic. `idle_in_transaction_session_timeout`
+    // is deliberately NOT reset: a migration client wedged idle mid-transaction
+    // is exactly the holder that must be reaped — backend death also releases
+    // this advisory lock. Session-scoped: the connection is detached and
+    // closed below, never returned to the pool.
+    sqlx::raw_sql("SET lock_timeout = 0; SET statement_timeout = 0")
+        .execute(&mut lock_conn)
+        .await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
         .execute(&mut lock_conn)
