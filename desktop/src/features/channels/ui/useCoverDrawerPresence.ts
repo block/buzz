@@ -1,9 +1,9 @@
 import * as React from "react";
 
-import { subscribeToFocusedThreadCloseRequest } from "@/features/channels/focusedThreadCloseRequest";
+import { subscribeToCoverDrawerCloseRequest } from "@/features/channels/coverDrawerCloseRequest";
 
 /** Keeps the covered channel inert and owns external dismissal while open. */
-export function useFocusDrawerPresence(open: boolean, onClose: () => void) {
+export function useCoverDrawerPresence(open: boolean, onClose: () => void) {
   const [present, setPresent] = React.useState(false);
 
   React.useEffect(() => {
@@ -12,7 +12,7 @@ export function useFocusDrawerPresence(open: boolean, onClose: () => void) {
 
   React.useEffect(() => {
     if (!open) return;
-    return subscribeToFocusedThreadCloseRequest(onClose);
+    return subscribeToCoverDrawerCloseRequest(onClose);
   }, [onClose, open]);
 
   const markExitComplete = React.useCallback(() => setPresent(false), []);
