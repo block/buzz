@@ -44,6 +44,31 @@ keypair.
   `.env`; use the Helm chart or a custom Compose configuration for providers
   such as new Railway Storage Buckets that require `virtual` addressing.
 
+## Device pairing
+
+Mobile QR pairing (NIP-AB) needs the `buzz-pair-relay` sidecar: a
+membership-gated (NIP-43) relay rejects unpaired devices, so the pairing
+handshake runs through a separate ephemeral relay instead. Without it, phones
+scanning the desktop QR fail with a WebSocket 404 on `<relay>/pair`.
+
+The TLS stack includes the sidecar by default (`compose.pair.yml`):
+
+- Runs `buzz-pair-relay` from the same relay image.
+- Caddy routes `/pair` to it; everything else still goes to the relay.
+- Sets `BUZZ_PAIRING_RELAY_URL=wss://$BUZZ_DOMAIN/pair` on the relay so the
+  pairing URL is advertised in NIP-11.
+
+Set `BUZZ_COMPOSE_PAIRING=false` to opt out — `/pair` then returns 502 from
+Caddy. Pairing is not wired for the non-TLS stack: there is no reverse proxy
+to route `/pair`, and iOS requires `wss://` anyway.
+
+Verify after `./run.sh start`:
+
+```bash
+curl -fsS "https://<your-domain>" -H 'Accept: application/nostr+json' | grep -o 'pairing_relay_url[^,]*'
+curl -is "https://<your-domain>/pair" | head -1   # expect HTTP 400 (non-WebSocket request rejected)
+```
+
 Run `./run.sh backup-hint` for the backup checklist.
 
 ## Validation
