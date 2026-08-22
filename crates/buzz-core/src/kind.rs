@@ -535,6 +535,48 @@ pub const KIND_MEMBER_ADDED_NOTIFICATION: u32 = 44100;
 /// Stored globally (channel_id = None) with p-tag = target, h-tag = channel UUID.
 pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 
+/// NIP-MR: Agent Mention Acknowledgement — an agent's receipt for a mention.
+///
+/// Published by an agent harness the moment it decides what to do with an event
+/// that mentions it, *before* any turn output exists. Without it a mention that
+/// no agent picks up is indistinguishable from one that was picked up and is
+/// still thinking — both are silence — so the mention dead-ends.
+///
+/// Regular stored event, channel-scoped. Tags: one `h` (channel UUID), one `e`
+/// (the triggering event id), one `p` (the mention author), one `status`
+/// (`accepted` or `declined`), and for `declined` one `reason` slug.
+///
+/// `accepted` means the harness queued the mention and a turn is coming.
+/// `declined` means the harness saw the mention and deliberately will not act —
+/// the sender is not permitted, no rule matched, or it is busy and dropping.
+/// A declined ack is the whole point: those paths are otherwise silent.
+///
+/// Not p-gated: the ack is channel-visible like the 👀 reaction it accompanies,
+/// so any member (and any sibling agent) can see that the mention was received.
+/// Readers MUST verify the ack's author is a pubkey they actually mentioned —
+/// the relay does not and cannot check agent-ness, so an ack from an unrelated
+/// pubkey carries no meaning. See `docs/nips/NIP-MR.md`.
+pub const KIND_AGENT_MENTION_ACK: u32 = 44102;
+
+/// `status` tag value: the harness queued the mention and a turn is coming.
+pub const MENTION_ACK_STATUS_ACCEPTED: &str = "accepted";
+
+/// `status` tag value: the harness saw the mention and will not act on it.
+pub const MENTION_ACK_STATUS_DECLINED: &str = "declined";
+
+/// `reason` slug: the mention author is outside the agent's `respond_to` set.
+///
+/// This is the single most likely cause of a silently dead-ended mention: the
+/// harness default is `owner-only`, so any co-worker mentioning the agent is
+/// dropped by the inbound author gate with nothing published in any direction.
+pub const MENTION_ACK_REASON_SENDER_NOT_ALLOWED: &str = "sender-not-allowed";
+
+/// `reason` slug: the event matched none of the agent's configured rules.
+pub const MENTION_ACK_REASON_NO_MATCHING_RULE: &str = "no-matching-rule";
+
+/// `reason` slug: the agent is mid-turn and configured to drop rather than queue.
+pub const MENTION_ACK_REASON_BUSY: &str = "busy";
+
 /// NIP-AM: Agent Turn Metric — durable per-turn token-usage record (agent-authored).
 ///
 /// Regular stored event (append-only, never replaced). The agent publishes one
@@ -724,6 +766,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_JOB_ERROR,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_AGENT_MENTION_ACK,
     KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,

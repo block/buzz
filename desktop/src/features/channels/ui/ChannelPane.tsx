@@ -2,6 +2,9 @@ import * as React from "react";
 import { Hash, LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useProblemEventIds } from "@/features/agents/pendingMentionAckStore";
+import { MentionAckFooter } from "@/features/agents/ui/MentionAckFooter";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { ComposerUploadProgressOverlay } from "@/features/messages/ui/ComposerUploadProgressOverlay";
@@ -162,6 +165,31 @@ export const ChannelPane = React.memo(function ChannelPane({
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
+
+  // NIP-MR: inline notices for mentions no agent picked up. The id list is
+  // reference-stable and almost always empty, so this builds nothing on the
+  // overwhelmingly common healthy path.
+  const mentionAckProblemIds = useProblemEventIds(activeChannel?.id ?? "");
+  const resolveMentionAckName = React.useCallback(
+    (pubkey: string) =>
+      profiles?.[pubkey]?.displayName ||
+      profiles?.[pubkey]?.name ||
+      truncatePubkey(pubkey),
+    [profiles],
+  );
+  const mentionAckFooters = React.useMemo(() => {
+    if (mentionAckProblemIds.length === 0) return undefined;
+    const footers: Record<string, React.ReactNode> = {};
+    for (const eventId of mentionAckProblemIds) {
+      footers[eventId] = (
+        <MentionAckFooter
+          eventId={eventId}
+          resolveName={resolveMentionAckName}
+        />
+      );
+    }
+    return footers;
+  }, [mentionAckProblemIds, resolveMentionAckName]);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
   const { goChannel } = useAppNavigation();
   const prepareDmSendChannel = usePrepareDmSendChannel(
@@ -569,6 +597,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           {isHuddleTranscript ? null : header}
           <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col">
             <MessageTimeline
+              messageFooters={mentionAckFooters}
               ref={messageTimelineRef}
               channelId={activeChannel?.id}
               channelIntro={channelIntro}

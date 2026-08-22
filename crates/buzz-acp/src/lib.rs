@@ -381,6 +381,50 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// NIP-MR: publish an acknowledgement for an event that tagged this agent.
+///
+/// Fires only when `event` actually carries a `p` tag naming `pubkey_hex`. Every
+/// other event is none of the sender's business — in `all` subscription mode the
+/// harness sees every message in the channel, and acknowledging those would bury
+/// it in receipts.
+///
+/// Self-authored events are skipped: the agent's own output p-tags the person it
+/// is replying to, and an agent acknowledging its own message is meaningless.
+///
+/// Acknowledgements themselves are never acknowledged. An ack p-tags the author
+/// it answers, so it *is* a mention of that agent. Without this guard two
+/// sibling agents subscribed with wildcard kinds would acknowledge each other's
+/// acknowledgements forever — each round publishing a stored event and firing a
+/// model turn, with no human involved and no terminating condition.
+///
+/// Spawned and not awaited. The ack is a courtesy to the sender; it must never
+/// add latency to the dispatch path or hold up the event loop behind a slow
+/// relay. `publish_mention_ack` swallows its own errors.
+fn ack_mention(
+    rest: &relay::RestClient,
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    pubkey_hex: &str,
+    status: &'static str,
+    reason: Option<&'static str>,
+) {
+    if event.kind.as_u16() as u32 == buzz_core::kind::KIND_AGENT_MENTION_ACK {
+        return;
+    }
+    if !filter::event_mentions(event, pubkey_hex) {
+        return;
+    }
+    let author = event.pubkey.to_hex();
+    if author == pubkey_hex {
+        return;
+    }
+    let rest = rest.clone();
+    let event_id = event.id.to_hex();
+    tokio::spawn(async move {
+        pool::publish_mention_ack(&rest, channel_id, &event_id, &author, status, reason).await;
+    });
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
@@ -2982,6 +3026,22 @@ async fn tokio_main() -> Result<()> {
                                         is_dm,
                                         "inbound author gate — dropping event"
                                     );
+                                    // NIP-MR: this is the most common way a
+                                    // mention dead-ends. `respond_to` defaults
+                                    // to owner-only, so a co-worker tagging the
+                                    // agent lands here and, before the ack, the
+                                    // drop was visible only in a debug! log.
+                                    // Tell the sender we saw it and why we are
+                                    // not acting, so they can ask the owner to
+                                    // widen respond_to instead of waiting.
+                                    ack_mention(
+                                        &ctx.rest_client,
+                                        &buzz_event.event,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+                                        Some(buzz_core::kind::MENTION_ACK_REASON_SENDER_NOT_ALLOWED),
+                                    );
                                     continue;
                                 }
                             }
@@ -2991,6 +3051,18 @@ async fn tokio_main() -> Result<()> {
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
+                                    // NIP-MR: no rule matched, or a filter
+                                    // expression failed closed. Either way the
+                                    // agent was tagged and will not answer, so
+                                    // say so rather than going quiet.
+                                    ack_mention(
+                                        &ctx.rest_client,
+                                        &buzz_event.event,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+                                        Some(buzz_core::kind::MENTION_ACK_REASON_NO_MATCHING_RULE),
+                                    );
                                     continue;
                                 }
                             };
@@ -3028,6 +3100,32 @@ async fn tokio_main() -> Result<()> {
                                     pool::reaction_add(&rc, &eid, "👀").await;
                                 });
                             }
+                            // NIP-MR: durable counterpart to the 👀 above. The
+                            // reaction is explicitly cosmetic — 500ms timeout,
+                            // failures swallowed at debug! — so it cannot be
+                            // the signal a sender relies on. The ack can.
+                            //
+                            // `!accepted` means DedupMode::Drop discarded the
+                            // event because the channel is already in flight.
+                            // That path posts no 👀 and fires no steer, so
+                            // before the ack it was the most completely silent
+                            // outcome in the harness.
+                            ack_mention(
+                                &ctx.rest_client,
+                                &event_for_steer,
+                                buzz_event.channel_id,
+                                &pubkey_hex,
+                                if accepted {
+                                    buzz_core::kind::MENTION_ACK_STATUS_ACCEPTED
+                                } else {
+                                    buzz_core::kind::MENTION_ACK_STATUS_DECLINED
+                                },
+                                if accepted {
+                                    None
+                                } else {
+                                    Some(buzz_core::kind::MENTION_ACK_REASON_BUSY)
+                                },
+                            );
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.

@@ -4552,6 +4552,96 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
+/// Timeout for publishing a NIP-MR mention acknowledgement.
+///
+/// Deliberately longer than [`REACTION_TIMEOUT`]. The 👀 is cosmetic and may be
+/// dropped freely, but the ack is the only thing that tells a sender their
+/// mention was received at all — dropping it recreates the dead-end the ack
+/// exists to prevent, so it is given room to land on a slow relay.
+const MENTION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Build the signed NIP-MR acknowledgement event.
+///
+/// Split out from [`publish_mention_ack`] so the tag shape — which the desktop
+/// and any other reader match on — is testable without a relay.
+pub(crate) fn build_mention_ack_event(
+    keys: &nostr::Keys,
+    channel_id: Uuid,
+    event_id: &str,
+    author_pubkey: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<nostr::Event, String> {
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let mut specs: Vec<[String; 2]> = vec![
+        ["h".to_string(), channel_id.to_string()],
+        ["e".to_string(), event_id.to_string()],
+        ["p".to_string(), author_pubkey.to_string()],
+        ["status".to_string(), status.to_string()],
+    ];
+    if let Some(reason) = reason {
+        specs.push(["reason".to_string(), reason.to_string()]);
+    }
+
+    let mut tags = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        tags.push(Tag::parse(spec.iter().map(String::as_str)).map_err(|e| e.to_string())?);
+    }
+
+    EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_AGENT_MENTION_ACK as u16),
+        "",
+    )
+    .tags(tags)
+    .sign_with_keys(keys)
+    .map_err(|e| e.to_string())
+}
+
+/// Publish a NIP-MR mention acknowledgement (kind 44102) for `event_id`.
+///
+/// `status` is [`MENTION_ACK_STATUS_ACCEPTED`] or [`MENTION_ACK_STATUS_DECLINED`];
+/// `reason` carries the machine-readable slug for a decline and is `None` for an
+/// accept. Tags are `h` (channel), `e` (the mention being acknowledged), `p`
+/// (its author, so the sender's client can match the ack to its own message),
+/// `status`, and `reason`.
+///
+/// Failures are logged and swallowed — an ack must never take down the main
+/// loop — but at `warn!` rather than the `debug!` used for reactions, because a
+/// silently missing ack looks to the sender exactly like an agent that never
+/// received the mention.
+pub(crate) async fn publish_mention_ack(
+    rest: &RestClient,
+    channel_id: Uuid,
+    event_id: &str,
+    author_pubkey: &str,
+    status: &str,
+    reason: Option<&str>,
+) {
+    let event = match build_mention_ack_event(
+        &rest.keys,
+        channel_id,
+        event_id,
+        author_pubkey,
+        status,
+        reason,
+    ) {
+        Ok(event) => event,
+        Err(e) => {
+            tracing::warn!(event_id, status, "mention ack: build failed: {e}");
+            return;
+        }
+    };
+
+    match tokio::time::timeout(MENTION_ACK_TIMEOUT, rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {
+            tracing::debug!(event_id, status, reason, "mention ack published");
+        }
+        Ok(Err(e)) => tracing::warn!(event_id, status, "mention ack failed: {e}"),
+        Err(_) => tracing::warn!(event_id, status, "mention ack timed out"),
+    }
+}
+
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a
 /// batch is dead-lettered. Replies into the thread of `thread_tags` when the
 /// triggering event was threaded. Errors are logged and swallowed — the
@@ -4724,6 +4814,130 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    /// Collect the values of every tag with the given name.
+    fn tag_values(event: &nostr::Event, name: &str) -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let s = t.as_slice();
+                (s.first().map(|k| k.as_str()) == Some(name))
+                    .then(|| s.get(1).cloned())
+                    .flatten()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mention_ack_accepted_carries_routing_tags_and_no_reason() {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let target = "a".repeat(64);
+        let author = "b".repeat(64);
+
+        let event = build_mention_ack_event(
+            &keys,
+            channel,
+            &target,
+            &author,
+            buzz_core::kind::MENTION_ACK_STATUS_ACCEPTED,
+            None,
+        )
+        .expect("accepted ack builds");
+
+        assert_eq!(
+            event.kind.as_u16() as u32,
+            buzz_core::kind::KIND_AGENT_MENTION_ACK
+        );
+        // `h` is what makes the relay enforce channel membership on the write,
+        // and what scopes the ack to the channel the mention happened in.
+        assert_eq!(tag_values(&event, "h"), vec![channel.to_string()]);
+        // `e` is how a client matches the ack back to the message it sent.
+        assert_eq!(tag_values(&event, "e"), vec![target.clone()]);
+        // `p` names the mention author, not the agent — the agent is the signer.
+        assert_eq!(tag_values(&event, "p"), vec![author.clone()]);
+        assert_eq!(
+            tag_values(&event, "status"),
+            vec![buzz_core::kind::MENTION_ACK_STATUS_ACCEPTED.to_string()]
+        );
+        assert!(
+            tag_values(&event, "reason").is_empty(),
+            "an accepted ack has nothing to explain"
+        );
+        assert_eq!(event.pubkey, keys.public_key());
+    }
+
+    #[test]
+    fn mention_ack_declined_carries_reason_slug() {
+        let keys = Keys::generate();
+        let event = build_mention_ack_event(
+            &keys,
+            Uuid::new_v4(),
+            &"c".repeat(64),
+            &"d".repeat(64),
+            buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+            Some(buzz_core::kind::MENTION_ACK_REASON_SENDER_NOT_ALLOWED),
+        )
+        .expect("declined ack builds");
+
+        assert_eq!(
+            tag_values(&event, "status"),
+            vec![buzz_core::kind::MENTION_ACK_STATUS_DECLINED.to_string()]
+        );
+        // Without the reason the sender learns only "not answering", which is
+        // barely better than silence. The slug is what makes it actionable —
+        // sender-not-allowed means "ask the owner to widen respond_to".
+        assert_eq!(
+            tag_values(&event, "reason"),
+            vec![buzz_core::kind::MENTION_ACK_REASON_SENDER_NOT_ALLOWED.to_string()]
+        );
+    }
+
+    #[test]
+    fn mention_ack_p_tags_the_author_which_is_why_acks_are_never_acked() {
+        // This test documents the loop that the kind guard in `ack_mention`
+        // exists to prevent. The ack names its recipient with a `p` tag, so by
+        // the harness's own "someone tagged me" predicate an ack IS a mention
+        // of the agent it answers. Two sibling agents on wildcard kinds would
+        // otherwise acknowledge each other's acknowledgements forever.
+        let keys = Keys::generate();
+        let author = "d".repeat(64);
+        let event = build_mention_ack_event(
+            &keys,
+            Uuid::new_v4(),
+            &"c".repeat(64),
+            &author,
+            buzz_core::kind::MENTION_ACK_STATUS_ACCEPTED,
+            None,
+        )
+        .expect("ack builds");
+
+        assert!(
+            crate::filter::event_mentions(&event, &author),
+            "an ack is itself a mention of the pubkey it answers — \
+             ack_mention must refuse to acknowledge kind 44102"
+        );
+    }
+
+    #[test]
+    fn mention_ack_is_signed_and_verifies() {
+        let keys = Keys::generate();
+        let event = build_mention_ack_event(
+            &keys,
+            Uuid::new_v4(),
+            &"e".repeat(64),
+            &"f".repeat(64),
+            buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+            Some(buzz_core::kind::MENTION_ACK_REASON_BUSY),
+        )
+        .expect("busy ack builds");
+
+        // Readers authenticate an ack by its signature and author pubkey — the
+        // relay cannot verify agent-ness, so a forged ack from an unrelated key
+        // must be rejectable by the client.
+        assert!(event.verify().is_ok(), "ack must be a valid signed event");
     }
 
     #[test]
