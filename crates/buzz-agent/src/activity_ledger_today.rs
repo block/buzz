@@ -3,7 +3,6 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::Digest;
 
-use crate::mcp::truncate_middle;
 use crate::types::{ToolDef, ToolResult, ToolResultContent};
 
 pub const ACTIVITY_LEDGER_TODAY_TOOL: &str = "get_activity_ledger_today";
@@ -54,6 +53,17 @@ pub fn activity_ledger_today_def() -> ToolDef {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum journals to return, from 1 to 100."
+                },
+                "before": {
+                    "type": "object",
+                    "description": "Optional continuation cursor from nextBefore for the next older page.",
+                    "properties": {
+                        "endedAt": { "type": "string" },
+                        "agentPubkey": { "type": "string" },
+                        "id": { "type": "string" }
+                    },
+                    "required": ["endedAt", "agentPubkey", "id"],
+                    "additionalProperties": false
                 },
                 "includeEvents": {
                     "type": "boolean",
@@ -109,12 +119,15 @@ pub async fn call_activity_ledger_today(arguments: &Value, max_text_bytes: usize
 }
 
 fn success_result(output: String, max_text_bytes: usize) -> ToolResult {
+    if output.len() > max_text_bytes {
+        return error_result(&format!(
+            "{ACTIVITY_LEDGER_TODAY_TOOL}: query result is {} bytes and exceeds the {max_text_bytes}-byte model text budget; retry with includeEvents false or a smaller limit, then use nextBefore to retrieve older pages",
+            output.len()
+        ));
+    }
     ToolResult {
         provider_id: String::new(),
-        content: vec![ToolResultContent::Text(truncate_middle(
-            &output,
-            max_text_bytes,
-        ))],
+        content: vec![ToolResultContent::Text(output)],
         is_error: false,
     }
 }
@@ -126,6 +139,14 @@ fn env_non_empty(name: &str) -> Option<String> {
     })
 }
 
+#[derive(Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+struct ActivityLedgerCursor {
+    ended_at: String,
+    agent_pubkey: String,
+    id: String,
+}
+
 #[derive(Clone)]
 struct ActivityLedgerQuery {
     channel_id: Option<String>,
@@ -133,6 +154,7 @@ struct ActivityLedgerQuery {
     status: Option<String>,
     proof_state: Option<String>,
     limit: usize,
+    before: Option<ActivityLedgerCursor>,
     include_events: bool,
 }
 
@@ -276,8 +298,28 @@ fn parse_activity_ledger_query(arguments: &Value) -> Result<ActivityLedgerQuery,
         status: optional_string_arg(object, "status")?,
         proof_state: optional_string_arg(object, "proofState")?,
         limit: parse_limit_arg(object.get("limit"))?,
+        before: parse_cursor_arg(object.get("before"))?,
         include_events: parse_bool_arg(object.get("includeEvents"))?,
     })
+}
+
+fn parse_cursor_arg(value: Option<&Value>) -> Result<Option<ActivityLedgerCursor>, String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{ACTIVITY_LEDGER_TODAY_TOOL}: before must be a cursor object"))?;
+    if object.len() != 3 {
+        return Err(format!(
+            "{ACTIVITY_LEDGER_TODAY_TOOL}: before must contain only endedAt, agentPubkey, and id"
+        ));
+    }
+    Ok(Some(ActivityLedgerCursor {
+        ended_at: required_string_field(object, "endedAt")?.to_owned(),
+        agent_pubkey: required_string_field(object, "agentPubkey")?.to_owned(),
+        id: required_string_field(object, "id")?.to_owned(),
+    }))
 }
 
 fn optional_string_arg(object: &Map<String, Value>, key: &str) -> Result<Option<String>, String> {
@@ -393,13 +435,15 @@ fn filter_activity_ledger_snapshot(
     require_lower_hex_len(signature, "signature", 128)?;
     verify_activity_ledger_snapshot_signature(
         object,
-        owner_pubkey,
-        relay_url,
-        generated_at,
-        expires_at,
-        snapshot_sha256,
-        event_id,
-        signature,
+        &ActivityLedgerSnapshotSignatureFields {
+            owner_pubkey,
+            relay_url,
+            generated_at,
+            expires_at,
+            snapshot_sha256,
+            event_id,
+            signature,
+        },
     )?;
 
     let surface = object
@@ -423,15 +467,27 @@ fn filter_activity_ledger_snapshot(
     let mut filtered = Vec::new();
     for journal in journals {
         if journal_matches_query(journal, query)? {
-            filtered.push(strip_events_from_journal(journal, query.include_events)?);
+            let projected = strip_events_from_journal(journal, query.include_events)?;
+            journal_cursor(&projected)?;
+            filtered.push(projected);
         }
     }
     let matching_journals = filtered.len();
-    let truncated = matching_journals > query.limit;
+    filtered.sort_by(|left, right| journal_sort_key(left).cmp(&journal_sort_key(right)));
+    if let Some(before) = &query.before {
+        filtered.retain(|journal| journal_cursor(journal).is_ok_and(|cursor| &cursor < before));
+    }
+    let eligible_before_cursor = filtered.len();
+    let truncated = eligible_before_cursor > query.limit;
     if truncated {
         let oldest_to_drop = filtered.len() - query.limit;
         filtered.drain(..oldest_to_drop);
     }
+    let next_before = if truncated {
+        filtered.first().map(journal_cursor).transpose()?
+    } else {
+        None
+    };
 
     let channels = rebuild_filtered_channels(&filtered);
     let failed = filtered
@@ -463,19 +519,41 @@ fn filter_activity_ledger_snapshot(
             "status": query.status,
             "proofState": query.proof_state,
             "limit": query.limit,
+            "before": query.before.clone(),
             "includeEvents": query.include_events,
         },
         "counts": {
             "matchingJournals": matching_journals,
+            "eligibleBeforeCursor": eligible_before_cursor,
             "returnedJournals": filtered.len(),
             "failed": failed,
             "inProgress": in_progress,
             "claimedWithoutEvidence": claimed_without_evidence,
         },
         "truncated": truncated,
+        "nextBefore": next_before,
         "journals": filtered,
         "channels": channels,
     }))
+}
+
+fn journal_cursor(journal: &Value) -> Result<ActivityLedgerCursor, String> {
+    let object = journal
+        .as_object()
+        .ok_or_else(|| format!("{ACTIVITY_LEDGER_TODAY_TOOL}: each journal must be an object"))?;
+    Ok(ActivityLedgerCursor {
+        ended_at: required_string_field(object, "endedAt")?.to_owned(),
+        agent_pubkey: required_string_field(object, "agentPubkey")?.to_owned(),
+        id: required_string_field(object, "id")?.to_owned(),
+    })
+}
+
+fn journal_sort_key(journal: &Value) -> (&str, &str, &str) {
+    (
+        string_field(journal, "endedAt").unwrap_or_default(),
+        string_field(journal, "agentPubkey").unwrap_or_default(),
+        string_field(journal, "id").unwrap_or_default(),
+    )
 }
 
 fn journal_matches_query(journal: &Value, query: &ActivityLedgerQuery) -> Result<bool, String> {
@@ -640,43 +718,47 @@ fn is_hex_64(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn verify_activity_ledger_snapshot_signature(
-    object: &Map<String, Value>,
-    owner_pubkey: &str,
-    relay_url: &str,
+struct ActivityLedgerSnapshotSignatureFields<'a> {
+    owner_pubkey: &'a str,
+    relay_url: &'a str,
     generated_at: u64,
     expires_at: u64,
-    snapshot_sha256: &str,
-    event_id: &str,
-    signature: &str,
+    snapshot_sha256: &'a str,
+    event_id: &'a str,
+    signature: &'a str,
+}
+
+fn verify_activity_ledger_snapshot_signature(
+    object: &Map<String, Value>,
+    fields: &ActivityLedgerSnapshotSignatureFields<'_>,
 ) -> Result<(), String> {
     let payload_json = canonical_activity_ledger_snapshot_payload_json(
         object,
-        owner_pubkey,
-        relay_url,
-        generated_at,
-        expires_at,
+        fields.owner_pubkey,
+        fields.relay_url,
+        fields.generated_at,
+        fields.expires_at,
     )?;
     let payload_sha256 = hex::encode(sha2::Sha256::digest(payload_json.as_bytes()));
-    if payload_sha256 != snapshot_sha256 {
+    if payload_sha256 != fields.snapshot_sha256 {
         return Err(format!(
             "{ACTIVITY_LEDGER_TODAY_TOOL}: snapshotSha256 does not match the canonical payload"
         ));
     }
     let event_json = serde_json::json!({
-        "id": event_id,
-        "pubkey": owner_pubkey,
-        "created_at": generated_at,
+        "id": fields.event_id,
+        "pubkey": fields.owner_pubkey,
+        "created_at": fields.generated_at,
         "kind": ACTIVITY_LEDGER_TODAY_SIGNED_KIND,
         "tags": [
             ["t", ACTIVITY_LEDGER_TODAY_SIGNED_TAG_MARKER],
             ["schema", ACTIVITY_LEDGER_TODAY_SCHEMA],
             ["capability", ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE],
-            ["snapshot_sha256", snapshot_sha256],
-            ["expires_at", expires_at.to_string()]
+            ["snapshot_sha256", fields.snapshot_sha256],
+            ["expires_at", fields.expires_at.to_string()]
         ],
         "content": payload_json,
-        "sig": signature,
+        "sig": fields.signature,
     })
     .to_string();
     let event = Event::from_json(&event_json)
@@ -684,12 +766,12 @@ fn verify_activity_ledger_snapshot_signature(
     event.verify().map_err(|e| {
         format!("{ACTIVITY_LEDGER_TODAY_TOOL}: snapshot signature verification failed: {e}")
     })?;
-    if event.id.to_hex() != event_id {
+    if event.id.to_hex() != fields.event_id {
         return Err(format!(
             "{ACTIVITY_LEDGER_TODAY_TOOL}: eventId does not match the signed snapshot event"
         ));
     }
-    if event.pubkey.to_hex() != owner_pubkey {
+    if event.pubkey.to_hex() != fields.owner_pubkey {
         return Err(format!(
             "{ACTIVITY_LEDGER_TODAY_TOOL}: snapshot signer is not the expected owner"
         ));

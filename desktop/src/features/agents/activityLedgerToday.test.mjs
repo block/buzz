@@ -91,6 +91,28 @@ test("Today reconstruction skips decrypt failures without admitting bad proof", 
     },
   });
   assert.equal(surface.counts.journals, 0);
+  assert.equal(surface.snapshotProjection.excludedObserverFrames, 1);
+  assert.equal(surface.snapshotProjection.bounded, true);
+});
+
+test("Today reconstruction reports malformed or empty observer batches", async () => {
+  const event = relayEvent({
+    id: "empty-batch",
+    decoded: {
+      seq: 1,
+      timestamp: "2026-08-21T14:00:00.000Z",
+      kind: "batch",
+      payload: { events: [{ malformed: true }] },
+    },
+  });
+  const surface = await buildTodayActivityFromArchivedEvents({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [event],
+    decrypt: async (candidate) => candidate.decoded,
+  });
+  assert.equal(surface.counts.journals, 0);
+  assert.equal(surface.snapshotProjection.excludedObserverFrames, 1);
 });
 
 test("Today reconstruction expands every inner event from one signed batch", async () => {

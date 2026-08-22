@@ -29,6 +29,7 @@ export type TodaySnapshotProjection = {
   includedJournals: number;
   omittedJournals: number;
   omittedEvents: number;
+  excludedObserverFrames: number;
   textFieldsTruncated: number;
 };
 
@@ -165,6 +166,7 @@ function snapshotSurfaceFromJournals(input: {
   maxBytes: number;
   originalJournalCount: number;
   originalEventCount: number;
+  excludedObserverFrames: number;
   textFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
   const channels = new Map<
@@ -231,12 +233,14 @@ function snapshotSurfaceFromJournals(input: {
       bounded:
         omittedJournals > 0 ||
         omittedEvents > 0 ||
+        input.excludedObserverFrames > 0 ||
         input.textFieldsTruncated > 0,
       maxBytes: input.maxBytes,
       originalJournals: input.originalJournalCount,
       includedJournals: input.journals.length,
       omittedJournals,
       omittedEvents,
+      excludedObserverFrames: input.excludedObserverFrames,
       textFieldsTruncated: input.textFieldsTruncated,
     },
   };
@@ -293,6 +297,7 @@ export function buildBoundedTodayActivitySurface(
       maxBytes,
       originalJournalCount,
       originalEventCount,
+      excludedObserverFrames: previousProjection?.excludedObserverFrames ?? 0,
       textFieldsTruncated,
     });
   const compactedTextCount =
@@ -360,6 +365,7 @@ function buildArchiveReconstructionCheckpoint(input: {
   surface: TodayActivitySurface;
   originalJournalCount: number;
   originalEventCount: number;
+  excludedObserverFrames: number;
   previousTextFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
   const ordered = [...input.surface.journals].sort(
@@ -383,6 +389,7 @@ function buildArchiveReconstructionCheckpoint(input: {
       maxBytes: TODAY_SNAPSHOT_SURFACE_MAX_BYTES,
       originalJournalCount: input.originalJournalCount,
       originalEventCount: input.originalEventCount,
+      excludedObserverFrames: input.excludedObserverFrames,
       textFieldsTruncated,
     });
   const all = compacted.map((item) => item.journal);
@@ -493,6 +500,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   let retainedEvents = new Map<string, NormalizedActivityEvent[]>();
   const journalEventCounts = new Map<string, number>();
   let originalEventCount = 0;
+  let excludedObserverFrames = 0;
   let textFieldsTruncated = 0;
   let checkpoint: BoundedTodayActivitySurface | null = null;
 
@@ -515,15 +523,20 @@ async function buildTodayActivityFromArchivedEventPages(input: {
           relayEvent.pubkey !== agentPubkey ||
           !trustedAgents.has(agentPubkey)
         ) {
+          excludedObserverFrames += 1;
           continue;
         }
 
         try {
           const decoded = await decrypt(relayEvent);
           const decodedEvents = unwrapObserverEvents(decoded);
-          if (decodedEvents.length === 0) continue;
+          if (decodedEvents.length === 0) {
+            excludedObserverFrames += 1;
+            continue;
+          }
           decodedPage[index] = decodedEvents;
         } catch {
+          excludedObserverFrames += 1;
           // Archive reconciliation is fail-closed: one bad ciphertext cannot
           // suppress the rest of the owner's durable activity surface.
         }
@@ -588,6 +601,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       surface,
       originalJournalCount: journalEventCounts.size,
       originalEventCount,
+      excludedObserverFrames,
       previousTextFieldsTruncated: textFieldsTruncated,
     });
     textFieldsTruncated = checkpoint.snapshotProjection.textFieldsTruncated;
@@ -611,6 +625,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       maxBytes: TODAY_SNAPSHOT_SURFACE_MAX_BYTES,
       originalJournalCount: 0,
       originalEventCount: 0,
+      excludedObserverFrames,
       textFieldsTruncated: 0,
     })
   );

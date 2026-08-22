@@ -209,17 +209,54 @@ fn activity_ledger_today_limit_keeps_newest_matching_journals() {
     assert_eq!(result["journals"][0]["id"], "journal-b");
     assert_eq!(result["channels"][0]["channelId"], "chan-b");
     assert_eq!(result["truncated"], true);
+    assert_eq!(result["nextBefore"]["id"], "journal-b");
     assert_eq!(result["sourceProjection"]["bounded"], false);
+
+    let older_output = read_activity_ledger_today(
+        path.to_str().unwrap(),
+        capability,
+        &expected_owner_pubkey(),
+        TEST_RELAY,
+        &json!({"limit": 1, "before": result["nextBefore"].clone()}),
+        120,
+    )
+    .unwrap();
+    let older: Value = serde_json::from_str(&older_output).unwrap();
+    assert_eq!(older["journals"][0]["id"], "journal-a");
+    assert_eq!(older["truncated"], false);
+    assert_eq!(older["nextBefore"], Value::Null);
 }
 
 #[test]
-fn activity_ledger_today_result_obeys_the_model_text_budget() {
-    let result = success_result("x".repeat(4_096), 512);
+fn activity_ledger_today_result_fails_instead_of_corrupting_json_over_budget() {
+    let output = serde_json::to_string(&json!({"journals": [{
+        "id": "large",
+        "summary": "x".repeat(4_096)
+    }]}))
+    .unwrap();
+    let result = success_result(output, 512);
     let ToolResultContent::Text(text) = &result.content[0] else {
         panic!("Today result must stay text-only");
     };
-    assert!(text.len() <= 512);
-    assert!(text.contains("bytes elided from tool result"));
+    assert!(result.is_error);
+    assert!(text.contains("exceeds the 512-byte model text budget"));
+    assert!(text.contains("smaller limit"));
+}
+
+#[test]
+fn activity_ledger_today_cursor_separates_same_time_and_id_across_agents() {
+    let left = json!({
+        "endedAt": "2026-08-21T15:00:00Z",
+        "agentPubkey": "agent-a",
+        "id": "shared-journal",
+    });
+    let right = json!({
+        "endedAt": "2026-08-21T15:00:00Z",
+        "agentPubkey": "agent-b",
+        "id": "shared-journal",
+    });
+
+    assert!(journal_cursor(&left).unwrap() < journal_cursor(&right).unwrap());
 }
 
 #[test]

@@ -8,6 +8,10 @@ use std::{
     sync::OnceLock,
 };
 
+#[path = "today_snapshot_authorization.rs"]
+mod today_snapshot_authorization;
+use today_snapshot_authorization::redact_embedded_authorization_headers;
+
 pub const TODAY_SNAPSHOT_SCHEMA: &str = "buzz.activity-ledger.today/v1";
 pub const TODAY_SNAPSHOT_CAPABILITY: &str = "buzz.activity-ledger.today.read/v1";
 pub const TODAY_SNAPSHOT_SIGNED_KIND: u16 = 24202;
@@ -169,20 +173,9 @@ fn embedded_secret_colon_regex() -> Result<&'static Regex, String> {
     static REGEX: OnceLock<Result<Regex, String>> = OnceLock::new();
     match REGEX.get_or_init(|| {
         Regex::new(
-            r#"(?i)(^|[,{]\s*)(["']?[A-Za-z0-9_.-]+["']?)(\s*:\s*)("[^"\r\n]*"|'[^'\r\n]*'|\[[^\]\r\n]*\]|[^\s,"';)\]}]+)"#,
+            r#"(?i)(^|[,{]\s*)(["']?[A-Za-z0-9_.-]+["']?)(\s*:\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|\[[^\]\r\n]*\]|[^\s,"';)\]}]+)"#,
         )
         .map_err(|error| format!("embedded secret colon regex is invalid: {error}"))
-    }) {
-        Ok(regex) => Ok(regex),
-        Err(error) => Err(error.clone()),
-    }
-}
-
-fn embedded_authorization_header_regex() -> Result<&'static Regex, String> {
-    static REGEX: OnceLock<Result<Regex, String>> = OnceLock::new();
-    match REGEX.get_or_init(|| {
-        Regex::new(r#"(?i)((?:proxy-)?authorization\s*:\s*)([^"'\r\n]+)"#)
-            .map_err(|error| format!("embedded authorization header regex is invalid: {error}"))
     }) {
         Ok(regex) => Ok(regex),
         Err(error) => Err(error.clone()),
@@ -262,21 +255,6 @@ fn redact_embedded_secret_colons(text: &str) -> Result<(String, usize), String> 
     Ok((redacted.into_owned(), redactions))
 }
 
-fn redact_embedded_authorization_headers(text: &str) -> Result<(String, usize), String> {
-    let mut redactions = 0;
-    let redacted =
-        embedded_authorization_header_regex()?.replace_all(text, |captures: &regex::Captures| {
-            let prefix = captures.get(1).map_or("", |value| value.as_str());
-            let value = captures.get(2).map_or("", |value| value.as_str());
-            if is_existing_redaction_marker(value) {
-                return matched_text(captures);
-            }
-            redactions += 1;
-            format!("{prefix}{}", redacted_secret_value(value))
-        });
-    Ok((redacted.into_owned(), redactions))
-}
-
 fn redact_embedded_secret_flags(text: &str) -> Result<(String, usize), String> {
     let mut redactions = 0;
     let redacted = embedded_secret_flag_regex()?.replace_all(text, |captures: &regex::Captures| {
@@ -351,7 +329,10 @@ fn redact_identity_secret_text(value: &mut serde_json::Value) -> Result<usize, S
             let (with_redacted_colons, colon_redactions) =
                 redact_embedded_secret_colons(&with_redacted_assignments)?;
             let (with_redacted_authorization_headers, authorization_header_redactions) =
-                redact_embedded_authorization_headers(&with_redacted_colons)?;
+                redact_embedded_authorization_headers(
+                    &with_redacted_colons,
+                    REDACTED_IDENTITY_SECRET_TEXT,
+                )?;
             let (with_redacted_flags, flag_redactions) =
                 redact_embedded_secret_flags(&with_redacted_authorization_headers)?;
             let (redacted_text, nsec_redactions) =
@@ -930,10 +911,15 @@ mod tests {
         raw_event["message"] =
             "Inline owner key nsec1mock000000000000000000000000000000000000000000000000000000 must not leave the owner boundary".into();
         raw_event["json"] = r#"{"OPENAI_API_KEY":"test-value-5","mode":"safe"}"#.into();
-        raw_event["header"] = "curl -H 'Authorization: Basic test-value-6' -H \"Proxy-Authorization: Digest test-value-10\"".into();
+        raw_event["header"] = "curl -H 'Authorization: Digest username=\"u\", response=\"test-value-6\"' -H \"Proxy-Authorization: Basic test-value-10\"".into();
         raw_event["command"] = "tool --api-key test-value-7 --mode safe".into();
         raw_event["stringifiedHeader"] =
             r#"{"Authorization":"Bearer test-value-8","mode":"safe"}"#.into();
+        raw_event["stringifiedDigest"] =
+            r#"{"Authorization":"Digest username=\"u\", response=\"test-value-11\"","mode":"safe"}"#.into();
+        raw_event["doubleQuotedDigest"] =
+            r#"curl -H "Authorization: Digest username="u", response="test-value-12"" --mode safe"#
+                .into();
         raw_event["Authorization"] = "Bearer test-value-9".into();
         let receipt = write_owner_today_snapshot(
             dir.path(),
@@ -946,7 +932,7 @@ mod tests {
         .unwrap();
         let raw = read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1001).unwrap();
         #[rustfmt::skip]
-        let leaked = ["do-not-export", "test-value-1", "test-value-2", "test-value-3", "test-value-4", "test-value-5", "test-value-6", "test-value-7", "test-value-8", "test-value-9", "test-value-10"];
+        let leaked = ["do-not-export", "test-value-1", "test-value-2", "test-value-3", "test-value-4", "test-value-5", "test-value-6", "test-value-7", "test-value-8", "test-value-9", "test-value-10", "test-value-11", "test-value-12"];
         for secret in leaked {
             assert!(!raw.contains(secret), "snapshot leaked {secret}");
         }
@@ -954,14 +940,14 @@ mod tests {
         let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             stored["surface"]["snapshotProjection"]["identitySecretsRedacted"],
-            11
+            13
         );
         #[rustfmt::skip]
         assert_eq!(stored["surface"]["journals"][0]["summary"], "Documentation example: NoStR_SeCrEt_KeY=[REDACTED: identity secret material] while MODE=debug stays visible");
         #[rustfmt::skip]
         assert_eq!(stored["surface"]["journals"][0]["detail"], "A generic secret-handling note is safe and keyboard=on stays visible");
         #[rustfmt::skip]
-        let expected_fields = [("detail", "Tool failed with ANTHROPIC_API_KEY=[REDACTED: identity secret material], BUZZ_AUTH_TAG='[REDACTED: identity secret material]', and APIKEY=[REDACTED: identity secret material], but normal prose remains"), ("message", "Inline owner key [REDACTED: identity secret material] must not leave the owner boundary"), ("json", r#"{"OPENAI_API_KEY":"[REDACTED: identity secret material]","mode":"safe"}"#), ("header", "curl -H 'Authorization: [REDACTED: identity secret material]' -H \"Proxy-Authorization: [REDACTED: identity secret material]\""), ("command", "tool --api-key [REDACTED: identity secret material] --mode safe"), ("stringifiedHeader", r#"{"Authorization":"[REDACTED: identity secret material]","mode":"safe"}"#), ("Authorization", "[REDACTED: identity secret material]")];
+        let expected_fields = [("detail", "Tool failed with ANTHROPIC_API_KEY=[REDACTED: identity secret material], BUZZ_AUTH_TAG='[REDACTED: identity secret material]', and APIKEY=[REDACTED: identity secret material], but normal prose remains"), ("message", "Inline owner key [REDACTED: identity secret material] must not leave the owner boundary"), ("json", r#"{"OPENAI_API_KEY":"[REDACTED: identity secret material]","mode":"safe"}"#), ("header", "curl -H 'Authorization: [REDACTED: identity secret material]' -H \"Proxy-Authorization: [REDACTED: identity secret material]\""), ("command", "tool --api-key [REDACTED: identity secret material] --mode safe"), ("stringifiedHeader", r#"{"Authorization":"[REDACTED: identity secret material]","mode":"safe"}"#), ("stringifiedDigest", r#"{"Authorization":"[REDACTED: identity secret material]","mode":"safe"}"#), ("doubleQuotedDigest", "curl -H \"Authorization: [REDACTED: identity secret material]\" --mode safe"), ("Authorization", "[REDACTED: identity secret material]")];
         for (field, expected) in expected_fields {
             assert_eq!(stored["rawEvents"][0][field], expected);
         }
