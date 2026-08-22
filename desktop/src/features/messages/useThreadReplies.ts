@@ -62,7 +62,7 @@ export function useThreadReplies(
       if (!activeChannel || !openThreadRootId) return [];
       return loadThreadReplies(queryClient, activeChannel.id, openThreadRootId);
     },
-    staleTime: 30_000,
+    staleTime: 0,
     gcTime: 60 * 60 * 1_000,
   });
 }
@@ -84,7 +84,7 @@ export function useThreadRepliesForRoots(
       queryKey: threadRepliesKey(channelId, rootId),
       enabled: activeChannel !== null && activeChannel.channelType !== "forum",
       queryFn: () => loadThreadReplies(queryClient, channelId, rootId),
-      staleTime: 30_000,
+      staleTime: 0,
       gcTime: 60 * 60 * 1_000,
     })),
     combine: (results) => ({
