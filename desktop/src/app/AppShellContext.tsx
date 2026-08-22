@@ -3,6 +3,7 @@ import type { ForcedUnreadSource } from "@/features/channels/forcedUnreadStore";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
+import type { InboxViewPreferenceController } from "@/features/home/useInboxViewPreference";
 import type { FeedItem } from "@/shared/api/types";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 
@@ -76,6 +77,7 @@ type AppShellContextValue = {
   // the mounted shell uses the split projections above.
   hasSidebarUnreadProjections: boolean;
   feedItemState: FeedItemState;
+  inboxViewPreference: InboxViewPreferenceController;
   // Open the Settings panel at the given section. Available on all surfaces
   // that render under AppShell (channel, home, projects, pulse, agents).
   // Used by config-nudge cards to deep-link to Settings → Agents.
@@ -118,6 +120,12 @@ const AppShellContext = React.createContext<AppShellContextValue>({
     undoDone: () => {},
     undoUnread: () => {},
     unreadSet: EMPTY_SET,
+  },
+  inboxViewPreference: {
+    filter: "all",
+    setFilter: () => {},
+    setUnreadOnly: () => {},
+    unreadOnly: false,
   },
   onOpenSettings: null,
 });

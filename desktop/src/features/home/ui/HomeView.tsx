@@ -109,11 +109,10 @@ export function HomeView({
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
-  const [filter, setFilter] = React.useState<InboxFilter>("all");
-  const [unreadOnly, setUnreadOnly] = React.useState(false);
+  const { filter, setFilter, setUnreadOnly, unreadOnly } =
+    useAppShell().inboxViewPreference;
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
-  // restores the detail pane each history entry was showing and reloads
-  // restore it from the URL. Default/automatic selection stays local-only —
+  // and reload restore them. Default/automatic selection stays local-only —
   // background data loads must never trigger navigations.
   const { applyPatch: applyInboxSearchPatch, values: inboxSearchValues } =
     useHistorySearchState(INBOX_SEARCH_KEYS);
@@ -573,6 +572,7 @@ export function HomeView({
       selectedConversationId,
       setSelectedDraftKey,
       setSelectedReminderId,
+      setFilter,
       unreadOnly,
     ],
   );
