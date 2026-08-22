@@ -867,6 +867,100 @@ mod flush_barrier {
         assert_ne!(fresh.as_json(), stale.as_json());
     }
 
+    #[test]
+    fn managed_agent_resign_refreshes_timestamp_and_preserves_payload() {
+        use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+        use nostr::JsonUtil;
+
+        let keys = nostr::Keys::generate();
+        let content = r#"{"name":"agent","display_name":"Agent"}"#;
+        let stale = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content)
+            .tags([Tag::parse(["d", "agent-slug"]).unwrap()])
+            .custom_created_at(nostr::Timestamp::from(1))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+
+        let fresh = resign_with_fresh_timestamp(&stale, &state).unwrap();
+
+        assert!(fresh.created_at.as_secs() > stale.created_at.as_secs());
+        assert_eq!(fresh.kind, Kind::Custom(KIND_MANAGED_AGENT as u16));
+        assert_eq!(fresh.content, content);
+        assert_eq!(fresh.tags, stale.tags);
+        assert!(fresh.verify_id());
+        assert!(fresh.verify_signature());
+        assert_ne!(fresh.as_json(), stale.as_json());
+    }
+
+    #[test]
+    fn needs_fresh_timestamp_covers_replaceables_tombstones_and_archive() {
+        use buzz_core_pkg::kind::{
+            KIND_DELETION, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_MANAGED_AGENT,
+            KIND_PERSONA, KIND_REACTION, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
+        };
+
+        assert!(needs_fresh_timestamp_at_publish(KIND_DELETION));
+        assert!(needs_fresh_timestamp_at_publish(KIND_PERSONA));
+        assert!(needs_fresh_timestamp_at_publish(KIND_TEAM));
+        assert!(needs_fresh_timestamp_at_publish(KIND_MANAGED_AGENT));
+        assert!(needs_fresh_timestamp_at_publish(KIND_TEAM_CATALOG));
+        assert!(needs_fresh_timestamp_at_publish(KIND_IA_ARCHIVE_REQUEST));
+        assert!(needs_fresh_timestamp_at_publish(KIND_IA_UNARCHIVE_REQUEST));
+        assert!(!needs_fresh_timestamp_at_publish(KIND_TEXT_NOTE));
+        assert!(!needs_fresh_timestamp_at_publish(KIND_REACTION));
+    }
+
+    /// Stale retained parameterized-replaceable events must still flush: the
+    /// publish path re-signs with a fresh timestamp so the relay's ±900s
+    /// window does not permanently reject them.
+    #[tokio::test]
+    async fn stale_managed_agent_event_flushes_after_resign() {
+        use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("retention.db");
+
+        {
+            let conn = open_retention_db(&db_path).expect("open db");
+            let content = r#"{"name":"stale-agent"}"#;
+            let stale = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content)
+                .tags([Tag::parse(["d", "stale-agent"]).unwrap()])
+                .custom_created_at(nostr::Timestamp::from(1))
+                .sign_with_keys(&keys)
+                .expect("sign stale managed-agent");
+            retain_event(
+                &conn,
+                &RetainedEvent {
+                    kind: KIND_MANAGED_AGENT,
+                    pubkey: pubkey.clone(),
+                    d_tag: "stale-agent".to_string(),
+                    content: stale.content.to_string(),
+                    created_at: 1,
+                    raw_event: stale.as_json(),
+                    pending_sync: true,
+                },
+            )
+            .expect("retain stale managed-agent");
+        }
+
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+        *state.relay_url_override.lock().unwrap() = Some(spawn_stub_relay().await);
+
+        let flushed = flush_pending_events(&db_path, &state).await.expect("flush");
+        assert_eq!(flushed, 1, "stale managed-agent row publishes after re-sign");
+
+        let conn = open_retention_db(&db_path).expect("reopen db");
+        let row = get_retained_event(&conn, KIND_MANAGED_AGENT, &pubkey, "stale-agent")
+            .unwrap()
+            .unwrap();
+        assert!(!row.pending_sync, "flushed row marked synced");
+        assert_eq!(row.created_at, 1, "retention created_at unchanged by re-sign");
+    }
+
     /// The mid-sweep barrier: a tombstone the relay rejects must defer its
     /// own replacement to the next sweep (still pending, not counted as
     /// flushed) while unrelated rows in the same sweep publish normally.
