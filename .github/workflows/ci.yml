@@ -1092,10 +1092,12 @@ jobs:
         id: mesh_rev
         run: |
           set -euo pipefail
-          REV=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); p=next(p for p in d["package"] if p["name"] == "mesh-llm-sdk"); print(p["source"].rsplit("#", 1)[1])')
-          [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
+          # Derive the Mesh-LLM rev from desktop/src-tauri/Cargo.toml (the
+          # manifest the desktop build actually fetches), not the root
+          # Cargo.lock. See scripts/resolve-mesh-rev.sh.
+          REV=$(scripts/resolve-mesh-rev.sh)
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
-          echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
+          echo "short=$(scripts/resolve-mesh-rev.sh --short)" >> "$GITHUB_OUTPUT"
       - name: Restore mesh llama build cache
         id: llama_cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -1109,12 +1111,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
-          SHORT="$MESH_REV_SHORT"
-          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
-          if [[ -z "$MESH_ROOT" ]]; then
-            echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
-            exit 1
-          fi
+          MESH_ROOT=$(scripts/resolve-mesh-rev.sh --find-checkout)
           export LLAMA_STAGE_BACKEND=metal
           export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
           export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
