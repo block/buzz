@@ -23,7 +23,12 @@ import {
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
-import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
+import {
+  advanceAgentManagementRequest,
+  classifyAgentManagementOrigin,
+  enqueueAgentManagementRequest,
+  type AgentManagementRequestQueue,
+} from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
@@ -72,8 +77,11 @@ export function useAgentManagement() {
   const [error, setError] = React.useState<string | null>(null);
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
-  const pendingRequestId = React.useRef<string | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
+  const requestQueueRef = React.useRef<AgentManagementRequestQueue>({
+    active: null,
+    queued: [],
+  });
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
@@ -94,9 +102,14 @@ export function useAgentManagement() {
         return;
       }
       seenRequestIds.current.add(next.requestId);
-      setError(null);
-      if (pendingRequestId.current === null) {
-        pendingRequestId.current = next.requestId;
+      const previousQueue = requestQueueRef.current;
+      const nextQueue = enqueueAgentManagementRequest(previousQueue, {
+        agentPubkey,
+        request: next,
+      });
+      requestQueueRef.current = nextQueue;
+      if (previousQueue.active === null && nextQueue.active !== null) {
+        setError(null);
         sourceAgentPubkey.current = agentPubkey;
         setRequest(next);
       }
@@ -260,9 +273,11 @@ export function useAgentManagement() {
   }
 
   function dismiss() {
-    pendingRequestId.current = null;
-    sourceAgentPubkey.current = null;
-    setRequest(null);
+    const nextQueue = advanceAgentManagementRequest(requestQueueRef.current);
+    requestQueueRef.current = nextQueue;
+    setError(null);
+    sourceAgentPubkey.current = nextQueue.active?.agentPubkey ?? null;
+    setRequest(nextQueue.active?.request ?? null);
   }
 
   const createInitialValues = React.useMemo(
