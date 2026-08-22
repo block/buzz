@@ -10,6 +10,8 @@ type NostrBindPayload = {
   nonce: string;
   origin: string;
   protocol: string;
+  resultProtocol?: string;
+  resultUrl?: string;
   returnMode: string;
   verificationCode: string;
   version: string;
@@ -26,6 +28,14 @@ const VALID_REQUEST: NostrBindPayload = {
   returnMode: "clipboard",
   verificationCode: "123456",
   version: "1",
+};
+
+const RESULT_REQUEST: NostrBindPayload = {
+  ...VALID_REQUEST,
+  callbackUrl: "https://admin.example.com/buzz",
+  resultProtocol: "run402_adoption_result_v1",
+  resultUrl: "https://api.run402.com/buzz-human-adoption-results/v1",
+  returnMode: "browser_fragment_v1",
 };
 
 async function emitNostrBind(page: Page, payload: NostrBindPayload) {
@@ -96,6 +106,23 @@ async function signCommandPayloads(page: Page): Promise<unknown[]> {
       ).__BUZZ_E2E_COMMAND_LOG__ ?? []
     )
       .filter(({ command }) => command === "sign_nostr_identity_binding")
+      .map(({ payload }) => payload),
+  );
+}
+
+async function resultCommandPayloads(page: Page): Promise<unknown[]> {
+  return page.evaluate(() =>
+    (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    )
+      .filter(({ command }) => command === "fetch_nostr_bind_result")
       .map(({ payload }) => payload),
   );
 }
@@ -412,6 +439,135 @@ test("returns a signed response in the callback fragment after consent", async (
   expect(callbackUrl.search).toBe("?source=bind");
   expect(callbackUrl.searchParams.has("buzz_bind")).toBe(false);
   expect(callbackUrl.hash).toMatch(/^#buzz_bind=v1\.[A-Za-z0-9_-]+$/);
+});
+
+test("waits for Run402 completion, confirms it, and closes automatically", async ({
+  page,
+}) => {
+  await openNostrBind(page, RESULT_REQUEST, {
+    nostrBindResultResponses: [{ status: "pending" }, { status: "completed" }],
+  });
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    RESULT_REQUEST.verificationCode,
+  );
+
+  await expect(
+    page.getByRole("heading", { name: "Waiting for Run402 confirmation" }),
+  ).toBeVisible();
+  await expect(page.getByText("Ownership is not confirmed yet.")).toBeVisible();
+  await expect.poll(() => resultCommandPayloads(page)).toHaveLength(2);
+  await expect(
+    page.getByRole("heading", { name: "You’re now a Run402 co-owner" }),
+  ).toBeVisible();
+  await expect(page.getByText("Ownership is confirmed.")).toBeVisible();
+  await expect(page.getByTestId("nostr-bind-page")).toBeHidden({
+    timeout: 3_000,
+  });
+});
+
+test("keeps a wrong-owner result open with a specific recovery step", async ({
+  page,
+}) => {
+  await openNostrBind(page, RESULT_REQUEST, {
+    nostrBindResultResponses: [
+      {
+        status: "action_required",
+        resultCode: "BUZZ_OWNER_PROOF_INVALID",
+      },
+    ],
+  });
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    RESULT_REQUEST.verificationCode,
+  );
+
+  await expect(
+    page.getByRole("heading", { name: "Run402 needs another step" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Run402 could not match this signature to the linked Buzz owner.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Make sure Buzz is using the identity named in Run402/),
+  ).toBeVisible();
+  await page.waitForTimeout(1_100);
+  await expect(page.getByTestId("nostr-bind-page")).toBeVisible();
+});
+
+for (const [status, heading] of [
+  ["expired", "This approval expired"],
+  ["cancelled", "This handoff was cancelled"],
+] as const) {
+  test(`keeps an authoritative ${status} result open`, async ({ page }) => {
+    await openNostrBind(page, RESULT_REQUEST, {
+      nostrBindResultResponses: [{ status }],
+    });
+    await pasteCode(
+      page.getByTestId("nostr-bind-code-digit-1"),
+      RESULT_REQUEST.verificationCode,
+    );
+
+    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    await expect(page.getByTestId("nostr-bind-page")).toBeVisible();
+    await expect(
+      page.getByText(
+        "Closing Buzz does not cancel, retry, or change anything in Run402.",
+      ),
+    ).toBeVisible();
+  });
+}
+
+test("shows uncertainty instead of success for an unrecognized result", async ({
+  page,
+}) => {
+  await openNostrBind(page, RESULT_REQUEST, {
+    nostrBindResultResponses: [{ status: "completed", extra: true }],
+  });
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    RESULT_REQUEST.verificationCode,
+  );
+
+  await expect(
+    page.getByRole("heading", {
+      name: "Couldn’t confirm the Run402 result",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/does not prove that ownership succeeded/),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-bind-page")).toBeVisible();
+});
+
+test("ignores a completed result from a superseded approval", async ({
+  page,
+}) => {
+  await openNostrBind(page, RESULT_REQUEST, {
+    nostrBindResultDelayMs: 300,
+    nostrBindResultResponses: [{ status: "completed" }],
+  });
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    RESULT_REQUEST.verificationCode,
+  );
+  await expect.poll(() => resultCommandPayloads(page)).toHaveLength(1);
+
+  const nextRequest = {
+    ...RESULT_REQUEST,
+    challengeId: "550e8400-e29b-41d4-a716-446655440099",
+    verificationCode: "654321",
+  };
+  await emitNostrBind(page, nextRequest);
+  await page.waitForTimeout(400);
+
+  await expect(page.getByTestId("nostr-bind-code-step")).toBeVisible();
+  await expect(page.getByTestId("nostr-bind-code-digit-1")).toHaveValue("");
+  await expect(
+    page.getByRole("heading", { name: "You’re now a Run402 co-owner" }),
+  ).toBeHidden();
 });
 
 test("opens the manual fallback when returning to the browser fails", async ({
