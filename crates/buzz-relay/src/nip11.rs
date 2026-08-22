@@ -479,8 +479,7 @@ mod tests {
     fn nip43_not_in_static_supported_nips() {
         // NIP-43 advertisement is conditional on runtime config (stable signing
         // key + membership enforcement) and must NOT live in the static list.
-        // The desktop pairing probe keys off this NIP — advertising it on
-        // open relays misroutes pairing peers to a non-existent /pair sidecar.
+        // Pairing endpoint discovery is independent and uses pairing_relay_url.
         assert!(
             !SUPPORTED_NIPS.contains(&NIP_RELAY_MEMBERSHIP),
             "NIP-43 must be advertised only when advertise_nip43=true is passed to RelayInfo::build"
@@ -508,13 +507,17 @@ mod tests {
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
 
-    /// Membership-enforcing relay: both `self` and NIP-43 advertised.
+    /// Membership enforcement advertises `self` and NIP-43, but does not
+    /// invent a pairing endpoint when none was configured.
     #[test]
-    fn build_membership_relay_advertises_self_and_nip43() {
+    fn build_membership_relay_advertises_nip43_without_inventing_pairing_url() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
         let info = RelayInfo::build(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
+        assert!(info.pairing_relay_url.is_none());
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert!(json.get("pairing_relay_url").is_none());
     }
 
     /// NIP-43 events are verified against `self`; advertising NIP-43 without

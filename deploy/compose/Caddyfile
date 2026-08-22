@@ -1,5 +1,5 @@
 {$BUZZ_DOMAIN} {
-  encode zstd gzip
+	encode zstd gzip
 
-  reverse_proxy relay:3000
+	reverse_proxy gateway:3000
 }

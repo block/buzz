@@ -1,11 +1,11 @@
 services:
-  relay:
+  gateway:
     ports: !reset []
 
   caddy:
     image: caddy:2-alpine
     depends_on:
-      relay:
+      gateway:
         condition: service_healthy
     environment:
       BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}
