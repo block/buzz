@@ -34,6 +34,8 @@ pub enum MediaError {
     TokenExpired,
     #[error("timestamp out of window")]
     TimestampOutOfWindow,
+    #[error("storage backend rejected the range request (HTTP {code})")]
+    RangeUnsupported { code: u16 },
     #[error("storage error: {0}")]
     StorageError(String),
     #[error("internal error")]
@@ -160,6 +162,13 @@ impl IntoResponse for MediaError {
             | Self::InvalidVideo
             | Self::InvalidImage
             | Self::MetadataForbidden => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            Self::RangeUnsupported { .. } => {
+                // Reaching the response layer means the bounded fallback in
+                // `serve_blob_for_tenant` declined to run (object too large);
+                // the range itself may be fine, the backend just refused it.
+                tracing::error!(error = %self, "media storage error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+            }
             Self::Io(_) | Self::StorageError(_) | Self::Internal => {
                 tracing::error!(error = %self, "media storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
