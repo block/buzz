@@ -1,4 +1,7 @@
-use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
+use buzz_core::agent_handoff::{
+    build_agent_handoff_event, decrypt_agent_handoff, AgentHandoffPayload, HANDOFF_VERSION,
+};
+use buzz_core::kind::{KIND_AGENT_HANDOFF, KIND_IA_ARCHIVED_LIST};
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
 use nostr::PublicKey;
 use serde_json::json;
@@ -6,8 +9,8 @@ use serde_json::json;
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, validate_hex64};
-use crate::{AgentsCmd, RespondToArg};
+use crate::validate::{parse_event_id, read_file_or_stdin, read_or_stdin, validate_hex64};
+use crate::{AgentHandoffCmd, AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
@@ -84,6 +87,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             println!("{output}");
             Ok(())
         }
+
+        AgentsCmd::Handoff(command) => dispatch_handoff(command, client).await,
 
         AgentsCmd::Archive {
             target_pubkey,
@@ -165,6 +170,124 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
 
         AgentsCmd::Archived => cmd_archived(client).await,
     }
+}
+
+async fn dispatch_handoff(command: AgentHandoffCmd, client: &BuzzClient) -> Result<(), CliError> {
+    match command {
+        AgentHandoffCmd::Send {
+            to,
+            title,
+            summary,
+            history_file,
+        } => {
+            validate_hex64(&to)?;
+            let recipient = PublicKey::from_hex(&to)
+                .map_err(|e| CliError::Usage(format!("invalid --to pubkey: {e}")))?;
+            if recipient == client.keys().public_key() {
+                return Err(CliError::Usage(
+                    "handoff recipient must be a different Agent".into(),
+                ));
+            }
+            let payload = AgentHandoffPayload {
+                version: HANDOFF_VERSION,
+                title,
+                summary,
+                history: read_file_or_stdin(&history_file)?,
+            };
+            let event = build_agent_handoff_event(client.keys(), &recipient, &payload)
+                .map_err(|e| CliError::Usage(format!("invalid handoff: {e}")))?;
+            let event_id = event.id.to_hex();
+            let raw = client.submit_event(event).await?;
+            let response: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            println!(
+                "{}",
+                json!({
+                    "event_id": event_id,
+                    "accepted": response.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "to": recipient.to_hex(),
+                    "title": payload.title,
+                })
+            );
+            Ok(())
+        }
+        AgentHandoffCmd::List { limit } => {
+            if limit == 0 || limit > 500 {
+                return Err(CliError::Usage("--limit must be between 1 and 500".into()));
+            }
+            let me = client.keys().public_key().to_hex();
+            let filter = json!({
+                "kinds": [KIND_AGENT_HANDOFF],
+                "#p": [me],
+                "limit": limit,
+            });
+            let events = parse_handoff_events(&client.query(&filter).await?)?;
+            let mut records = Vec::new();
+            for event in events {
+                if event.verify().is_err() {
+                    continue;
+                }
+                let Ok(payload) = decrypt_agent_handoff(client.keys(), &event) else {
+                    continue;
+                };
+                records.push(json!({
+                    "event_id": event.id.to_hex(),
+                    "from": event.pubkey.to_hex(),
+                    "created_at": event.created_at.as_secs(),
+                    "title": payload.title,
+                    "summary": payload.summary,
+                }));
+            }
+            records.sort_by_key(|record| {
+                std::cmp::Reverse(record["created_at"].as_u64().unwrap_or_default())
+            });
+            println!("{}", serde_json::Value::Array(records));
+            Ok(())
+        }
+        AgentHandoffCmd::Show { event_id } => {
+            parse_event_id(&event_id)?;
+            let me = client.keys().public_key().to_hex();
+            let filter = json!({
+                "kinds": [KIND_AGENT_HANDOFF],
+                "ids": [event_id],
+                "#p": [me],
+                "limit": 1,
+            });
+            let mut events = parse_handoff_events(&client.query(&filter).await?)?;
+            let event = events.pop().ok_or_else(|| {
+                CliError::Other("handoff not found or not addressed to this Agent".into())
+            })?;
+            event
+                .verify()
+                .map_err(|e| CliError::Other(format!("handoff signature is invalid: {e}")))?;
+            let payload = decrypt_agent_handoff(client.keys(), &event)
+                .map_err(|e| CliError::Other(format!("failed to decrypt handoff: {e}")))?;
+            println!(
+                "{}",
+                json!({
+                    "event_id": event.id.to_hex(),
+                    "from": event.pubkey.to_hex(),
+                    "created_at": event.created_at.as_secs(),
+                    "title": payload.title,
+                    "summary": payload.summary,
+                    "history": payload.history,
+                })
+            );
+            Ok(())
+        }
+    }
+}
+
+fn parse_handoff_events(raw: &str) -> Result<Vec<nostr::Event>, CliError> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| CliError::Other(format!("relay returned invalid JSON: {e}")))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| CliError::Other("relay response is not an array".into()))?;
+    Ok(array
+        .iter()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect())
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by

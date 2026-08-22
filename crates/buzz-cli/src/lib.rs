@@ -297,6 +297,9 @@ pub enum AgentsCmd {
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
+    /// Send and read encrypted Agent handoff records
+    #[command(subcommand)]
+    Handoff(AgentHandoffCmd),
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
         after_help = "Auth flow: when target != signer, the CLI fetches the target's kind:0 and \
@@ -366,6 +369,39 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+}
+
+#[derive(Subcommand)]
+pub enum AgentHandoffCmd {
+    /// Send a curated task history to another Agent
+    #[command(
+        after_help = "Example:\n  buzz agents handoff send --to <AGENT_PUBKEY> --title \"Continue file previews\" --summary \"Core implementation is complete\" --history-file handoff.md\n  git diff | buzz agents handoff send --to <AGENT_PUBKEY> --title \"Review current changes\" --history-file -"
+    )]
+    Send {
+        /// Receiving Agent pubkey (64-hex)
+        #[arg(long)]
+        to: String,
+        /// Short task title
+        #[arg(long)]
+        title: String,
+        /// Optional quick summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Markdown history file, or '-' to read stdin
+        #[arg(long)]
+        history_file: String,
+    },
+    /// List handoffs addressed to this Agent
+    List {
+        /// Maximum number of recent handoffs
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Show and decrypt one handoff addressed to this Agent
+    Show {
+        /// Handoff event ID
+        event_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2176,6 +2212,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "handoff",
                 "unarchive"
             ]
         );
@@ -2314,7 +2351,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

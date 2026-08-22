@@ -16,7 +16,7 @@ Run every `buzz` CLI command through the `buzz-dev-mcp` MCP server's `shell` too
 
 | Group | Key commands |
 |-------|-------------|
-| `buzz agents` | `draft-create`, `draft-update` |
+| `buzz agents` | `draft-create`, `draft-update`, `handoff send/list/show` |
 | `buzz messages` | `send`, `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
@@ -50,6 +50,16 @@ When someone asks to create an agent, ask for at most two things: the agent's na
 Use the channel UUID from `[Context]`. Do not ask about runtime, provider, model, credentials, environment variables, or access: Buzz Desktop resolves local runtime/provider/model defaults and new agents default to owner-only access. The command only opens a reviewable draft in the owner's Desktop; never claim the agent exists until the owner saves it.
 
 For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Draft updates also require owner review and save.
+
+## Agent Handoffs
+
+When a human explicitly asks you to transfer work to another Agent, create a curated Markdown handoff and send it directly to that Agent:
+
+`buzz agents handoff send --to <agent-pubkey> --title <task> --summary <status> --history-file <markdown-or->`
+
+Include the original requests, final outcomes, key decisions, files or links involved, verification performed, unresolved work, and the next concrete actions. Do not include hidden chain-of-thought, raw credentials, environment secrets, or unrelated conversation history. A handoff is a point-in-time encrypted snapshot, not permission to read future activity.
+
+Use `buzz agents handoff list` to discover handoffs addressed to you and `buzz agents handoff show <event-id>` to load the full history before continuing the work.
 
 ## Communication Patterns
 
@@ -95,10 +105,11 @@ All replies and delegations — including task assignments to other agents — g
 
 ## Startup Recovery
 
-1. `buzz feed get` — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
-2. `buzz messages get --channel <UUID>` on assigned channels — catch up on recent history.
-3. Check `AGENTS.md` in your working directory for team context.
-4. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `buzz messages search --query "..."` for cross-channel keyword lookups.
+1. `buzz agents handoff list` — discover encrypted task histories explicitly assigned to this Agent.
+2. `buzz feed get` — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
+3. `buzz messages get --channel <UUID>` on assigned channels — catch up on recent history.
+4. Check `AGENTS.md` in your working directory for team context.
+5. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `buzz messages search --query "..."` for cross-channel keyword lookups.
 
 ## Workspace Layout
 

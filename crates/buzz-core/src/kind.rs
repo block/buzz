@@ -93,6 +93,12 @@ pub const KIND_AGENT_PROFILE: u32 = 10100;
 /// `docs/nips/NIP-AE.md` and [`crate::engram`].
 pub const KIND_AGENT_ENGRAM: u32 = 30174;
 
+/// NIP-AH: durable agent-to-agent handoff record.
+///
+/// Sender-authored and NIP-44 encrypted to the single receiving agent named
+/// by its `p` tag. Relay reads are recipient-gated, including event-id lookup.
+pub const KIND_AGENT_HANDOFF: u32 = 44201;
+
 /// NIP-ER: Event Reminder (parameterized replaceable, author-only).
 ///
 /// Encrypted, author-only reminder addressed by `(pubkey, kind, d_tag)`. The
@@ -139,7 +145,11 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_AGENT_HANDOFF,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -166,6 +176,7 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    KIND_AGENT_HANDOFF,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -651,6 +662,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FILE_METADATA,
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
+    KIND_AGENT_HANDOFF,
     KIND_EVENT_REMINDER,
     KIND_PERSONA,
     KIND_TEAM,

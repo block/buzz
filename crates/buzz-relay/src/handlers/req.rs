@@ -7,8 +7,9 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_HANDOFF,
+    KIND_AGENT_TURN_METRIC, KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS,
+    SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -1078,7 +1079,7 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
             ks.iter().any(|kind| {
                 let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
+                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC || k == KIND_AGENT_HANDOFF
             })
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -1685,6 +1686,32 @@ mod tests {
             p_gated_filters_authorized(&[owner_p_and_ids], authed),
             "kind:44200 with matching #p and ids must be allowed"
         );
+    }
+
+    #[test]
+    fn agent_handoff_requires_recipient_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let recipient = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let event_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_HANDOFF as u16);
+
+        let ids_only = Filter::new()
+            .kind(kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap());
+        assert!(!p_gated_filters_authorized(&[ids_only], recipient));
+
+        let wrong_recipient = Filter::new()
+            .kind(kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [other]);
+        assert!(!p_gated_filters_authorized(&[wrong_recipient], recipient));
+
+        let addressed = Filter::new()
+            .kind(kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [recipient]);
+        assert!(p_gated_filters_authorized(&[addressed], recipient));
     }
 
     #[test]

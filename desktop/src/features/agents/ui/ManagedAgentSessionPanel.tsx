@@ -38,6 +38,7 @@ import {
   useArchivedChannelEvents,
 } from "./useObserverEvents";
 import { buildTranscriptState } from "./agentSessionTranscript";
+import { AgentHandoffDialog } from "./AgentHandoffDialog";
 
 type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
@@ -139,6 +140,8 @@ export function ManagedAgentSessionPanel({
     >
       {showHeader ? (
         <SessionHeader
+          agent={agent}
+          history={formatHandoffHistory(displayTranscript)}
           connectionState={connectionState}
           eventCount={displayEvents.length}
           hasObserver={hasObserver}
@@ -171,11 +174,15 @@ export function ManagedAgentSessionPanel({
 }
 
 function SessionHeader({
+  agent,
+  history,
   connectionState,
   eventCount,
   hasObserver,
   latestSessionId,
 }: {
+  agent: Pick<ManagedAgent, "pubkey" | "name">;
+  history: string;
   connectionState: ConnectionState;
   eventCount: number;
   hasObserver: boolean;
@@ -198,11 +205,23 @@ function SessionHeader({
             : "Restart this local agent to attach the observer feed."}
         </p>
       </div>
-      <Badge className="w-fit font-mono" variant="outline">
-        {eventCount} event{eventCount === 1 ? "" : "s"}
-      </Badge>
+      <div className="flex items-center gap-2">
+        <Badge className="w-fit font-mono" variant="outline">
+          {eventCount} event{eventCount === 1 ? "" : "s"}
+        </Badge>
+        <AgentHandoffDialog agent={agent} history={history} />
+      </div>
     </div>
   );
+}
+
+function formatHandoffHistory(transcript: TranscriptItem[]) {
+  if (transcript.length === 0) {
+    return "## Handoff\n\nNo transcript is available yet. Add the current status and next actions here.\n";
+  }
+  return transcript
+    .map((item, index) => `## ${index + 1}. ${item.type}\n\n${JSON.stringify(item, null, 2)}`)
+    .join("\n\n");
 }
 
 function SessionBody({

@@ -12,8 +12,9 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 }
 
 /// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
+/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY`,
+/// `KIND_AGENT_TURN_METRIC`, and `KIND_AGENT_HANDOFF`: the reader MUST equal
+/// the event's `#p` tag
 /// (owner). Returns `true` for every other kind.
 ///
 /// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
@@ -22,7 +23,10 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if kind != crate::kind::KIND_DM_VISIBILITY
+        && kind != crate::kind::KIND_AGENT_TURN_METRIC
+        && kind != crate::kind::KIND_AGENT_HANDOFF
+    {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -296,5 +300,29 @@ mod tests {
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
         );
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_agent_handoff_by_recipient() {
+        let sender = Keys::generate();
+        let recipient = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let unrelated = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let handoff = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_AGENT_HANDOFF as u16),
+            "encrypted-payload",
+        )
+        .tags([
+            Tag::parse(["p", recipient]).unwrap(),
+            Tag::parse(["handoff", "1"]).unwrap(),
+        ])
+        .sign_with_keys(&sender)
+        .expect("sign");
+
+        assert!(reader_authorized_for_event(&handoff, recipient));
+        assert!(!reader_authorized_for_event(&handoff, unrelated));
+        assert!(!reader_authorized_for_event(
+            &handoff,
+            &sender.public_key().to_hex()
+        ));
     }
 }

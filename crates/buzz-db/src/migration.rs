@@ -625,7 +625,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1044,6 +1044,8 @@ mod tests {
         migrations.sort_by_key(|migration| migration.version);
 
         assert_eq!(migrations[30].version, 31);
+        assert_eq!(migrations[31].version, 32);
+        assert!(migrations[31].sql.as_str().contains("44201"));
         let sql = migrations[30].sql.as_str();
         assert!(sql.contains("ALTER TABLE workflow_runs ADD COLUMN error_code TEXT"));
         assert!(sql.contains("SET error_code = 'legacy_unclassified'"));
