@@ -763,7 +763,7 @@ pub fn spawn_agent_child(
         command.env_remove("BUZZ_AUTH_TAG");
     }
 
-    super::activity_ledger_env::configure(&mut command, record, owner_hex);
+    super::activity_ledger_env::configure(&mut command, record, owner_hex, &effective_relay_url);
     // Inbound author gate: who is this agent allowed to respond to?
     // Validation is strict here — a malformed allowlist on disk fails before
     // we spawn anything (the harness would also reject it, but we'd rather

@@ -12,6 +12,7 @@ const ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE: &str = "buzz.activity-ledger.today
 const ACTIVITY_LEDGER_TODAY_PATH_ENV: &str = "BUZZ_ACTIVITY_LEDGER_TODAY_PATH";
 const ACTIVITY_LEDGER_TODAY_CAPABILITY_ENV: &str = "BUZZ_ACTIVITY_LEDGER_TODAY_CAPABILITY";
 const ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY_ENV: &str = "BUZZ_ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY";
+const ACTIVITY_LEDGER_TODAY_RELAY_URL_ENV: &str = "BUZZ_ACTIVITY_LEDGER_TODAY_RELAY_URL";
 const ACTIVITY_LEDGER_MAX_LIFETIME_SECS: u64 = 24 * 60 * 60;
 const ACTIVITY_LEDGER_MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 const ACTIVITY_LEDGER_MAX_FUTURE_GENERATED_AT_SECS: u64 = 300;
@@ -23,6 +24,7 @@ pub fn activity_ledger_today_enabled() -> bool {
     env_non_empty(ACTIVITY_LEDGER_TODAY_PATH_ENV).is_some()
         && env_non_empty(ACTIVITY_LEDGER_TODAY_CAPABILITY_ENV).is_some()
         && env_non_empty(ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY_ENV).is_some()
+        && env_non_empty(ACTIVITY_LEDGER_TODAY_RELAY_URL_ENV).is_some()
 }
 
 pub fn activity_ledger_today_def() -> ToolDef {
@@ -78,6 +80,11 @@ pub async fn call_activity_ledger_today(arguments: &Value, max_text_bytes: usize
             "{ACTIVITY_LEDGER_TODAY_TOOL}: missing {ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY_ENV}"
         ));
     };
+    let Some(expected_relay_url) = env_non_empty(ACTIVITY_LEDGER_TODAY_RELAY_URL_ENV) else {
+        return error_result(&format!(
+            "{ACTIVITY_LEDGER_TODAY_TOOL}: missing {ACTIVITY_LEDGER_TODAY_RELAY_URL_ENV}"
+        ));
+    };
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -88,6 +95,7 @@ pub async fn call_activity_ledger_today(arguments: &Value, max_text_bytes: usize
             &path,
             &capability,
             &expected_owner_pubkey,
+            &expected_relay_url,
             &arguments,
             now_secs,
         )
@@ -132,6 +140,7 @@ fn read_activity_ledger_today(
     path: &str,
     capability: &str,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
     arguments: &Value,
     now_secs: u64,
 ) -> Result<String, String> {
@@ -149,6 +158,7 @@ fn read_activity_ledger_today(
         &root,
         capability,
         expected_owner_pubkey,
+        expected_relay_url,
         &query,
         now_secs,
     )?;
@@ -325,6 +335,7 @@ fn filter_activity_ledger_snapshot(
     root: &Value,
     capability: &str,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
     query: &ActivityLedgerQuery,
     now_secs: u64,
 ) -> Result<Value, String> {
@@ -342,6 +353,12 @@ fn filter_activity_ledger_snapshot(
     if owner_pubkey != expected_owner_pubkey {
         return Err(format!(
             "{ACTIVITY_LEDGER_TODAY_TOOL}: ownerPubkey mismatch: expected {expected_owner_pubkey:?}, got {owner_pubkey:?}"
+        ));
+    }
+    let relay_url = required_string_field(object, "relayUrl")?;
+    if relay_url != expected_relay_url {
+        return Err(format!(
+            "{ACTIVITY_LEDGER_TODAY_TOOL}: relayUrl mismatch: expected {expected_relay_url:?}, got {relay_url:?}"
         ));
     }
     let generated_at = required_u64_field(object, "generatedAt")?;
@@ -377,6 +394,7 @@ fn filter_activity_ledger_snapshot(
     verify_activity_ledger_snapshot_signature(
         object,
         owner_pubkey,
+        relay_url,
         generated_at,
         expires_at,
         snapshot_sha256,
@@ -434,6 +452,7 @@ fn filter_activity_ledger_snapshot(
         "sourceSchema": ACTIVITY_LEDGER_TODAY_SCHEMA,
         "day": day,
         "ownerPubkey": owner_pubkey,
+        "relayUrl": relay_url,
         "generatedAt": generated_at,
         "expiresAt": expires_at,
         "capability": capability,
@@ -624,6 +643,7 @@ fn is_hex_64(value: &str) -> bool {
 fn verify_activity_ledger_snapshot_signature(
     object: &Map<String, Value>,
     owner_pubkey: &str,
+    relay_url: &str,
     generated_at: u64,
     expires_at: u64,
     snapshot_sha256: &str,
@@ -633,6 +653,7 @@ fn verify_activity_ledger_snapshot_signature(
     let payload_json = canonical_activity_ledger_snapshot_payload_json(
         object,
         owner_pubkey,
+        relay_url,
         generated_at,
         expires_at,
     )?;
@@ -679,6 +700,7 @@ fn verify_activity_ledger_snapshot_signature(
 fn canonical_activity_ledger_snapshot_payload_json(
     object: &Map<String, Value>,
     owner_pubkey: &str,
+    relay_url: &str,
     generated_at: u64,
     expires_at: u64,
 ) -> Result<String, String> {
@@ -687,6 +709,7 @@ fn canonical_activity_ledger_snapshot_payload_json(
     struct CanonicalPayload<'a> {
         schema: &'static str,
         owner_pubkey: &'a str,
+        relay_url: &'a str,
         generated_at: u64,
         expires_at: u64,
         capability: &'static str,
@@ -704,6 +727,7 @@ fn canonical_activity_ledger_snapshot_payload_json(
     serde_json::to_string(&CanonicalPayload {
         schema: ACTIVITY_LEDGER_TODAY_SCHEMA,
         owner_pubkey,
+        relay_url,
         generated_at,
         expires_at,
         capability: ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE,

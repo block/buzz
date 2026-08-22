@@ -541,7 +541,8 @@ pub struct ArchiveSyncState {
 
 struct RunningSync {
     /// Identity + relay this task is bound to. A start request for the same
-    /// scope is a no-op, so a renderer remount does not churn the socket.
+    /// scope is a no-op only while this task is healthy, so a renderer remount
+    /// cannot mistake a timed-out teardown for success.
     scope: (String, String),
     cancel: CancellationToken,
     reload: Arc<Notify>,
@@ -692,21 +693,29 @@ impl ArchiveSyncState {
         cancel: CancellationToken,
         reload: Arc<Notify>,
         completion: Arc<SyncCompletion>,
-    ) -> Option<ArchiveOwnership<'_>> {
+    ) -> Result<Option<ArchiveOwnership<'_>>, String> {
         let mut latest = self.latest.lock().await;
         if mark <= *latest {
-            return None;
+            return Ok(None);
         }
         *latest = mark;
 
         let mut running = self.running.lock().await;
-        // A same-scope remount keeps its socket: reinstalling would tear down a
-        // healthy relay session to replace it with an identical one.
-        if running
-            .as_ref()
-            .is_some_and(|current| current.scope == scope)
-        {
-            return None;
+        // A same-scope remount keeps a healthy socket. A finished task may be
+        // replaced before its cleanup wins this lock. A cancelled task that
+        // has not finished is still draining its durable queue, so neither
+        // race it nor report a healthy no-op.
+        if let Some(current) = running.as_ref().filter(|current| current.scope == scope) {
+            if current.completion.finished.load(Ordering::Acquire) {
+                running.take();
+            } else if current.cancel.is_cancelled() {
+                return Err(
+                    "archive sync for this owner and relay is still stopping; retry start after teardown"
+                        .into(),
+                );
+            } else {
+                return Ok(None);
+            }
         }
         if let Some(previous) = running.take() {
             previous.cancel.cancel();
@@ -717,10 +726,10 @@ impl ArchiveSyncState {
             reload,
             completion,
         });
-        Some(ArchiveOwnership {
+        Ok(Some(ArchiveOwnership {
             _latest: latest,
             _running: running,
-        })
+        }))
     }
 
     /// Releases ownership for a stop under `(epoch, lease)`, cancelling the
@@ -825,7 +834,7 @@ pub async fn start_archive_sync(
             Arc::clone(&reload),
             Arc::clone(&completion),
         )
-        .await
+        .await?
     else {
         return Ok(());
     };

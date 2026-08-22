@@ -305,6 +305,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
       !receiptRef.trim() ||
       !verificationSources.hasReceiptedEvidence ||
       !verificationSources.hasCorrelationEvidence ||
+      !verificationSources.hasSupportedSourceSet ||
       saving
     ) {
       return;
@@ -395,6 +396,15 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
               activity before verifying.
             </p>
           ) : null}
+          {!verificationSources.hasSupportedSourceSet ? (
+            <p className="text-xs text-destructive">
+              This journal has {verificationSources.overflowCount} more signed
+              evidence frame
+              {verificationSources.overflowCount === 1 ? "" : "s"} than the
+              verification limit. Split the work into a new mission before
+              recording owner verification.
+            </p>
+          ) : null}
           <div className="flex gap-2">
             <Button
               size="xs"
@@ -402,7 +412,8 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
                 saving ||
                 !receiptRef.trim() ||
                 !verificationSources.hasReceiptedEvidence ||
-                !verificationSources.hasCorrelationEvidence
+                !verificationSources.hasCorrelationEvidence ||
+                !verificationSources.hasSupportedSourceSet
               }
               onClick={saveVerification}
             >

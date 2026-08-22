@@ -567,6 +567,7 @@ async fn start_half(
             completion,
         )
         .await
+        .expect("lifecycle start is available")
         .is_some()
         .then_some(cancel)
 }
@@ -676,29 +677,6 @@ async fn ordered_start_and_stop_still_take_effect() {
 
     stop_half(&state, (1, 2)).await;
     assert!(!is_running(&state).await, "the newer stop must take effect");
-}
-
-/// A same-scope remount that reaches the backend in order is still a no-op at
-/// the socket, so the lease does not undo the idempotence the port relies on.
-#[tokio::test]
-async fn a_same_scope_restart_does_not_churn_the_running_task() {
-    let state = ArchiveSyncState::default();
-
-    let first = start_half(&state, (1, 1), SCOPE)
-        .await
-        .expect("first start");
-    assert!(
-        start_half(&state, (1, 2), SCOPE).await.is_none(),
-        "a newer start for the same scope must not reinstall"
-    );
-    assert!(
-        !first.is_cancelled(),
-        "the original task must not be torn down"
-    );
-    assert!(
-        running_is(&state, &first).await,
-        "the original task must still be the installed one"
-    );
 }
 
 /// An identity or relay change must replace the task rather than leaving the
@@ -927,6 +905,7 @@ async fn a_newer_start_cannot_claim_while_the_owner_holds_its_token() {
             first_completion,
         )
         .await
+        .expect("first lifecycle start is available")
         .expect("the first start claims ownership");
 
     let second = CancellationToken::new();
@@ -947,6 +926,7 @@ async fn a_newer_start_cannot_claim_while_the_owner_holds_its_token() {
                     completion,
                 )
                 .await
+                .expect("competing lifecycle start is available")
                 .is_some();
             claimed.store(won, std::sync::atomic::Ordering::SeqCst);
         }

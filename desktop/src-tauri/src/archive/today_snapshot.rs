@@ -25,6 +25,7 @@ const MAX_LIFETIME_SECS: i64 = 24 * 60 * 60;
 pub struct UnsignedOwnerTodaySnapshot {
     pub schema: String,
     pub owner_pubkey: String,
+    pub relay_url: String,
     pub generated_at: i64,
     pub expires_at: i64,
     pub capability: String,
@@ -47,16 +48,18 @@ pub struct OwnerTodaySnapshot {
 pub struct TodaySnapshotReceipt {
     pub path: String,
     pub owner_pubkey: String,
+    pub relay_url: String,
     pub generated_at: i64,
     pub expires_at: i64,
     pub byte_length: usize,
     pub sha256: String,
 }
 
-fn snapshot_path(nest_dir: &Path, owner_pubkey: &str) -> PathBuf {
-    nest_dir
-        .join("archive")
-        .join(format!("activity-ledger-today-{owner_pubkey}.json"))
+pub(crate) fn snapshot_path(nest_dir: &Path, owner_pubkey: &str, relay_url: &str) -> PathBuf {
+    let relay_scope = hex::encode(Sha256::digest(relay_url.as_bytes()));
+    nest_dir.join("archive").join(format!(
+        "activity-ledger-today-{owner_pubkey}-{relay_scope}.json"
+    ))
 }
 
 fn validate_owner_pubkey(owner_pubkey: &str) -> Result<(), String> {
@@ -68,6 +71,14 @@ fn validate_owner_pubkey(owner_pubkey: &str) -> Result<(), String> {
         return Err("Today snapshot ownerPubkey must be lowercase 64-character hex".into());
     }
     Ok(())
+}
+
+fn normalize_relay_url(relay_url: &str) -> Result<String, String> {
+    if relay_url.is_empty() || relay_url.len() > 2_048 {
+        return Err("Today snapshot relayUrl must contain between 1 and 2048 bytes".into());
+    }
+    buzz_core_pkg::relay::normalize_relay_url(relay_url)
+        .map_err(|error| format!("Today snapshot relayUrl is invalid: {error}"))
 }
 
 fn validate_hex(value: &str, label: &str, expected_len: usize) -> Result<(), String> {
@@ -121,6 +132,7 @@ fn reject_identity_secret_material(value: &serde_json::Value) -> Result<(), Stri
 fn parse_unsigned_snapshot(
     snapshot_json: &str,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
     now: i64,
     require_unexpired: bool,
 ) -> Result<UnsignedOwnerTodaySnapshot, String> {
@@ -130,7 +142,8 @@ fn parse_unsigned_snapshot(
         ));
     }
     validate_owner_pubkey(expected_owner_pubkey)?;
-    let snapshot: UnsignedOwnerTodaySnapshot = serde_json::from_str(snapshot_json)
+    let expected_relay_url = normalize_relay_url(expected_relay_url)?;
+    let mut snapshot: UnsignedOwnerTodaySnapshot = serde_json::from_str(snapshot_json)
         .map_err(|error| format!("parse Today snapshot: {error}"))?;
     if snapshot.schema != TODAY_SNAPSHOT_SCHEMA {
         return Err("unsupported Today snapshot schema".into());
@@ -141,6 +154,11 @@ fn parse_unsigned_snapshot(
     if snapshot.owner_pubkey != expected_owner_pubkey {
         return Err("Today snapshot owner does not match the active identity".into());
     }
+    let snapshot_relay_url = normalize_relay_url(&snapshot.relay_url)?;
+    if snapshot_relay_url != expected_relay_url {
+        return Err("Today snapshot relay does not match the active workspace".into());
+    }
+    snapshot.relay_url = expected_relay_url;
     if snapshot.generated_at < 0 || snapshot.expires_at < 0 {
         return Err("Today snapshot timestamps must be non-negative".into());
     }
@@ -251,6 +269,7 @@ fn signed_event_json(snapshot: &OwnerTodaySnapshot) -> Result<String, String> {
 fn parse_and_validate_signed_snapshot(
     snapshot_json: &str,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
     now: i64,
     require_unexpired: bool,
 ) -> Result<OwnerTodaySnapshot, String> {
@@ -263,7 +282,13 @@ fn parse_and_validate_signed_snapshot(
     let snapshot: OwnerTodaySnapshot = serde_json::from_str(snapshot_json)
         .map_err(|error| format!("parse Today snapshot: {error}"))?;
     let payload_json = canonical_payload_json(&snapshot.payload)?;
-    parse_unsigned_snapshot(&payload_json, expected_owner_pubkey, now, require_unexpired)?;
+    parse_unsigned_snapshot(
+        &payload_json,
+        expected_owner_pubkey,
+        expected_relay_url,
+        now,
+        require_unexpired,
+    )?;
     validate_hex(&snapshot.snapshot_sha256, "snapshotSha256", 64)?;
     validate_hex(&snapshot.event_id, "eventId", 64)?;
     validate_hex(&snapshot.signature, "signature", 128)?;
@@ -307,10 +332,17 @@ pub fn write_owner_today_snapshot(
     nest_dir: &Path,
     owner_keys: &Keys,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
     snapshot_json: &str,
     now: i64,
 ) -> Result<TodaySnapshotReceipt, String> {
-    let snapshot = parse_unsigned_snapshot(snapshot_json, expected_owner_pubkey, now, true)?;
+    let snapshot = parse_unsigned_snapshot(
+        snapshot_json,
+        expected_owner_pubkey,
+        expected_relay_url,
+        now,
+        true,
+    )?;
     let signed_snapshot = build_signed_snapshot(owner_keys, snapshot)?;
     let canonical_json = serde_json::to_string(&signed_snapshot)
         .map_err(|error| format!("serialize signed Today snapshot: {error}"))?;
@@ -319,7 +351,11 @@ pub fn write_owner_today_snapshot(
         .map_err(|error| format!("create Today snapshot directory: {error}"))?;
     enforce_private_permissions(&archive_dir, true)?;
 
-    let destination = snapshot_path(nest_dir, expected_owner_pubkey);
+    let destination = snapshot_path(
+        nest_dir,
+        expected_owner_pubkey,
+        &signed_snapshot.payload.relay_url,
+    );
     // Keep the temporary file in the destination directory. Besides making
     // replacement atomic, this rules out Windows' cross-volume copy/delete
     // path; file contents are synced below before the safe replace-existing
@@ -349,6 +385,7 @@ pub fn write_owner_today_snapshot(
     Ok(TodaySnapshotReceipt {
         path: destination.to_string_lossy().into_owned(),
         owner_pubkey: signed_snapshot.payload.owner_pubkey,
+        relay_url: signed_snapshot.payload.relay_url,
         generated_at: signed_snapshot.payload.generated_at,
         expires_at: signed_snapshot.payload.expires_at,
         byte_length: canonical_json.len(),
@@ -359,12 +396,20 @@ pub fn write_owner_today_snapshot(
 pub fn read_owner_today_snapshot(
     nest_dir: &Path,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
     now: i64,
 ) -> Result<String, String> {
-    let path = snapshot_path(nest_dir, expected_owner_pubkey);
+    let expected_relay_url = normalize_relay_url(expected_relay_url)?;
+    let path = snapshot_path(nest_dir, expected_owner_pubkey, &expected_relay_url);
     let raw = std::fs::read_to_string(&path)
         .map_err(|error| format!("read owner Today snapshot: {error}"))?;
-    parse_and_validate_signed_snapshot(&raw, expected_owner_pubkey, now, true)?;
+    parse_and_validate_signed_snapshot(
+        &raw,
+        expected_owner_pubkey,
+        &expected_relay_url,
+        now,
+        true,
+    )?;
     Ok(raw)
 }
 
@@ -373,10 +418,13 @@ mod tests {
     use super::*;
     use nostr::Keys;
 
-    fn snapshot(owner: &str, generated_at: i64) -> String {
+    const TEST_RELAY: &str = "wss://relay-a.test";
+
+    fn snapshot_for_relay(owner: &str, relay_url: &str, generated_at: i64) -> String {
         serde_json::json!({
             "schema": TODAY_SNAPSHOT_SCHEMA,
             "ownerPubkey": owner,
+            "relayUrl": relay_url,
             "generatedAt": generated_at,
             "expiresAt": generated_at + 3600,
             "capability": TODAY_SNAPSHOT_CAPABILITY,
@@ -384,6 +432,10 @@ mod tests {
             "rawEvents": [{"journalId": "j-1", "proofState": "OBSERVED"}]
         })
         .to_string()
+    }
+
+    fn snapshot(owner: &str, generated_at: i64) -> String {
+        snapshot_for_relay(owner, TEST_RELAY, generated_at)
     }
 
     #[test]
@@ -399,12 +451,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::parse(&"a".repeat(64)).unwrap();
         let owner = keys.public_key().to_hex();
-        let receipt =
-            write_owner_today_snapshot(dir.path(), &keys, &owner, &snapshot(&owner, 1000), 1000)
-                .unwrap();
+        let receipt = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &snapshot(&owner, 1000),
+            1000,
+        )
+        .unwrap();
         assert_eq!(receipt.owner_pubkey, owner);
         assert_eq!(receipt.sha256.len(), 64);
-        let raw = read_owner_today_snapshot(dir.path(), &owner, 1001).unwrap();
+        let raw = read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1001).unwrap();
         assert!(raw.contains(TODAY_SNAPSHOT_CAPABILITY));
         assert!(raw.contains("\"snapshotSha256\""));
         assert!(raw.contains("\"eventId\""));
@@ -431,6 +489,7 @@ mod tests {
             dir.path(),
             &owner_keys,
             &other,
+            TEST_RELAY,
             &snapshot(&owner, 1000),
             1000
         )
@@ -443,6 +502,7 @@ mod tests {
             dir.path(),
             &owner_keys,
             &owner,
+            TEST_RELAY,
             &value.to_string(),
             1000
         )
@@ -453,6 +513,7 @@ mod tests {
             dir.path(),
             &owner_keys,
             &owner,
+            TEST_RELAY,
             &snapshot(&owner, 1000),
             5000
         )
@@ -461,16 +522,71 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_paths_and_validation_are_relay_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::parse(&"a".repeat(64)).unwrap();
+        let owner = keys.public_key().to_hex();
+        let other_relay = "wss://relay-b.test";
+        let first = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &snapshot_for_relay(&owner, TEST_RELAY, 1000),
+            1000,
+        )
+        .unwrap();
+        let second = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            other_relay,
+            &snapshot_for_relay(&owner, other_relay, 1000),
+            1000,
+        )
+        .unwrap();
+        assert_ne!(first.path, second.path);
+
+        let equivalent = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            "wss://RELAY-A.TEST:443/",
+            &snapshot_for_relay(&owner, TEST_RELAY, 1001),
+            1001,
+        )
+        .unwrap();
+        assert_eq!(first.path, equivalent.path);
+        assert_eq!(equivalent.relay_url, TEST_RELAY);
+
+        std::fs::copy(&second.path, &first.path).unwrap();
+        let error = read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1001).unwrap_err();
+        assert!(error.contains("relay does not match"), "got: {error}");
+    }
+
+    #[test]
     fn snapshot_read_revalidates_tampering_and_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::parse(&"a".repeat(64)).unwrap();
         let owner = keys.public_key().to_hex();
-        let first =
-            write_owner_today_snapshot(dir.path(), &keys, &owner, &snapshot(&owner, 1000), 1000)
-                .unwrap();
-        let second =
-            write_owner_today_snapshot(dir.path(), &keys, &owner, &snapshot(&owner, 1001), 1001)
-                .unwrap();
+        let first = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &snapshot(&owner, 1000),
+            1000,
+        )
+        .unwrap();
+        let second = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &snapshot(&owner, 1001),
+            1001,
+        )
+        .unwrap();
         assert_eq!(first.path, second.path);
         assert_ne!(first.sha256, second.sha256);
         let replaced: serde_json::Value =
@@ -480,9 +596,11 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&second.path).unwrap()).unwrap();
         value["ownerPubkey"] = "b".repeat(64).into();
         std::fs::write(&second.path, value.to_string()).unwrap();
-        assert!(read_owner_today_snapshot(dir.path(), &owner, 1002)
-            .unwrap_err()
-            .contains("owner does not match"));
+        assert!(
+            read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1002)
+                .unwrap_err()
+                .contains("owner does not match")
+        );
     }
 
     #[test]
@@ -492,19 +610,29 @@ mod tests {
         let owner = keys.public_key().to_hex();
         let mut field: serde_json::Value = serde_json::from_str(&snapshot(&owner, 1000)).unwrap();
         field["surface"]["secretKey"] = "do-not-export".into();
-        assert!(
-            write_owner_today_snapshot(dir.path(), &keys, &owner, &field.to_string(), 1000)
-                .unwrap_err()
-                .contains("identity secret")
-        );
+        assert!(write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &field.to_string(),
+            1000
+        )
+        .unwrap_err()
+        .contains("identity secret"));
 
         let mut value: serde_json::Value = serde_json::from_str(&snapshot(&owner, 1000)).unwrap();
         value["rawEvents"][0]["detail"] = "nsec1should-never-leave-the-owner-boundary".into();
-        assert!(
-            write_owner_today_snapshot(dir.path(), &keys, &owner, &value.to_string(), 1000)
-                .unwrap_err()
-                .contains("identity secret")
-        );
+        assert!(write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &value.to_string(),
+            1000
+        )
+        .unwrap_err()
+        .contains("identity secret"));
     }
 
     #[test]
@@ -512,14 +640,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::parse(&"a".repeat(64)).unwrap();
         let owner = keys.public_key().to_hex();
-        let receipt =
-            write_owner_today_snapshot(dir.path(), &keys, &owner, &snapshot(&owner, 1000), 1000)
-                .unwrap();
+        let receipt = write_owner_today_snapshot(
+            dir.path(),
+            &keys,
+            &owner,
+            TEST_RELAY,
+            &snapshot(&owner, 1000),
+            1000,
+        )
+        .unwrap();
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&receipt.path).unwrap()).unwrap();
         value["surface"]["journals"] = serde_json::json!([{ "id": "forged" }]);
         std::fs::write(&receipt.path, value.to_string()).unwrap();
-        let error = read_owner_today_snapshot(dir.path(), &owner, 1001).unwrap_err();
+        let error = read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1001).unwrap_err();
         assert!(
             error.contains("snapshotSha256 does not match")
                 || error.contains("signature verification failed"),

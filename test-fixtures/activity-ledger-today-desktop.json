@@ -1,1 +1,1 @@
-{"schema":"buzz.activity-ledger.today/v1","ownerPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generatedAt":1000,"expiresAt":1300,"capability":"buzz.activity-ledger.today.read/v1","surface":{"day":"2026-08-21","journals":[]},"rawEvents":[]}
+{"schema":"buzz.activity-ledger.today/v1","ownerPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","relayUrl":"wss://relay-a.test","generatedAt":1000,"expiresAt":1300,"capability":"buzz.activity-ledger.today.read/v1","surface":{"day":"2026-08-21","journals":[]},"rawEvents":[]}

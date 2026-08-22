@@ -228,6 +228,7 @@ export function buildBoundedTodayActivitySurface(
 }
 
 type DecryptObserverEvent = (event: RelayEvent) => Promise<unknown>;
+const TODAY_ARCHIVE_DECRYPT_CONCURRENCY = 8;
 
 function observerAgentPubkey(event: RelayEvent): string | null {
   const tag = event.tags.find(
@@ -290,10 +291,10 @@ export function activityLedgerDayRange(day: string): {
  * frame that fails that authority check, fails decryption, or is malformed is
  * excluded instead of being allowed to mint activity or proof.
  */
-export async function buildTodayActivityFromArchivedEvents(input: {
+async function buildTodayActivityFromArchivedEventPages(input: {
   day: string;
   agents: readonly ActivityLedgerAgentIdentity[];
-  events: readonly RelayEvent[];
+  pages: Iterable<readonly RelayEvent[]> | AsyncIterable<readonly RelayEvent[]>;
   decrypt?: DecryptObserverEvent;
 }): Promise<TodayActivitySurface> {
   const decrypt = input.decrypt ?? decryptObserverEvent;
@@ -302,40 +303,69 @@ export async function buildTodayActivityFromArchivedEvents(input: {
   );
   const observerEvents = new Map<string, ObserverEvent[]>();
 
-  await Promise.all(
-    input.events.map(async (relayEvent) => {
-      const agentPubkey = observerAgentPubkey(relayEvent);
-      if (
-        !agentPubkey ||
-        relayEvent.pubkey !== agentPubkey ||
-        !trustedAgents.has(agentPubkey)
-      ) {
-        return;
-      }
-
-      try {
-        const decoded = await decrypt(relayEvent);
-        const decodedEvents = unwrapObserverEvents(decoded);
-        if (decodedEvents.length === 0) return;
-        const bucket = observerEvents.get(agentPubkey) ?? [];
-        for (const decodedEvent of decodedEvents) {
-          bucket.push({
-            ...decodedEvent,
-            sourceEventId: relayEvent.id,
-            sourcePubkey: relayEvent.pubkey,
-            sourceKind: relayEvent.kind,
-            sourceCreatedAt: relayEvent.created_at,
-            sourceSignature: relayEvent.sig,
-            origin: "historical_backfill",
-          });
+  for await (const page of input.pages) {
+    const decodedPage: (ObserverEvent[] | null)[] = Array.from(
+      { length: page.length },
+      () => null,
+    );
+    let nextIndex = 0;
+    const decryptWorker = async () => {
+      for (;;) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= page.length) return;
+        const relayEvent = page[index];
+        if (!relayEvent) continue;
+        const agentPubkey = observerAgentPubkey(relayEvent);
+        if (
+          !agentPubkey ||
+          relayEvent.pubkey !== agentPubkey ||
+          !trustedAgents.has(agentPubkey)
+        ) {
+          continue;
         }
-        observerEvents.set(agentPubkey, bucket);
-      } catch {
-        // Archive reconciliation is fail-closed: one bad ciphertext cannot
-        // suppress the rest of the owner's durable activity surface.
+
+        try {
+          const decoded = await decrypt(relayEvent);
+          const decodedEvents = unwrapObserverEvents(decoded);
+          if (decodedEvents.length === 0) continue;
+          decodedPage[index] = decodedEvents;
+        } catch {
+          // Archive reconciliation is fail-closed: one bad ciphertext cannot
+          // suppress the rest of the owner's durable activity surface.
+        }
       }
-    }),
-  );
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(TODAY_ARCHIVE_DECRYPT_CONCURRENCY, page.length) },
+        decryptWorker,
+      ),
+    );
+
+    // Append in archive order, not promise-completion order, so reconstruction
+    // remains deterministic even when decryption latency varies by frame.
+    for (let index = 0; index < page.length; index += 1) {
+      const relayEvent = page[index];
+      const decodedEvents = decodedPage[index];
+      if (!relayEvent || !decodedEvents) continue;
+      const agentPubkey = observerAgentPubkey(relayEvent);
+      if (!agentPubkey) continue;
+      const bucket = observerEvents.get(agentPubkey) ?? [];
+      for (const decodedEvent of decodedEvents) {
+        bucket.push({
+          ...decodedEvent,
+          sourceEventId: relayEvent.id,
+          sourcePubkey: relayEvent.pubkey,
+          sourceKind: relayEvent.kind,
+          sourceCreatedAt: relayEvent.created_at,
+          sourceSignature: relayEvent.sig,
+          origin: "historical_backfill",
+        });
+      }
+      observerEvents.set(agentPubkey, bucket);
+    }
+  }
 
   return buildTodayActivitySurface(
     input.agents.map((agent) => ({
@@ -345,6 +375,30 @@ export async function buildTodayActivityFromArchivedEvents(input: {
     })),
     { day: input.day },
   );
+}
+
+export async function buildTodayActivityFromArchivedEvents(input: {
+  day: string;
+  agents: readonly ActivityLedgerAgentIdentity[];
+  events: readonly RelayEvent[];
+  decrypt?: DecryptObserverEvent;
+}): Promise<TodayActivitySurface> {
+  return buildTodayActivityFromArchivedEventPages({
+    day: input.day,
+    agents: input.agents,
+    pages: [input.events],
+    decrypt: input.decrypt,
+  });
+}
+
+/** Reconstruct Today while releasing each raw archive page after decryption. */
+export async function buildTodayActivityFromArchivedPages(input: {
+  day: string;
+  agents: readonly ActivityLedgerAgentIdentity[];
+  pages: Iterable<readonly RelayEvent[]> | AsyncIterable<readonly RelayEvent[]>;
+  decrypt?: DecryptObserverEvent;
+}): Promise<TodayActivitySurface> {
+  return buildTodayActivityFromArchivedEventPages(input);
 }
 
 /** Apply backend-validated owner artifacts and recompute every derived count. */

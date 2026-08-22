@@ -451,6 +451,7 @@ async fn lifecycle_stop_waits_until_the_sync_task_finishes() {
             Arc::clone(&completion),
         )
         .await
+        .expect("lifecycle start is available")
         .expect("start owns sync");
     drop(ownership);
 
@@ -482,6 +483,7 @@ async fn lifecycle_stop_timeout_is_explicit_and_keeps_task_visible() {
             Arc::clone(&completion),
         )
         .await
+        .expect("lifecycle start is available")
         .expect("start owns sync");
     drop(ownership);
 
@@ -504,5 +506,84 @@ async fn lifecycle_stop_timeout_is_explicit_and_keeps_task_visible() {
             restarted,
         )
         .await
+        .expect("lifecycle restart is available")
         .is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_scope_start_during_timed_out_stop_is_explicitly_blocked() {
+    let state = ArchiveSyncState::default();
+    let completion = Arc::new(SyncCompletion::default());
+    let ownership = state
+        .begin(
+            (1, 1),
+            ("owner".into(), "wss://relay.test".into()),
+            CancellationToken::new(),
+            Arc::new(Notify::new()),
+            Arc::clone(&completion),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    drop(ownership);
+
+    assert!(state.end((1, 1)).await.unwrap_err().contains("teardown"));
+    let blocked = state
+        .begin(
+            (1, 2),
+            ("owner".into(), "wss://relay.test".into()),
+            CancellationToken::new(),
+            Arc::new(Notify::new()),
+            Arc::new(SyncCompletion::default()),
+        )
+        .await;
+    let Err(error) = blocked else {
+        panic!("same-scope start must be blocked while teardown is unfinished");
+    };
+    assert!(error.contains("still stopping"));
+
+    completion.finish();
+    state.clear_completed(&completion).await;
+    assert!(state
+        .begin(
+            (1, 3),
+            ("owner".into(), "wss://relay.test".into()),
+            CancellationToken::new(),
+            Arc::new(Notify::new()),
+            Arc::new(SyncCompletion::default()),
+        )
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn healthy_same_scope_start_remains_an_idempotent_noop() {
+    let state = ArchiveSyncState::default();
+    let first = CancellationToken::new();
+    let ownership = state
+        .begin(
+            (1, 1),
+            ("owner".into(), "wss://relay.test".into()),
+            first.clone(),
+            Arc::new(Notify::new()),
+            Arc::new(SyncCompletion::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    drop(ownership);
+
+    let second = state
+        .begin(
+            (1, 2),
+            ("owner".into(), "wss://relay.test".into()),
+            CancellationToken::new(),
+            Arc::new(Notify::new()),
+            Arc::new(SyncCompletion::default()),
+        )
+        .await
+        .unwrap();
+    assert!(second.is_none());
+    assert!(!first.is_cancelled());
 }

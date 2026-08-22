@@ -547,6 +547,32 @@ export async function readAllArchivedObserverEventsForRange(opts: {
   }
 }
 
+/** Stream durable observer pages so callers can decrypt without retaining the raw day. */
+export async function* iterateArchivedObserverEventPagesForRange(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  agentPubkey?: string | null;
+  channelId?: string | null;
+  pageSize?: number;
+}): AsyncGenerator<import("@/shared/api/types").RelayEvent[]> {
+  let before: ArchivedObserverRangeCursor | null = null;
+  for (;;) {
+    const page = await readArchivedObserverEventsForRange({
+      ...opts,
+      before,
+      limit: opts.pageSize ?? 200,
+    });
+    yield page.events;
+    if (!page.hasMore) return;
+    if (!page.nextBefore) {
+      throw new Error(
+        "Archived observer range reported more rows without a cursor.",
+      );
+    }
+    before = page.nextBefore;
+  }
+}
+
 export type JournalAuthorityArtifactType = "owner_override" | "verification";
 
 /** An artifact returned only after backend signature and evidence validation. */
@@ -624,6 +650,7 @@ export const OWNER_TODAY_SNAPSHOT_CAPABILITY =
 export type OwnerTodaySnapshotInput = {
   schema: typeof OWNER_TODAY_SNAPSHOT_SCHEMA;
   ownerPubkey: string;
+  relayUrl: string;
   generatedAt: number;
   expiresAt: number;
   capability: typeof OWNER_TODAY_SNAPSHOT_CAPABILITY;
@@ -640,6 +667,7 @@ export type OwnerTodaySnapshot = OwnerTodaySnapshotInput & {
 export type TodaySnapshotReceipt = {
   path: string;
   ownerPubkey: string;
+  relayUrl: string;
   generatedAt: number;
   expiresAt: number;
   byteLength: number;

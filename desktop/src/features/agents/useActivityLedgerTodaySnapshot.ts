@@ -2,12 +2,13 @@ import * as React from "react";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { getRelayWsUrl } from "@/shared/api/tauri";
 import {
   OWNER_TODAY_SNAPSHOT_CAPABILITY,
   OWNER_TODAY_SNAPSHOT_SCHEMA,
   getJournalAuthorityArtifacts,
   queryJournalAuthorityArtifacts,
-  readAllArchivedObserverEventsForRange,
+  iterateArchivedObserverEventPagesForRange,
   writeOwnerTodaySnapshot,
   type JournalAuthorityArtifact,
 } from "@/shared/api/tauriArchive";
@@ -15,7 +16,7 @@ import {
   activityLedgerDayRange,
   applyAuthorityToTodayActivity,
   buildBoundedTodayActivitySurface,
-  buildTodayActivityFromArchivedEvents,
+  buildTodayActivityFromArchivedPages,
 } from "./activityLedgerToday";
 
 const SNAPSHOT_REFRESH_MS = 60_000;
@@ -76,16 +77,17 @@ export function useActivityLedgerTodaySnapshot(): void {
       if (disposed || inFlight) return;
       inFlight = (async () => {
         const now = new Date();
+        const relayUrl = await getRelayWsUrl();
         const day = localDay(now);
         const range = activityLedgerDayRange(day);
-        const archived = await readAllArchivedObserverEventsForRange({
+        const archivedPages = iterateArchivedObserverEventPagesForRange({
           ...range,
           pageSize: 500,
         });
-        const observedSurface = await buildTodayActivityFromArchivedEvents({
+        const observedSurface = await buildTodayActivityFromArchivedPages({
           day,
           agents: managedIdentities,
-          events: archived,
+          pages: archivedPages,
         });
         const authority = await loadCompleteAuthorityWindow({
           ...range,
@@ -98,6 +100,7 @@ export function useActivityLedgerTodaySnapshot(): void {
         await writeOwnerTodaySnapshot({
           schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
           ownerPubkey,
+          relayUrl,
           generatedAt,
           expiresAt: generatedAt + SNAPSHOT_LIFETIME_SECONDS,
           capability: OWNER_TODAY_SNAPSHOT_CAPABILITY,

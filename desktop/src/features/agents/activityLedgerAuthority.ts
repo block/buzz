@@ -34,7 +34,11 @@ export type JournalVerificationSources = {
   sourceEventIds: string[];
   hasReceiptedEvidence: boolean;
   hasCorrelationEvidence: boolean;
+  hasSupportedSourceSet: boolean;
+  overflowCount: number;
 };
+
+export const MAX_JOURNAL_VERIFICATION_SOURCE_EVENTS = 256;
 
 function validSourceEventId(value: string | null | undefined): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
@@ -93,18 +97,23 @@ export function journalVerificationSources(
   const hasCorrelationEvidence =
     correlationId === journal.id || validSourceEventId(correlationSourceId);
 
-  return {
-    sourceEventIds: [
-      ...new Set(
-        [
-          correlationSourceId,
-          ...receiptedSourceIds,
-          currentSourceEventId,
-        ].filter(validSourceEventId),
+  const sourceEventIds = [
+    ...new Set(
+      [correlationSourceId, ...receiptedSourceIds, currentSourceEventId].filter(
+        validSourceEventId,
       ),
-    ].sort(),
+    ),
+  ].sort();
+  return {
+    sourceEventIds,
     hasReceiptedEvidence: receiptedSourceIds.length > 0,
     hasCorrelationEvidence,
+    hasSupportedSourceSet:
+      sourceEventIds.length <= MAX_JOURNAL_VERIFICATION_SOURCE_EVENTS,
+    overflowCount: Math.max(
+      0,
+      sourceEventIds.length - MAX_JOURNAL_VERIFICATION_SOURCE_EVENTS,
+    ),
   };
 }
 

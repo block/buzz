@@ -9,6 +9,7 @@ use super::today_snapshot::{self, TodaySnapshotReceipt};
 use super::{identity_pubkey, now_secs};
 use crate::app_state::AppState;
 use crate::managed_agents::nest_dir;
+use crate::relay::relay_ws_url_with_override;
 
 // ── Activity Ledger owner authority ─────────────────────────────────────────
 
@@ -130,11 +131,13 @@ pub fn write_owner_today_snapshot(
 ) -> Result<TodaySnapshotReceipt, String> {
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
+    let relay_url = relay_ws_url_with_override(&state);
     let nest = nest_dir().ok_or("cannot resolve nest directory for Today snapshot")?;
     today_snapshot::write_owner_today_snapshot(
         &nest,
         &keys,
         &identity_pk,
+        &relay_url,
         &snapshot_json,
         now_secs(),
     )
@@ -144,6 +147,7 @@ pub fn write_owner_today_snapshot(
 #[tauri::command]
 pub fn read_owner_today_snapshot(state: State<'_, AppState>) -> Result<String, String> {
     let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
     let nest = nest_dir().ok_or("cannot resolve nest directory for Today snapshot")?;
-    today_snapshot::read_owner_today_snapshot(&nest, &identity_pk, now_secs())
+    today_snapshot::read_owner_today_snapshot(&nest, &identity_pk, &relay_url, now_secs())
 }

@@ -588,6 +588,7 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
     let owner_keys =
         Keys::parse("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
     let owner_pubkey = owner_keys.public_key().to_hex();
+    let relay_url = "wss://relay-a.test";
     let surface = json!({
         "day": "2026-08-21",
         "journals": [
@@ -610,6 +611,7 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
     struct CanonicalPayload<'a> {
         schema: &'static str,
         owner_pubkey: &'a str,
+        relay_url: &'a str,
         generated_at: u64,
         expires_at: u64,
         capability: &'static str,
@@ -619,6 +621,7 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
     let canonical_payload = serde_json::to_string(&CanonicalPayload {
         schema: "buzz.activity-ledger.today/v1",
         owner_pubkey: &owner_pubkey,
+        relay_url,
         generated_at: now_secs.saturating_sub(60),
         expires_at: now_secs + 300,
         capability: "buzz.activity-ledger.today.read/v1",
@@ -641,6 +644,7 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
     let snapshot = json!({
         "schema": "buzz.activity-ledger.today/v1",
         "ownerPubkey": owner_pubkey,
+        "relayUrl": relay_url,
         "generatedAt": now_secs.saturating_sub(60),
         "expiresAt": now_secs + 300,
         "capability": "buzz.activity-ledger.today.read/v1",
@@ -692,6 +696,7 @@ async fn activity_ledger_today_tool_returns_filtered_snapshot() {
                 "BUZZ_ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY",
                 owner_pubkey.as_str(),
             ),
+            ("BUZZ_ACTIVITY_LEDGER_TODAY_RELAY_URL", relay_url),
         ],
     )
     .await;

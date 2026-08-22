@@ -6,6 +6,7 @@ import {
   applyAuthorityToTodayActivity,
   buildBoundedTodayActivitySurface,
   buildTodayActivityFromArchivedEvents,
+  buildTodayActivityFromArchivedPages,
 } from "./activityLedgerToday.ts";
 
 function relayEvent({ id, pubkey = "agent-a", agent = pubkey, decoded }) {
@@ -142,6 +143,52 @@ test("Today reconstruction expands every inner event from one signed batch", asy
     surface.journals[0].events.map((event) => event.provenance.sourceEventId),
     ["batch-frame", "batch-frame"],
   );
+});
+
+test("Today archive decryption is concurrency-bounded and page-incremental", async () => {
+  let active = 0;
+  let maxActive = 0;
+  let resumedAfterFirstPage = false;
+  const makePage = (offset) =>
+    Array.from({ length: 20 }, (_, index) =>
+      relayEvent({
+        id: `frame-${offset + index}`,
+        decoded: {
+          seq: offset + index + 1,
+          timestamp: `2026-08-21T14:${String(offset + index).padStart(2, "0")}:00.000Z`,
+          kind: "turn_started",
+          turnId: `turn-${offset + index}`,
+          payload: {},
+        },
+      }),
+    );
+  async function* pages() {
+    yield makePage(0);
+    assert.equal(
+      active,
+      0,
+      "the next raw page was requested before decrypt drained",
+    );
+    resumedAfterFirstPage = true;
+    yield makePage(20);
+  }
+
+  const surface = await buildTodayActivityFromArchivedPages({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    pages: pages(),
+    decrypt: async (event) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return event.decoded;
+    },
+  });
+
+  assert.equal(resumedAfterFirstPage, true);
+  assert.equal(maxActive, 8);
+  assert.equal(surface.counts.journals, 40);
 });
 
 test("day range is half-open and rejects impossible dates", () => {

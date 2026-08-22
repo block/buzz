@@ -3,6 +3,8 @@ use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+const TEST_RELAY: &str = "wss://relay-a.test";
+
 fn write_activity_snapshot(
     dir: &TempDir,
     capability: &str,
@@ -16,6 +18,7 @@ fn write_activity_snapshot(
     let unsigned_snapshot = json!({
         "schema": ACTIVITY_LEDGER_TODAY_SCHEMA,
         "ownerPubkey": owner_pubkey,
+        "relayUrl": TEST_RELAY,
         "generatedAt": generated_at,
         "expiresAt": expires_at,
         "capability": capability,
@@ -64,6 +67,7 @@ fn write_activity_snapshot(
     let canonical_payload = canonical_activity_ledger_snapshot_payload_json(
         unsigned_snapshot.as_object().unwrap(),
         &owner_pubkey,
+        TEST_RELAY,
         generated_at,
         expires_at,
     )
@@ -86,6 +90,7 @@ fn write_activity_snapshot(
     let signed_snapshot = json!({
         "schema": ACTIVITY_LEDGER_TODAY_SCHEMA,
         "ownerPubkey": owner_pubkey,
+        "relayUrl": TEST_RELAY,
         "generatedAt": generated_at,
         "expiresAt": expires_at,
         "capability": capability,
@@ -130,6 +135,7 @@ fn desktop_canonical_payload_fixture_matches_honey_reconstruction() {
     let reconstructed = canonical_activity_ledger_snapshot_payload_json(
         object,
         object["ownerPubkey"].as_str().unwrap(),
+        object["relayUrl"].as_str().unwrap(),
         object["generatedAt"].as_u64().unwrap(),
         object["expiresAt"].as_u64().unwrap(),
     )
@@ -147,6 +153,7 @@ fn activity_ledger_today_filters_and_strips_events_by_default() {
         path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({"agentPubkey": "agent-a", "limit": 10}),
         120,
     )
@@ -169,6 +176,7 @@ fn activity_ledger_today_includes_events_when_requested() {
         path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({"channelId": "chan-b", "includeEvents": true, "limit": 10}),
         120,
     )
@@ -190,6 +198,7 @@ fn activity_ledger_today_limit_keeps_newest_matching_journals() {
         path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({"limit": 1}),
         120,
     )
@@ -219,6 +228,7 @@ fn activity_ledger_today_rejects_relative_path() {
         "relative.json",
         ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -245,6 +255,7 @@ fn activity_ledger_today_rejects_oversized_snapshot_before_reading() {
         path.to_str().unwrap(),
         ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -262,6 +273,7 @@ fn activity_ledger_today_rejects_capability_mismatch_and_staleness() {
         path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -276,6 +288,7 @@ fn activity_ledger_today_rejects_capability_mismatch_and_staleness() {
         stale_path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -296,6 +309,7 @@ fn activity_ledger_today_rejects_future_generated_at_and_uppercase_owner() {
         future_path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -327,6 +341,7 @@ fn activity_ledger_today_rejects_future_generated_at_and_uppercase_owner() {
         uppercase_owner_path.to_str().unwrap(),
         capability,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -350,6 +365,7 @@ fn activity_ledger_today_rejects_symlink_and_non_0600_mode() {
         path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -366,6 +382,7 @@ fn activity_ledger_today_rejects_symlink_and_non_0600_mode() {
         link_path.to_str().unwrap(),
         capability,
         &expected_owner_pubkey(),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -390,6 +407,7 @@ fn activity_ledger_today_rejects_same_user_forged_rewrite_and_wrong_owner_env() 
         path.to_str().unwrap(),
         capability,
         &expected_owner,
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -405,6 +423,7 @@ fn activity_ledger_today_rejects_same_user_forged_rewrite_and_wrong_owner_env() 
         fresh_path.to_str().unwrap(),
         capability,
         &"f".repeat(64),
+        TEST_RELAY,
         &json!({}),
         120,
     )
@@ -412,5 +431,19 @@ fn activity_ledger_today_rejects_same_user_forged_rewrite_and_wrong_owner_env() 
     assert!(
         wrong_owner_error.contains("ownerPubkey mismatch"),
         "got: {wrong_owner_error}"
+    );
+
+    let wrong_relay_error = read_activity_ledger_today(
+        fresh_path.to_str().unwrap(),
+        capability,
+        &expected_owner,
+        "wss://relay-b.test",
+        &json!({}),
+        120,
+    )
+    .unwrap_err();
+    assert!(
+        wrong_relay_error.contains("relayUrl mismatch"),
+        "got: {wrong_relay_error}"
     );
 }

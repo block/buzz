@@ -249,6 +249,8 @@ test("verification writes use the journal correlation, not a tool-call correlati
     sourceEventIds: [sourceId, receiptSourceId].sort(),
     hasReceiptedEvidence: true,
     hasCorrelationEvidence: true,
+    hasSupportedSourceSet: true,
+    overflowCount: 0,
   });
 
   const missingCorrelationSource = {
@@ -259,6 +261,36 @@ test("verification writes use the journal correlation, not a tool-call correlati
     journalVerificationSources(missingCorrelationSource).hasCorrelationEvidence,
     false,
   );
+});
+
+test("verification source capacity fails closed before backend submission", () => {
+  const journal = observedJournal();
+  const receipted = Array.from({ length: 256 }, (_, index) => ({
+    ...journal.events[0],
+    id: `receipt-${index}`,
+    category: "tool",
+    proofState: "RECEIPTED",
+    provenance: {
+      ...journal.events[0].provenance,
+      sourceEventId: index.toString(16).padStart(64, "0"),
+      triggeringEventIds: [],
+    },
+  }));
+  const atLimit = journalVerificationSources({
+    ...journal,
+    events: [...journal.events, ...receipted.slice(0, 255)],
+  });
+  assert.equal(atLimit.sourceEventIds.length, 256);
+  assert.equal(atLimit.hasSupportedSourceSet, true);
+  assert.equal(atLimit.overflowCount, 0);
+
+  const overLimit = journalVerificationSources({
+    ...journal,
+    events: [...journal.events, ...receipted],
+  });
+  assert.equal(overLimit.sourceEventIds.length, 257);
+  assert.equal(overLimit.hasSupportedSourceSet, false);
+  assert.equal(overLimit.overflowCount, 1);
 });
 
 test("latest owner override changes summary without changing proof", () => {

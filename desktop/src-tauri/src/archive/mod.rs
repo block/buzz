@@ -27,7 +27,7 @@ pub mod retention;
 pub mod store;
 mod store_migrations;
 pub mod sync;
-mod today_snapshot;
+pub(crate) mod today_snapshot;
 
 pub use archive_db::ArchiveDb;
 use pipeline::{commit_archive, plan_archive, query_buckets};
