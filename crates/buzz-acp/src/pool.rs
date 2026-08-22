@@ -21,7 +21,10 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -63,6 +66,12 @@ pub struct TaskMeta {
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
+    /// True only while this task is polling an actual `session/prompt`.
+    ///
+    /// Queue ownership begins earlier, while session setup and context fetches
+    /// are still running, so `EventQueue::is_channel_in_flight` cannot answer
+    /// whether a mid-turn control signal has a prompt to target.
+    pub prompt_in_flight: Arc<AtomicBool>,
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
@@ -371,6 +380,30 @@ pub enum ControlSignal {
         model_id: String,
         request_id: Option<String>,
     },
+}
+
+/// Control-plane state shared between a channel prompt task and the main loop.
+pub struct PromptControl {
+    /// Receives the first cancel, interrupt, rotate, or model-switch signal.
+    rx: tokio::sync::oneshot::Receiver<ControlSignal>,
+    /// Shared marker for the narrower lifetime of the ACP `session/prompt`.
+    prompt_in_flight: Arc<AtomicBool>,
+}
+
+impl PromptControl {
+    /// Build the task-side control state and its main-loop activity handle from
+    /// one shared allocation so dispatch cannot accidentally register a
+    /// different marker in [`TaskMeta`].
+    pub fn new(rx: tokio::sync::oneshot::Receiver<ControlSignal>) -> (Self, Arc<AtomicBool>) {
+        let prompt_in_flight = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                rx,
+                prompt_in_flight: Arc::clone(&prompt_in_flight),
+            },
+            prompt_in_flight,
+        )
+    }
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -731,6 +764,17 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
+    }
+
+    /// Whether `channel_id` currently has an actual ACP prompt in flight.
+    ///
+    /// A task can own the channel before it reaches `session/prompt` while it
+    /// creates a session or fetches context. Mid-turn steering must not target
+    /// that pre-prompt phase.
+    pub fn has_in_flight_prompt(&self, channel_id: Uuid) -> bool {
+        self.task_map.values().any(|meta| {
+            meta.channel_id == Some(channel_id) && meta.prompt_in_flight.load(Ordering::Acquire)
+        })
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
@@ -1754,6 +1798,26 @@ fn send_prompt_result(
     });
 }
 
+struct PromptInFlightGuard<'a>(&'a AtomicBool);
+
+impl Drop for PromptInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Mark only the lifetime during which the ACP `session/prompt` future is
+/// actually being polled. The guard clears the marker on completion,
+/// cancellation, or panic.
+async fn track_prompt_in_flight<F>(state: &AtomicBool, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    state.store(true, Ordering::Release);
+    let _guard = PromptInFlightGuard(state);
+    future.await
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -1772,7 +1836,7 @@ pub async fn run_prompt_task(
     prompt_text: Option<String>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
-    control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    control: Option<PromptControl>,
     turn_id: String,
 ) {
     // Is this a channel prompt or a heartbeat?
@@ -2476,11 +2540,11 @@ pub async fn run_prompt_task(
         prompt_label(&source)
     );
 
-    // When control_rx is Some (channel tasks), wrap the prompt in select! so
+    // When control is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
-    // (control_rx=None) take the simple await path — they are not controllable.
+    // (`control=None`) take the simple await path — they are not controllable.
     //
-    let prompt_result = match control_rx {
+    let prompt_result = match control {
         None => {
             // Heartbeat / non-cancellable path.
             tokio::select! {
@@ -2493,16 +2557,19 @@ pub async fn run_prompt_task(
                 ) => result,
             }
         }
-        Some(rx) => {
+        Some(control) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
-                    ctx.max_turn_duration,
+                result = track_prompt_in_flight(
+                    &control.prompt_in_flight,
+                    agent.acp.session_prompt_blocks_with_idle_timeout(
+                        &session_id,
+                        &prompt_blocks,
+                        ctx.idle_timeout,
+                        ctx.max_turn_duration,
+                    ),
                 ) => result,
-                mode = rx => {
+                mode = control.rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Land the model switch before any cancel/requeue work: setting
                     // `desired_model` here means the fresh session created by the
@@ -4729,6 +4796,54 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn pool_distinguishes_task_ownership_from_prompt_activity() {
+        let channel_id = Uuid::new_v4();
+        let (_control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let (_control, prompt_in_flight) = PromptControl::new(control_rx);
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map.insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                prompt_in_flight: Arc::clone(&prompt_in_flight),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(!pool.has_in_flight_prompt(channel_id));
+        prompt_in_flight.store(true, Ordering::Release);
+        assert!(pool.has_in_flight_prompt(channel_id));
+    }
+
+    #[tokio::test]
+    async fn prompt_activity_marker_clears_when_prompt_future_is_cancelled() {
+        let (_control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let (control, prompt_in_flight) = PromptControl::new(control_rx);
+        let task = tokio::spawn(async move {
+            track_prompt_in_flight(&control.prompt_in_flight, std::future::pending::<()>()).await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !prompt_in_flight.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prompt future was never polled");
+        assert!(prompt_in_flight.load(Ordering::Acquire));
+
+        task.abort();
+        let _ = task.await;
+        assert!(!prompt_in_flight.load(Ordering::Acquire));
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {

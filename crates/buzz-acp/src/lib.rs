@@ -2922,9 +2922,17 @@ async fn tokio_main() -> Result<()> {
                                 });
                             }
                             // Event is already queued. If mode requires it AND
-                            // the channel has an in-flight task, fire cancel —
-                            // OR take the non-cancelling (ACP steer) fork for Steer signals.
-                            if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
+                            // the channel has an actual ACP prompt in flight,
+                            // fire cancel — OR take the non-cancelling (ACP
+                            // steer) fork for Steer signals. Queue ownership
+                            // starts earlier during session setup and context
+                            // fetches, when there is no prompt to steer yet.
+                            if mid_turn_signal_allowed(
+                                accepted,
+                                buzz_event.channel_id,
+                                &queue,
+                                &pool,
+                            ) {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
                                 // above, so the mid-turn signal fires for every
@@ -3572,6 +3580,22 @@ fn mode_gate_signal(
     }
 }
 
+/// Whether a newly queued event may be routed through a mid-turn control path.
+///
+/// Queue ownership spans the whole task lifecycle, while the pool's prompt
+/// marker tracks the narrower period where the `session/prompt` future is
+/// being polled and can actually be steered or interrupted. Keep both
+/// predicates so a broken queue/task invariant fails closed instead of
+/// targeting the wrong turn.
+fn mid_turn_signal_allowed(
+    accepted: bool,
+    channel_id: Uuid,
+    queue: &EventQueue,
+    pool: &AgentPool,
+) -> bool {
+    accepted && queue.is_channel_in_flight(channel_id) && pool.has_in_flight_prompt(channel_id)
+}
+
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
 fn signal_in_flight_task(
@@ -3746,7 +3770,7 @@ fn dispatch_pending(
 
         // Mid-turn non-cancelling steer seam: install the per-turn steer
         // receiver on the read loop so the main loop's mode-gate fork
-        // (see the `if accepted && queue.is_channel_in_flight(...)` block
+        // (see the `mid_turn_signal_allowed(...)` block
         // in the relay event branch of the main `select!` loop) can drive
         // it via the matching sender stored in `TaskMeta.steer_tx`.
         // Installed for every prompt task: the read loop picks the steer
@@ -3760,6 +3784,7 @@ fn dispatch_pending(
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
+        let (prompt_control, prompt_in_flight) = pool::PromptControl::new(control_rx);
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
 
@@ -3770,7 +3795,7 @@ fn dispatch_pending(
                 None,
                 ctx_clone,
                 result_tx,
-                Some(control_rx),
+                Some(prompt_control),
                 task_turn_id,
             )
             .await;
@@ -3783,6 +3808,7 @@ fn dispatch_pending(
                 channel_id: Some(channel_id),
                 turn_id,
                 recoverable_batch,
+                prompt_in_flight,
                 control_tx: Some(control_tx),
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
@@ -4398,6 +4424,7 @@ fn dispatch_heartbeat(
     let agent_index = agent.index;
     let turn_id = Uuid::new_v4().to_string();
     let task_turn_id = turn_id.clone();
+    let prompt_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let abort_handle = pool.join_set.spawn(async move {
         pool::run_prompt_task(
@@ -4419,6 +4446,7 @@ fn dispatch_heartbeat(
             channel_id: None,
             turn_id,
             recoverable_batch: None,
+            prompt_in_flight,
             control_tx: None,
             steer_tx: None,
             successful_steer_deliveries: HashSet::new(),
@@ -5163,6 +5191,54 @@ mod owner_control_command_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn mid_turn_signal_requires_an_actual_prompt() {
+        // Queue ownership spans session setup and context fetches, so it can
+        // be true while there is no ACP prompt to steer. The event must remain
+        // queued for ordinary dispatch. #3282 may exercise this state, but its
+        // reporter log does not expose the ACP prompt ID and cannot prove it.
+        let channel_id = Uuid::new_v4();
+        let event = make_event(KIND_STREAM_MESSAGE, "queued prompt", None);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let _batch = queue.flush_next().expect("queue should own the channel");
+
+        let (_control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let (_control, prompt_in_flight) = pool::PromptControl::new(control_rx);
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                prompt_in_flight: Arc::clone(&prompt_in_flight),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(!mid_turn_signal_allowed(true, channel_id, &queue, &pool));
+
+        prompt_in_flight.store(true, std::sync::atomic::Ordering::Release);
+        assert!(mid_turn_signal_allowed(true, channel_id, &queue, &pool));
+        assert!(!mid_turn_signal_allowed(false, channel_id, &queue, &pool));
+
+        // Queue ownership is normally a superset of prompt activity. If the
+        // queue's stale-task deadline breaks that invariant, fail closed rather
+        // than target a task after the queue has released its channel.
+        queue.mark_complete(channel_id);
+        assert!(!mid_turn_signal_allowed(true, channel_id, &queue, &pool));
+    }
+
     #[test]
     fn mode_gate_signal_maps_handling_to_control_signal() {
         let owner = "a".repeat(64);
@@ -5218,6 +5294,7 @@ mod owner_control_command_tests {
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -7077,6 +7154,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -7149,6 +7227,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -7264,6 +7343,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::from([
@@ -7329,6 +7409,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -7406,6 +7487,7 @@ mod error_outcome_emission_tests {
                 channel_id: Some(channel_id),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -7499,6 +7581,7 @@ mod error_outcome_emission_tests {
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    prompt_in_flight: Arc::default(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -7591,6 +7674,7 @@ mod error_outcome_emission_tests {
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    prompt_in_flight: Arc::default(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -7697,6 +7781,7 @@ mod error_outcome_emission_tests {
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
+                    prompt_in_flight: Arc::default(),
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
@@ -7774,6 +7859,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -7869,6 +7955,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -7986,6 +8073,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -8126,6 +8214,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -8315,6 +8404,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
@@ -8401,6 +8491,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
+                prompt_in_flight: Arc::default(),
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
