@@ -69,14 +69,20 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
-                                   -p buzz-pair-relay --bin buzz-pair-relay
+                                   -p buzz-pair-relay --bin buzz-pair-relay \
+                                   -p buzz-acp --bin buzz-acp \
+                                   -p buzz-cli --bin buzz \
+                                   -p buzz-dev-mcp --bin buzz-dev-mcp
 
 # Derive the normal release binaries from the same optimized ELF files as the
 # debug image so the two variants cannot drift at code-generation time.
 FROM builder AS stripped-binaries
 RUN strip target/release/buzz-relay \
     && strip target/release/buzz-admin \
-    && strip target/release/buzz-pair-relay
+    && strip target/release/buzz-pair-relay \
+    && strip target/release/buzz-acp \
+    && strip target/release/buzz \
+    && strip target/release/buzz-dev-mcp
 
 # ─── Stage 4: web bundle (pnpm + vite) ──────────────────────────────────────
 # Independent of the Rust layers so a CSS change doesn't bust Rust cache and
@@ -137,6 +143,7 @@ RUN apt-get update \
         curl \
         git \
         openssl \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1000 buzz \
     && useradd  --system --uid 1000 --gid 1000 --home-dir /var/lib/buzz \
@@ -169,6 +176,28 @@ FROM runtime-base AS runtime-debug
 COPY --from=builder /build/target/release/buzz-relay /usr/local/bin/buzz-relay
 COPY --from=builder /build/target/release/buzz-admin /usr/local/bin/buzz-admin
 COPY --from=builder /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
+
+# Generic ACP listener image for externally supplied adapter processes. Build
+# with `--target agent-runtime`, then layer an adapter and runtime policy in the
+# provider-owned image.
+FROM debian:${DEBIAN_VERSION}-slim AS agent-runtime
+LABEL org.opencontainers.image.title="Buzz ACP Agent Runtime" \
+      org.opencontainers.image.description="Buzz ACP listener base for external adapter processes" \
+      org.opencontainers.image.source="https://github.com/block/buzz" \
+      org.opencontainers.image.licenses="Apache-2.0"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 buzz \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /var/lib/buzz \
+               --create-home --shell /usr/sbin/nologin buzz
+COPY --from=stripped-binaries /build/target/release/buzz-acp /usr/local/bin/buzz-acp
+COPY --from=stripped-binaries /build/target/release/buzz-dev-mcp /usr/local/bin/buzz-dev-mcp
+COPY --from=stripped-binaries /build/target/release/buzz /usr/local/bin/buzz
+ENV BUZZ_ACP_MCP_COMMAND=/usr/local/bin/buzz-dev-mcp
+USER buzz:buzz
+WORKDIR /var/lib/buzz
+ENTRYPOINT ["/usr/local/bin/buzz-acp"]
 
 # Keep the stripped runtime as the final/default Dockerfile target so existing
 # `docker build .` callers and release tags retain their current behavior.
