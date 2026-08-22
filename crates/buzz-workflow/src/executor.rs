@@ -843,10 +843,13 @@ async fn check_ssrf(host: &str, port: u16) -> Result<std::net::IpAddr, WorkflowE
 
     debug!("Resolved webhook host '{}' → {:?}", host, addrs);
 
+    let allowed = buzz_core::network::parse_allowed_cidrs(
+        &std::env::var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS").unwrap_or_default(),
+    );
     for ip in &addrs {
-        if buzz_core::network::is_private_ip(ip) {
+        if buzz_core::network::is_blocked_ip(ip, &allowed) {
             return Err(WorkflowError::WebhookError(format!(
-                "SSRF blocked: '{host}' resolved to private/reserved address {ip}"
+                "SSRF blocked: '{host}' resolved to private/reserved address {ip} (allow it with BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS)"
             )));
         }
     }

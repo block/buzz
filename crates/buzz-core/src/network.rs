@@ -43,6 +43,8 @@ fn embedded_ipv4(v6: &std::net::Ipv6Addr, prefix: &[u8; 12]) -> Option<std::net:
 /// - NAT64 local-use     64:ff9b:1::/48 (RFC 8215)
 /// - Teredo              2001::/32 (RFC 4380)
 /// - 6to4                2002::/16 (RFC 3056)
+///
+/// Returns `true` if the IP address is in a private, reserved, or loopback range.
 pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -92,6 +94,108 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         }
     }
+}
+
+/// CIDR range for allowlist matching (hand-rolled, no extra dependency).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpCidr {
+    /// Base address of the CIDR range.
+    pub base: std::net::IpAddr,
+    /// Prefix length (0-32 for IPv4, 0-128 for IPv6).
+    pub prefix_len: u8,
+}
+
+impl IpCidr {
+    /// Returns true if `ip` is within this CIDR range. Family mismatch returns false.
+    pub fn contains(&self, ip: &std::net::IpAddr) -> bool {
+        match (&self.base, ip) {
+            (std::net::IpAddr::V4(b), std::net::IpAddr::V4(i)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                if self.prefix_len > 32 {
+                    return false;
+                }
+                let mask = if self.prefix_len == 32 {
+                    u32::MAX
+                } else {
+                    u32::MAX << (32 - self.prefix_len)
+                };
+                (u32::from(*b) & mask) == (u32::from(*i) & mask)
+            }
+            (std::net::IpAddr::V6(b), std::net::IpAddr::V6(i)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
+                if self.prefix_len > 128 {
+                    return false;
+                }
+                let b = b.octets();
+                let i = i.octets();
+                let full = (self.prefix_len / 8) as usize;
+                if b[..full] != i[..full] {
+                    return false;
+                }
+                let rem = self.prefix_len % 8;
+                if rem == 0 {
+                    return true;
+                }
+                let mask: u8 = 0xFF << (8 - rem);
+                (b[full] & mask) == (i[full] & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Parse comma-separated CIDR spec into valid entries. Malformed entries are dropped with a warning.
+pub fn parse_allowed_cidrs(spec: &str) -> Vec<IpCidr> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let s = part.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let Some((addr_str, prefix_str)) = s.split_once('/') else {
+            eprintln!(
+                "BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS: dropping malformed entry '{}'",
+                s
+            );
+            continue;
+        };
+        let Ok(prefix_len) = prefix_str.trim().parse::<u8>() else {
+            eprintln!(
+                "BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS: dropping malformed entry '{}'",
+                s
+            );
+            continue;
+        };
+        let Ok(base) = addr_str.trim().parse::<std::net::IpAddr>() else {
+            eprintln!(
+                "BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS: dropping malformed entry '{}'",
+                s
+            );
+            continue;
+        };
+        let max = match base {
+            std::net::IpAddr::V4(_) => 32,
+            std::net::IpAddr::V6(_) => 128,
+        };
+        if prefix_len > max {
+            eprintln!(
+                "BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS: dropping malformed entry '{}'",
+                s
+            );
+            continue;
+        }
+        out.push(IpCidr { base, prefix_len });
+    }
+    out
+}
+
+/// Returns true if `ip` is private/reserved and not covered by `allowed`.
+pub fn is_blocked_ip(ip: &std::net::IpAddr, allowed: &[IpCidr]) -> bool {
+    is_private_ip(ip) && !allowed.iter().any(|c| c.contains(ip))
 }
 
 #[cfg(test)]
@@ -358,5 +462,81 @@ mod tests {
     fn test_ipv6_not_multicast() {
         // fe00:: — just below ff00::/8 (not multicast, not link-local, not ULA)
         assert!(!is_private_ip(&"fe00::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_allowlist_cgnat() {
+        let ip: IpAddr = "100.64.1.5".parse().unwrap();
+        assert!(is_blocked_ip(&ip, &[]));
+        let allowed = parse_allowed_cidrs("100.64.0.0/10");
+        assert!(!is_blocked_ip(&ip, &allowed));
+        let near = parse_allowed_cidrs("100.65.0.0/16");
+        assert!(is_blocked_ip(&ip, &near));
+    }
+
+    #[test]
+    fn test_allowlist_public_never_blocked() {
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(!is_blocked_ip(&ip, &[]));
+        assert!(!is_blocked_ip(&ip, &parse_allowed_cidrs("100.64.0.0/10")));
+    }
+
+    #[test]
+    fn test_allowlist_one_range_does_not_open_others() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let allowed = parse_allowed_cidrs("100.64.0.0/10");
+        assert!(is_blocked_ip(&ip, &allowed));
+    }
+
+    #[test]
+    fn test_allowlist_ipv6_ula() {
+        let ip: IpAddr = "fd00::1".parse().unwrap();
+        assert!(is_blocked_ip(&ip, &[]));
+        assert!(!is_blocked_ip(&ip, &parse_allowed_cidrs("fd00::/8")));
+    }
+
+    #[test]
+    fn test_allowlist_family_mismatch() {
+        let v4: IpAddr = "10.0.0.1".parse().unwrap();
+        let v6: IpAddr = "fd00::1".parse().unwrap();
+        assert!(is_blocked_ip(&v4, &parse_allowed_cidrs("fd00::/8")));
+        assert!(is_blocked_ip(&v6, &parse_allowed_cidrs("10.0.0.0/8")));
+    }
+
+    #[test]
+    fn test_allowlist_single_host() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let neigh: IpAddr = "10.0.0.2".parse().unwrap();
+        let allowed = parse_allowed_cidrs("10.0.0.1/32");
+        assert!(!is_blocked_ip(&ip, &allowed));
+        assert!(is_blocked_ip(&neigh, &allowed));
+        let v6: IpAddr = "fd00::1".parse().unwrap();
+        let v6n: IpAddr = "fd00::2".parse().unwrap();
+        let allowed6 = parse_allowed_cidrs("fd00::1/128");
+        assert!(!is_blocked_ip(&v6, &allowed6));
+        assert!(is_blocked_ip(&v6n, &allowed6));
+    }
+
+    #[test]
+    fn test_parse_drops_malformed() {
+        let v = parse_allowed_cidrs("10.0.0.0/8, garbage, 100.64.0.0/99, 100.64.0.0/10");
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_empty() {
+        assert!(parse_allowed_cidrs("").is_empty());
+        assert!(parse_allowed_cidrs("   ").is_empty());
+        // empty allowlist behaves like is_private_ip
+        for s in [
+            "10.0.0.1",
+            "8.8.8.8",
+            "100.64.1.5",
+            "fd00::1",
+            "2606:4700::1",
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert_eq!(is_blocked_ip(&ip, &[]), is_private_ip(&ip));
+        }
     }
 }
