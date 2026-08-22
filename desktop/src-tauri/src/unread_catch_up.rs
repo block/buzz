@@ -2,26 +2,38 @@
 //!
 //! Native unread catch-up consumes notification membership from the observed-
 //! unread SQLite store rather than serializing renderer-owned sets on every
-//! request. Rust performs every channel REQ over the shared authenticated
-//! session, then classifies the complete successful batch in two passes so a
-//! root learned anywhere in pass one is visible everywhere in pass two.
+//! request. It uses the authenticated HTTP bridge's composite keyset cursor so
+//! dense same-second pages cannot lose events, and separates discovery,
+//! top-level, and relevant-thread queries so a stale bare marker never forces
+//! the desktop to download an entire busy channel history.
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::{HashMap, HashSet};
 
 use buzz_core_pkg::kind::{
     KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_HUDDLE_STARTED, KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
 };
-use nostr::Event;
+use futures_util::{stream, StreamExt};
+use nostr::{Event, Keys};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
-use tokio::{sync::Semaphore, task::JoinSet};
 
-use crate::{app_state::AppState, native_relay_client::NativeRelayClient};
+use crate::app_state::AppState;
+
+mod window_page;
+use window_page::{parse_top_level_page, PageCursor};
+
+mod page_fetch;
+use page_fetch::{apply_page_cursor, fetch_filter_pages, query_page};
+
+mod relevant_threads;
+use relevant_threads::fetch_relevant_thread_events;
 
 const CATCH_UP_LIMIT: usize = 1_000;
 const ACTIVITY_LIMIT: usize = 100;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const ROOT_FILTER_CHUNK: usize = 200;
+const CHANNEL_FETCH_CONCURRENCY: usize = 8;
+const DISCOVERY_OVERLAP_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +51,9 @@ struct CatchUpChannel {
     channel_type: String,
     name: String,
     read_at: Option<u64>,
+    timeline_read_at: Option<u64>,
+    #[serde(default)]
+    discovery_at: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +73,7 @@ enum ChannelResult {
         channel_id: String,
         observed_events: Vec<ObservedUnreadEvent>,
         max_trigger: u64,
+        discovery_through: u64,
         activity_rows: Vec<ActivityRow>,
         discovered: DiscoveredRoots,
     },
@@ -100,9 +116,9 @@ struct DiscoveredRoots {
 }
 
 struct FetchedChannel {
-    order: usize,
     channel: CatchUpChannel,
     events: Vec<EventView>,
+    discovery_through: u64,
 }
 
 #[derive(Clone)]
@@ -132,11 +148,179 @@ impl From<Event> for EventView {
     }
 }
 
+fn catch_up_kinds(channel_type: &str) -> &'static [u32] {
+    if channel_type == "dm" {
+        &[
+            KIND_STREAM_MESSAGE,
+            KIND_STREAM_MESSAGE_V2,
+            KIND_FORUM_POST,
+            KIND_FORUM_COMMENT,
+            KIND_HUDDLE_STARTED,
+        ]
+    } else {
+        &[
+            KIND_STREAM_MESSAGE,
+            KIND_STREAM_MESSAGE_V2,
+            KIND_FORUM_POST,
+            KIND_FORUM_COMMENT,
+        ]
+    }
+}
+
+fn base_filter(channel: &CatchUpChannel, since: u64) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": catch_up_kinds(&channel.channel_type),
+        "#h": [channel.id],
+        "since": since,
+        "limit": CATCH_UP_LIMIT,
+    })
+}
+
+fn discovery_filters(
+    channel: &CatchUpChannel,
+    self_pubkey: &str,
+    discovery_through: u64,
+) -> (serde_json::Value, serde_json::Value) {
+    // Discovery is device-local because membership is device-local. A fresh
+    // device must scan old roots once even when synced read markers are newer;
+    // subsequent successful catch-up advances this independent watermark.
+    let since = channel
+        .discovery_at
+        .map_or(0, |value| value.saturating_sub(DISCOVERY_OVERLAP_SECONDS));
+    let mut authored = base_filter(channel, since);
+    authored["until"] = serde_json::json!(discovery_through);
+    authored["authors"] = serde_json::json!([self_pubkey]);
+    let mut mentioned = base_filter(channel, since);
+    mentioned["until"] = serde_json::json!(discovery_through);
+    mentioned["#p"] = serde_json::json!([self_pubkey]);
+    (authored, mentioned)
+}
+
+fn top_level_filter(channel: &CatchUpChannel) -> serde_json::Value {
+    let since = top_level_since(channel);
+    let mut filter = base_filter(channel, since);
+    filter["top_level"] = serde_json::json!(true);
+    filter
+}
+
+fn top_level_since(channel: &CatchUpChannel) -> u64 {
+    channel
+        .timeline_read_at
+        .or(channel.read_at)
+        .map_or(0, |value| value.saturating_add(1))
+}
+
+fn next_top_level_cursor(next: Option<PageCursor>, since: u64) -> Option<PageCursor> {
+    next.filter(|next| next.created_at >= since)
+}
+
+async fn fetch_top_level_pages(
+    state: &AppState,
+    api_base: &str,
+    keys: &Keys,
+    channel: &CatchUpChannel,
+) -> Result<Vec<Event>, String> {
+    let base = top_level_filter(channel);
+    let since = top_level_since(channel);
+    let mut events = Vec::new();
+    let mut cursor: Option<PageCursor> = None;
+    loop {
+        let mut filter = base.clone();
+        if let Some(current) = &cursor {
+            apply_page_cursor(&mut filter, current);
+        }
+        let page = query_page(state, api_base, keys, filter).await?;
+        let (mut rows, next) = parse_top_level_page(page, &channel.id, cursor.as_ref())?;
+        // The relay's special top-level window path does not apply `since`.
+        // Enforce the frontier locally and stop once its descending cursor has
+        // crossed it, rather than walking the channel's complete history.
+        rows.retain(|event| event.created_at.as_secs() >= since);
+        events.append(&mut rows);
+        let Some(next) = next_top_level_cursor(next, since) else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    Ok(events)
+}
+
+async fn fetch_discovery_events(
+    state: &AppState,
+    api_base: &str,
+    keys: &Keys,
+    channel: &CatchUpChannel,
+    self_pubkey: &str,
+) -> Result<(Vec<Event>, u64), String> {
+    let discovery_through = (chrono::Utc::now().timestamp().max(0) as u64).saturating_sub(1);
+    if channel
+        .discovery_at
+        .is_some_and(|watermark| watermark >= discovery_through)
+    {
+        return Ok((Vec::new(), discovery_through));
+    }
+    let (authored, mentioned) = discovery_filters(channel, self_pubkey, discovery_through);
+    let (authored, mentioned) = tokio::try_join!(
+        fetch_filter_pages(state, api_base, keys, &authored),
+        fetch_filter_pages(state, api_base, keys, &mentioned),
+    )?;
+    let mut seen = HashSet::new();
+    Ok((
+        authored
+            .into_iter()
+            .chain(mentioned)
+            .filter(|event| seen.insert(event.id))
+            .collect(),
+        discovery_through,
+    ))
+}
+
+fn discover_query_membership(
+    events: &[Event],
+    self_pubkey: &str,
+    membership: &mut HashMap<String, HashSet<String>>,
+) {
+    for event in events {
+        let view = EventView::from(event.clone());
+        let reference = thread_reference(&view.tags);
+        if view.pubkey.eq_ignore_ascii_case(self_pubkey) {
+            if let Some(root_id) = reference.root_id {
+                membership
+                    .entry("participated".into())
+                    .or_default()
+                    .insert(root_id);
+            } else {
+                membership
+                    .entry("authored".into())
+                    .or_default()
+                    .insert(view.id);
+            }
+        } else if has_tag_value(&view.tags, "p", self_pubkey) {
+            if let Some(root_id) = reference.root_id {
+                membership
+                    .entry("mentioned".into())
+                    .or_default()
+                    .insert(root_id);
+            }
+        }
+    }
+}
+
+fn relevant_roots(membership: &HashMap<String, HashSet<String>>) -> Vec<String> {
+    let mut roots = HashSet::new();
+    for kind in ["participated", "authored", "mentioned", "followed"] {
+        if let Some(values) = membership.get(kind) {
+            roots.extend(values.iter().cloned());
+        }
+    }
+    let mut roots: Vec<_> = roots.into_iter().collect();
+    roots.sort();
+    roots
+}
+
 #[tauri::command]
 pub(crate) async fn unread_catch_up(
     request: UnreadCatchUpRequest,
     state: State<'_, AppState>,
-    relay_client: State<'_, NativeRelayClient>,
     app: AppHandle,
 ) -> Result<UnreadCatchUpResponse, String> {
     let keys = state.signing_keys()?;
@@ -145,77 +329,100 @@ pub(crate) async fn unread_catch_up(
         return Err("unread catch-up identity does not match active scope".to_string());
     }
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
-    // The lease must outlive every task below: when the leased session is
-    // private (a scope switch landed mid-command), dropping the lease shuts
-    // that session down, and a `handle()` clone still held by a running fetch
-    // would then be reading a cancelled socket. The `join_next` drain ends
-    // before this binding does, so that holds today — keep it that way, and in
-    // particular do not move the lease into a task or narrow its scope.
-    let session = relay_client.session(relay_url.clone(), keys).await;
+    let api_base = crate::relay::relay_api_base_url_with_override(&state);
+    let membership = crate::observed_unread::load_membership(
+        &app,
+        &crate::observed_unread::ObservedUnreadScope {
+            pubkey: owner.clone(),
+            relay_url: relay_url.clone(),
+        },
+    )?;
 
-    let concurrency = std::sync::Arc::new(Semaphore::new(8));
-    let mut pending = JoinSet::new();
-    // One command replaces N renderer invokes while the shared session still
-    // multiplexes bounded finite REQs on one authenticated socket.
-    for (order, channel) in request.channels.iter().cloned().enumerate() {
-        let permit = concurrency
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|error| error.to_string())?;
-        let session = session.handle();
-        pending.spawn(async move {
-            let _permit = permit;
-            let kinds: &[u32] = if channel.channel_type == "dm" {
-                &[
-                    KIND_STREAM_MESSAGE,
-                    KIND_STREAM_MESSAGE_V2,
-                    KIND_FORUM_POST,
-                    KIND_FORUM_COMMENT,
-                    KIND_HUDDLE_STARTED,
-                ]
-            } else {
-                &[
-                    KIND_STREAM_MESSAGE,
-                    KIND_STREAM_MESSAGE_V2,
-                    KIND_FORUM_POST,
-                    KIND_FORUM_COMMENT,
-                ]
-            };
-            let filter = serde_json::json!({
-                "kinds": kinds,
-                "#h": [channel.id],
-                "since": channel.read_at.map_or(0, |value| value.saturating_add(1)),
-                "limit": CATCH_UP_LIMIT,
-            });
-            let result = session.fetch_events(filter, REQUEST_TIMEOUT).await;
-            (order, channel, result)
-        });
-    }
-
-    let mut fetched = Vec::new();
+    // Phase one narrows the deep scan to the current user's own history and
+    // direct mentions. Those rows discover the roots phase two is allowed to
+    // query; unrelated top-level traffic never crosses the bridge.
+    let discovery_results = stream::iter(request.channels.iter().cloned())
+        .map(|channel| async {
+            let result = fetch_discovery_events(&state, &api_base, &keys, &channel, &owner).await;
+            (channel, result)
+        })
+        .buffered(CHANNEL_FETCH_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let mut discovery = Vec::with_capacity(discovery_results.len());
     let mut failures = Vec::new();
-    while let Some(joined) = pending.join_next().await {
-        let (order, channel, result) =
-            joined.map_err(|error| format!("unread catch-up task failed: {error}"))?;
+    for (channel, result) in discovery_results {
         match result {
-            Ok(events) => fetched.push(FetchedChannel {
-                order,
-                channel,
-                events: events
-                    .into_iter()
-                    .take(CATCH_UP_LIMIT)
-                    .map(EventView::from)
-                    .collect(),
-            }),
+            Ok((events, discovery_through)) => discovery.push((channel, events, discovery_through)),
             Err(error) => failures.push(ChannelResult::Error {
                 channel_id: channel.id,
                 error,
             }),
         }
     }
+    let mut query_membership = membership.clone();
+    for (_, events, _) in &discovery {
+        discover_query_membership(events, &owner, &mut query_membership);
+    }
+    let roots = relevant_roots(&query_membership);
+    let discovery_channels = discovery
+        .iter()
+        .map(|(channel, _, _)| channel.clone())
+        .collect::<Vec<_>>();
+    let mut relevant =
+        fetch_relevant_thread_events(&state, &api_base, &keys, &discovery_channels, &roots).await;
+    discovery.retain(|(channel, _, _)| {
+        let Some(error) = relevant
+            .errors_by_channel
+            .remove(&channel.id.to_ascii_lowercase())
+        else {
+            return true;
+        };
+        failures.push(ChannelResult::Error {
+            channel_id: channel.id.clone(),
+            error,
+        });
+        false
+    });
 
-    fetched.sort_by_key(|item| item.order);
+    let top_level_results = stream::iter(discovery)
+        .map(|(channel, events, discovery_through)| {
+            let state = &state;
+            let api_base = &api_base;
+            let keys = &keys;
+            async move {
+                let result = fetch_top_level_pages(state, api_base, keys, &channel).await;
+                (channel, events, discovery_through, result)
+            }
+        })
+        .buffered(CHANNEL_FETCH_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let mut fetched = Vec::with_capacity(top_level_results.len());
+    for (channel, mut events, discovery_through, result) in top_level_results {
+        match result {
+            Ok(top_level) => {
+                events.extend(top_level);
+                events.extend(
+                    relevant
+                        .by_channel
+                        .remove(&channel.id.to_ascii_lowercase())
+                        .unwrap_or_default(),
+                );
+                let mut seen = HashSet::new();
+                events.retain(|event| seen.insert(event.id));
+                fetched.push(FetchedChannel {
+                    channel,
+                    events: events.into_iter().map(EventView::from).collect(),
+                    discovery_through,
+                });
+            }
+            Err(error) => failures.push(ChannelResult::Error {
+                channel_id: channel.id,
+                error,
+            }),
+        }
+    }
 
     let current_keys = state.signing_keys()?;
     if current_keys.public_key().to_hex() != owner
@@ -224,13 +431,6 @@ pub(crate) async fn unread_catch_up(
         return Err("unread catch-up scope changed while fetching".to_string());
     }
 
-    let membership = crate::observed_unread::load_membership(
-        &app,
-        &crate::observed_unread::ObservedUnreadScope {
-            pubkey: owner,
-            relay_url,
-        },
-    )?;
     let mut channels = classify_batch(&request, fetched, &membership);
     channels.extend(failures);
     Ok(UnreadCatchUpResponse { channels })
@@ -280,11 +480,16 @@ fn classify_batch(
         let mut activity_rows = Vec::new();
         let mut max_trigger = 0;
         for event in item.events {
+            let reference = thread_reference(&event.tags);
+            let broadcast = has_exact_tag(&event.tags, "broadcast", "1");
+            let threaded = reference.parent_id.is_some() && !broadcast;
+            let read_at = if threaded {
+                item.channel.read_at
+            } else {
+                item.channel.timeline_read_at
+            };
             if event.pubkey.eq_ignore_ascii_case(&self_pubkey)
-                || item
-                    .channel
-                    .read_at
-                    .is_some_and(|read_at| event.created_at <= read_at)
+                || read_at.is_some_and(|read_at| event.created_at <= read_at)
                 || !should_notify(
                     &event,
                     &self_pubkey,
@@ -292,13 +497,11 @@ fn classify_batch(
                     membership,
                     &participated,
                     &authored,
+                    &mentioned,
                 )
             {
                 continue;
             }
-            let reference = thread_reference(&event.tags);
-            let broadcast = has_exact_tag(&event.tags, "broadcast", "1");
-            let threaded = reference.parent_id.is_some() && !broadcast;
             let high_priority = item.channel.channel_type == "dm"
                 || broadcast
                 || has_tag_value(&event.tags, "p", &self_pubkey);
@@ -334,6 +537,7 @@ fn classify_batch(
             item.channel.id,
             observed_events,
             max_trigger,
+            item.discovery_through,
             activity_rows,
             discovered,
         ));
@@ -350,12 +554,20 @@ fn classify_batch(
     outputs
         .into_iter()
         .map(
-            |(channel_id, observed_events, max_trigger, mut activity_rows, discovered)| {
+            |(
+                channel_id,
+                observed_events,
+                max_trigger,
+                discovery_through,
+                mut activity_rows,
+                discovered,
+            )| {
                 activity_rows.retain(|row| allowed.contains(&row.id));
                 ChannelResult::Success {
                     channel_id,
                     observed_events,
                     max_trigger,
+                    discovery_through,
                     activity_rows,
                     discovered,
                 }
@@ -403,6 +615,7 @@ fn should_notify(
     membership: &std::collections::HashMap<String, HashSet<String>>,
     participated: &HashSet<String>,
     authored: &HashSet<String>,
+    mentioned: &HashSet<String>,
 ) -> bool {
     if has_exact_tag(&event.tags, "broadcast", "1") || has_tag_value(&event.tags, "p", self_pubkey)
     {
@@ -434,6 +647,7 @@ fn should_notify(
             .get("followed")
             .is_some_and(|set| set.contains(&root_id))
         || authored.contains(&root_id)
+        || mentioned.contains(&root_id)
 }
 
 fn has_exact_tag(tags: &[Vec<String>], name: &str, value: &str) -> bool {
@@ -487,9 +701,10 @@ mod tests {
             channel_type: "stream".into(),
             name: "Ch".into(),
             read_at: Some(9),
+            timeline_read_at: Some(9),
+            discovery_at: None,
         };
         let fetched = vec![FetchedChannel {
-            order: 0,
             channel,
             events: vec![
                 event(
@@ -505,6 +720,7 @@ mod tests {
                     &[&["e", "root", "", "reply"], &["h", "ch"]],
                 ),
             ],
+            discovery_through: 20,
         }];
         let result = classify_batch(&req, fetched, &HashMap::new());
         let ChannelResult::Success {
@@ -535,9 +751,10 @@ mod tests {
             channel_type: "stream".into(),
             name: "Ch".into(),
             read_at: Some(10),
+            timeline_read_at: Some(10),
+            discovery_at: None,
         };
         let fetched = vec![FetchedChannel {
-            order: 0,
             channel,
             events: vec![
                 event("boundary", "other", 10, &[&["h", "ch"]]),
@@ -554,6 +771,7 @@ mod tests {
                     &[&["broadcast", "1"], &["h", "ch"]],
                 ),
             ],
+            discovery_through: 20,
         }];
         let result = classify_batch(&req, fetched, &membership);
         let ChannelResult::Success {
@@ -572,6 +790,110 @@ mod tests {
             ["broadcast"]
         );
         assert_eq!(*max_trigger, 12);
+    }
+
+    #[test]
+    fn discovery_uses_its_device_local_watermark_independently_of_read_frontiers() {
+        let channel = CatchUpChannel {
+            id: "ch".into(),
+            channel_type: "stream".into(),
+            name: "Ch".into(),
+            read_at: Some(10),
+            timeline_read_at: Some(900),
+            discovery_at: Some(1_000_000),
+        };
+        let (authored, mentioned) = discovery_filters(&channel, "self", 2_000_000);
+        assert_eq!(authored["since"], 395_200);
+        assert_eq!(authored["authors"], serde_json::json!(["self"]));
+        assert_eq!(mentioned["since"], 395_200);
+        assert_eq!(mentioned["until"], 2_000_000);
+        assert_eq!(mentioned["#p"], serde_json::json!(["self"]));
+
+        let top_level = top_level_filter(&channel);
+        assert_eq!(top_level["since"], 901);
+        assert_eq!(top_level["top_level"], true);
+    }
+
+    #[test]
+    fn fresh_device_discovers_roots_before_synced_read_frontiers() {
+        let channel = CatchUpChannel {
+            id: "ch".into(),
+            channel_type: "stream".into(),
+            name: "Ch".into(),
+            read_at: Some(100),
+            timeline_read_at: Some(100),
+            discovery_at: None,
+        };
+        let (authored, mentioned) = discovery_filters(&channel, "self", 1_000);
+        assert_eq!(authored["since"], 0);
+        assert_eq!(mentioned["since"], 0);
+    }
+
+    #[test]
+    fn top_level_pagination_stops_after_crossing_the_read_frontier() {
+        let cursor = |created_at| PageCursor {
+            created_at,
+            event_id: "ab".repeat(32),
+        };
+
+        assert_eq!(
+            next_top_level_cursor(Some(cursor(901)), 901),
+            Some(cursor(901))
+        );
+        assert_eq!(next_top_level_cursor(Some(cursor(900)), 901), None);
+        assert_eq!(next_top_level_cursor(None, 901), None);
+    }
+
+    #[test]
+    fn complete_paginated_batch_recovers_old_reply_behind_non_trigger_traffic() {
+        let req = request();
+        let channel = CatchUpChannel {
+            id: "ch".into(),
+            channel_type: "stream".into(),
+            name: "Ch".into(),
+            read_at: Some(0),
+            timeline_read_at: Some(2_000),
+            discovery_at: None,
+        };
+        let mut events = (0..=CATCH_UP_LIMIT)
+            .map(|index| {
+                event(
+                    &format!("noise-{index}"),
+                    if index % 2 == 0 { "self" } else { "other" },
+                    100 + index as u64,
+                    &[&["h", "ch"]],
+                )
+            })
+            .collect::<Vec<_>>();
+        events.push(event(
+            "old-thread-reply",
+            "other",
+            5,
+            &[&["e", "root", "", "reply"], &["h", "ch"]],
+        ));
+        let membership = HashMap::from([("participated".into(), HashSet::from(["root".into()]))]);
+        let result = classify_batch(
+            &req,
+            vec![FetchedChannel {
+                channel,
+                events,
+                discovery_through: 2_000,
+            }],
+            &membership,
+        );
+        let ChannelResult::Success {
+            observed_events, ..
+        } = &result[0]
+        else {
+            panic!("expected success")
+        };
+        assert_eq!(
+            observed_events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            ["old-thread-reply"]
+        );
     }
 
     /// Pins the SERIALIZED wire contract against `tauriUnreadCatchUp.ts`.
@@ -602,6 +924,7 @@ mod tests {
                     counts_toward_app_badge: false,
                 }],
                 max_trigger: 11,
+                discovery_through: 12,
                 activity_rows: vec![ActivityRow {
                     id: "evt".into(),
                     kind: 9,
@@ -639,6 +962,7 @@ mod tests {
                         "countsTowardAppBadge": false,
                     }],
                     "maxTrigger": 11,
+                    "discoveryThrough": 12,
                     "activityRows": [{
                         "id": "evt",
                         "kind": 9,

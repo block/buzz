@@ -115,9 +115,8 @@ impl std::ops::Deref for SessionLease {
 }
 
 impl SessionLease {
-    /// Clones the underlying handle for a task that outlives this binding, as
-    /// the catch-up fan-out does. Only the lease cancels the session, so the
-    /// clone must not outlive it.
+    /// Clones the underlying handle so tests can verify lease lifetime rules.
+    #[cfg(test)]
     pub(crate) fn handle(&self) -> Arc<RelaySession> {
         Arc::clone(&self.session)
     }

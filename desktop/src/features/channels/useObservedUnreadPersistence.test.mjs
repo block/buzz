@@ -42,6 +42,7 @@ const DEFAULT_PROPS = {
   isReady: true,
   readStateVersion: 0,
   getTs: () => null,
+  getTimelineTs: () => null,
   getOwn: () => null,
 };
 
@@ -232,6 +233,16 @@ test("marker prune: thread and channel markers prune covered events; sibling cha
     createdAt: NOW_S + 10,
     rootId: "root-sv",
   });
+  const evtTimeline = makeObservedEvent({
+    id: "evt-timeline",
+    createdAt: NOW_S - 10,
+    rootId: null,
+  });
+  const evtThreadBeforeTimeline = makeObservedEvent({
+    id: "evt-thread-before-timeline",
+    createdAt: NOW_S - 10,
+    rootId: "root-before-timeline",
+  });
 
   const stored = new Map();
   const ch1 = new Map();
@@ -245,6 +256,10 @@ test("marker prune: thread and channel markers prune covered events; sibling cha
   const chB = new Map();
   chB.set("evt-survivor", evtSurvivor);
   stored.set("channel-b", chB);
+  const chTimeline = new Map();
+  chTimeline.set("evt-timeline", evtTimeline);
+  chTimeline.set("evt-thread-before-timeline", evtThreadBeforeTimeline);
+  stored.set("channel-timeline", chTimeline);
   writeObservedUnreadToStorage(PUBKEY, RELAY, stored);
 
   let pruneCount = 0;
@@ -259,6 +274,8 @@ test("marker prune: thread and channel markers prune covered events; sibling cha
     isReady: true,
     readStateVersion: 1,
     getTs: (channelId) => (channelId === "channel-a" ? NOW_S - 5 : null),
+    getTimelineTs: (channelId) =>
+      channelId === "channel-timeline" ? NOW_S - 5 : null,
     getOwn: (ctx) => (ctx === "thread:root-a" ? NOW_S - 5 : null),
     onPruned: () => {
       pruneCount += 1;
@@ -281,6 +298,16 @@ test("marker prune: thread and channel markers prune covered events; sibling cha
   );
   // Sibling: channel-b unaffected.
   assert.ok(eventsRef.current.has("channel-b"), "channel-b must survive");
+  assert.ok(
+    !eventsRef.current.get("channel-timeline")?.has("evt-timeline"),
+    "the top-level event must be pruned by the timeline marker",
+  );
+  assert.ok(
+    eventsRef.current
+      .get("channel-timeline")
+      ?.has("evt-thread-before-timeline"),
+    "the timeline marker must not prune older thread activity",
+  );
   assert.equal(pruneCount, 1, "onPruned must fire exactly once");
 
   await harness.unmount();

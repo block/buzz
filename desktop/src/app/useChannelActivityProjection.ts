@@ -26,7 +26,30 @@ type UseChannelActivityProjectionOptions = {
   readStateVersion: number;
   threadActivityItems: ThreadActivityItem[];
   mutedRootIds: ReadonlySet<string>;
+  currentPubkey?: string;
 };
+
+export function mergeUnreadThreadChannelIds(
+  previewChannelIds: ReadonlySet<string>,
+  unreadEventIdsByChannel: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlySet<string> {
+  const channelIds = new Set(previewChannelIds);
+  for (const [channelId, eventIds] of unreadEventIdsByChannel) {
+    if (eventIds.size > 0) channelIds.add(channelId);
+  }
+  return channelIds;
+}
+
+export function useMergedUnreadThreadChannelIds(
+  previewChannelIds: ReadonlySet<string>,
+  unreadEventIdsByChannel: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlySet<string> {
+  return React.useMemo(
+    () =>
+      mergeUnreadThreadChannelIds(previewChannelIds, unreadEventIdsByChannel),
+    [previewChannelIds, unreadEventIdsByChannel],
+  );
+}
 
 export function resolveChannelActivityFeedItemReadAt(
   item: Pick<FeedItem, "channelId" | "id">,
@@ -48,18 +71,19 @@ export function useChannelActivityProjection({
   readStateVersion,
   threadActivityItems,
   mutedRootIds,
+  currentPubkey,
 }: UseChannelActivityProjectionOptions) {
   const getThreadReadAt = React.useCallback(
     (rootId: string, channelId?: string | null) => {
       const threadReadAt = getOwnReadAt(`thread:${rootId}`);
       if (!channelId) return threadReadAt;
 
-      const channelReadAt = getChannelReadAt(channelId);
+      const channelReadAt = getOwnReadAt(channelId);
       if (threadReadAt === null) return channelReadAt;
       if (channelReadAt === null) return threadReadAt;
       return Math.max(threadReadAt, channelReadAt);
     },
-    [getChannelReadAt, getOwnReadAt],
+    [getOwnReadAt],
   );
   const markThreadRead = React.useCallback(
     (rootId: string, timestamp: number) =>
@@ -90,6 +114,7 @@ export function useChannelActivityProjection({
     threadActivityItems,
     mutedRootIds,
     channels,
+    currentPubkey,
   );
   const locallyUnreadFeedItems = React.useMemo(() => {
     if (!feed || unreadFeedItemIds.size === 0) return [];

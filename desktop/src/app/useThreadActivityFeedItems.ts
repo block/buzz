@@ -8,6 +8,7 @@ export function buildThreadActivityFeedItems(
   threadActivityItems: ThreadActivityItem[],
   mutedRootIds: ReadonlySet<string>,
   channels: Channel[],
+  currentPubkey?: string,
 ): FeedItem[] {
   const channelById = new Map(channels.map((channel) => [channel.id, channel]));
 
@@ -20,7 +21,14 @@ export function buildThreadActivityFeedItems(
       const channel = channelById.get(item.channelId);
       if (channel === undefined) return false;
       const rootId = getThreadReference(item.tags).rootId;
-      return !rootId || !mutedRootIds.has(rootId);
+      const overridesMute = item.tags.some(
+        (tag) =>
+          tag[0] === "broadcast" ||
+          (tag[0] === "p" &&
+            currentPubkey !== undefined &&
+            tag[1]?.toLowerCase() === currentPubkey.toLowerCase()),
+      );
+      return !rootId || !mutedRootIds.has(rootId) || overridesMute;
     })
     .map((item) => {
       const channel = channelById.get(item.channelId);
@@ -43,6 +51,7 @@ export function useThreadActivityFeedItems(
   threadActivityItems: ThreadActivityItem[],
   mutedRootIds: ReadonlySet<string>,
   channels: Channel[],
+  currentPubkey?: string,
 ): FeedItem[] {
   const mutedRootIdsKey = [...mutedRootIds].sort().join("\0");
 
@@ -53,6 +62,13 @@ export function useThreadActivityFeedItems(
       threadActivityItems,
       mutedRootIds,
       channels,
+      currentPubkey,
     );
-  }, [channels, mutedRootIds, mutedRootIdsKey, threadActivityItems]);
+  }, [
+    channels,
+    currentPubkey,
+    mutedRootIds,
+    mutedRootIdsKey,
+    threadActivityItems,
+  ]);
 }

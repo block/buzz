@@ -39,9 +39,20 @@ export function computeThreadBadgeCounts(
   const counts = new Map<string, number>();
   for (const message of messages) {
     if (message.parentId) continue;
-    if (!isNotified(message.id)) continue;
-    const subtreeReplies = repliesByRootId.get(message.id);
+    let subtreeReplies = repliesByRootId.get(message.id);
     if (!subtreeReplies || subtreeReplies.length === 0) continue;
+    if (!isNotified(message.id)) {
+      const normalizedPubkey = currentPubkey?.toLowerCase();
+      subtreeReplies = subtreeReplies.filter(
+        (reply) =>
+          normalizedPubkey !== undefined &&
+          reply.tags?.some(
+            (tag) =>
+              tag[0] === "p" && tag[1]?.toLowerCase() === normalizedPubkey,
+          ) === true,
+      );
+      if (subtreeReplies.length === 0) continue;
+    }
     const { unreadCount } = computeThreadUnreadMarker(
       subtreeReplies,
       getReadAt,

@@ -238,6 +238,12 @@ export function ChannelActivityPopover({
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const contentLossTimerRef = React.useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const retainedUnreadFeedItemsRef = React.useRef<FeedItem[]>([]);
+  const retainedActivityItemsRef = React.useRef<InboxItem[]>([]);
+  const isPointerInsideRef = React.useRef(false);
   const {
     clearChannelUnreadSource,
     getChannelActivityItemReadAt,
@@ -258,14 +264,23 @@ export function ChannelActivityPopover({
       (item) => item.channelId === channel.id,
     );
   }, [channel.id, unreadThreadFeedItems]);
+  if (unreadChannelFeedItems.length > 0) {
+    retainedUnreadFeedItemsRef.current = unreadChannelFeedItems;
+  }
+  const visibleUnreadFeedItems =
+    unreadChannelFeedItems.length > 0
+      ? unreadChannelFeedItems
+      : isPointerInsideRef.current
+        ? retainedUnreadFeedItemsRef.current
+        : [];
   const profilePubkeys = React.useMemo(
     () => [
       ...new Set([
-        ...unreadChannelFeedItems.map((item) => item.pubkey),
+        ...visibleUnreadFeedItems.map((item) => item.pubkey),
         ...(activeWorking?.agentPubkeys ?? []),
       ]),
     ],
-    [activeWorking?.agentPubkeys, unreadChannelFeedItems],
+    [activeWorking?.agentPubkeys, visibleUnreadFeedItems],
   );
   const profilesQuery = useUsersBatchQuery(open ? profilePubkeys : [], {
     enabled: open,
@@ -274,19 +289,18 @@ export function ChannelActivityPopover({
   const activityReadAtByMessageId = React.useMemo(
     () =>
       new Map(
-        unreadChannelFeedItems.map((item) => [
+        visibleUnreadFeedItems.map((item) => [
           item.id,
           getChannelActivityItemReadAt(item),
         ]),
       ),
-    [getChannelActivityItemReadAt, unreadChannelFeedItems],
+    [getChannelActivityItemReadAt, visibleUnreadFeedItems],
   );
   const activityItems = React.useMemo(() => {
-    if (!open) return [];
     return buildInboxItems({
       channels: [channel],
       currentPubkey: identityQuery.data?.pubkey,
-      feed: buildChannelActivityFeed(unreadChannelFeedItems),
+      feed: buildChannelActivityFeed(visibleUnreadFeedItems),
       getMessageReadAt: (messageId) =>
         activityReadAtByMessageId.get(messageId) ?? null,
       profiles,
@@ -295,13 +309,22 @@ export function ChannelActivityPopover({
     channel,
     activityReadAtByMessageId,
     identityQuery.data?.pubkey,
-    open,
     profiles,
-    unreadChannelFeedItems,
+    visibleUnreadFeedItems,
   ]);
+  if (activityItems.length > 0) {
+    retainedActivityItemsRef.current = activityItems;
+  }
+  const visibleActivityItems =
+    activityItems.length > 0
+      ? activityItems
+      : open && isPointerInsideRef.current
+        ? retainedActivityItemsRef.current
+        : [];
   const hasContent =
-    unreadChannelFeedItems.length > 0 ||
-    (activeWorking?.agentPubkeys.length ?? 0) > 0;
+    visibleUnreadFeedItems.length > 0 ||
+    (activeWorking?.agentPubkeys.length ?? 0) > 0 ||
+    visibleActivityItems.length > 0;
 
   const clearHoverTimer = React.useCallback(() => {
     if (hoverTimerRef.current !== null) {
@@ -333,9 +356,33 @@ export function ChannelActivityPopover({
 
   React.useEffect(() => () => clearHoverTimer(), [clearHoverTimer]);
   React.useEffect(() => {
-    if (!hasContent) {
-      setOpen(false);
+    if (open) return;
+    retainedUnreadFeedItemsRef.current = [];
+    retainedActivityItemsRef.current = [];
+  }, [open]);
+  React.useEffect(() => {
+    if (contentLossTimerRef.current !== null) {
+      clearTimeout(contentLossTimerRef.current);
+      contentLossTimerRef.current = null;
     }
+    if (hasContent && isPointerInsideRef.current) {
+      setOpen(true);
+      return;
+    }
+    if (!hasContent && isPointerInsideRef.current) {
+      contentLossTimerRef.current = setTimeout(() => {
+        contentLossTimerRef.current = null;
+        setOpen(false);
+      }, HOVER_CLOSE_DELAY_MS);
+      return;
+    }
+    if (!hasContent) setOpen(false);
+    return () => {
+      if (contentLossTimerRef.current !== null) {
+        clearTimeout(contentLossTimerRef.current);
+        contentLossTimerRef.current = null;
+      }
+    };
   }, [hasContent]);
 
   const clearUnreadOverride = React.useCallback(
@@ -367,20 +414,27 @@ export function ChannelActivityPopover({
     [clearUnreadOverride, markMessageRead, markThreadRead],
   );
 
-  if (!hasContent) {
-    return children;
-  }
-
   return (
     <Popover onOpenChange={setOpen} open={open}>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: hover/focus events bubble from the nested channel button while the wrapper keeps the preview interactive. */}
       <div
         className="w-full min-w-0"
         onBlur={closeWithDelay}
-        onContextMenu={() => setOpen(false)}
+        onContextMenu={() => {
+          isPointerInsideRef.current = false;
+          retainedUnreadFeedItemsRef.current = [];
+          retainedActivityItemsRef.current = [];
+          setOpen(false);
+        }}
         onFocus={openImmediately}
-        onMouseEnter={openWithDelay}
-        onMouseLeave={closeWithDelay}
+        onMouseEnter={() => {
+          isPointerInsideRef.current = true;
+          openWithDelay();
+        }}
+        onMouseLeave={() => {
+          isPointerInsideRef.current = false;
+          closeWithDelay();
+        }}
       >
         <PopoverAnchor asChild>{children}</PopoverAnchor>
       </div>
@@ -421,8 +475,8 @@ export function ChannelActivityPopover({
                 profiles={profiles}
               />
             ) : null}
-            {activityItems.length > 0
-              ? activityItems.map((item) => (
+            {visibleActivityItems.length > 0
+              ? visibleActivityItems.map((item) => (
                   <ThreadPreviewRow
                     item={item}
                     key={item.conversationId}

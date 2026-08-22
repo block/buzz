@@ -24,8 +24,11 @@ import {
 } from "@/features/messages/lib/unreadMarker";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isConversationalUnreadKind } from "@/shared/constants/kinds";
+import { readAtForPreservedUnreadMessage } from "@/features/channels/unreadThreadEventIds";
 
 import { useWelcomeInitialUnreadSuppression } from "./useWelcomeInitialUnreadSuppression";
+
+const EMPTY_SET = new Set<string>();
 
 type UseChannelUnreadStateOptions = {
   activeChannelId: string | null;
@@ -37,6 +40,7 @@ type UseChannelUnreadStateOptions = {
   openThreadMessages?: MainTimelineEntry[];
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
+  preservedUnreadMessageIds: ReadonlySet<string>;
   clearChannelUnreadSource: (
     channelId: string,
     source: ForcedUnreadSource,
@@ -69,6 +73,7 @@ export function useChannelUnreadState({
   openThreadMessages,
   getChannelReadAt,
   getMessageReadAt,
+  preservedUnreadMessageIds,
   clearChannelUnreadSource,
   markChannelUnread,
   markMessageRead,
@@ -92,6 +97,26 @@ export function useChannelUnreadState({
   const openFrontierSeconds = activeChannelId
     ? (openFrontierRef.current.get(activeChannelId) ?? null)
     : null;
+  // IDs already authoritative when this channel first opens are trusted across
+  // later visits even if a newer channel-timeline marker overtakes them. Keep
+  // this session snapshot across channel leave/revisit; IDs that appear later
+  // still use the timestamp guard below, preventing an in-flight projection
+  // refresh from reviving old history while the channel is already open.
+  const preservedUnreadOnFirstOpenRef = React.useRef(
+    new Map<string, ReadonlySet<string>>(),
+  );
+  if (
+    activeChannelId &&
+    !preservedUnreadOnFirstOpenRef.current.has(activeChannelId)
+  ) {
+    preservedUnreadOnFirstOpenRef.current.set(
+      activeChannelId,
+      new Set(preservedUnreadMessageIds),
+    );
+  }
+  const preservedUnreadMessageIdsOnFirstOpen = activeChannelId
+    ? (preservedUnreadOnFirstOpenRef.current.get(activeChannelId) ?? EMPTY_SET)
+    : EMPTY_SET;
   // Channels the user manually marked unread this session. A deliberate
   // mark-unread has no meaningful "new" boundary inside the timeline — the
   // open-time snapshot already covers every message — so the pill and divider
@@ -166,6 +191,42 @@ export function useChannelUnreadState({
   const messageById = React.useMemo(
     () => new Map(timelineMessages.map((message) => [message.id, message])),
     [timelineMessages],
+  );
+  // Per-message read resolver for the ACTIVE channel's badges and predicates.
+  // Folds the browse frontier — max(bare channel, channel-timeline) exposed as
+  // getChannelReadAt(activeChannelId) — over each message's own msg:<id> marker.
+  //
+  // Passive channel-open advances only the channel-timeline context (so the
+  // sidebar keeps preserving unopened thread activity via the bare marker), but
+  // the per-message parent resolver folds only the bare channel context. Without
+  // re-adding the timeline term here, a reply the user already browsed past — one
+  // older than the frontier but never expanded, so it has no msg:<id> marker —
+  // re-lights the collapsed in-panel branch badge. Folding the browse frontier
+  // reads those browsed-past replies. The observed-unread projection is
+  // authoritative positive evidence for preservation, including replies older
+  // than a later channel-timeline frontier after a revisit. Matching message
+  // ids keep their bare/message frontier so the sidebar dot, timeline badge,
+  // and hover action stay coherent.
+  const getActiveMessageReadAt = React.useCallback(
+    (messageId: string) =>
+      readAtForPreservedUnreadMessage(
+        messageId,
+        preservedUnreadMessageIds,
+        preservedUnreadMessageIdsOnFirstOpen,
+        createdAtByMessageId.get(messageId),
+        openFrontierSeconds,
+        getMessageReadAt(messageId),
+        activeChannelId ? getChannelReadAt(activeChannelId) : null,
+      ),
+    [
+      activeChannelId,
+      createdAtByMessageId,
+      getChannelReadAt,
+      getMessageReadAt,
+      openFrontierSeconds,
+      preservedUnreadMessageIds,
+      preservedUnreadMessageIdsOnFirstOpen,
+    ],
   );
   const threadPanelIndex = React.useMemo(
     () => buildThreadPanelIndex(timelineMessages),
@@ -322,7 +383,7 @@ export function useChannelUnreadState({
             subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
             visibleReplyIds: threadMessages.map((entry) => entry.message.id),
             expandedReplyIds: expandedThreadReplyIds,
-            getReadAt: getMessageReadAt,
+            getReadAt: getActiveMessageReadAt,
             currentPubkey,
             isForcedUnread: isMsgForcedUnread,
           })
@@ -331,7 +392,7 @@ export function useChannelUnreadState({
       openThreadHeadId,
       threadMessages,
       timelineMessages,
-      getMessageReadAt,
+      getActiveMessageReadAt,
       expandedThreadReplyIds,
       getReplyDescendantIdsForMessage,
       currentPubkey,
@@ -352,7 +413,7 @@ export function useChannelUnreadState({
       computeThreadBadgeCounts(
         timelineMessages,
         repliesByRootId,
-        getMessageReadAt,
+        getActiveMessageReadAt,
         (rootId) => !isThreadMuted(rootId),
         currentPubkey,
         isMsgForcedUnread,
@@ -361,7 +422,7 @@ export function useChannelUnreadState({
       currentPubkey,
       timelineMessages,
       repliesByRootId,
-      getMessageReadAt,
+      getActiveMessageReadAt,
       isThreadMuted,
       isMsgForcedUnread,
       readStateVersion,
@@ -392,7 +453,7 @@ export function useChannelUnreadState({
       if (!message) return false;
       const { firstUnreadReplyId } = computeThreadUnreadMarker(
         [message],
-        getMessageReadAt,
+        getActiveMessageReadAt,
         currentPubkey,
         isMsgForcedUnread,
       );
@@ -400,7 +461,7 @@ export function useChannelUnreadState({
     },
     [
       messageById,
-      getMessageReadAt,
+      getActiveMessageReadAt,
       currentPubkey,
       isMsgForcedUnread,
       readStateVersion,

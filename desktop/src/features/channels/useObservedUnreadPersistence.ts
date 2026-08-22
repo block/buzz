@@ -13,6 +13,10 @@ import {
 } from "@/features/channels/observedUnreadStorage";
 import { activityScopeKey } from "@/features/channels/threadActivityStorage";
 import {
+  channelTimelineContextKey,
+  maxReadAt,
+} from "@/features/channels/readState/readStateFormat";
+import {
   recordObservedUnreadEvent,
   type ObservedUnreadEvent,
 } from "@/features/channels/unreadChannelCounts";
@@ -80,7 +84,8 @@ export function useObservedUnreadPersistence(
   normalizedRelayUrl: string,
   isReadStateReady: boolean,
   readStateVersion: number,
-  getEffectiveTimestamp: (channelId: string) => number | null,
+  getChannelReadAt: (channelId: string) => number | null,
+  getChannelTimelineReadAt: (channelId: string) => number | null,
   getOwnTimestamp: (contextId: string) => number | null,
   observedUnreadEventsByChannelRef: React.MutableRefObject<
     Map<string, Map<string, ObservedUnreadEvent>>
@@ -309,7 +314,17 @@ export function useObservedUnreadPersistence(
       (channelId) =>
         markers.has(channelId)
           ? (markers.get(channelId) ?? null)
-          : getEffectiveTimestamp(channelId),
+          : getChannelReadAt(channelId),
+      (channelId) => {
+        const channelMarker = markers.has(channelId)
+          ? (markers.get(channelId) ?? null)
+          : getChannelReadAt(channelId);
+        const timelineContext = channelTimelineContextKey(channelId);
+        const timelineMarker = markers.has(timelineContext)
+          ? (markers.get(timelineContext) ?? null)
+          : getOwnTimestamp(timelineContext);
+        return maxReadAt(channelMarker, timelineMarker);
+      },
       (contextId) =>
         markers.has(contextId)
           ? (markers.get(contextId) ?? null)
@@ -506,9 +521,11 @@ export function useObservedUnreadPersistence(
         contextId,
         readAt:
           explicitReadAt?.get(contextId) ??
-          (contextId.startsWith("thread:") || contextId.startsWith("msg:")
+          (contextId.startsWith("thread:") ||
+          contextId.startsWith("msg:") ||
+          contextId.startsWith("channel-timeline:")
             ? getOwnTimestamp(contextId)
-            : getEffectiveTimestamp(contextId)),
+            : getChannelReadAt(contextId)),
       }));
       if (markers.length === 0) return;
       let pending = pendingMarkersRef.current.get(currentScope);
@@ -519,7 +536,7 @@ export function useObservedUnreadPersistence(
       for (const marker of markers) pending.set(marker.contextId, marker);
       flushPendingMarkers(currentScope);
     },
-    [currentScope, flushPendingMarkers, getEffectiveTimestamp, getOwnTimestamp],
+    [currentScope, flushPendingMarkers, getChannelReadAt, getOwnTimestamp],
   );
 
   // A read-state revision only needs to send the contexts that changed. Native
@@ -533,7 +550,8 @@ export function useObservedUnreadPersistence(
         pruneObservedUnreadByMarkers(
           observedUnreadEventsByChannelRef.current,
           latestByChannelRef.current,
-          getEffectiveTimestamp,
+          getChannelReadAt,
+          getChannelTimelineReadAt,
           getOwnTimestamp,
         )
       ) {

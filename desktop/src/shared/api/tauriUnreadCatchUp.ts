@@ -7,6 +7,8 @@ export type UnreadCatchUpChannel = {
   type: string;
   name: string;
   readAt: number | null;
+  timelineReadAt: number | null;
+  discoveryAt: number | null;
 };
 
 export type UnreadCatchUpRequest = {
@@ -21,6 +23,7 @@ export type UnreadCatchUpChannelResult =
       channelId: string;
       observedEvents: ObservedUnreadEvent[];
       maxTrigger: number;
+      discoveryThrough: number;
       activityRows: ThreadActivityItem[];
       discovered: {
         participated: string[];

@@ -627,6 +627,74 @@ test("D2: a catch-up maxTrigger with no notifying event still advances native la
   }
 });
 
+test("transient catch-up failure retries autonomously and restores unread", async () => {
+  installFreshStorage();
+  const CHANNEL = "channel-catch-up-retry";
+  const EVENT = makeObservedEvent({
+    id: "event-catch-up-retry",
+    createdAt: NOW_S,
+  });
+  let attempt = 0;
+  let harness;
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) =>
+    originalSetTimeout(callback, Math.min(delay, 10), ...args);
+  const rig = installNativeRig({
+    catchUpChannels: (request) => {
+      attempt += 1;
+      return request.channels.map((channel) =>
+        attempt === 1
+          ? {
+              status: "error",
+              channelId: channel.id,
+              error: "transient relay failure",
+            }
+          : {
+              status: "success",
+              channelId: channel.id,
+              observedEvents: [EVENT],
+              maxTrigger: EVENT.createdAt,
+              activityRows: [],
+              discovered: { participated: [], authored: [], mentioned: [] },
+            },
+      );
+    },
+  });
+  try {
+    harness = await mountUnreadChannels({
+      pubkey: "pk-catch-up-retry",
+      relay: RELAY,
+      channels: [{ id: CHANNEL, name: "retry", channelType: "stream" }],
+      relayClient: makeStubRelayClient(),
+    });
+    for (let index = 0; index < 20; index += 1) {
+      await settle();
+      if (rig.requests("unread_catch_up").length >= 2) break;
+      await act(async () => {
+        await new Promise((resolve) => originalSetTimeout(resolve, 10));
+      });
+    }
+    await settle();
+
+    assert.equal(
+      rig.requests("unread_catch_up").length,
+      2,
+      "a failed channel must retry without an unrelated rerender",
+    );
+    assert.equal(
+      rig
+        .scope({ pubkey: "pk-catch-up-retry", relayUrl: RELAY })
+        .events.has(EVENT.id),
+      true,
+      "the successful retry must restore the unread event",
+    );
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
 // ── D3: an empty seed must not wipe accumulated native membership ────────────
 
 test("D3: reopening with an empty membership seed preserves discovered membership", async () => {
@@ -848,7 +916,7 @@ test("matrix: a rebuilt store generation is reopened instead of wedging on the o
 // badge lane had no witness: forcing `nativeProjection?.count ?? 0` to a
 // constant 0 left the full 4,919-test suite green. This closes that.
 
-test("native: an ingested event reaches the hook's unread counts, not just the projection", async () => {
+test("native: every unread thread ID reaches the hook beyond the activity preview cap", async () => {
   installFreshStorage();
   const CHANNEL = "channel-badge";
   const scope = { pubkey: "pk-badge", relayUrl: RELAY };
@@ -869,20 +937,24 @@ test("native: an ingested event reaches the hook's unread counts, not just the p
     await first.unmount();
     first = null;
 
-    // A notifying event exists natively when the renderer reopens.
-    store.events.set("evt-badge", {
-      id: "evt-badge",
-      channelId: CHANNEL,
-      createdAt: NOW_S,
-      rootId: null,
-      highPriority: false,
-      countsTowardBadge: true,
-      countsTowardAppBadge: true,
-    });
+    // More notifying replies exist natively than the 100-row activity preview
+    // can expose when the renderer reopens.
+    for (let index = 0; index < 101; index += 1) {
+      const id = `evt-badge-${index}`;
+      store.events.set(id, {
+        id,
+        channelId: CHANNEL,
+        createdAt: NOW_S + index,
+        rootId: `root-${index}`,
+        highPriority: false,
+        countsTowardBadge: true,
+        countsTowardAppBadge: false,
+      });
+    }
     assert.equal(
       store.projections().find((p) => p.channelId === CHANNEL)?.count,
-      1,
-      "precondition: the native projection itself must count the event",
+      101,
+      "precondition: the native projection itself must count every reply",
     );
 
     // Reopen: the open snapshot carries the projection into the renderer.
@@ -897,16 +969,78 @@ test("native: an ingested event reaches the hook's unread counts, not just the p
 
     assert.equal(
       second.result.unreadChannelCounts.get(CHANNEL),
-      1,
+      101,
       "the native badgeCount must reach unreadChannelCounts; asserting projectionsRef alone leaves this lane untested",
     );
     assert.ok(
       second.result.unreadChannelIds.has(CHANNEL),
       "the channel must appear in unreadChannelIds",
     );
+    assert.equal(
+      second.result.unreadThreadEventIdsByChannel.get(CHANNEL)?.size,
+      101,
+      "inline badges must use the authoritative projection rather than the capped activity preview",
+    );
   } finally {
     await first?.unmount();
     await second?.unmount();
+    rig.restore();
+  }
+});
+
+test("native: muting a thread removes its authoritative unread dot", async () => {
+  installFreshStorage();
+  const CHANNEL = "channel-muted-thread";
+  const EVENT = "event-muted-thread";
+  const ROOT = "root-muted-thread";
+  const PUBKEY = "pk-muted-thread";
+  writeObservedUnreadToStorage(
+    PUBKEY,
+    RELAY,
+    new Map([
+      [
+        CHANNEL,
+        new Map([
+          [
+            EVENT,
+            makeObservedEvent({ id: EVENT, rootId: ROOT, createdAt: NOW_S }),
+          ],
+        ]),
+      ],
+    ]),
+  );
+  let harness;
+  const rig = installNativeRig();
+  try {
+    harness = await mountUnreadChannels({
+      pubkey: PUBKEY,
+      relay: RELAY,
+      channels: [{ id: CHANNEL, channelType: "stream" }],
+      relayClient: makeStubRelayClient(),
+    });
+    await settle();
+
+    assert.ok(harness.result.unreadChannelIds.has(CHANNEL));
+    assert.ok(
+      harness.result.unreadThreadEventIdsByChannel.get(CHANNEL)?.has(EVENT),
+    );
+
+    await act(async () => harness.result.muteThread(ROOT));
+    await settle();
+    await settle();
+
+    assert.equal(harness.result.unreadChannelIds.has(CHANNEL), false);
+    assert.equal(
+      harness.result.unreadThreadEventIdsByChannel.has(CHANNEL),
+      false,
+    );
+    assert.ok(
+      rig
+        .scope({ pubkey: PUBKEY, relayUrl: RELAY })
+        .membership.has(`muted_root\u0000${ROOT}`),
+    );
+  } finally {
+    await harness?.unmount();
     rig.restore();
   }
 });

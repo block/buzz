@@ -8,6 +8,7 @@ export type ObservedUnreadProjection = {
   count: number;
   badgeCount: number;
   appBadgeCount: number;
+  unreadThreadEventIds: string[];
   topLevelUnread: boolean;
   highPriorityUnread: boolean;
 };

@@ -387,6 +387,34 @@ test.describe("channel activity hover preview", () => {
     ).toHaveCount(0);
   });
 
+  test("does not restore read activity in a later agent-only hover session", async ({
+    page,
+  }) => {
+    await seedChannelActivity(page);
+    let popover = await openActivityPopover(page);
+
+    for (let remaining = 1; remaining >= 0; remaining -= 1) {
+      const row = popover.getByTestId(/^channel-activity-item-/).first();
+      await row.hover();
+      await row.getByRole("button", { name: "Mark as read" }).click();
+      await expect(popover.getByTestId(/^channel-activity-item-/)).toHaveCount(
+        remaining,
+      );
+    }
+    await expect(
+      popover.getByTestId(`channel-activity-agent-${AGENT_PUBKEY}`),
+    ).toBeVisible();
+
+    await page.mouse.move(1100, 100, { steps: 10 });
+    await expect(popover).toBeHidden();
+
+    popover = await openActivityPopover(page);
+    await expect(
+      popover.getByTestId(`channel-activity-agent-${AGENT_PUBKEY}`),
+    ).toBeVisible();
+    await expect(popover.getByTestId(/^channel-activity-item-/)).toHaveCount(0);
+  });
+
   test("groups multiple unread replies against the previewed channel", async ({
     page,
   }) => {
@@ -407,6 +435,46 @@ test.describe("channel activity hover preview", () => {
       .getByTestId(/^channel-activity-item-/)
       .filter({ hasText: "direct thread link" });
     await expect(groupedRow).toContainText("2 unread");
+  });
+
+  test("keeps older thread activity after opening a channel with newer timeline activity", async ({
+    page,
+  }) => {
+    await seedChannelActivity(page, { includeAgent: false });
+    await emitMockMessage(page, "Newer top-level timeline message", {
+      pubkey: SELF_PUBKEY,
+      createdAt: Math.floor(Date.now() / 1_000) + 180,
+    });
+
+    await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
+
+    const timelineBadges = page.getByTestId("thread-unread-badge");
+    await expect(timelineBadges).toHaveCount(2);
+    await page.mouse.move(900, 680);
+    const popover = await openActivityPopover(page);
+    await expect(popover.getByTestId(/^channel-activity-item-/)).toHaveCount(2);
+    await expect(
+      popover.getByRole("button", { name: /Open thread/ }),
+    ).toHaveCount(2);
+
+    const openThreadButton = popover
+      .getByTestId(/^channel-activity-item-/)
+      .filter({ hasText: "direct thread link" })
+      .getByRole("button", { name: /Open thread/ });
+    await waitForAnimations(page);
+    await openThreadButton.focus();
+    await openThreadButton.press("Enter");
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("auxiliary-panel-close").click();
+
+    await page.getByTestId("channel-general").click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Mark as read" }).click();
+    await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
+    await expect(timelineBadges).toHaveCount(0);
+    await expect(popover).toHaveCount(0);
   });
 
   test("marks projected thread activity read from the active channel menu", async ({
@@ -657,9 +725,11 @@ test.describe("channel activity hover preview", () => {
       .filter({ hasText: "Keep this separate timeline message unread." });
     await manualUnreadRow.hover();
     await page.getByTestId(`more-actions-${manualUnreadMessage.id}`).click();
-    await page
-      .getByTestId(`mark-read-toggle-${manualUnreadMessage.id}`)
-      .click();
+    const markUnreadItem = page.getByTestId(
+      `mark-read-toggle-${manualUnreadMessage.id}`,
+    );
+    await expect(markUnreadItem).toHaveText("Mark unread");
+    await markUnreadItem.click();
 
     await page.getByRole("button", { name: "Inbox", exact: true }).click();
     const groupedRootId = "grouped-inbox-root-preserve-manual";
