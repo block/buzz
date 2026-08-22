@@ -99,6 +99,25 @@ export type AgentUsageSeriesRequest = {
   agentPubkey?: string;
 };
 
+/**
+ * Physical and logical size accounting for the archive DB, from
+ * `archive_size_stats`. Mirrors `retention::ArchiveSizeStats`
+ * (`#[serde(rename_all = "camelCase")]`) field-for-field. All figures are cheap
+ * PRAGMAs + file metadata — no payload scans.
+ */
+export type ArchiveSizeStats = {
+  /** On-disk size of the main DB file, in bytes. */
+  mainFileBytes: number;
+  /** On-disk size of the `-wal` sidecar, in bytes; `0` when absent. */
+  walFileBytes: number;
+  /** SQLite page size, in bytes. */
+  pageSize: number;
+  /** Total pages in the main DB. */
+  pageCount: number;
+  /** Free (reclaimable) pages on the freelist. */
+  freelistCount: number;
+};
+
 // ── Wire-shape types (raw Tauri responses) ───────────────────────────────────
 
 /**
@@ -554,4 +573,32 @@ export async function readArchivedEvents(
       }
     })
     .filter((e): e is import("@/shared/api/types").RelayEvent => e !== null);
+}
+
+// ── Retention configuration ──────────────────────────────────────────────────
+
+/**
+ * Read the global observer-frame (kind 24200) retention window, in days. Every
+ * other archived kind — NIP-AM metrics and any custom subscription — is kept
+ * indefinitely and has no setting.
+ */
+export async function getObserverRetentionDays(): Promise<number> {
+  return invokeTauri<number>("get_observer_retention_days");
+}
+
+/**
+ * Set the global observer-frame retention window, in days. The backend is
+ * fail-closed and rejects values outside `1..=36500`; callers validate the
+ * same bounds client-side before invoking (see `retentionSettings`).
+ */
+export async function setObserverRetentionDays(days: number): Promise<void> {
+  await invokeTauri("set_observer_retention_days", { days });
+}
+
+/**
+ * Physical (file) and logical (page) size accounting for the archive DB, for
+ * the Settings size readout. PRAGMAs + file metadata only — no payload scans.
+ */
+export async function archiveSizeStats(): Promise<ArchiveSizeStats> {
+  return invokeTauri<ArchiveSizeStats>("archive_size_stats");
 }
