@@ -588,13 +588,17 @@ impl AcpClient {
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
+    ///
+    /// Secret-shaped values (API keys, tokens, …) are redacted before emit so
+    /// observer feeds / transcripts never persist plaintext MCP env secrets
+    /// that agents sometimes rebroadcast in custom notifications (#2819).
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         if let Some(observer) = &self.observer {
             observer.emit(
                 kind,
                 self.observer_agent_index,
                 &self.observer_context,
-                payload,
+                crate::redact::redact_secret_shaped_json(&payload),
             );
         }
     }
@@ -1108,7 +1112,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            "→ {}",
+            crate::redact::redact_wire_line(&serde_json::to_string(&msg).unwrap_or_default())
+        );
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1173,7 +1181,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            "→ (notification) {}",
+            crate::redact::redact_wire_line(&serde_json::to_string(&msg).unwrap_or_default())
+        );
         self.write_ndjson(&msg).await?;
         Ok(())
     }
@@ -1215,7 +1227,13 @@ impl AcpClient {
             }
 
             // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
+            // Redact before logging so MCP env secrets in custom notifications
+            // never land in debug traces (#2819).
+            tracing::debug!(
+                target: "acp::wire",
+                "← {}",
+                crate::redact::redact_wire_line(trimmed)
+            );
 
             let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
@@ -1223,7 +1241,7 @@ impl AcpClient {
                     self.observe(
                         "acp_parse_error",
                         serde_json::json!({
-                            "line": trimmed,
+                            "line": crate::redact::redact_wire_line(trimmed),
                             "error": e.to_string(),
                         }),
                     );
@@ -1538,7 +1556,11 @@ impl AcpClient {
                         continue;
                     }
 
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
+                    tracing::debug!(
+                        target: "acp::wire",
+                        "← {}",
+                        crate::redact::redact_wire_line(trimmed)
+                    );
 
                     let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                         Ok(v) => v,
@@ -1546,7 +1568,7 @@ impl AcpClient {
                             self.observe(
                                 "acp_parse_error",
                                 serde_json::json!({
-                                    "line": trimmed,
+                                    "line": crate::redact::redact_wire_line(trimmed),
                                     "error": e.to_string(),
                                 }),
                             );
