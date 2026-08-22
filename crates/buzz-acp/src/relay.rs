@@ -121,7 +121,7 @@ use buzz_core::kind::{
     KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -161,6 +161,47 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
     } else {
         "stream".to_string()
     }
+}
+
+fn parse_nip11_relay_pubkey(document: &Value) -> Option<String> {
+    document
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(|value| PublicKey::from_hex(value).ok())
+        .map(|pubkey| pubkey.to_hex())
+}
+
+fn nip11_identity_transport_is_trusted(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    if url.scheme() == "https" {
+        return true;
+    }
+
+    url.scheme() == "http"
+        && url
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "[::1]"))
+}
+
+fn nip11_identity_response_is_trusted(base_url: &str, response_url: &str) -> bool {
+    if !nip11_identity_transport_is_trusted(base_url)
+        || !nip11_identity_transport_is_trusted(response_url)
+    {
+        return false;
+    }
+
+    let (Ok(base), Ok(response)) = (
+        reqwest::Url::parse(base_url),
+        reqwest::Url::parse(response_url),
+    ) else {
+        return false;
+    };
+
+    base.scheme() == response.scheme()
+        && base.host_str() == response.host_str()
+        && base.port_or_known_default() == response.port_or_known_default()
 }
 
 /// Build the discovered-channel subscribe set from the membership UUIDs and the
@@ -277,6 +318,35 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch the relay signer advertised by NIP-11.
+    ///
+    /// ACP uses this identity to authenticate relay-executed workflow messages
+    /// before evaluating their delegated workflow-owner `p` tag.
+    pub async fn nip11_relay_pubkey(&self) -> Result<Option<String>, RelayError> {
+        if !nip11_identity_transport_is_trusted(&self.base_url) {
+            return Ok(None);
+        }
+
+        let response = self
+            .http
+            .get(&self.base_url)
+            .header(reqwest::header::ACCEPT, "application/nostr+json")
+            .send()
+            .await
+            .map_err(|error| RelayError::Http(format!("NIP-11 request failed: {error}")))?;
+        if !nip11_identity_response_is_trusted(&self.base_url, response.url().as_str()) {
+            return Ok(None);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| RelayError::Http(format!("NIP-11 request failed: {error}")))?;
+        let document = response
+            .json::<Value>()
+            .await
+            .map_err(|error| RelayError::Http(format!("invalid NIP-11 document: {error}")))?;
+        Ok(parse_nip11_relay_pubkey(&document))
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -4025,6 +4095,66 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_valid_relay_identity_from_nip11() {
+        let relay = Keys::generate();
+        let document = serde_json::json!({ "self": relay.public_key().to_hex() });
+
+        assert_eq!(
+            parse_nip11_relay_pubkey(&document),
+            Some(relay.public_key().to_hex())
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_nip11_relay_identity() {
+        assert_eq!(parse_nip11_relay_pubkey(&serde_json::json!({})), None);
+        assert_eq!(
+            parse_nip11_relay_pubkey(&serde_json::json!({ "self": "not-a-pubkey" })),
+            None
+        );
+    }
+
+    #[test]
+    fn trusts_nip11_identity_only_over_tls_or_loopback() {
+        assert!(nip11_identity_transport_is_trusted(
+            "https://relay.example.com"
+        ));
+        assert!(nip11_identity_transport_is_trusted("http://localhost:3000"));
+        assert!(nip11_identity_transport_is_trusted("http://127.0.0.1:3000"));
+        assert!(nip11_identity_transport_is_trusted("http://[::1]:3000"));
+        assert!(!nip11_identity_transport_is_trusted(
+            "http://relay.example.com"
+        ));
+        assert!(!nip11_identity_transport_is_trusted(
+            "http://100.86.114.121:3000"
+        ));
+    }
+
+    #[test]
+    fn trusts_nip11_response_only_from_the_configured_origin() {
+        assert!(nip11_identity_response_is_trusted(
+            "https://relay.example.com",
+            "https://relay.example.com/nip11"
+        ));
+        assert!(nip11_identity_response_is_trusted(
+            "https://relay.example.com:443",
+            "https://relay.example.com/"
+        ));
+        assert!(!nip11_identity_response_is_trusted(
+            "https://relay.example.com",
+            "https://attacker.example.com/"
+        ));
+        assert!(!nip11_identity_response_is_trusted(
+            "https://relay.example.com",
+            "https://relay.example.com:8443/"
+        ));
+        assert!(!nip11_identity_response_is_trusted(
+            "http://localhost:3000",
+            "https://relay.example.com/"
+        ));
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

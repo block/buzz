@@ -257,6 +257,36 @@ async fn author_allowed(
     }
 }
 
+/// Return the author identity evaluated by the inbound security gate.
+///
+/// Workflow `send_message` events are signed by the relay because it executes
+/// the scheduled action, while the first `p` tag records the workflow owner who
+/// authorized that action. Honor that delegated identity only when the signer
+/// matches the relay identity discovered from NIP-11. An ordinary user cannot
+/// bypass `respond-to` by adding a `buzz:workflow` tag to their own event.
+fn event_author_for_gate(event: &nostr::Event, trusted_relay_pubkey: Option<&str>) -> String {
+    let signer = event.pubkey.to_hex();
+    let is_trusted_workflow = event.kind.as_u16() as u32 == KIND_STREAM_MESSAGE
+        && trusted_relay_pubkey.is_some_and(|relay| relay.eq_ignore_ascii_case(&signer))
+        && event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("buzz:workflow")
+                && values.get(1).map(String::as_str) == Some("true")
+        });
+    if !is_trusted_workflow {
+        return signer;
+    }
+
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+        .and_then(|tag| tag.as_slice().get(1))
+        .and_then(|value| PublicKey::from_hex(value).ok())
+        .map(|pubkey| pubkey.to_hex())
+        .unwrap_or(signer)
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -2001,6 +2031,25 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    let trusted_relay_pubkey = match relay.rest_client().nip11_relay_pubkey().await {
+        Ok(Some(pubkey)) => {
+            tracing::info!(relay_pubkey = %pubkey, "trusted NIP-11 relay identity resolved");
+            Some(pubkey)
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "NIP-11 did not advertise a valid relay identity — workflow delegated authorship disabled"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                "failed to resolve NIP-11 relay identity: {error} — workflow delegated authorship disabled"
+            );
+            None
+        }
+    };
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -2852,7 +2901,10 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                let author = event_author_for_gate(
+                                    &buzz_event.event,
+                                    trusted_relay_pubkey.as_deref(),
+                                );
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -5322,6 +5374,118 @@ mod owner_cache_tests {
 #[cfg(test)]
 mod author_gate_tests {
     use super::*;
+
+    fn workflow_event(
+        signer: &nostr::Keys,
+        delegated_author: &nostr::PublicKey,
+        mentioned_agent: &nostr::PublicKey,
+    ) -> nostr::Event {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "@Rui run the monitor",
+        )
+        .tags([
+            Tag::parse(["p", &delegated_author.to_hex()]).expect("delegated author tag"),
+            Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("channel tag"),
+            Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"),
+            Tag::parse(["p", &mentioned_agent.to_hex()]).expect("agent mention tag"),
+        ])
+        .sign_with_keys(signer)
+        .expect("workflow event signs")
+    }
+
+    #[test]
+    fn trusted_relay_workflow_uses_delegated_author_for_gate() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let event = workflow_event(&relay, &owner.public_key(), &agent.public_key());
+
+        assert_eq!(
+            event_author_for_gate(&event, Some(&relay.public_key().to_hex())),
+            owner.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn untrusted_workflow_tag_cannot_spoof_delegated_author() {
+        let relay = nostr::Keys::generate();
+        let attacker = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let event = workflow_event(&attacker, &owner.public_key(), &agent.public_key());
+
+        assert_eq!(
+            event_author_for_gate(&event, Some(&relay.public_key().to_hex())),
+            attacker.public_key().to_hex()
+        );
+        assert_eq!(
+            event_author_for_gate(&event, None),
+            attacker.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn trusted_relay_non_workflow_event_keeps_relay_signer() {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "relay-authored message",
+        )
+        .tags([Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag")])
+        .sign_with_keys(&relay)
+        .expect("event signs");
+
+        assert_eq!(
+            event_author_for_gate(&event, Some(&relay.public_key().to_hex())),
+            relay.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn trusted_relay_workflow_without_valid_owner_keeps_relay_signer() {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let relay = nostr::Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "workflow message")
+            .tags([
+                Tag::parse(["p", "not-a-pubkey"]).expect("malformed owner tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"),
+            ])
+            .sign_with_keys(&relay)
+            .expect("event signs");
+
+        assert_eq!(
+            event_author_for_gate(&event, Some(&relay.public_key().to_hex())),
+            relay.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn malformed_first_owner_cannot_fall_through_to_later_recipient() {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let relay = nostr::Keys::generate();
+        let mentioned_agent = nostr::Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "workflow message")
+            .tags([
+                Tag::parse(["p", "not-a-pubkey"]).expect("malformed owner tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"),
+                Tag::parse(["p", &mentioned_agent.public_key().to_hex()]).expect("recipient tag"),
+            ])
+            .sign_with_keys(&relay)
+            .expect("event signs");
+
+        assert_eq!(
+            event_author_for_gate(&event, Some(&relay.public_key().to_hex())),
+            relay.public_key().to_hex()
+        );
+    }
 
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
