@@ -4486,7 +4486,19 @@ const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
 
 /// Best-effort timeout for a single reaction REST call.
+///
+/// Paired with `submit_event_once`, never `submit_event`. The retrying variant
+/// backs off 500ms/1s/2s between attempts, so under this budget the timeout
+/// would fire *during the first backoff sleep*: the ladder could never reach
+/// its second attempt, and the only thing the retries changed was replacing
+/// whatever the relay actually said with an opaque `Elapsed`.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Budget for the two-step reaction removal (query, then kind:5 delete).
+///
+/// Twice `REACTION_TIMEOUT`, which is enough to clear the first backoff sleep
+/// with time left to spend, so this one keeps the retrying `submit_event`.
+const REACTION_REMOVE_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 /// Percent-encode a string for use in a URL path segment (used in tests only).
 #[cfg(test)]
@@ -4533,7 +4545,7 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
             return;
         }
     };
-    match tokio::time::timeout(REACTION_TIMEOUT, rest.submit_event(&event)).await {
+    match tokio::time::timeout(REACTION_TIMEOUT, rest.submit_event_once(&event)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
@@ -4658,7 +4670,7 @@ pub(crate) async fn reaction_remove(rest: &crate::relay::RestClient, event_id: &
             return;
         }
     };
-    match tokio::time::timeout(Duration::from_millis(1_000), rest.submit_event(&event)).await {
+    match tokio::time::timeout(REACTION_REMOVE_TIMEOUT, rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction remove failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction remove timed out"),
@@ -5011,6 +5023,45 @@ mod tests {
             workspace_section(r"C:\Users\me\buzz"),
             "[Workspace]\nCurrent working directory: C:\\Users\\me\\buzz"
         );
+    /// `REACTION_TIMEOUT` is shorter than the REST ladder's *first* backoff
+    /// sleep, so `reaction_add` must use the single-attempt submit path.
+    /// Wrapping the retrying one in that budget is not a slow success — the
+    /// timeout fires mid-sleep, so attempt two never runs and the caller is
+    /// handed an opaque `Elapsed` in place of whatever the relay actually said.
+    ///
+    /// `REACTION_REMOVE_TIMEOUT` is on the other side of that line and keeps
+    /// the ladder; both directions are asserted so the pairing cannot drift.
+    ///
+    /// This is arithmetic rather than behaviour, which is the point: it fails
+    /// the moment someone raises a backoff or lowers a budget, and that is the
+    /// only way the mismatch silently comes back.
+    #[test]
+    fn reaction_budgets_match_their_chosen_submit_path() {
+        let first_backoff = crate::relay::REST_RETRY_BASE_DELAYS[0];
+        // Jitter is ±20%, so the first sleep is somewhere in [0.8×, 1.2×).
+        let shortest_sleep = first_backoff.mul_f64(0.8);
+        let longest_sleep = first_backoff.mul_f64(1.2);
+
+        assert!(
+            REACTION_TIMEOUT < longest_sleep,
+            "REACTION_TIMEOUT ({REACTION_TIMEOUT:?}) must be unable to outlast \
+             the first backoff ({longest_sleep:?} worst case) — that is why \
+             reaction_add uses submit_event_once"
+        );
+
+        assert!(
+            REACTION_REMOVE_TIMEOUT > longest_sleep,
+            "REACTION_REMOVE_TIMEOUT ({REACTION_REMOVE_TIMEOUT:?}) must clear \
+             the first backoff ({longest_sleep:?} worst case) for its retrying \
+             submit_event to be reachable at all"
+        );
+        assert!(
+            REACTION_REMOVE_TIMEOUT - longest_sleep > shortest_sleep.mul_f64(0.5),
+            "REACTION_REMOVE_TIMEOUT must leave a usable window after the \
+             backoff, not merely cross it"
+        );
+    }
+
     }
 
     #[test]
