@@ -135,6 +135,9 @@ pub struct SessionState {
     /// Per-channel successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<Uuid, ChannelDeliveryState>,
+    /// Process-level IFC audit state. This is intentionally not cleared when an
+    /// ACP session is invalidated: a live process does not forget prior input.
+    pub ifc_audit: crate::ifc::ProcessAuditState,
 }
 
 impl SessionState {
@@ -622,6 +625,9 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Present only for `--information-flow=audit`. `None` is the default fast
+    /// path and performs no membership queries or IFC bookkeeping.
+    pub ifc_auditor: Option<crate::ifc::Auditor>,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -1854,6 +1860,20 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // IFC is attached at the last point where Buzz events are still typed and
+    // signed. A standalone ACP proxy sees only rendered prompt strings and
+    // cannot reconstruct trustworthy requesters, audiences, or membership
+    // epochs. In audit mode failures are logged and the existing turn proceeds.
+    let ifc_turn = if let (Some(auditor), Some(batch)) = (&ctx.ifc_auditor, batch.as_ref()) {
+        Some(
+            auditor
+                .begin_turn(batch, &turn_id, agent.index, &mut agent.state.ifc_audit)
+                .await,
+        )
+    } else {
+        None
+    };
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -1976,6 +1996,33 @@ pub async fn run_prompt_task(
             .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
+
+    if let Some(turn) = ifc_turn.as_ref() {
+        // Paper: "Confinement invariant." Record every known input before it
+        // can reach session/new or a legacy first prompt. A denied read still
+        // taints the audit ledger because audit mode does not remove the data.
+        if ctx.base_prompt.is_some() {
+            turn.observe_public_configuration(&mut agent.state.ifc_audit, "base_prompt");
+        }
+        if ctx.system_prompt.is_some() {
+            turn.observe_unclassified(&mut agent.state.ifc_audit, "system_prompt");
+        }
+        if ctx.team_instructions.is_some() {
+            turn.observe_unclassified(&mut agent.state.ifc_audit, "team_instructions");
+        }
+        if ctx.initial_message.is_some() {
+            turn.observe_unclassified(&mut agent.state.ifc_audit, "initial_message");
+        }
+        if agent_core.is_some() {
+            turn.observe_owner_private(&mut agent.state.ifc_audit, "agent_core_memory");
+        }
+        if huddle_instructions.is_some() {
+            turn.observe_domain_input(&mut agent.state.ifc_audit, "huddle_instructions");
+        }
+        if agent_canvas.is_some() {
+            turn.observe_domain_input(&mut agent.state.ifc_audit, "channel_canvas");
+        }
+    }
 
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
@@ -2363,6 +2410,11 @@ pub async fn run_prompt_task(
             });
         let conversation_context =
             conversation_context_delta(conversation_context, &delivered_ids, &rendered_batch_ids);
+        if conversation_context.is_some() {
+            if let Some(turn) = ifc_turn.as_ref() {
+                turn.observe_domain_input(&mut agent.state.ifc_audit, "conversation_history");
+            }
+        }
         pending_delivered_event_ids.extend(rendered_batch_ids);
         pending_delivered_event_ids.extend(conversation_context_event_ids(
             conversation_context.as_ref(),
@@ -2418,6 +2470,13 @@ pub async fn run_prompt_task(
         );
         return;
     };
+
+    if let Some(turn) = ifc_turn.as_ref() {
+        // This evaluates the destination selected by the design. It is not an
+        // enforcement claim: the current agent can still publish through its
+        // credential-bearing MCP/CLI path, which begin_turn logs as a gap.
+        turn.audit_reply(&agent.state.ifc_audit);
+    }
 
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
@@ -7995,6 +8054,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
+            ifc_auditor: None,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,

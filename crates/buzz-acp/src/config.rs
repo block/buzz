@@ -143,6 +143,29 @@ pub enum PermissionMode {
     Plan,
 }
 
+/// Information-flow mode for the experimental audience policy.
+///
+/// `Off` preserves the existing harness path without membership queries or policy
+/// bookkeeping. `Audit` evaluates and logs the design-paper rules but does not alter
+/// prompts, tools, session reuse, or publication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum InformationFlowMode {
+    /// Do not construct or invoke the experimental policy evaluator.
+    #[default]
+    Off,
+    /// Evaluate and log policy without changing the existing turn.
+    Audit,
+}
+
+impl std::fmt::Display for InformationFlowMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("off"),
+            Self::Audit => f.write_str("audit"),
+        }
+    }
+}
+
 impl PermissionMode {
     /// Return the wire-format string sent to the agent via
     /// `session/set_config_option`.
@@ -457,6 +480,16 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
+    /// Evaluate the audience-scoped information-flow design without enforcing it.
+    /// `off` is the default and leaves the existing harness behavior unchanged.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_INFORMATION_FLOW",
+        default_value = "off",
+        value_enum
+    )]
+    pub information_flow: InformationFlowMode,
+
     /// Inbound author gate: which authors' events the harness forwards.
     /// Modes: owner-only (default), allowlist, anyone, nobody.
     #[arg(
@@ -565,6 +598,8 @@ pub struct Config {
     pub session_title: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Experimental IFC evaluator. `Off` is a true fast path with no policy queries.
+    pub information_flow: InformationFlowMode,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
@@ -1131,6 +1166,7 @@ impl Config {
                 .as_deref()
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
+            information_flow: args.information_flow,
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
@@ -1164,7 +1200,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} information_flow={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1185,6 +1221,7 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.information_flow,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1504,6 +1541,7 @@ mod tests {
             effort_level: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
+            information_flow: InformationFlowMode::Off,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -2225,6 +2263,22 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn information_flow_is_default_off_and_audit_is_explicit() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.information_flow, InformationFlowMode::Off);
+
+        let audit = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--information-flow",
+            "audit",
+        ]);
+        assert_eq!(audit.information_flow, InformationFlowMode::Audit);
     }
 
     #[test]

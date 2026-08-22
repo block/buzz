@@ -119,6 +119,21 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
+### Experimental information-flow audit
+
+`--information-flow audit` (or `BUZZ_ACP_INFORMATION_FLOW=audit`) enables the
+audience-scoped IFC prototype. It verifies trigger events and relay-signed channel
+policy, derives `D = (Audience, Context, Epoch, Capabilities)`, evaluates read,
+call, publish, and process-reuse rules, and keeps a conservative process-level
+state label. Decisions are emitted under the `buzz_acp::ifc` tracing target.
+
+The default is `off`. In that mode no IFC auditor is constructed, no extra channel
+policy queries run, and prompt/session behavior is unchanged.
+
+Audit mode is observational. It does not filter prompts, block tools, split agent
+processes, bind replies to a destination, or provide OS confinement. Its logs call
+those gaps out explicitly; enabling it is not an enforcement claim.
+
 ### Parallel Agents & Heartbeat
 
 | Flag | Env Var | Default | Description |

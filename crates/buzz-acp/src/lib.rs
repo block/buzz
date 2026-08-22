@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod ifc;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -30,8 +31,8 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, InformationFlowMode,
+    ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -2173,6 +2174,22 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let agent_owner_pubkey = startup_owner
+        .as_deref()
+        .and_then(|hex| nostr::PublicKey::from_hex(hex).ok());
+    let ifc_auditor = (config.information_flow == InformationFlowMode::Audit).then(|| {
+        tracing::warn!(
+            target: "buzz_acp::ifc",
+            "information-flow audit enabled; decisions are logged but not enforced"
+        );
+        ifc::Auditor::new(
+            &config.relay_url,
+            relay.rest_client(),
+            relay_self.as_deref(),
+            config.keys.public_key(),
+            agent_owner_pubkey,
+        )
+    });
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2200,10 +2217,9 @@ async fn tokio_main() -> Result<()> {
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
+        ifc_auditor,
         agent_keys: config.keys.clone(),
-        agent_owner_pubkey: startup_owner
-            .as_deref()
-            .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
+        agent_owner_pubkey,
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
@@ -6775,6 +6791,7 @@ mod build_mcp_servers_tests {
             effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
+            information_flow: config::InformationFlowMode::Off,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -6999,6 +7016,7 @@ mod error_outcome_emission_tests {
             effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
+            information_flow: config::InformationFlowMode::Off,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
