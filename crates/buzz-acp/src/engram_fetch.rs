@@ -67,7 +67,8 @@ async fn fetch_core_body(
     agent_keys: &Keys,
     owner: &PublicKey,
 ) -> Result<Option<String>, String> {
-    let k_c = conversation_key(agent_keys.secret_key(), owner);
+    let k_c = conversation_key(agent_keys.secret_key(), owner)
+        .map_err(|e| format!("conversation key derivation failed: {e}"))?;
     let d = d_tag(&k_c, buzz_core::engram::CORE_SLUG);
 
     let filter = nostr::Filter::new()
