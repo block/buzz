@@ -200,12 +200,14 @@ test("persona card main click records a persona target, never an explicit pubkey
     recordedPersona = persona;
   };
 
-  // Archived sibling sorts first by name, so under fail-open pickProfileAgent
-  // selects it — the card displays the archived identity at click time. A
-  // durable pubkey target would strand the panel there after hydration.
+  // Both siblings carry the persona's name, so they stay on its single card.
+  // The archived one is first and ranks equal by name, so under fail-open
+  // pickProfileAgent selects it — the card displays the archived identity at
+  // click time. A durable pubkey target would strand the panel there after
+  // hydration.
   const agents = [
-    agent({ pubkey: ARCHIVED_PK, name: "Archived Sibling" }),
-    agent({ pubkey: LIVE_PK, name: "Zed Sibling" }),
+    agent({ pubkey: ARCHIVED_PK, name: "Fizz Prime" }),
+    agent({ pubkey: LIVE_PK, name: "Fizz Prime" }),
   ];
 
   await act(async () => {
