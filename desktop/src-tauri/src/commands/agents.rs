@@ -527,13 +527,13 @@ pub async fn create_managed_agent(
         let personas = load_personas(&app).unwrap_or_default();
 
         // Harness resolution: the persona's runtime is authoritative. A
-        // persona-backed create stores an `agent_command_override` ONLY when the
-        // user deliberately picked a divergent runtime (`harness_override`) —
-        // e.g. AddChannelBotDialog's runtime selector. A divergence WITHOUT that
-        // flag is a missing-runtime fallback from `resolvePersonaRuntime`, not a
-        // pin, and must inherit so it doesn't freeze on the fallback harness once
-        // the persona's runtime is installed. A persona-less create always
-        // preserves the picked command as a real pin.
+        // persona-backed create stores an `agent_command_override` only when the
+        // caller marks the exact supplied command as a deliberate pin
+        // (`harness_override`). A different command without that flag is a
+        // missing-runtime fallback from `resolvePersonaRuntime`, not a pin, and
+        // must inherit so it doesn't freeze on the fallback harness once the
+        // persona's runtime is installed. A persona-less create always preserves
+        // the picked command as a real pin.
         let agent_command_override = crate::managed_agents::create_time_agent_command_override(
             requested_persona_id.as_deref(),
             &personas,

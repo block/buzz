@@ -250,8 +250,20 @@ with a TypeScript lookup table or an id comparison in a component.
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
+15. **Team deploy preserves one unambiguous local runtime configuration.** A
+   team persona may have several personal instances. Deploy may reuse their
+   runtime only when every local, non-team instance has the same exact command
+   override and argument list; conflicting configurations fail closed as
+   Setup required. Catalog matching proves availability and supplies metadata,
+   but create persists the source's exact path or alias as the durable command
+   binding. Provider-backed instances never supply a local team runtime.
+
 ## The tests that enforce this
 
+- `lib/teamDeployRuntime.test.mjs` and
+  `ui/AddTeamToChannelDialog.seam.test.mjs` — ambiguous personal-instance
+  runtime settings fail closed, exact path/alias pins cross the create seam,
+  and managed-agent loading/error gates are causal.
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
   policy. Update when the capability model changes.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
