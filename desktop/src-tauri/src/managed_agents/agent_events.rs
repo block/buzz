@@ -124,6 +124,35 @@ pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, St
     Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags(tags))
 }
 
+/// Build the public policy record for an existing externally operated agent.
+/// This deliberately cannot represent a private key, runtime, provider, model,
+/// prompt, environment, process, or local managed-agent record.
+pub fn build_existing_agent_registration(
+    agent_pubkey: &str,
+    name: &str,
+) -> Result<EventBuilder, String> {
+    super::validate_managed_agent_definition_text(name, None, None)
+        .map_err(|error| format!("Managed agent definition is unsafe to publish: {error}"))?;
+    let agent_pubkey = nostr::PublicKey::from_hex(agent_pubkey)
+        .map_err(|error| format!("invalid agent pubkey: {error}"))?
+        .to_hex();
+    let content = serde_json::to_string(&ManagedAgentEventContent {
+        name: name.to_string(),
+        persona_id: None,
+        system_prompt: None,
+        model: None,
+        provider: None,
+        persona_source_version: None,
+        parallelism: 1,
+        respond_to: RespondTo::OwnerOnly,
+        respond_to_allowlist: Vec::new(),
+    })
+    .map_err(|error| format!("failed to serialize managed-agent content: {error}"))?;
+    let tag = Tag::parse(["d", agent_pubkey.as_str()])
+        .map_err(|error| format!("invalid d-tag: {error}"))?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags([tag]))
+}
+
 /// Parse a kind:30177 event's content into the projection — the inbound
 /// counterpart of [`agent_event_content`].
 ///
@@ -233,6 +262,28 @@ mod tests {
         let keys = nostr::Keys::generate();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind.as_u16() as u32, KIND_MANAGED_AGENT);
+    }
+
+    #[test]
+    fn existing_agent_registration_is_the_minimal_owner_only_policy() {
+        let external = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let event =
+            build_existing_agent_registration(&external.public_key().to_hex(), "Remote helper")
+                .unwrap()
+                .sign_with_keys(&owner)
+                .unwrap();
+
+        assert_eq!(event.kind.as_u16() as u32, KIND_MANAGED_AGENT);
+        assert_eq!(
+            event.content,
+            r#"{"name":"Remote helper","parallelism":1,"respond_to":"owner-only"}"#
+        );
+        assert_eq!(event.tags.len(), 1);
+        assert_eq!(
+            event.tags.iter().next().unwrap().as_slice(),
+            &["d".to_string(), external.public_key().to_hex()]
+        );
     }
 
     #[test]

@@ -8,6 +8,26 @@ import type {
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
 
+export type RegisterExistingRelayAgentInput = {
+  agentPubkey: string;
+  displayName: string;
+  expectedOwnerPubkey: string;
+  expectedRelayUrl: string;
+  expectedSignerPubkey: string;
+};
+
+export type RegisterExistingRelayAgentResult = {
+  eventId: string;
+  agentPubkey: string;
+  ownerPubkey: string;
+};
+
+export async function registerExistingRelayAgent(
+  input: RegisterExistingRelayAgentInput,
+): Promise<RegisterExistingRelayAgentResult> {
+  return invokeTauri("register_existing_relay_agent", { input });
+}
+
 export async function startManagedAgent(
   pubkey: string,
   options?: {

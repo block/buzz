@@ -104,3 +104,40 @@ test("allows agents to update only personal, editable profiles", () => {
     false,
   );
 });
+
+test("parses a narrow existing-identity adoption request", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "adopt",
+    requestId: "request-adopt",
+    request: {
+      channelId: CHANNEL_ID,
+      agentPubkey: "a".repeat(64),
+      displayName: "Luci",
+    },
+  };
+
+  assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
+test("rejects adoption requests carrying runtime or secret fields", () => {
+  for (const [field, value] of [
+    ["privateKeyNsec", "nsec1secret"],
+    ["runtime", "hermes"],
+    ["provider", "remote"],
+    ["systemPrompt", "hidden instructions"],
+  ]) {
+    const payload = {
+      type: AGENT_MANAGEMENT_REQUEST,
+      action: "adopt",
+      requestId: "request-adopt",
+      request: {
+        channelId: CHANNEL_ID,
+        agentPubkey: "a".repeat(64),
+        displayName: "Luci",
+        [field]: value,
+      },
+    };
+    assert.equal(parseAgentManagementRequest(payload), null);
+  }
+});

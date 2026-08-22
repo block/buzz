@@ -3,7 +3,9 @@ use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identit
 use nostr::PublicKey;
 use serde_json::json;
 
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_adopt, build_create, build_update, AdoptAgentDraft, CreateAgentDraft, UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
@@ -78,6 +80,38 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                 obj.insert(
                     "message".into(),
                     "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
+                        .into(),
+                );
+            }
+            println!("{output}");
+            Ok(())
+        }
+
+        AgentsCmd::DraftAdopt {
+            channel,
+            agent_pubkey,
+            display_name,
+        } => {
+            let owner = require_owner(client)?;
+            let built = build_adopt(
+                client.keys(),
+                &owner,
+                AdoptAgentDraft {
+                    channel_id: channel,
+                    agent_pubkey,
+                    display_name,
+                },
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                obj.insert("saved".into(), false.into());
+                obj.insert(
+                    "message".into(),
+                    "Registration draft sent to Buzz Desktop for owner review. The existing agent is unchanged until the owner saves it."
                         .into(),
                 );
             }
@@ -168,7 +202,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
-/// the `draft-create` and `draft-update` paths.
+/// the owner-reviewed agent draft paths.
 fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     let hex = client
         .auth_tag_owner_hex()
