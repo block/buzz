@@ -37,7 +37,21 @@ tests:
       replicaCount: 3
     asserts:
       - failedTemplate:
-          errorPattern: "minimum replica count 3 requires Redis"
+          errorPattern: "minimum replica count 3 requires Redis or Valkey"
+
+  - it: fails when both redis and valkey are enabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      redis.enabled: true
+      valkey.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "cannot both be true"
 
   - it: fails when ingress and httproute both enabled
     set:
