@@ -294,6 +294,23 @@ export function useChannelSubscription(channel: Channel | null) {
     await refreshChannelWindowMessages(queryClient, channelId);
   });
 
+  // Drop the freshness of this channel's thread-replies caches so the next
+  // thread open refetches. The 30s `staleTime` keeps a warm cache authoritative
+  // on reopen, but that only stays correct while the channel's live
+  // subscription is feeding it appends. When the channel goes inactive the
+  // subscription is disposed, so replies emitted meanwhile never reach the
+  // cache — reopening within the window would render stale topology and unread
+  // state. Invalidating on (re)subscribe closes that gap exactly as
+  // `refreshNewestWindow` does for the channel window: mirrors "freshness alone
+  // is not a proof that no events landed while we were away." Cached rows still
+  // paint immediately (stale-while-revalidate); the refetch reconciles them.
+  const invalidateThreadReplies = useEffectEvent(() => {
+    if (!channelId) return;
+    void queryClient.invalidateQueries({
+      queryKey: ["thread-replies", channelId],
+    });
+  });
+
   const appendMessage = useEffectEvent((event: RelayEvent) => {
     if (!channelId) return;
     if (event.kind === KIND_CHANNEL_THREAD_SUMMARY) {
@@ -316,8 +333,17 @@ export function useChannelSubscription(channel: Channel | null) {
     if (threadReference?.parentId != null) {
       const rootId = threadReference?.rootId;
       if (rootId) {
-        queryClient.setQueryData<RelayEvent[]>(
-          threadRepliesKey(channelId, rootId),
+        // Update only an already-observed thread key; never build a fresh one.
+        // Under the 30s `staleTime`, a `setQueryData` that creates the key
+        // would mint a "complete/fresh" cache whose only row is this live
+        // reply, so opening a never-loaded thread inside the window would skip
+        // the history fetch and show just this reply. `setQueriesData` writes
+        // through `findAll`, which matches only existing queries — a warm or
+        // in-flight thread appends; an absent thread stays absent and its next
+        // mount fetches the full subtree from the relay (which includes this
+        // reply). Mirrors the aux fan-out below, which is create-safe already.
+        queryClient.setQueriesData<RelayEvent[]>(
+          { queryKey: threadRepliesKey(channelId, rootId), exact: true },
           (current = []) => mergeMessages(current, event),
         );
       }
@@ -382,6 +408,7 @@ export function useChannelSubscription(channel: Channel | null) {
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
+      invalidateThreadReplies();
       void refreshNewestWindow().catch((error) => {
         if (!isDisposed) {
           console.error(
@@ -410,6 +437,7 @@ export function useChannelSubscription(channel: Channel | null) {
         // between the last page snapshot and subscription establishment. Always
         // refresh after the subscription is active; freshness alone is not a
         // proof that no relay events landed in that interval.
+        invalidateThreadReplies();
         void refreshNewestWindow().catch((error) => {
           if (!isDisposed) {
             console.error(
