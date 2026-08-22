@@ -7,20 +7,25 @@ import type { MentionSuggestion } from "./MentionAutocomplete";
 export function useAlwaysAddressShortcut({
   enabled,
   mentions,
-  onOpenPicker,
+  onSelect,
   onToggle,
 }: {
   enabled: boolean;
   mentions: UseMentionsResult;
-  onOpenPicker: (insertTrigger?: boolean) => void;
+  onSelect: (suggestion: MentionSuggestion) => void;
   onToggle: (suggestion: MentionSuggestion) => void;
 }) {
-  const { isMentionOpen, mentionSelectedIndex, suggestions } = mentions;
+  const {
+    getDefaultAgentSuggestion,
+    isMentionOpen,
+    mentionSelectedIndex,
+    suggestions,
+  } = mentions;
   return React.useCallback(
     (event: React.KeyboardEvent): boolean => {
       if (
         !enabled ||
-        event.key !== "Enter" ||
+        event.key.toLowerCase() !== "m" ||
         !hasPrimaryShortcutModifier(event) ||
         event.altKey ||
         !event.shiftKey
@@ -30,21 +35,23 @@ export function useAlwaysAddressShortcut({
 
       event.preventDefault();
       if (event.repeat) return true;
-      if (!isMentionOpen) {
-        onOpenPicker(false);
-        return true;
-      }
-
-      const suggestion = suggestions[mentionSelectedIndex];
+      const suggestion = isMentionOpen
+        ? suggestions[mentionSelectedIndex]
+        : getDefaultAgentSuggestion();
       if (!suggestion?.isAgent || !suggestion.pubkey) return true;
-      onToggle(suggestion);
+      if (isMentionOpen) {
+        onSelect(suggestion);
+      } else {
+        onToggle(suggestion);
+      }
       return true;
     },
     [
       enabled,
+      getDefaultAgentSuggestion,
       isMentionOpen,
       mentionSelectedIndex,
-      onOpenPicker,
+      onSelect,
       onToggle,
       suggestions,
     ],

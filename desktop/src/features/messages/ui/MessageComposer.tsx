@@ -489,7 +489,7 @@ function MessageComposerImpl({
   const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
     enabled: Boolean(audienceScope && editTarget == null),
     mentions,
-    onOpenPicker: openMentionPicker,
+    onSelect: selectMentionSuggestion,
     onToggle: toggleAlwaysAddressAgent,
   });
   const submitMessage = React.useCallback(async () => {

@@ -19,7 +19,7 @@ export type RankedMentionCandidate<T extends MentionCandidateForRanking> = {
   score: number;
 };
 
-function getMentionCandidateGroupRank(
+export function getMentionCandidateGroupRank(
   candidate: MentionCandidateForRanking,
   activePersonaIds: ReadonlySet<string>,
 ) {

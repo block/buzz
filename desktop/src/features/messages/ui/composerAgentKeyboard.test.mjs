@@ -44,13 +44,12 @@ test("agent picker preference skips people", async () => {
   assert.equal(view.result.current.mentionSelectedIndex, 1);
 });
 
-test("primary+Shift+Enter opens the picker or toggles in place", async () => {
+test("primary+Shift+M addresses the default agent or toggles the tray selection", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAlwaysAddressShortcut } = await import(
     "./useAlwaysAddressShortcut.ts"
   );
   const { isMacPlatform } = await import("@/shared/lib/platform");
-  const opened = [];
   const toggled = [];
   const suggestion = {
     displayName: "Agent Ada",
@@ -60,7 +59,7 @@ test("primary+Shift+Enter opens the picker or toggles in place", async () => {
   const createEvent = () => ({
     altKey: false,
     ctrlKey: !isMacPlatform(),
-    key: "Enter",
+    key: "M",
     metaKey: isMacPlatform(),
     preventDefault() {},
     repeat: false,
@@ -71,24 +70,24 @@ test("primary+Shift+Enter opens the picker or toggles in place", async () => {
       useAlwaysAddressShortcut({
         enabled: true,
         mentions: {
+          getDefaultAgentSuggestion: () => suggestion,
           isMentionOpen,
           mentionSelectedIndex: 0,
           suggestions: [suggestion],
         },
-        onOpenPicker: (insertTrigger) => opened.push(insertTrigger),
+        onSelect: (value) => toggled.push(value),
         onToggle: (value) => toggled.push(value),
       }),
     { initialProps: { isMentionOpen: false } },
   );
 
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(opened, [false]);
-  assert.deepEqual(toggled, []);
+  assert.deepEqual(toggled, [suggestion]);
 
   view.rerender({ isMentionOpen: true });
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(toggled, [suggestion, suggestion]);
 
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion, suggestion]);
+  assert.deepEqual(toggled, [suggestion, suggestion, suggestion]);
 });

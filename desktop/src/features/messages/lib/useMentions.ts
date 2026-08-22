@@ -49,7 +49,10 @@ import {
   type MentionPickerMode,
   useMentionSelection,
 } from "./useMentionSelection";
-import { rankMentionCandidates } from "./mentionRanking";
+import {
+  getMentionCandidateGroupRank,
+  rankMentionCandidates,
+} from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   appendUniqueName,
@@ -534,6 +537,37 @@ export function useMentions(
     ownerProfilesQuery.data?.profiles,
     profiles,
   ]);
+  const getDefaultAgentSuggestion =
+    React.useCallback((): MentionSuggestion | null => {
+      let bestCandidate: MentionCandidate | null = null;
+      let bestRank = Number.POSITIVE_INFINITY;
+      for (const candidate of mentionCandidates) {
+        if (!candidate.isAgent || !candidate.pubkey) continue;
+        const rank = getMentionCandidateGroupRank(candidate, activePersonaIds);
+        if (rank < bestRank) {
+          bestCandidate = candidate;
+          bestRank = rank;
+        }
+      }
+      if (!bestCandidate) return null;
+      return mapMentionCandidateToSuggestion({
+        agentProvenanceReady: agentDirectoriesReady,
+        candidate: bestCandidate,
+        label: mentionCandidateLabel(bestCandidate),
+        channelType: options?.channelType,
+        currentPubkey,
+        ownerProfiles: ownerProfilesQuery.data?.profiles,
+        profiles,
+      });
+    }, [
+      activePersonaIds,
+      agentDirectoriesReady,
+      currentPubkey,
+      mentionCandidates,
+      options?.channelType,
+      ownerProfilesQuery.data?.profiles,
+      profiles,
+    ]);
   const fetchMoreSuggestions = React.useCallback(() => {
     if (userSearchQuery.hasNextPage && !userSearchQuery.isFetchingNextPage) {
       void userSearchQuery.fetchNextPage();
@@ -938,6 +972,7 @@ export function useMentions(
   return {
     cancelMentionAutocomplete,
     clearMentions,
+    getDefaultAgentSuggestion,
     extractMentionPersonas,
     extractMentionPubkeys: extractMentionPubkeysForCurrentMentions,
     revalidateMentionPubkeys,

@@ -54,7 +54,7 @@ function threadComposer(page: Page) {
   return page.getByTestId("thread-composer-overlay");
 }
 
-async function pressPrimaryShift(page: Page, key: "Enter" | "M") {
+async function pressPrimaryShift(page: Page, key: "M") {
   const isMac = await page.evaluate(() =>
     /mac|iphone|ipad|ipod/i.test(navigator.platform),
   );
@@ -174,7 +174,7 @@ test("Tab keeps a manually selected agent as an inline mention", async ({
   ).toHaveCount(0);
 });
 
-test("primary+Shift+Enter opens the picker, then pins the highlighted agent", async ({
+test("primary+Shift+M addresses the default agent, then selects the highlighted agent", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
@@ -183,23 +183,32 @@ test("primary+Shift+Enter opens the picker, then pins the highlighted agent", as
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
   await input.fill("draft text");
-  await pressPrimaryShift(page, "Enter");
+  await pressPrimaryShift(page, "M");
 
-  const menu = composer.getByTestId("mention-autocomplete");
-  await expect(menu).toBeVisible();
   await expect(input).toHaveText("draft text");
+  await expect(
+    composer
+      .getByTestId("composer-address-locks")
+      .getByRole("button", { name: /^Stop automatically mentioning / }),
+  ).toHaveCount(1);
 
-  await input.fill("@Mor");
-  await expect(menu.getByTestId(`mention-suggestion-${AGENT_A}`)).toHaveClass(
+  await input.fill("@Vog");
+  const menu = composer.getByTestId("mention-autocomplete");
+  await expect(menu.getByTestId(`mention-suggestion-${AGENT_B}`)).toHaveClass(
     /(?:^|\s)bg-accent(?:\s|$)/,
   );
-  await pressPrimaryShift(page, "Enter");
+  await pressPrimaryShift(page, "M");
 
-  await expect(menu).toBeVisible();
-  await expect(input).toHaveText("");
+  await expect(menu).toHaveCount(0);
+  await expect(input).toHaveText("@Vogue ");
   await expect(
-    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+    composer.getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toHaveCount(0);
+  await expect(
+    composer
+      .getByTestId("composer-address-locks")
+      .getByRole("button", { name: /^Stop automatically mentioning / }),
+  ).toHaveCount(1);
 });
 
 test("the mention button opens settings and can undo an address", async ({
