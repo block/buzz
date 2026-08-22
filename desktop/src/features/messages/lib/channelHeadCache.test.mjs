@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, test } from "node:test";
+import { after, afterEach, before, mock, test } from "node:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { JSDOM } from "jsdom";
 import React from "react";
 import {
   consumeHydratedChannel,
+  hasPersistedHydratedChannel,
   hydrateChannelHeads,
 } from "./channelHeadCache.ts";
 import { channelMessagesKey } from "./messageQueryKeys.ts";
 import {
   reconcileFetchedChannelWindow,
   useChannelMessagesQuery,
+  useChannelSubscription,
 } from "../hooks.ts";
+import { relayClient } from "../../../shared/api/relayClient.ts";
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
 });
@@ -81,13 +84,18 @@ function bounds() {
     sig: "",
   };
 }
-function install(entries) {
+function install(entries, { loadDelayMs = 0 } = {}) {
   channelWindowCalls = 0;
   channelWindowEvents = [replacement, bounds()];
   window.localStorage.clear();
   window.__TAURI_INTERNALS__ = {
     invoke: async (command) => {
-      if (command === "channel_head_cache_load") return entries;
+      if (command === "channel_head_cache_load") {
+        if (loadDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, loadDelayMs));
+        }
+        return entries;
+      }
       if (command === "get_channel_window") {
         channelWindowCalls += 1;
         return channelWindowEvents;
@@ -205,4 +213,92 @@ test("drops malformed entries independently", async () => {
   });
   assert.equal(client.getQueryData(channelMessagesKey("bad")), undefined);
   assert.deepEqual(client.getQueryData(channelMessagesKey(channelId)), [root]);
+});
+
+test("a channel mounted during a slow cache load still takes the hydrated path", async () => {
+  // Carl/#6572 (1): the app no longer waits for the cache before mounting, so
+  // the channel query must itself wait for the seed instead of racing it with
+  // a cold relay fetch.
+  install(
+    [{ channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 }],
+    { loadDelayMs: 150 },
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  void hydrateChannelHeads(client, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  const view = await mountChannelQuery(client);
+  assert.equal(channelWindowCalls, 0);
+  assert.deepEqual(view.result.current.data, [root]);
+  view.unmount();
+  client.clear();
+});
+test("a bounds-only persisted head is not hydrated", async () => {
+  // Carl/#6572 (3): zero rows paint nothing, so the channel must take the
+  // cold path and hold its skeleton rather than flash the empty-channel intro.
+  install([{ channelId, events: [bounds()], savedAt: 1, lastVisitedAt: 1 }]);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  await hydrateChannelHeads(client, {
+    pubkey: "f".repeat(64),
+    relayUrl: "wss://relay",
+  });
+  assert.equal(client.getQueryData(channelMessagesKey(channelId)), undefined);
+  assert.equal(hasPersistedHydratedChannel(client, channelId), false);
+  const view = await mountChannelQuery(client);
+  assert.equal(channelWindowCalls, 1);
+  assert.deepEqual(view.result.current.data, [replacement]);
+  view.unmount();
+  client.clear();
+});
+
+test("a hydrated channel still revalidates when live subscription setup fails", async () => {
+  // Carl/#6572 (2): the hydrated path skips get_channel_window on mount, so
+  // the post-subscribe refresh is its only authoritative fetch. A rejected
+  // subscribe must trigger it too, or the channel stays stale all session.
+  install([
+    { channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 },
+  ]);
+  mock.method(relayClient, "subscribeToReconnects", () => () => {});
+  mock.method(relayClient, "subscribeToChannelLive", () =>
+    Promise.reject(new Error("socket down")),
+  );
+  const consoleError = mock.method(console, "error", () => {});
+  try {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    await hydrateChannelHeads(client, {
+      pubkey: "f".repeat(64),
+      relayUrl: "wss://relay",
+    });
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const view = renderHook(
+      () => {
+        useChannelSubscription(channel);
+        return useChannelMessagesQuery(channel);
+      },
+      {
+        wrapper: ({ children }) =>
+          React.createElement(QueryClientProvider, { client }, children),
+      },
+    );
+    await waitFor(() => assert.equal(channelWindowCalls, 1));
+    await waitFor(() =>
+      assert.deepEqual(view.result.current.data, [replacement]),
+    );
+    view.unmount();
+    client.clear();
+  } finally {
+    mock.restoreAll();
+  }
+  assert.ok(
+    consoleError.mock.calls.some(
+      (call) => call.arguments[0] === "Failed to subscribe to channel",
+    ),
+  );
 });

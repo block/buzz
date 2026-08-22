@@ -26,6 +26,7 @@ import {
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
 import {
   channelHeadCacheScope,
+  channelHeadHydration,
   consumeHydratedChannel,
 } from "@/features/messages/lib/channelHeadCache";
 import { storeChannelHeadCache } from "@/shared/api/tauriChannelHeadCache";
@@ -291,6 +292,10 @@ export function useChannelMessagesQuery(channel: Channel | null) {
     queryKey,
     queryFn: async ({ signal }) => {
       if (!channel) throw new Error("No channel selected.");
+      // Persisted heads seed asynchronously; wait for that seed so a channel
+      // opened during boot takes the hydrated path instead of racing it with
+      // a cold relay fetch.
+      await channelHeadHydration(queryClient);
       if (consumeHydratedChannel(queryClient, channel.id)) {
         return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       }
@@ -418,36 +423,45 @@ export function useChannelSubscription(channel: Channel | null) {
       });
     });
 
+    // The live subscription starts at "now", so it cannot close the gap
+    // between the last page snapshot and subscription establishment. Always
+    // refresh once subscription setup settles — on success because freshness
+    // alone is not proof that no relay events landed in that interval, and on
+    // failure because a hydrated channel has no other authoritative fetch:
+    // the relay window endpoint may be healthy even when the live socket is
+    // not, and the reconnect listener above re-syncs when it recovers.
+    const refreshAfterSubscribe = (outcome: string) => {
+      if (isDisposed) return;
+      void refreshNewestWindow().catch((error) => {
+        if (!isDisposed) {
+          console.error(
+            `Failed to refresh channel window after ${outcome}`,
+            channelId,
+            error,
+          );
+        }
+      });
+    };
     relayClient
       .subscribeToChannelLive(channelId, (event) => {
         if (!isDisposed) {
           appendMessage(event);
         }
       })
-      .then((dispose) => {
-        if (isDisposed) {
-          void dispose();
-          return;
-        }
-
-        cleanup = dispose;
-        // The live subscription starts at "now", so it cannot close the gap
-        // between the last page snapshot and subscription establishment. Always
-        // refresh after the subscription is active; freshness alone is not a
-        // proof that no relay events landed in that interval.
-        void refreshNewestWindow().catch((error) => {
-          if (!isDisposed) {
-            console.error(
-              "Failed to refresh channel window after subscribing",
-              channelId,
-              error,
-            );
+      .then(
+        (dispose) => {
+          if (isDisposed) {
+            void dispose();
+            return;
           }
-        });
-      })
-      .catch((error) => {
-        console.error("Failed to subscribe to channel", channelId, error);
-      });
+          cleanup = dispose;
+          refreshAfterSubscribe("subscribing");
+        },
+        (error) => {
+          console.error("Failed to subscribe to channel", channelId, error);
+          refreshAfterSubscribe("subscription failure");
+        },
+      );
 
     return () => {
       isDisposed = true;
