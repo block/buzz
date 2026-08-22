@@ -80,6 +80,24 @@ const CATALOG = [
     source: "preset",
   },
   {
+    id: "pi",
+    label: "Pi",
+    avatar_url: "",
+    availability: "adapter_missing",
+    command: null,
+    binary_path: null,
+    default_args: [],
+    mcp_command: null,
+    install_hint:
+      "Buzz talks to the standard Pi CLI through the pi-acp adapter. Follow the setup guide to install both pi and pi-acp so both commands are on your PATH.",
+    install_instructions_url: "https://github.com/svkozak/pi-acp",
+    can_auto_install: false,
+    underlying_cli_path: "/usr/local/bin/pi",
+    node_required: false,
+    auth_status: { status: "not_applicable" },
+    source: "preset",
+  },
+  {
     id: "omp",
     label: "Oh My Pi",
     avatar_url: "",
@@ -160,7 +178,14 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
     path: `${SHOTS}/after-catalog-needs-setup.png`,
   });
 
-  // 3. Ready entry detail (Ready state, no install action). Ready entries
+  // 3. Standard Pi uses its own preset and reports the missing ACP adapter.
+  await page.getByTestId("harness-catalog-list-item-pi").click();
+  await page.waitForTimeout(300);
+  await page.getByTestId("harness-catalog-dialog").screenshot({
+    path: `${SHOTS}/after-catalog-pi.png`,
+  });
+
+  // 4. Ready entry detail (Ready state, no install action). Ready entries
   // sit in the "Installed" accordion, collapsed by default — expand it.
   await page.getByTestId("harness-catalog-section-installed").click();
   await page.getByTestId("harness-catalog-list-item-claude").click();
@@ -169,7 +194,7 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
     path: `${SHOTS}/after-catalog-ready-detail.png`,
   });
 
-  // 4. Custom harness form — all fields inline.
+  // 5. Custom harness form — all fields inline.
   await page.getByTestId("harness-catalog-list-item-custom").click();
   await expect(page.getByTestId("custom-harness-form")).toBeVisible();
   await page.waitForTimeout(300);
