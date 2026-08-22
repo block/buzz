@@ -1167,6 +1167,20 @@ pub(crate) fn format_event_block(
     block
 }
 
+/// Append a DM reply instruction.
+///
+/// DMs are already a single focused conversation, so ordinary replies belong
+/// in the main timeline even when the triggering event came from a side thread.
+/// A human can still explicitly ask the agent to continue a particular thread.
+fn append_dm_reply_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: For ordinary replies in this turn, send the message without \
+         `--reply-to` so it appears in the main DM timeline. Only use `--reply-to` \
+         if the human explicitly asks you to reply inside a DM thread. If the \
+         requested destination is ambiguous, ask before sending.",
+    );
+}
+
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
 /// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
@@ -1294,10 +1308,10 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
-/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
-/// replies; in the channel branch a `Some` anchor means a human-facing
-/// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
+/// [`resolve_reply_anchor`]). Channel thread branches use it to keep ordinary
+/// replies flat; channel top-level branches use it to open a thread at the
+/// triggering event. DMs ignore it and default ordinary replies to the main
+/// timeline.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1337,7 +1351,9 @@ fn format_context_hints(
              Channel: {channel_display}\n\
              {ctx_hint}"
         );
-        // If this is a DM reply, include thread structural info as supplementary.
+        // DM replies normally return to the main timeline. Include thread
+        // structure as supplementary context so an explicit request can still
+        // target the existing thread.
         if let Some(ref root) = thread_tags.root_event_id {
             s.push_str(&format!("\nThread root: {root}"));
             if let Some(ref parent) = thread_tags.parent_event_id {
@@ -1345,10 +1361,8 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
-            }
         }
+        append_dm_reply_instruction(&mut s);
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
@@ -1589,17 +1603,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
+    // Human-facing channel turns are anchored so replies stay readable at layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
-    // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // Agent↔agent channel turns get no forced anchor — deep nesting is intentional
+    // there. DMs instead receive an explicit main-timeline instruction.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        None
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4298,7 +4309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_present_for_dm_thread_reply() {
+    fn test_dm_thread_reply_defaults_to_main_timeline() {
         let ch = Uuid::new_v4();
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
@@ -4331,8 +4342,16 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains("without `--reply-to` so it appears in the main DM timeline"),
+            "DM thread reply should default to the main timeline"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "DM thread reply should not anchor to the triggering event"
+        );
+        assert!(
+            prompt.contains("Only use `--reply-to` if the human explicitly asks"),
+            "DM thread reply should preserve explicitly requested threading"
         );
     }
 
@@ -4367,7 +4386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_dm_non_reply_defaults_to_main_timeline() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
@@ -4395,8 +4414,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains("without `--reply-to` so it appears in the main DM timeline"),
+            "DM non-reply should default to the main timeline"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {}", batch.events[0].event.id.to_hex())),
+            "DM non-reply should not anchor to the triggering event"
         );
     }
 
