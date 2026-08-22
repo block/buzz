@@ -329,6 +329,20 @@ The harness works with any agent that implements the [ACP spec](https://agentcli
 - Accept `session/prompt` with a text message and stream `session/update` notifications
 - Return a `stopReason` (`end_turn`, `cancelled`, `max_tokens`, etc.)
 
+### Permission-policy boundary
+
+`AcpClient` exposes an injectable asynchronous policy for
+`session/request_permission`. No policy means deny: Buzz selects an offered
+reject option when that is unambiguous, or returns `cancelled`. Callback errors,
+timeouts, invalid selections, and cancellation also fail closed. The historical
+`allow_once` behavior is available only through the explicit
+`AcpClient::allow_once_permission_policy()` compatibility policy.
+
+This is cooperative control of the ACP session/request_permission exchange only.
+It does not enforce or attest filesystem, subprocess, network, MCP, runtime, or
+operating-system containment. An agent or tool that does not ask is outside this
+policy boundary.
+
 Set `BUZZ_ACP_AGENT_COMMAND` and `BUZZ_ACP_AGENT_ARGS` to point at your agent binary.
 
 ## Testing

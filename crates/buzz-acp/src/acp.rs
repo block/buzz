@@ -9,6 +9,9 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -21,6 +24,54 @@ use crate::usage::{
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+
+/// Maximum time an injected permission policy may take to decide.
+const PERMISSION_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An option offered by an ACP agent in `session/request_permission`.
+///
+/// Both fields are preserved exactly as supplied on the wire. Buzz does not
+/// infer semantics from an option ID or normalize an unknown option kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionOption {
+    /// Exact `optionId` value supplied by the agent.
+    pub option_id: String,
+    /// Exact option `kind` supplied by the agent.
+    pub kind: String,
+}
+
+/// The policy input for one cooperative ACP permission request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+    /// JSON-RPC request ID, preserved as either a string or number.
+    pub request_id: serde_json::Value,
+    /// ACP session ID when the agent supplied one.
+    pub session_id: Option<String>,
+    /// Permission choices supplied by the agent.
+    pub options: Vec<PermissionOption>,
+}
+
+/// A decision returned by an injected [`PermissionPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionDecision {
+    /// Select the offered option with this exact ID.
+    Select(String),
+    /// Decline without selecting any option.
+    Cancel,
+}
+
+/// Asynchronous, Buzz-owned decision callback for cooperative ACP permission requests.
+///
+/// This controls only an agent's voluntary `session/request_permission` exchange.
+/// It is not enforcement or attestation for filesystem, subprocess, network, MCP,
+/// runtime, or operating-system access. A non-cooperating agent can act without asking.
+pub type PermissionPolicy = Arc<
+    dyn Fn(
+            PermissionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<PermissionDecision, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -160,6 +211,8 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Explicit cooperative ACP permission policy. Absence fails closed.
+    permission_policy: Option<PermissionPolicy>,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -414,6 +467,29 @@ fn build_client_capabilities() -> serde_json::Value {
 }
 
 impl AcpClient {
+    /// Install the policy used for cooperative ACP permission requests.
+    ///
+    /// No policy is installed by default, which fails closed. Callers that
+    /// intentionally require the historical auto-approval behavior must install
+    /// [`Self::allow_once_permission_policy`] explicitly.
+    pub fn set_permission_policy(&mut self, policy: PermissionPolicy) {
+        self.permission_policy = Some(policy);
+    }
+
+    /// Explicit compatibility policy that selects the first offered `allow_once` option.
+    pub fn allow_once_permission_policy() -> PermissionPolicy {
+        Arc::new(|request| {
+            Box::pin(async move {
+                request
+                    .options
+                    .iter()
+                    .find(|option| option.kind == "allow_once")
+                    .map(|option| PermissionDecision::Select(option.option_id.clone()))
+                    .ok_or_else(|| "no allow_once option offered".to_string())
+            })
+        })
+    }
+
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
     /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
@@ -552,6 +628,7 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            permission_policy: None,
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -1182,7 +1259,8 @@ impl AcpClient {
     ///
     /// While waiting, handles:
     /// - `session/update` notifications → logged via tracing
-    /// - `session/request_permission` requests → auto-approved with `allow_once`
+    /// - `session/request_permission` requests → delegated to the explicit policy,
+    ///   failing closed when no valid decision is available
     /// - Any other messages → debug-logged and ignored; if they carry an `id`
     ///   (i.e. they are requests, not notifications), a JSON-RPC -32601 error is sent.
     ///
@@ -1922,15 +2000,7 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
-    ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
-    ///
-    /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
-    ///
-    /// The request `id` is stored as `serde_json::Value` to support both numeric
-    /// and string IDs per JSON-RPC 2.0.
+    /// Decide a cooperative `session/request_permission` request, failing closed.
     async fn handle_permission_request(&mut self, msg: &serde_json::Value) -> Result<(), AcpError> {
         // Extract id as a Value — JSON-RPC 2.0 allows both numeric and string IDs.
         let id = msg
@@ -1943,48 +2013,57 @@ impl AcpClient {
         // Mark as not yet responded — guards against double-response race.
         self.permission_responded = false;
 
-        let options = msg["params"]["options"]
-            .as_array()
-            .ok_or_else(|| AcpError::Protocol("permission request missing options".into()))?;
+        let wire_options = msg["params"]["options"].as_array();
+        let options = wire_options.ok_or(()).and_then(|wire_options| {
+            wire_options
+                .iter()
+                .map(|option| {
+                    let option_id = option.get("optionId").and_then(|value| value.as_str());
+                    let kind = option.get("kind").and_then(|value| value.as_str());
+                    match (option_id, kind) {
+                        (Some(option_id), Some(kind)) => Ok(PermissionOption {
+                            option_id: option_id.to_owned(),
+                            kind: kind.to_owned(),
+                        }),
+                        _ => Err(()),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let wire_options = wire_options.map(Vec::as_slice).unwrap_or_default();
 
         tracing::debug!(
             target: "acp::permission",
             "session/request_permission id={id}, {} options",
-            options.len()
+            wire_options.len()
         );
 
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+        let policy_result = match (self.permission_policy.clone(), options.as_ref()) {
+            (Some(policy), Ok(options)) => {
+                let request = PermissionRequest {
+                    request_id: id.clone(),
+                    session_id: msg["params"]["sessionId"].as_str().map(str::to_owned),
+                    options: options.clone(),
+                };
+                match tokio::time::timeout(PERMISSION_DECISION_TIMEOUT, policy(request)).await {
+                    Ok(result) => result,
+                    Err(_) => Err("permission policy timed out".to_string()),
+                }
+            }
+            (None, _) => Err("no permission policy installed".to_string()),
+            (_, Err(_)) => Err("malformed permission option".to_string()),
+        };
 
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
-                .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
-            tracing::info!(
-                target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
-            );
-            permission_response_selected(&id, option_id)
-        } else {
-            // No allow_once — fall back to reject_once.
-            tracing::warn!(
-                target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
-            );
-            let reject = options
-                .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
-            } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
+        let response = match (policy_result, options.as_ref()) {
+            (Ok(PermissionDecision::Select(selected)), Ok(options))
+                if options.iter().any(|option| option.option_id == selected) =>
+            {
+                permission_response_selected(&id, &selected)
+            }
+            (Ok(PermissionDecision::Cancel), _) => permission_response_cancelled(&id),
+            (decision, _) => {
+                tracing::warn!(target: "acp::permission", ?decision, "permission policy failed closed");
+                permission_response_rejected(&id, wire_options)
             }
         };
 
@@ -2118,6 +2197,34 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
         "id": id,
         "result": { "outcome": { "outcome": "cancelled" } }
     })
+}
+
+/// Build a fail-closed response. A reject option is selected only when its ID
+/// is unambiguous and is not also attached to an allow kind; otherwise the
+/// option-free `cancelled` outcome cannot accidentally select an allow option.
+fn permission_response_rejected(
+    id: &serde_json::Value,
+    options: &[serde_json::Value],
+) -> serde_json::Value {
+    let reject = options.iter().find_map(|candidate| {
+        let option_id = candidate.get("optionId")?.as_str()?;
+        let kind = candidate.get("kind")?.as_str()?;
+        if !matches!(kind, "reject_once" | "reject_always") {
+            return None;
+        }
+        let ambiguous = options.iter().any(|option| {
+            option.get("optionId").and_then(|value| value.as_str()) == Some(option_id)
+                && matches!(
+                    option.get("kind").and_then(|value| value.as_str()),
+                    Some("allow_once" | "allow_always")
+                )
+        });
+        (!ambiguous).then_some(option_id)
+    });
+    reject.map_or_else(
+        || permission_response_cancelled(id),
+        |option_id| permission_response_selected(id, option_id),
+    )
 }
 
 /// Full `session/new` response — session ID plus the raw JSON result.
@@ -2637,6 +2744,174 @@ mod tests {
         );
         // cancelled outcome has no optionId
         assert!(response["result"]["outcome"].get("optionId").is_none());
+    }
+
+    #[test]
+    fn fail_closed_response_never_selects_allow_option() {
+        for id in [serde_json::json!(17), serde_json::json!("request-17")] {
+            let offered = serde_json::json!([
+                {"optionId": "yes", "kind": "allow_once"},
+                {"optionId": "no", "kind": "reject_once"}
+            ]);
+            let response = permission_response_rejected(&id, offered.as_array().unwrap());
+            assert_eq!(response["id"], id);
+            assert_eq!(response["result"]["outcome"]["optionId"], "no");
+        }
+
+        let ambiguous = serde_json::json!([
+            {"optionId": "same", "kind": "allow_always"},
+            {"optionId": "same", "kind": "reject_always"}
+        ]);
+        let response =
+            permission_response_rejected(&serde_json::json!(1), ambiguous.as_array().unwrap());
+        assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
+        assert!(response["result"]["outcome"].get("optionId").is_none());
+    }
+
+    #[tokio::test]
+    async fn policy_receives_exact_kinds_and_ids_and_selects_exact_option() {
+        let mut client = spawn_script("read -r line; printf '%s\\n' \"$line\"").await;
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let seen_tx = std::sync::Mutex::new(Some(seen_tx));
+        client.set_permission_policy(Arc::new(move |request| {
+            if let Some(tx) = seen_tx.lock().unwrap().take() {
+                let _ = tx.send(request.clone());
+            }
+            Box::pin(async { Ok(PermissionDecision::Select("Allow-ID/Exact".into())) })
+        }));
+        let message = serde_json::json!({
+            "jsonrpc": "2.0", "id": "string-id", "method": "session/request_permission",
+            "params": {"sessionId": "s", "options": [
+                {"optionId": "Allow-ID/Exact", "kind": "vendor_allow_KIND"},
+                {"optionId": "Reject-ID", "kind": "reject_once"}
+            ]}
+        });
+        client.handle_permission_request(&message).await.unwrap();
+        let seen = seen_rx.await.unwrap();
+        assert_eq!(seen.request_id, serde_json::json!("string-id"));
+        assert_eq!(seen.options[0].option_id, "Allow-ID/Exact");
+        assert_eq!(seen.options[0].kind, "vendor_allow_KIND");
+        let written: serde_json::Value =
+            serde_json::from_str(&client.reader.next().await.unwrap().unwrap()).unwrap();
+        assert_eq!(written["id"], "string-id");
+        assert_eq!(written["result"]["outcome"]["optionId"], "Allow-ID/Exact");
+    }
+
+    #[tokio::test]
+    async fn callback_error_and_invalid_selection_fail_closed() {
+        for policy in
+            [
+                Arc::new(
+                    |_: PermissionRequest| -> Pin<
+                        Box<dyn Future<Output = Result<PermissionDecision, String>> + Send>,
+                    > { Box::pin(async { Err("policy failed".to_string()) }) },
+                ) as PermissionPolicy,
+                Arc::new(
+                    |_: PermissionRequest| -> Pin<
+                        Box<dyn Future<Output = Result<PermissionDecision, String>> + Send>,
+                    > {
+                        Box::pin(async {
+                            Ok(PermissionDecision::Select("allow-not-offered".into()))
+                        })
+                    },
+                ) as PermissionPolicy,
+            ]
+        {
+            let mut client = spawn_script("read -r line; printf '%s\\n' \"$line\"").await;
+            client.set_permission_policy(policy);
+            let message = serde_json::json!({"id": 9, "params": {"options": [
+                {"optionId": "allow", "kind": "allow_once"},
+                {"optionId": "reject", "kind": "reject_always"}
+            ]}});
+            client.handle_permission_request(&message).await.unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&client.reader.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(written["result"]["outcome"]["optionId"], "reject");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permission_policy_timeout_fails_closed() {
+        let mut client = spawn_script("read -r line; printf '%s\\n' \"$line\"").await;
+        client.set_permission_policy(Arc::new(|_| {
+            Box::pin(std::future::pending::<Result<PermissionDecision, String>>())
+        }));
+        let message = serde_json::json!({"id": 11, "params": {"options": [
+            {"optionId": "allow", "kind": "allow_once"},
+            {"optionId": "reject", "kind": "reject_once"}
+        ]}});
+        client.handle_permission_request(&message).await.unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&client.reader.next().await.unwrap().unwrap()).unwrap();
+        assert_eq!(written["result"]["outcome"]["optionId"], "reject");
+    }
+
+    #[tokio::test]
+    async fn cancelled_callback_leaves_request_for_cleanup_without_allowing() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-acp-permission-cancel-{}.ndjson",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let script = format!(
+            "read -r first; read -r second; printf '%s\n%s\n' \"$first\" \"$second\" > {}; \
+             printf '%s\n' '{{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{{\"stopReason\":\"cancelled\"}}}}'",
+            path.display()
+        );
+        let mut client = spawn_script(&script).await;
+        client.set_permission_policy(Arc::new(|_| {
+            Box::pin(std::future::pending::<Result<PermissionDecision, String>>())
+        }));
+        let message = serde_json::json!({"id": "cancel-race", "params": {"options": [
+            {"optionId": "allow", "kind": "allow_once"},
+            {"optionId": "reject", "kind": "reject_once"}
+        ]}});
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            client.handle_permission_request(&message),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            client.pending_permission_id,
+            Some(serde_json::json!("cancel-race"))
+        );
+        assert!(!client.permission_responded);
+
+        client.last_prompt_id = Some(99);
+        let stop_reason = client
+            .cancel_with_cleanup_grace("session", std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(stop_reason, StopReason::Cancelled);
+        let lines = std::fs::read_to_string(&path).unwrap();
+        let mut lines = lines
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap());
+        let permission_response = lines.next().unwrap();
+        assert_eq!(permission_response["id"], "cancel-race");
+        assert_eq!(
+            permission_response["result"]["outcome"]["outcome"],
+            "cancelled"
+        );
+        assert!(permission_response["result"]["outcome"]
+            .get("optionId")
+            .is_none());
+        assert_eq!(lines.next().unwrap()["method"], "session/cancel");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn response_write_failure_keeps_permission_pending_for_cancellation() {
+        let mut client = spawn_script("exit 0").await;
+        client.child.wait().await.unwrap();
+        let message = serde_json::json!({"id": 23, "params": {"options": [
+            {"optionId": "reject", "kind": "reject_once"}
+        ]}});
+        let result = client.handle_permission_request(&message).await;
+        assert!(matches!(result, Err(AcpError::Io(_))));
+        assert_eq!(client.pending_permission_id, Some(serde_json::json!(23)));
+        assert!(!client.permission_responded);
     }
 
     #[test]
