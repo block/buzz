@@ -44,6 +44,7 @@ export async function enumerateProjectEvents(
   kinds: number[],
   pageSize: number,
   extraFilter?: ProjectEventExtraFilter,
+  signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
   if (!Number.isSafeInteger(pageSize) || pageSize <= 0) {
     throw new Error(
@@ -55,6 +56,10 @@ export async function enumerateProjectEvents(
   let until: number | undefined;
 
   for (;;) {
+    // Each relay REQ is bounded, but this loop is not: leaving the Projects
+    // surface cancels its queries, and the abort must stop the enumeration
+    // from queuing further pages behind the next surface's fetches.
+    signal?.throwIfAborted();
     const page = await fetchPage({
       ...extraFilter,
       kinds,
@@ -65,6 +70,7 @@ export async function enumerateProjectEvents(
     if (page.length < pageSize) return [...eventsById.values()];
 
     const oldest = Math.min(...page.map((event) => event.created_at));
+    signal?.throwIfAborted();
     const boundary = await fetchPage({
       ...extraFilter,
       kinds,
@@ -94,12 +100,14 @@ export function fetchProjectEventsExhaustively(
   kinds: number[],
   extraFilter?: ProjectEventExtraFilter,
   pageSize = PROJECT_ENUMERATION_PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
   return enumerateProjectEvents(
     (filter) => relayClient.fetchEvents(filter),
     kinds,
     pageSize,
     extraFilter,
+    signal,
   );
 }
 

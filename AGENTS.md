@@ -120,14 +120,27 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri), desktop TypeScript
-typechecking (`tsc --noEmit`), and fast unit tests in parallel (Rust, desktop
-JS, Tauri Rust, mobile Flutter) — no overlap with pre-commit. Builds are
-CI-only. Run `just fix-all` to auto-fix all formatting in one shot. Run
-`just ci` for the full local gate. Run `just hooks` to
-re-install hooks after env changes. Before agents run Git or hooks, activate the
-repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
-commands to compensate for an unconfigured shell `PATH`.
+commit. **Pre-push hooks** run the repository-wide differential file-size gate,
+clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
+and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
+— no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
+all formatting in one shot. Run `just ci` for the full local gate. Run `just
+hooks` to re-install hooks after env changes. Each globbed pre-push lane is
+scoped to the branch's merge-base diff against `origin/main` (`git diff
+origin/main...HEAD`), matching CI's paths-filter — so a lane only fires when this
+branch actually changed a file it covers, never because `origin/main` moved.
+These lanes validate the checked-out HEAD; pushing a non-HEAD ref (explicit
+refspec, `--all`) gets a non-fatal `push-head-scope` warning and relies on CI for
+its path-scoped checks.
+Before agents run Git or hooks, activate the repo's Hermit environment
+(`. ./bin/activate-hermit`) so `./bin` leads `PATH` and the pinned toolchain
+(flutter, dart, lefthook) wins over any Homebrew version; do not
+rewrite hook commands to compensate for an unconfigured shell `PATH`. The
+pre-push hook self-pins regardless: `bin/.lefthookrc` (sourced by the generated
+`.git/hooks/*`) prepends the Hermit `bin/` to `PATH` and pins `LEFTHOOK_BIN`, so
+lane subprocesses resolve the pinned flutter/dart/lefthook even when an
+unactivated shell has Homebrew first. Activating Hermit remains recommended for
+non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
@@ -202,15 +215,16 @@ or invoke with the full path.
 ### Deep Links
 
 `buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
-thread. To read the linked thread:
+thread. Pass the link directly to the CLI:
 
 ```bash
-buzz --format compact messages thread --channel <uuid> --event <hex>
+buzz --format compact messages thread --link '<buzz://message?...>'
 ```
 
-Extract `channel` and `id` from the URL query parameters. The optional
-`thread` parameter (root event ID) can be ignored — `messages thread` resolves
-the full thread from the event ID alone.
+The selected message ID is authoritative: `messages thread` verifies its
+channel and derives its containing root. An optional `thread` parameter is
+accepted only when it matches that derived root. The explicit
+`--channel <uuid> --event <hex>` form remains available.
 
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
@@ -476,11 +490,18 @@ are frozen.**
 So for any readable text, reach for rem-based Tailwind tokens, never arbitrary
 px:
 
-- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …). **Chat body/author
-  text === `text-base` (16px) — chat is the app's base type size**, and the
-  surrounding timeline elements (timestamps, system rows, code, reactions) are
-  deliberate steps on that same stock ramp.
-- ✅ The `text-2xs` (0.6875rem / 11px) and `text-3xs` (0.5rem / 8px) meta-text
+- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …) for general
+  interface text. All of these derive from the virtual typography rem and
+  therefore follow the user's font-size preference and Cmd +/- zoom.
+- ✅ Conversation text uses the named `text-message` token. Its
+  **Smaller / Default / Larger contract is 13 / 14 / 15px** before keyboard
+  zoom. Author names use the same conversation-size step; timestamps, system
+  rows, code, and reactions are deliberate neighboring steps on the shared
+  virtual-rem ramp. Keep those relationships tokenized rather than restoring a
+  fixed 16px chat baseline or hardcoding preference-specific values in
+  components.
+- ✅ The `text-2xs` (0.6875rem / 11px at a 16px virtual rem) and `text-3xs`
+  (0.5rem / 8px at a 16px virtual rem) meta-text
   tokens (in `desktop/tailwind.config.js` under `theme.extend.fontSize`) for the
   sub-`text-xs` ramp — timestamps, count badges, tracking labels, tiny glyphs.
   These replaced the dozens of arbitrary `text-[…rem]` literals that had drifted
@@ -566,10 +587,10 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 - **Keep widgets small and composable.** One public widget per file; push
   private sub-widgets (`_Foo`) into sibling `part` files under a
   `<page>/` folder rather than growing the page file. Hard ceiling:
-  **1000 lines/file**, enforced by `mobile/scripts/check-file-sizes.mjs` via
-  `just mobile-check` (runs in `just check` + pre-push, mirroring desktop/web).
-  If the guard trips, **split the file — never bump the limit or add an
-  override to slip under it.**
+  **1000 lines/file**, enforced across Desktop, Web, and Mobile by the
+  repository-level `just file-size-check` gate (`just check`, CI, and every
+  pre-push). If the guard trips, **split the file — never bump the limit or add
+  an override to slip under it.**
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.

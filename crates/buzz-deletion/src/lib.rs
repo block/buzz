@@ -547,23 +547,17 @@ fn nonempty_s3_region(region: String) -> Option<String> {
     (!region.is_empty()).then(|| region.to_string())
 }
 
-fn s3_region_from_env() -> String {
-    resolve_s3_region(
-        std::env::var("BUZZ_S3_REGION").ok(),
-        std::env::var("AWS_REGION").ok(),
-    )
-}
-
 async fn connect_services() -> Result<Services> {
     let store = connect_store().await?;
     connect_services_with_store(store).await
 }
 
 async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
+    let (s3_access_key, s3_secret_key) = s3_key_pair_from_env();
     let media_config = buzz_media::MediaConfig {
         s3_endpoint: required_env("BUZZ_S3_ENDPOINT")?,
-        s3_access_key: required_env("BUZZ_S3_ACCESS_KEY")?,
-        s3_secret_key: required_env("BUZZ_S3_SECRET_KEY")?,
+        s3_access_key,
+        s3_secret_key,
         s3_bucket: required_env("BUZZ_S3_BUCKET")?,
         s3_region: s3_region_from_env(),
         s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
@@ -596,12 +590,36 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     })
 }
 
+fn s3_region_from_env() -> String {
+    resolve_s3_region(
+        std::env::var("BUZZ_S3_REGION").ok(),
+        std::env::var("AWS_REGION").ok(),
+    )
+}
+
+fn s3_key_pair_from_env() -> (String, String) {
+    s3_key_pair_from(|name| std::env::var(name).ok())
+}
+
+fn s3_key_pair_from(get_env: impl Fn(&str) -> Option<String>) -> (String, String) {
+    (
+        optional_env_from(&get_env, "BUZZ_S3_ACCESS_KEY"),
+        optional_env_from(&get_env, "BUZZ_S3_SECRET_KEY"),
+    )
+}
+
 fn required_env(name: &str) -> Result<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{name} is required for community deletion"))
+}
+
+fn optional_env_from(get_env: impl Fn(&str) -> Option<String>, name: &str) -> String {
+    get_env(name)
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn env_parse<T>(name: &str, default: T) -> T
@@ -1541,6 +1559,68 @@ mod tests {
                 .expect("construct unused Redis pool"),
         };
         (db, services, claim)
+    }
+
+    fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_normalizes_missing_and_blank_pairs_for_default_credentials() {
+        assert_eq!(
+            s3_key_pair_from(env_of(&[])),
+            (String::new(), String::new())
+        );
+
+        assert_eq!(
+            s3_key_pair_from(env_of(&[
+                ("BUZZ_S3_ACCESS_KEY", ""),
+                ("BUZZ_S3_SECRET_KEY", "   "),
+            ])),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_trims_static_and_preserves_partial_pairs() {
+        assert_eq!(
+            s3_key_pair_from(env_of(&[
+                ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+                ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+            ])),
+            ("buzz_dev".to_string(), "buzz_dev_secret".to_string())
+        );
+
+        for (env, expected) in [
+            (
+                &[("BUZZ_S3_ACCESS_KEY", " buzz_dev ")][..],
+                ("buzz_dev".to_string(), String::new()),
+            ),
+            (
+                &[("BUZZ_S3_SECRET_KEY", " buzz_dev_secret ")][..],
+                (String::new(), "buzz_dev_secret".to_string()),
+            ),
+            (
+                &[
+                    ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+                    ("BUZZ_S3_SECRET_KEY", "   "),
+                ][..],
+                ("buzz_dev".to_string(), String::new()),
+            ),
+            (
+                &[
+                    ("BUZZ_S3_ACCESS_KEY", "   "),
+                    ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+                ][..],
+                (String::new(), "buzz_dev_secret".to_string()),
+            ),
+        ] {
+            assert_eq!(s3_key_pair_from(env_of(env)), expected);
+        }
     }
 
     fn deletion_test_media_storage() -> Arc<MediaStorage> {

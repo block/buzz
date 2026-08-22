@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
+    claude_config::EFFORT_LEVEL_ENV_VAR,
     effective_config::{resolve_effective_config, EffectiveConfigResult},
     known_acp_runtime, normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
@@ -72,6 +73,9 @@ pub(crate) struct SpawnConfigInputs<'a> {
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     pub provider: Option<&'a str>,
+    /// Compile-time distribution capability projected at this runtime boundary.
+    /// The stored record remains portable; only effective spawned access is stamped.
+    pub enforced_owner_only: bool,
 }
 
 /// The effective spawn configuration of one managed-agent process.
@@ -123,6 +127,31 @@ pub(crate) struct SpawnConfigSnapshot {
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
+    /// The startup effort the harness will actually apply, resolved by
+    /// [`effective_effort`]: the persisted canonical `record.effort_level` when
+    /// present, else the user-seeded `BUZZ_ACP_EFFORT_LEVEL` from the layered
+    /// env. This is the *sole* representation of effort in the snapshot — the
+    /// key is stripped from `env` (see `from_inputs`) so an authority handoff
+    /// that leaves the effective value unchanged (canonical `low` replacing a
+    /// user env `low`, or the reverse) produces no spurious drift entry, and an
+    /// env-only edit still surfaces as exactly one `effort_level` entry.
+    pub effort_level: Option<String>,
+}
+
+/// The startup effort a spawn would actually apply, mirroring `apply_effort_env`
+/// exactly: the persisted canonical `record.effort_level` wins, and only when it
+/// is absent does a user-supplied `BUZZ_ACP_EFFORT_LEVEL` from the layered env
+/// seed startup effort. This is the resolver input for the snapshot's single
+/// `effort_level` representation; the same precedence runs at spawn time in
+/// `runtime.rs`, so badge and process can never disagree.
+pub(crate) fn effective_effort(
+    record: &ManagedAgentRecord,
+    descriptor_env: &BTreeMap<String, String>,
+) -> Option<String> {
+    record
+        .effort_level
+        .clone()
+        .or_else(|| descriptor_env.get(EFFORT_LEVEL_ENV_VAR).cloned())
 }
 
 impl SpawnConfigSnapshot {
@@ -136,7 +165,10 @@ impl SpawnConfigSnapshot {
             system_prompt,
             model,
             provider,
+            enforced_owner_only,
         } = inputs;
+        let (respond_to, respond_to_allowlist) =
+            super::projected_access_with_policy(record, enforced_owner_only);
         Self {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
@@ -145,7 +177,17 @@ impl SpawnConfigSnapshot {
                 .and_then(|runtime| runtime.mcp_command)
                 .unwrap_or("")
                 .to_string(),
-            env: descriptor.env.clone(),
+            // Effort has ONE representation in the snapshot: `effort_level`
+            // below, always holding `effective_effort`. Stripping the env key
+            // here means a canonical/user-env authority handoff at the same
+            // value is a no-op (no phantom `env.BUZZ_ACP_EFFORT_LEVEL` add or
+            // remove) and an env-only effort edit surfaces as exactly one
+            // `effort_level` entry rather than a duplicate under `env.`.
+            env: {
+                let mut env = descriptor.env.clone();
+                env.remove(EFFORT_LEVEL_ENV_VAR);
+                env
+            },
             relay_url: relay_url.to_string(),
             team_instructions: team_instructions.map(str::to_string),
             system_prompt: system_prompt.map(str::to_string),
@@ -155,16 +197,14 @@ impl SpawnConfigSnapshot {
                 .then(|| resolve_session_title(record.display_name.as_deref(), &record.name))
                 .flatten(),
             auth_tag: record.auth_tag.clone(),
-            respond_to: record.respond_to.as_str().to_string(),
-            respond_to_allowlist: (record.respond_to == super::types::RespondTo::Allowlist).then(
-                || {
-                    // A list spawn would reject is captured raw: the stamped
-                    // snapshot comes from a successful spawn, so any invalid
-                    // edit correctly compares unequal.
-                    super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)
-                        .unwrap_or_else(|_| record.respond_to_allowlist.clone())
-                },
-            ),
+            respond_to: respond_to.as_str().to_string(),
+            respond_to_allowlist: (respond_to == super::types::RespondTo::Allowlist).then(|| {
+                // A list spawn would reject is captured raw: the stamped
+                // snapshot comes from a successful spawn, so any invalid
+                // edit correctly compares unequal.
+                super::types::validate_respond_to_allowlist(&respond_to_allowlist)
+                    .unwrap_or(respond_to_allowlist)
+            }),
             idle_timeout_seconds: record.idle_timeout_seconds,
             max_turn_duration_seconds: record.max_turn_duration_seconds,
             // Hash the effective parallelism so over-cap edits that don't change
@@ -174,6 +214,11 @@ impl SpawnConfigSnapshot {
             // pool and must badge. The diff surface consequently displays the
             // effective value — that is correct, it is what actually runs.
             parallelism: super::effective_parallelism(&descriptor.command, record.parallelism),
+            // Sole effort representation — see the field doc and the `env`
+            // strip above. Resolver reads the record's canonical value and the
+            // raw descriptor env (before the strip), so a user-seeded env value
+            // is preserved as the effective effort when no canonical is set.
+            effort_level: effective_effort(record, &descriptor.env),
         }
     }
 
@@ -213,6 +258,7 @@ pub(crate) fn prospective_spawn_config_snapshot(
     teams: &[TeamRecord],
     workspace_relay: &str,
     global: &GlobalAgentConfig,
+    enforced_owner_only: bool,
 ) -> SpawnConfigSnapshot {
     // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
     // start/restore paths run right before spawning, so this describes what a
@@ -262,6 +308,7 @@ pub(crate) fn prospective_spawn_config_snapshot(
         system_prompt: prompt.as_deref(),
         model: model.as_deref(),
         provider: provider.as_deref(),
+        enforced_owner_only,
     })
 }
 

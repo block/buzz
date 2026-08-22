@@ -8,7 +8,10 @@ import {
   KIND_PERSONA,
   KIND_TEAM,
 } from "@/shared/constants/kinds";
-import { startPersonaSync } from "./usePersonaSync.ts";
+import {
+  coalesceManagedAgentBackfill,
+  startPersonaSync,
+} from "./usePersonaSync.ts";
 
 const EXPECTED_KINDS = [
   KIND_PERSONA,
@@ -16,6 +19,53 @@ const EXPECTED_KINDS = [
   KIND_MANAGED_AGENT,
   KIND_DELETION,
 ];
+
+function event({
+  id,
+  kind = KIND_MANAGED_AGENT,
+  createdAt,
+  pubkey = "owner-pubkey",
+  dTag = "agent-pubkey",
+}) {
+  return {
+    id,
+    pubkey,
+    created_at: createdAt,
+    kind,
+    tags: dTag ? [["d", dTag]] : [],
+    content: "{}",
+    sig: "sig",
+  };
+}
+
+test("startup backfill keeps only the newest managed-agent head per coordinate", () => {
+  const persona = event({
+    id: "persona",
+    kind: KIND_PERSONA,
+    createdAt: 1,
+    dTag: "persona-id",
+  });
+  const otherAgent = event({
+    id: "other-agent",
+    createdAt: 2,
+    dTag: "other-agent",
+  });
+  const oldest = event({ id: "oldest", createdAt: 1 });
+  const sameSecondLoser = event({ id: "f", createdAt: 3 });
+  const newest = event({ id: "a", createdAt: 3 });
+
+  assert.deepEqual(
+    coalesceManagedAgentBackfill([
+      oldest,
+      persona,
+      newest,
+      otherAgent,
+      sameSecondLoser,
+    ]).map(({ id }) => id),
+    ["persona", "a", "other-agent"],
+    "NIP-33 uses newest created_at and lowest id on a tie",
+  );
+});
 
 // Regression guard for the fresh-start backfill gap (F3): a device that comes
 // online AFTER another published gets zero history from a live-only `limit: 0`
