@@ -263,23 +263,33 @@ async fn author_allowed(
 /// 1. Startup discovery metadata (`startup_info`) — covers channels known at
 ///    process start.
 /// 2. Per-loop resolution cache (`cache`) — covers channels resolved since.
-/// 3. Lazy REST fetch of the channel's kind:39000 metadata — covers channels
-///    the agent was added to *after* startup (the exploit path: an
-///    agent-initiated DM is exactly such a channel).
+/// 3. Background REST fetch of the channel's kind:39000 metadata — covers
+///    channels the agent was added to *after* startup (the exploit path: an
+///    agent-initiated DM is exactly such a channel). Its result lands in the
+///    cache for subsequent events; it never blocks this one.
 ///
-/// Fail-closed: if the fetch fails or times out, the channel is treated as a
-/// DM for this event and the result is NOT cached, so a later event retries
-/// the fetch instead of pinning a mis-classification.
+/// Fail-closed: an unresolved channel is treated as a DM for this event and
+/// the result is NOT cached, so a later event retries instead of pinning a
+/// mis-classification.
+///
+/// The lazy fetch runs in the BACKGROUND rather than inline. The author gate
+/// is on the per-event hot path, and `fetch_channel_info` retries with a
+/// multi-second budget, so awaiting it here stalls every other channel's
+/// events behind one unknown channel. Failing closed immediately costs
+/// nothing but the first event of a newly joined channel — it is gated as a
+/// DM — while the spawned resolve populates the cache for the rest.
 pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    match channel_info.resolve(channel_id).await {
+    match channel_info.cached(channel_id) {
         Some(info) => info.channel_type == "dm",
         None => {
+            channel_info.spawn_resolve(channel_id);
             tracing::warn!(
                 channel_id = %channel_id,
-                "channel type unresolved — treating as DM for author gate (fail closed)"
+                "channel type unresolved — treating as DM for author gate (fail closed); \
+                 resolving in background"
             );
             true
         }
@@ -537,18 +547,35 @@ impl ObserverPublishQueue {
         let channel = self.events.front()?.2.channel_id.clone();
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
+        // Running total of the picked events' own serialized lengths, so the
+        // budget check never re-serializes the whole batch per event (which
+        // made gathering quadratic in total batch bytes).
+        let mut picked_bytes: usize = 0;
         let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
         while let Some((bytes, source_events, event)) = self.events.pop_front() {
             if gathering && event.channel_id == channel {
                 picked.push(event);
-                if picked.len() > 1
-                    && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
-                {
+                picked_bytes += bytes;
+                // The envelope's own bytes depend only on the LAST event —
+                // `batch_envelope` mirrors its metadata — so measuring a
+                // single-event envelope around it yields the exact wrapper
+                // overhead. The events array then contributes each event's
+                // already-measured length plus one comma per gap, which
+                // reproduces `serialized_len(&batch_envelope(&picked))`
+                // byte for byte at O(last event) instead of O(batch).
+                let overflowed = picked.len() > 1 && {
+                    let last = picked.last().expect("len > 1");
+                    let overhead = serialized_len(&batch_envelope(std::slice::from_ref(last)))
+                        .saturating_sub(bytes);
+                    overhead + picked_bytes + (picked.len() - 1) > OBSERVER_MAX_PLAINTEXT_LEN
+                };
+                if overflowed {
                     // Frame full: the overflow event stays queued and leads
                     // its channel's next slot.
                     let event = picked.pop().expect("len > 1");
+                    picked_bytes -= bytes;
                     kept.push_back((bytes, source_events, event));
                     gathering = false;
                 } else {
@@ -1981,10 +2008,22 @@ async fn tokio_main() -> Result<()> {
     let pubkey_hex = config.keys.public_key().to_hex();
 
     // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
+    // A malformed tag is non-fatal — the harness still connects, just without
+    // delegation — but it must not vanish: the only other signal is a later
+    // membership rejection that looks nothing like a config error.
     let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
         .ok()
         .filter(|s| !s.is_empty())
-        .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
+        .and_then(|s| match buzz_sdk::nip_oa::parse_auth_tag(&s) {
+            Ok(tag) => Some(tag),
+            Err(error) => {
+                tracing::warn!(
+                    "BUZZ_AUTH_TAG is set but could not be parsed as a NIP-OA auth tag: {error} \
+                     — connecting without relay membership delegation"
+                );
+                None
+            }
+        });
 
     let mut relay =
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
@@ -2179,6 +2218,7 @@ async fn tokio_main() -> Result<()> {
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
+        turn_output_timeout: Duration::from_secs(config.turn_output_timeout_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
@@ -3161,6 +3201,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3172,7 +3213,15 @@ async fn tokio_main() -> Result<()> {
                 }
             }
             Some(PoolEvent::Panic(join_error)) => {
-                tracing::error!("agent task panicked: {join_error}");
+                // A cancelled join is a deliberate abort (watchdog or
+                // shutdown), not a crash — logging it as a panic at ERROR
+                // would trip alerting on the exact recovery path working as
+                // designed. recover_panicked_agent logs the abort cause.
+                if join_error.is_cancelled() {
+                    tracing::warn!("agent task aborted: {join_error}");
+                } else {
+                    tracing::error!("agent task panicked: {join_error}");
+                }
                 recover_panicked_agent(
                     &mut pool,
                     &mut queue,
@@ -3185,6 +3234,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -3420,6 +3470,11 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    // Shutdown has its own bounded grace below. Disarm every per-turn watchdog
+    // first: dropping a Tokio JoinHandle detaches the task, so leaving these in
+    // TaskMeta would otherwise keep sleepers alive after `pool` is dropped and
+    // let them emit false expiry logs (or abort stale handles) much later.
+    disarm_turn_watchdogs(&mut pool);
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
@@ -3703,6 +3758,69 @@ fn try_native_steer(
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
+/// Spawn a per-turn watchdog task that aborts the prompt (or heartbeat) task
+/// when `timeout` elapses without it completing.
+///
+/// Centralises the watchdog arm logic so the prompt and heartbeat dispatchers
+/// don't drift. Three pieces of correctness live here:
+///
+/// 1. **`timeout.is_zero()` is opt-out.** Returning `(None, None)` lets the
+///    caller store zero-cost `TaskMeta` slots for the disabled case; downstream
+///    code distinguishes armed vs idle task maps on `Option<..>`.
+///
+/// 2. **Post-sleep `is_finished()` guard.** A turn that resolves on the
+///    deadline boundary can mark the underlying task finished between
+///    `tokio::time::sleep` returning and the alarm body firing. Without the
+///    guard we'd log "aborting stuck prompt task" against a turn that just
+///    ended, and store `watchdog_fired=true` for a future that did not hang.
+///
+/// 3. **Two log lines, not one.** The prompt path carries a `channel_id` for
+///    observability; the heartbeat path doesn't. Using a single call with a
+///    `channel_id: Option<Uuid>` field keeps the watchdog future a single
+///    type so the helper can be unit-tested in isolation.
+fn arm_turn_watchdog(
+    timeout: Duration,
+    abort_handle: tokio::task::AbortHandle,
+    agent_index: usize,
+    channel_id: Option<Uuid>,
+) -> (
+    Option<Arc<std::sync::atomic::AtomicBool>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    if timeout.is_zero() {
+        return (None, None);
+    }
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog_fired = Arc::clone(&fired);
+    let timeout_secs = timeout.as_secs();
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(timeout).await;
+        // Suppress the alarm if the task already finished between the sleep
+        // deadline and now — a turn that ended at the deadline boundary
+        // shouldn't log "aborting stuck prompt task" (block/buzz#4860).
+        if abort_handle.is_finished() {
+            return;
+        }
+        watchdog_fired.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(ch) = channel_id {
+            tracing::error!(
+                agent = agent_index,
+                channel_id = %ch,
+                timeout_secs,
+                "turn output watchdog expired; aborting stuck prompt task"
+            );
+        } else {
+            tracing::error!(
+                agent = agent_index,
+                timeout_secs,
+                "turn output watchdog expired; aborting stuck heartbeat task"
+            );
+        }
+        abort_handle.abort();
+    });
+    (Some(fired), Some(handle))
+}
+
 /// Flush queued work to available agents.
 fn dispatch_pending(
     pool: &mut AgentPool,
@@ -3775,9 +3893,21 @@ fn dispatch_pending(
             )
             .await;
         });
+        let task_id = abort_handle.id();
+
+        // This watchdog deliberately has no connection to the queue's
+        // renewable in-flight deadline. A successful steer may extend that
+        // deadline, but must never extend the absolute cap for a task which
+        // has stopped making forward progress (block/buzz#4860).
+        let (watchdog_fired, watchdog_handle) = arm_turn_watchdog(
+            ctx.turn_output_timeout,
+            abort_handle.clone(),
+            agent_index,
+            Some(channel_id),
+        );
 
         pool.task_map_mut().insert(
-            abort_handle.id(),
+            task_id,
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
@@ -3786,6 +3916,8 @@ fn dispatch_pending(
                 control_tx: Some(control_tx),
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired,
+                watchdog_handle,
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -3873,6 +4005,37 @@ fn handle_prompt_result(
         .find(|meta| meta.agent_index == agent_index)
         .map(|meta| meta.successful_steer_deliveries.clone())
         .unwrap_or_default();
+    // Stale-result reconciliation (block/buzz#4860): if the watchdog aborted
+    // this task in the window between `send_prompt_result` and the runtime
+    // reaping the future, the join arm may already have reconciled it —
+    // `recover_panicked_agent` removed the TaskMeta, requeued the batch, and
+    // scheduled a respawn. Processing this buffered result again would requeue
+    // a second copy of the batch and return an agent to a slot the respawn now
+    // owns. A claimed agent runs exactly one task at a time, so a missing
+    // meta for this (agent, turn) pair means the join arm got there first.
+    // Drop the stale agent — its Drop kills the subprocess; the respawn
+    // provides the replacement.
+    if !pool
+        .task_map()
+        .values()
+        .any(|meta| meta.agent_index == agent_index && meta.turn_id == result.turn_id)
+    {
+        tracing::warn!(
+            agent = agent_index,
+            turn_id = %result.turn_id,
+            "dropping stale prompt result already reconciled by watchdog abort"
+        );
+        return LoopAction::Continue;
+    }
+    // A normally returned task no longer needs its independent watchdog. The
+    // abort is idempotent and also covers the (unlikely) result/watchdog race.
+    for meta in pool.task_map_mut().values_mut() {
+        if meta.agent_index == agent_index {
+            if let Some(handle) = meta.watchdog_handle.take() {
+                handle.abort();
+            }
+        }
+    }
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
@@ -4253,26 +4416,87 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
-    let Some(meta) = pool.task_map_mut().remove(&task_id) else {
-        tracing::error!("panic for unknown task {task_id:?} — bug");
+    let Some(mut meta) = pool.task_map_mut().remove(&task_id) else {
+        // The result arm may have consumed PromptResult and removed TaskMeta
+        // just before it drains the task's watchdog cancellation from the
+        // JoinSet. Both halves are already reconciled in that ordering.
+        if join_error.is_cancelled() {
+            tracing::debug!(
+                task_id = ?task_id,
+                "ignoring task cancellation already reconciled by prompt result"
+            );
+        } else {
+            tracing::error!("panic for unknown task {task_id:?} — bug");
+        }
         return;
     };
     let i = meta.agent_index;
+    // A watchdog abort surfaces as `JoinError::is_cancelled`. Gate the flag on
+    // that fact: a genuine panic can race the watchdog's store (the flag is
+    // set, then the task dies of its own panic before the abort lands), and
+    // that panic must still be classified — and circuit-counted — as a panic.
+    let watchdog_fired = join_error.is_cancelled()
+        && meta
+            .watchdog_fired
+            .as_ref()
+            .is_some_and(|fired| fired.load(std::sync::atomic::Ordering::Acquire));
+    if let Some(handle) = meta.watchdog_handle.take() {
+        handle.abort();
+    }
+
+    if watchdog_fired {
+        tracing::error!(
+            agent = i,
+            channel_id = ?meta.channel_id,
+            timeout_secs = config.turn_output_timeout_secs,
+            "turn output watchdog aborted stuck agent task"
+        );
+    }
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
+    // `recoverable_batch` only exists in DedupMode::Queue; Drop mode
+    // deliberately does not retain dispatched input, so recovery must not
+    // fabricate retry work in that mode.
+    let mut retry_fate = "no_batch";
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
+                // Dead-letter on exhaustion is logged inside requeue().
+                if let Some(dead) = queue.requeue(batch) {
+                    retry_fate = "dead_lettered";
+                    tracing::error!(
+                        agent = i,
+                        channel_id = %ch,
+                        "watchdog/panic recovery exhausted the retry budget; batch dead-lettered"
+                    );
+                    // Same user-visible contract as the other dead-letter
+                    // paths in handle_prompt_result: exhausting the retry
+                    // budget must not silently swallow the user's message.
+                    let content = if watchdog_fired {
+                        format!(
+                            "⚠️ I couldn't process the last request after multiple retries (the turn produced no output within {}s and was aborted). Please re-send if it's still needed.",
+                            config.turn_output_timeout_secs
+                        )
+                    } else {
+                        "⚠️ I couldn't process the last request after multiple retries (the agent crashed). Please re-send if it's still needed.".to_string()
+                    };
+                    spawn_failure_notice(rest_client, &dead, content);
+                } else {
+                    retry_fate = "requeued";
+                    tracing::warn!(
+                        agent = i,
+                        channel_id = %ch,
+                        "requeued batch after aborted agent task"
+                    );
+                }
             } else {
+                retry_fate = "removed_channel";
                 tracing::debug!(
                     channel_id = %ch,
-                    "dropping panicked batch for removed channel"
+                    "dropping aborted batch for removed channel"
                 );
             }
         }
@@ -4288,38 +4512,83 @@ fn recover_panicked_agent(
     }
 
     if let Some(ref observer) = observer {
-        observer.emit(
-            "agent_panic",
-            Some(i),
-            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
-            serde_json::json!({
-                "outcome": "panic",
-                "error": format!("Agent task panicked: {join_error}"),
-            }),
-        );
+        if watchdog_fired {
+            let context = observer::context_for(meta.channel_id, None, Some(meta.turn_id.clone()));
+            // `turn_aborted` is the lifecycle fact; `turn_error` is the
+            // activity-feed failure signal. Emit both so dashboards can
+            // count aborts without making operators inspect raw logs.
+            observer.emit(
+                "turn_aborted",
+                Some(i),
+                &context,
+                serde_json::json!({
+                    "trigger": "watchdog",
+                    "timeout_secs": config.turn_output_timeout_secs,
+                    "channel_id": meta.channel_id.map(|c| c.to_string()),
+                    "turn_id": meta.turn_id,
+                    "agent_index": i,
+                    "retry_fate": retry_fate,
+                    "join_error": join_error.to_string(),
+                }),
+            );
+            observer.emit(
+                "turn_error",
+                Some(i),
+                &context,
+                serde_json::json!({
+                    "outcome": "watchdog_timeout",
+                    "trigger": "watchdog",
+                    "timeout_secs": config.turn_output_timeout_secs,
+                    "retry_fate": retry_fate,
+                    "error": format!(
+                        "Turn output watchdog expired after {}s; retry fate: {retry_fate}",
+                        config.turn_output_timeout_secs,
+                    ),
+                }),
+            );
+        } else {
+            observer.emit(
+                "agent_panic",
+                Some(i),
+                &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
+                serde_json::json!({
+                    "outcome": "panic",
+                    "error": format!("Agent task panicked: {join_error}"),
+                    "retry_fate": retry_fate,
+                }),
+            );
+        }
     }
 
-    // Panics count as crashes for the circuit breaker.
-    // The panicked task already dropped the AcpClient, so we just need to
-    // check the circuit and spawn a fresh agent in the background.
+    // Panics count as crashes for the circuit breaker — but watchdog-triggered
+    // aborts do NOT. A watchdog expiry is a harness-side safety cap, not a
+    // fault in the agent itself. Treating it as a crash would disable healthy
+    // replacement slots after a run of slow provider responses.
     let slot = &mut crash_history[i];
-
-    let delay = match slot.record_crash() {
-        CrashVerdict::CircuitOpen => {
-            tracing::error!(agent = i, "circuit open after panic — not respawning");
-            return;
-        }
-        CrashVerdict::HalfOpenProbe => {
-            tracing::info!(agent = i, "circuit half-open — probe respawn after panic");
-            Duration::ZERO
-        }
-        CrashVerdict::Respawn(d) => {
-            tracing::info!(
-                agent = i,
-                delay_ms = d.as_millis(),
-                "respawn backoff after panic"
-            );
-            d
+    let delay = if watchdog_fired {
+        tracing::info!(
+            agent = i,
+            "watchdog expiry is not counted toward the crash circuit"
+        );
+        Duration::ZERO
+    } else {
+        match slot.record_crash() {
+            CrashVerdict::CircuitOpen => {
+                tracing::error!(agent = i, "circuit open after panic — not respawning");
+                return;
+            }
+            CrashVerdict::HalfOpenProbe => {
+                tracing::info!(agent = i, "circuit half-open — probe respawn after panic");
+                Duration::ZERO
+            }
+            CrashVerdict::Respawn(d) => {
+                tracing::info!(
+                    agent = i,
+                    delay_ms = d.as_millis(),
+                    "respawn backoff after panic"
+                );
+                d
+            }
         }
     };
 
@@ -4351,10 +4620,16 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
-            tracing::error!("agent task panicked: {join_error}");
+            // Same cancelled-vs-panic split as the main-loop Panic arm.
+            if join_error.is_cancelled() {
+                tracing::warn!("agent task aborted: {join_error}");
+            } else {
+                tracing::error!("agent task panicked: {join_error}");
+            }
             recover_panicked_agent(
                 pool,
                 queue,
@@ -4367,6 +4642,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -4411,9 +4687,17 @@ fn dispatch_heartbeat(
         )
         .await;
     });
+    let task_id = abort_handle.id();
+
+    let (watchdog_fired, watchdog_handle) = arm_turn_watchdog(
+        ctx.turn_output_timeout,
+        abort_handle.clone(),
+        agent_index,
+        None,
+    );
 
     pool.task_map_mut().insert(
-        abort_handle.id(),
+        task_id,
         pool::TaskMeta {
             agent_index,
             channel_id: None,
@@ -4422,6 +4706,8 @@ fn dispatch_heartbeat(
             control_tx: None,
             steer_tx: None,
             successful_steer_deliveries: HashSet::new(),
+            watchdog_fired,
+            watchdog_handle,
         },
     );
     *heartbeat_in_flight = true;
@@ -4577,7 +4863,16 @@ async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     }
 }
 
+fn disarm_turn_watchdogs(pool: &mut AgentPool) {
+    for meta in pool.task_map_mut().values_mut() {
+        if let Some(handle) = meta.watchdog_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 async fn shutdown_agent_pool(pool: &mut AgentPool) {
+    disarm_turn_watchdogs(pool);
     pool.join_set.shutdown().await;
     while let Ok(mut result) = pool.result_rx_try_recv() {
         result.agent.acp.shutdown().await;
@@ -5221,6 +5516,8 @@ mod owner_control_command_tests {
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
 
@@ -5651,13 +5948,102 @@ mod author_gate_tests {
         }]);
         let (resolver, requests, server) = lazy_resolver_with_response(response).await;
 
-        assert!(is_dm_channel(id, &resolver).await);
-        assert!(is_dm_channel(id, &resolver).await);
+        // First event: nothing cached yet, so the gate fails closed as a DM
+        // and kicks the fetch off in the background.
+        assert!(
+            is_dm_channel(id, &resolver).await,
+            "an uncached channel must fail closed on the first event"
+        );
+
+        // The spawned resolve lands shortly after; poll rather than sleep a
+        // fixed amount so the test is not timing-fragile.
+        let mut cached = None;
+        for _ in 0..200 {
+            if let Some(info) = resolver.cached(id) {
+                cached = Some(info);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cached = cached.expect("background resolve must populate the cache within ~2s");
+        assert_eq!(cached.channel_type, "dm", "the fetched type must be cached");
+
+        assert!(
+            is_dm_channel(id, &resolver).await,
+            "the cached DM classification must hold on the next event"
+        );
         assert_eq!(
             requests.load(Ordering::SeqCst),
             1,
             "second resolution uses cache"
         );
+        server.abort();
+    }
+
+    /// The author gate must not await the retrying metadata fetch: it runs per
+    /// inbound event, so one unresolved channel behind a slow relay would
+    /// stall every other channel's events.
+    #[tokio::test]
+    async fn test_is_dm_channel_does_not_block_on_uncached_fetch() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                // Answer far later than any assertion window below: an inline
+                // await would be pinned here.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]")
+                    .await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        let resolver = pool::ChannelInfoResolver::new(HashMap::new(), rest);
+
+        let started = std::time::Instant::now();
+        let is_dm = is_dm_channel(id, &resolver).await;
+        let elapsed = started.elapsed();
+
+        assert!(is_dm, "an unresolved channel must still fail closed as DM");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the gate must return without awaiting the fetch, took {elapsed:?}"
+        );
+
+        // A burst of further events for the same channel must not multiply
+        // the in-flight fetches. The shared fetch above has not returned
+        // yet (we made it sleep 30s), so each call here would have to take
+        // the dedup branch — without the guard, the server counter would
+        // reach at least one per call within the burst.
+        for _ in 0..5 {
+            assert!(is_dm_channel(id, &resolver).await);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "concurrent events for one unknown channel must share a single fetch"
+        );
+
         server.abort();
     }
 
@@ -6064,6 +6450,78 @@ mod observer_publish_queue_tests {
             seen,
             [1, 2, 3, 4, 5, 6],
             "no event lost or reordered by splitting"
+        );
+    }
+
+    /// The incremental byte accumulator in `next_frame` must split frames
+    /// EXACTLY where whole-envelope re-serialization would. Seqs and payload
+    /// sizes vary so the envelope's own metadata length changes between
+    /// events — a cached one-time overhead would drift here and misplace a
+    /// boundary.
+    #[test]
+    fn incremental_batch_budget_matches_exhaustive_serialization() {
+        // Events are small relative to the 64KB cap, so hundreds fit per
+        // frame and the per-gap comma bytes plus the envelope wrapper are
+        // each worth SEVERAL events — an arithmetic slip cannot hide inside
+        // the headroom of one oversized event. `turn_id` and `started_at`
+        // swing widely in length because `batch_envelope` copies them from
+        // the LAST event: an overhead measured once and reused would be off
+        // by more than an event's worth by the time a frame fills.
+        let source: Vec<observer::ObserverEvent> = (0..1_300usize)
+            .map(|index| {
+                let seq = (index as u64 + 1) * 7;
+                let mut e = event(seq, "acp_read", Some("chan-a"));
+                e.timestamp = format!("2026-04-29T04:00:00.{}Z", "1".repeat(1 + index % 9));
+                e.turn_id = Some("t".repeat(1 + (index * 13) % 97));
+                e.started_at = (index % 3 == 0).then(|| "2026-04-29T03:59:00Z".to_string());
+                e.payload = serde_json::json!({
+                    "seq": seq,
+                    "text": "x".repeat(40 + index % 23),
+                });
+                e
+            })
+            .collect();
+
+        // Reference: the exhaustive algorithm this fix replaced, applied to
+        // the same events with the same cap.
+        let mut expected: Vec<Vec<u64>> = Vec::new();
+        let mut batch: Vec<observer::ObserverEvent> = Vec::new();
+        for candidate in &source {
+            batch.push(candidate.clone());
+            if batch.len() > 1
+                && serialized_len(&batch_envelope(&batch)) > OBSERVER_MAX_PLAINTEXT_LEN
+            {
+                batch.pop();
+                expected.push(batch.iter().map(|e| e.seq).collect());
+                batch = vec![candidate.clone()];
+            }
+        }
+        if !batch.is_empty() {
+            expected.push(batch.iter().map(|e| e.seq).collect());
+        }
+        assert!(
+            expected.len() > 2,
+            "the corpus must actually split into several frames, got {}",
+            expected.len()
+        );
+
+        let mut queue = queue_of(source.clone());
+        let actual: Vec<Vec<u64>> = drain_frames(&mut queue).iter().map(frame_seqs).collect();
+
+        assert_eq!(
+            actual, expected,
+            "incremental budget must reproduce exhaustive serialization splits exactly"
+        );
+        for frame_seq_list in &actual {
+            assert!(
+                !frame_seq_list.is_empty(),
+                "no frame may be empty: {actual:?}"
+            );
+        }
+        assert_eq!(
+            actual.concat(),
+            source.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            "no event lost or reordered"
         );
     }
 
@@ -6751,6 +7209,7 @@ mod build_mcp_servers_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            turn_output_timeout_secs: 0,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -6824,6 +7283,45 @@ mod build_mcp_servers_tests {
             "BUZZ_AUTH_TAG should be forwarded when set"
         );
         assert_eq!(auth_tag_env.unwrap().value, "test-attestation-tag");
+    }
+
+    /// `run` resolves BUZZ_AUTH_TAG through `parse_auth_tag`, and a value the
+    /// MCP server env happily forwards can still fail that parse — the exact
+    /// case that used to be discarded by a bare `.ok()`. This pins that the
+    /// Err branch (now a warn) is reachable rather than dead code, and that a
+    /// malformed tag resolves to None instead of aborting the connect.
+    #[test]
+    fn parse_relay_auth_tag_returns_err_on_malformed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
+
+        let raw = std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .expect("BUZZ_AUTH_TAG was just set to a non-empty value");
+        let parsed = buzz_sdk::nip_oa::parse_auth_tag(&raw);
+
+        std::env::remove_var("BUZZ_AUTH_TAG");
+
+        let error = parsed.expect_err("a bare non-JSON string is not a valid NIP-OA auth tag");
+        assert!(
+            !error.to_string().is_empty(),
+            "the discarded error must carry a message worth logging"
+        );
+
+        // NIP-OA spec test vector: 64-hex owner pubkey, valid conditions
+        // string, 128-hex signature.
+        let well_formed = concat!(
+            r#"["auth","79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","#,
+            r#""kind=1&created_at<1713957000","#,
+            r#""8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb"#,
+            r#"2e189eae9f49d72187674c2f5bd244145e10ff86c9f257ffe65a1ee5f108b369"]"#,
+        )
+        .to_string();
+        assert!(
+            buzz_sdk::nip_oa::parse_auth_tag(&well_formed).is_ok(),
+            "a well-formed tag must still parse: {well_formed}"
+        );
     }
 
     #[test]
@@ -6959,7 +7457,7 @@ mod error_outcome_emission_tests {
     use crate::pool::{
         AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource, TimeoutKind,
     };
-    use crate::queue::{BatchEvent, FlushBatch};
+    use crate::queue::{BatchEvent, FlushBatch, QueuedEvent};
     use nostr::{EventBuilder, Keys, Kind};
     use std::collections::HashSet;
 
@@ -6975,6 +7473,7 @@ mod error_outcome_emission_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            turn_output_timeout_secs: 0,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -7085,6 +7584,8 @@ mod error_outcome_emission_tests {
                         session_id: "live-session".into(),
                     },
                 ]),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
 
@@ -7157,6 +7658,8 @@ mod error_outcome_emission_tests {
                         session_id: "old-session".into(),
                     },
                 ]),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
 
@@ -7272,6 +7775,8 @@ mod error_outcome_emission_tests {
                         session_id: "invalidated-session".into(),
                     },
                 ]),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7332,6 +7837,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
 
@@ -7409,6 +7916,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         started_rx.await.unwrap();
@@ -7441,6 +7950,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         let panic = observer
@@ -7502,6 +8012,8 @@ mod error_outcome_emission_tests {
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
+                    watchdog_fired: None,
+                    watchdog_handle: None,
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7594,6 +8106,8 @@ mod error_outcome_emission_tests {
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
+                    watchdog_fired: None,
+                    watchdog_handle: None,
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7700,6 +8214,8 @@ mod error_outcome_emission_tests {
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
+                    watchdog_fired: None,
+                    watchdog_handle: None,
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7777,6 +8293,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7872,6 +8390,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let config = test_config();
@@ -7989,6 +8509,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8129,6 +8651,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8318,6 +8842,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8404,6 +8930,8 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: None,
+                watchdog_handle: None,
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8448,6 +8976,670 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(&channel_id),
             1,
             "non-auth application error must preserve the event for retry"
+        );
+    }
+
+    /// Drive the watchdog path end-to-end: a non-returning prompt task is
+    /// aborted by an independent watchdog sleep task, then
+    /// `recover_panicked_agent` reconciles it through the same machinery as a
+    /// genuine panic (block/buzz#4860). Asserts:
+    ///   * the watchdog fired the configured abort handle;
+    ///   * `JoinSet::join_next` yielded `JoinError::is_cancelled`;
+    ///   * the in-flight channel marker on the queue was released;
+    ///   * the slot was scheduled for respawn (so the channel is unblocked);
+    ///   * the observer received a `turn_aborted` event keyed to the original
+    ///     turn id, not a generic `agent_panic`.
+    #[tokio::test(flavor = "current_thread", start_paused = false)]
+    async fn watchdog_abort_releases_inflight_and_respawns_slot() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let task_id = abort_handle.id();
+
+        let watchdog_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog_fired_for_task = std::sync::Arc::clone(&watchdog_fired);
+        let abort_for_watchdog = abort_handle.clone();
+        // The task ignores cancellation for the moment of this test; abort()
+        // only marks it, the JoinSet will collect it when we poll.
+        let timeout = std::time::Duration::from_millis(20);
+        let watchdog_handle = tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            watchdog_fired_for_task.store(true, std::sync::atomic::Ordering::Release);
+            abort_for_watchdog.abort();
+        });
+
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "watchdog-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: std::collections::HashSet::new(),
+                watchdog_fired: Some(std::sync::Arc::clone(&watchdog_fired)),
+                watchdog_handle: Some(watchdog_handle),
+            },
+        );
+        started_rx.await.unwrap();
+
+        // Drain the watchdog's sleep + abort into the JoinSet.
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+        assert!(
+            join_error.is_cancelled(),
+            "watchdog abort must surface as JoinError::is_cancelled"
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let queued_event = EventBuilder::new(Kind::Custom(9), "watchdog fixture")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event: queued_event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "watchdog-test".into(),
+        }));
+        let _in_flight_batch = queue.flush_next().expect("flush marks channel in-flight");
+        assert!(
+            queue.is_channel_in_flight(channel_id),
+            "precondition: in-flight marker is set"
+        );
+
+        let mut config = test_config();
+        config.turn_output_timeout_secs = timeout.as_secs().max(1);
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut typing_channels = std::collections::HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, mut respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        assert!(
+            !queue.is_channel_in_flight(channel_id),
+            "watchdog abort must release the in-flight marker so the channel can dispatch again"
+        );
+        assert!(
+            !pool.task_map().contains_key(&task_id),
+            "watchdog abort must drop the task_map entry"
+        );
+        assert!(
+            crash_history[0].respawn_in_flight,
+            "watchdog abort must schedule a slot respawn"
+        );
+        assert!(
+            respawn_rx.try_recv().is_err(),
+            "respawn should be queued through respawn_tasks, not delivered yet"
+        );
+        let aborted = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "turn_aborted")
+            .expect("watchdog abort emits turn_aborted to the observer feed");
+        assert_eq!(
+            aborted.turn_id.as_deref(),
+            Some("watchdog-turn-id"),
+            "turn_aborted must carry the originating turn id"
+        );
+        assert_eq!(
+            aborted.channel_id.as_deref(),
+            Some(channel_id.to_string().as_str())
+        );
+        assert!(
+            observer
+                .snapshot()
+                .into_iter()
+                .all(|event| event.kind != "agent_panic"),
+            "watchdog-triggered abort must not also be reported as a generic agent_panic"
+        );
+    }
+
+    /// Reproduce the watchdog race where `send_prompt_result` has queued the
+    /// OwnedAgent, but the task is aborted before its future returns. If the
+    /// JoinSet arm wins the select, panic recovery reconciles the TaskMeta and
+    /// schedules a respawn before the buffered PromptResult is consumed. The
+    /// stale result must then be discarded: processing it again would duplicate
+    /// the batch and put the old agent into a slot owned by the respawn.
+    #[tokio::test]
+    async fn buffered_result_after_watchdog_recovery_is_discarded() {
+        let channel_id = Uuid::new_v4();
+        let queued_event = EventBuilder::new(Kind::Custom(9), "watchdog race fixture")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event: queued_event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "watchdog-race".into(),
+        }));
+        let batch = queue.flush_next().expect("flush marks channel in-flight");
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let abort_handle = pool.join_set.spawn(std::future::pending::<()>());
+        let task_id = abort_handle.id();
+        let watchdog_fired = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "watchdog-race-turn".into(),
+                recoverable_batch: Some(batch.clone()),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: Some(watchdog_fired),
+                watchdog_handle: None,
+            },
+        );
+
+        // Model the task's result already buffered in result_rx, then let the
+        // watchdog cancellation's JoinSet arm win the select.
+        let buffered_result = PromptResult {
+            agent: dummy_agent(0).await,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "watchdog-race-turn".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: Some(batch),
+        };
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = std::collections::HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+        assert_eq!(queue.queued_event_count(&channel_id), 1);
+        assert!(crash_history[0].respawn_in_flight);
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                buffered_result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            1,
+            "stale result must not enqueue a second copy of the recovered batch"
+        );
+        assert!(
+            pool.agents_mut()[0].is_none(),
+            "stale agent must not occupy the slot reserved for its respawn"
+        );
+    }
+
+    /// The heartbeat watchdog arm: a heartbeat task's TaskMeta carries
+    /// `channel_id: None`, so recovery must reset `heartbeat_in_flight`
+    /// (not the per-channel in-flight marker) and still report
+    /// `turn_aborted` rather than `agent_panic`.
+    #[tokio::test(flavor = "current_thread", start_paused = false)]
+    async fn watchdog_abort_of_heartbeat_releases_inflight_flag() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let abort_handle = pool.join_set.spawn(std::future::pending::<()>());
+        let task_id = abort_handle.id();
+        let watchdog_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog_fired_for_task = std::sync::Arc::clone(&watchdog_fired);
+        let abort_for_watchdog = abort_handle.clone();
+        let watchdog_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            watchdog_fired_for_task.store(true, std::sync::atomic::Ordering::Release);
+            abort_for_watchdog.abort();
+        });
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "heartbeat-watchdog-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: Some(watchdog_fired),
+                watchdog_handle: Some(watchdog_handle),
+            },
+        );
+
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+        assert!(join_error.is_cancelled());
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut config = test_config();
+        config.turn_output_timeout_secs = 1;
+        let mut heartbeat_in_flight = true;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = std::collections::HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        assert!(
+            !heartbeat_in_flight,
+            "watchdog abort of a heartbeat task must release heartbeat_in_flight"
+        );
+        assert!(crash_history[0].respawn_in_flight);
+        let aborted = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "turn_aborted")
+            .expect("heartbeat watchdog abort emits turn_aborted");
+        assert_eq!(aborted.turn_id.as_deref(), Some("heartbeat-watchdog-turn"));
+        assert!(
+            observer
+                .snapshot()
+                .into_iter()
+                .all(|event| event.kind != "agent_panic"),
+            "heartbeat watchdog abort must not be reported as agent_panic"
+        );
+    }
+
+    /// Tokio detaches a task when its `JoinHandle` is dropped. Pool shutdown
+    /// must therefore abort and remove watchdog handles explicitly rather than
+    /// relying on `TaskMeta` being dropped with the pool.
+    #[tokio::test]
+    async fn disarm_turn_watchdogs_aborts_sleepers_before_pool_drop() {
+        struct DropNotify(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropNotify {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        let prompt_abort = pool.join_set.spawn(std::future::pending::<()>());
+        let task_id = prompt_abort.id();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let watchdog_handle = tokio::spawn(async move {
+            let _notify = DropNotify(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("watchdog task started");
+
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "shutdown-watchdog-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
+                watchdog_handle: Some(watchdog_handle),
+            },
+        );
+
+        disarm_turn_watchdogs(&mut pool);
+
+        assert!(
+            pool.task_map()
+                .get(&task_id)
+                .expect("task metadata remains for prompt shutdown")
+                .watchdog_handle
+                .is_none(),
+            "disarming must remove the detached-task handle from TaskMeta"
+        );
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("aborted watchdog should be dropped promptly")
+            .expect("drop notification sender should survive until task teardown");
+    }
+
+    /// A watchdog abort must NOT count toward the crash circuit. With
+    /// `CIRCUIT_BREAKER_THRESHOLD - 1` genuine crashes already in the window,
+    /// a watchdog expiry would be the opening crash if it were recorded —
+    /// which on a 1-agent harness kills the whole process
+    /// (`live_count() == 0 && !any_respawn_in_flight`). The slot must respawn
+    /// with the circuit untouched.
+    #[tokio::test]
+    async fn watchdog_abort_does_not_open_crash_circuit() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let abort_handle = pool.join_set.spawn(std::future::pending::<()>());
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "circuit-isolation-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))),
+                watchdog_handle: None,
+            },
+        );
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+        assert!(join_error.is_cancelled());
+
+        let now = std::time::Instant::now();
+        let mut crash_history = vec![SlotCircuit {
+            // One more recorded crash would reach the threshold and open
+            // the circuit — the exact state where mis-counting a watchdog
+            // expiry is fatal to a single-slot pool.
+            crash_times: vec![now; CIRCUIT_BREAKER_THRESHOLD - 1],
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = std::collections::HashMap::new();
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert!(
+            crash_history[0].respawn_in_flight,
+            "watchdog abort at the circuit threshold must still schedule a respawn"
+        );
+        assert!(
+            crash_history[0].open_until.is_none(),
+            "watchdog abort must not open the crash circuit"
+        );
+        assert_eq!(
+            crash_history[0].crash_times.len(),
+            CIRCUIT_BREAKER_THRESHOLD - 1,
+            "watchdog abort must not record a crash"
+        );
+    }
+
+    /// A genuine panic that races the watchdog's flag store must still be
+    /// classified as a panic: the flag alone is not proof the abort landed —
+    /// only `JoinError::is_cancelled` is. The panic must be circuit-counted
+    /// and reported as `agent_panic`, not `turn_aborted`.
+    #[tokio::test]
+    async fn real_panic_with_watchdog_flag_set_still_counts_as_crash() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let panic_handle = pool.join_set.spawn(async {
+            panic!("real agent panic racing the watchdog store");
+        });
+        let task_id = panic_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "panic-race-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                // Watchdog stored `true`, then the task died of its own
+                // panic before the abort landed.
+                successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))),
+                watchdog_handle: None,
+            },
+        );
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+        assert!(join_error.is_panic(), "fixture must produce a real panic");
+        assert!(!join_error.is_cancelled());
+
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = std::collections::HashMap::new();
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        assert_eq!(
+            crash_history[0].crash_times.len(),
+            1,
+            "a real panic must be circuit-counted even when the watchdog flag is set"
+        );
+        let events = observer.snapshot();
+        assert!(
+            events.iter().any(|e| e.kind == "agent_panic"),
+            "real panic must emit agent_panic"
+        );
+        assert!(
+            events.iter().all(|e| e.kind != "turn_aborted"),
+            "real panic must not be misreported as a watchdog turn_aborted"
+        );
+    }
+
+    /// Retry-budget exhaustion during watchdog recovery must dead-letter the
+    /// batch and say so in both observer emissions — silently discarding the
+    /// user's message is the original #4860 complaint.
+    #[tokio::test]
+    async fn watchdog_recovery_dead_letters_after_retry_budget_and_reports_fate() {
+        let channel_id = Uuid::new_v4();
+        let queued_event = EventBuilder::new(Kind::Custom(9), "dead-letter fixture")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event: queued_event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "dead-letter-test".into(),
+        }));
+        let batch = queue.flush_next().expect("flush marks channel in-flight");
+        queue.set_retry_count_for_test(channel_id, crate::queue::MAX_RETRIES);
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let abort_handle = pool.join_set.spawn(std::future::pending::<()>());
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "dead-letter-turn".into(),
+                recoverable_batch: Some(batch),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+                watchdog_fired: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))),
+                watchdog_handle: None,
+            },
+        );
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = std::collections::HashMap::new();
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            0,
+            "exhausted batch must be dead-lettered, not requeued"
+        );
+        let events = observer.snapshot();
+        let aborted = events
+            .iter()
+            .find(|e| e.kind == "turn_aborted")
+            .expect("watchdog abort emits turn_aborted");
+        assert_eq!(
+            aborted.payload["retry_fate"], "dead_lettered",
+            "turn_aborted must report the dead-letter fate"
+        );
+        let turn_error = events
+            .iter()
+            .find(|e| e.kind == "turn_error")
+            .expect("watchdog abort emits a terminal turn_error for activity feeds");
+        assert_eq!(
+            turn_error.payload["outcome"], "watchdog_timeout",
+            "turn_error must carry the watchdog_timeout outcome"
+        );
+        assert_eq!(turn_error.payload["retry_fate"], "dead_lettered");
+    }
+
+    /// A turn that finishes exactly at the watchdog deadline must not trip
+    /// the alarm: `arm_turn_watchdog` re-checks `AbortHandle::is_finished`
+    /// after the sleep and suppresses the abort + flag store.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn watchdog_suppresses_alarm_when_task_already_finished() {
+        let mut join_set = tokio::task::JoinSet::new();
+        let abort_handle = join_set.spawn(async {});
+        // Reap the completed task so is_finished() is observable.
+        join_set.join_next().await.unwrap().unwrap();
+        assert!(abort_handle.is_finished());
+
+        let (fired, handle) = arm_turn_watchdog(
+            Duration::from_millis(50),
+            abort_handle,
+            0,
+            Some(Uuid::new_v4()),
+        );
+        let fired = fired.expect("nonzero timeout arms the watchdog");
+        handle
+            .expect("nonzero timeout spawns the sleeper")
+            .await
+            .expect("watchdog task must not panic");
+        assert!(
+            !fired.load(std::sync::atomic::Ordering::Acquire),
+            "finished-at-deadline turn must not be flagged as a watchdog abort"
         );
     }
 }
