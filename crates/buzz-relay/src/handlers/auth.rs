@@ -239,7 +239,8 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 
             // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
             // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
+            // relays enforce_relay_membership has already resolved the owner, for a
+            // direct member as well as for an agent admitted by delegation.
             // No feature flag needed: NIP-OA is cryptographically self-proving.
             let nip_oa_owner = nip_oa_owner.or_else(|| {
                 if !state.config.require_relay_membership && auth_tag_json.is_some() {
