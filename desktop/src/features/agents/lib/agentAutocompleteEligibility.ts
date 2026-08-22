@@ -317,29 +317,6 @@ function isPreferredAgentCandidate<T extends AgentAutocompleteCandidate>(
   return false;
 }
 
-export function coalesceAutocompleteCandidatesByKey<T>(
-  candidates: readonly T[],
-  getKey: (candidate: T) => string | null,
-) {
-  const output: T[] = [];
-  const indexesByKey = new Map<string, number>();
-
-  for (const candidate of candidates) {
-    const key = getKey(candidate);
-    if (!key) {
-      output.push(candidate);
-      continue;
-    }
-
-    if (!indexesByKey.has(key)) {
-      indexesByKey.set(key, output.length);
-      output.push(candidate);
-    }
-  }
-
-  return output;
-}
-
 export function coalesceAgentAutocompleteCandidates<
   T extends AgentAutocompleteCandidate,
 >(

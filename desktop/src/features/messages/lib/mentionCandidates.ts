@@ -57,22 +57,6 @@ export function mentionCandidateLabel(candidate: MentionCandidate) {
   );
 }
 
-export function globalSearchIdentityKey(candidate: MentionCandidate) {
-  if (
-    !candidate.isGlobalSearchResult ||
-    candidate.isMember ||
-    candidate.isAgent
-  ) {
-    return null;
-  }
-
-  const label = candidate.displayName?.trim().toLowerCase();
-  if (!label) return null;
-
-  const secondaryLabel = candidate.secondaryLabel?.trim().toLowerCase() ?? "";
-  return `global-person:${label}:${secondaryLabel}`;
-}
-
 function findTeamMemberTarget(
   persona: AgentPersona,
   candidates: readonly MentionCandidate[],

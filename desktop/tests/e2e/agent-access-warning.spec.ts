@@ -128,6 +128,146 @@ test("open agent access explains the available access before save", async ({
   await expect(warning).toHaveCount(0);
 });
 
+test("selected-people search keeps same-name people independently selectable", async ({
+  page,
+}) => {
+  const firstWillPubkey = "1".repeat(64);
+  const secondWillPubkey = "2".repeat(64);
+  const agent = TEST_IDENTITIES.charlie;
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: agent.pubkey,
+        name: "Hack Day Helper",
+        status: "running",
+        channelNames: ["general"],
+        respondTo: "owner-only",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: firstWillPubkey,
+        displayName: "Will",
+        nip05Handle: "will@example.com",
+      },
+      {
+        pubkey: secondWillPubkey,
+        displayName: "Will",
+        nip05Handle: "will@example.com",
+      },
+    ],
+  });
+  await page.goto("/");
+  await openAgentAccessDialog(page, agent.pubkey);
+
+  await page.getByTestId("agent-respond-to-select").selectOption("allowlist");
+  await page.getByTestId("agent-respond-to-search").fill("Will");
+
+  const firstWill = page.getByTestId(
+    `agent-respond-to-result-${firstWillPubkey}`,
+  );
+  const secondWill = page.getByTestId(
+    `agent-respond-to-result-${secondWillPubkey}`,
+  );
+  await expect(firstWill).toContainText("Will");
+  await expect(firstWill).toContainText("will@example.com");
+  await expect(firstWill).toContainText("11111111…1111");
+  await expect(secondWill).toContainText("Will");
+  await expect(secondWill).toContainText("will@example.com");
+  await expect(secondWill).toContainText("22222222…2222");
+  const firstAdd = firstWill.getByRole("button", {
+    name: `Add Will, will@example.com, public key ${firstWillPubkey}`,
+  });
+  const secondAdd = secondWill.getByRole("button", {
+    name: `Add Will, will@example.com, public key ${secondWillPubkey}`,
+  });
+  await expect(firstAdd).toBeVisible();
+  await expect(secondAdd).toBeVisible();
+  await page
+    .getByTestId("agent-respond-to-allowlist")
+    .screenshot({ path: `${SHOTS}/duplicate-will-selected-people.png` });
+
+  await secondAdd.focus();
+  await secondAdd.press("Enter");
+  await expect(
+    page.getByTestId(`agent-respond-to-chip-${secondWillPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`agent-respond-to-chip-${firstWillPubkey}`),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Save access" }).click();
+  const updateCommand = await page.evaluate(
+    (agentPubkey) =>
+      window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+        (entry) =>
+          entry.command === "update_managed_agent" &&
+          (entry.payload as { input?: { pubkey?: string } })?.input?.pubkey ===
+            agentPubkey,
+      ),
+    agent.pubkey,
+  );
+  expect(updateCommand?.payload).toMatchObject({
+    input: {
+      pubkey: agent.pubkey,
+      respondTo: "allowlist",
+      respondToAllowlist: [secondWillPubkey],
+    },
+  });
+  expect(updateCommand?.payload).not.toMatchObject({
+    input: { respondToAllowlist: [firstWillPubkey] },
+  });
+});
+
+for (const selectedFirstPageCount of [50, 49]) {
+  test(`selected-people search fetches past a ${
+    selectedFirstPageCount === 50 ? "fully filtered" : "non-scrollable"
+  } first page`, async ({ page }) => {
+    const firstPageProfiles = Array.from({ length: 50 }, (_, index) => ({
+      pubkey: (index + 1).toString(16).padStart(64, "0"),
+      displayName: `Will ${String(index).padStart(2, "0")}`,
+    }));
+    const targetPubkey = "f".repeat(64);
+    const agent = TEST_IDENTITIES.charlie;
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: agent.pubkey,
+          name: "Hack Day Helper",
+          status: "running",
+          channelNames: ["general"],
+          respondTo: "allowlist",
+          respondToAllowlist: firstPageProfiles
+            .slice(0, selectedFirstPageCount)
+            .map((profile) => profile.pubkey),
+        },
+      ],
+      searchProfiles: [
+        ...firstPageProfiles,
+        { pubkey: targetPubkey, displayName: "Will Target" },
+      ],
+    });
+    await page.goto("/");
+    await openAgentAccessDialog(page, agent.pubkey);
+
+    await page.getByTestId("agent-respond-to-search").fill("Will");
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+              .filter((entry) => entry.command === "search_users")
+              .map((entry) => entry.payload),
+          ),
+        { message: "search should request the second result page" },
+      )
+      .toContainEqual(expect.objectContaining({ cursor: "2" }));
+    await expect(
+      page.getByTestId(`agent-respond-to-result-${targetPubkey}`),
+    ).toContainText("Will Target");
+  });
+}
+
 test("full agent editor tightens the exact sidebar agent instance", async ({
   page,
 }) => {

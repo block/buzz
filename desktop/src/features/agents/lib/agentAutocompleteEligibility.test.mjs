@@ -538,3 +538,20 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+test("coalesceAgentAutocompleteCandidates: keeps same-name global people distinct", () => {
+  const first = makeAgent({
+    pubkey: PUB_A,
+    displayName: "Will",
+    isAgent: false,
+    isGlobalSearchResult: true,
+  });
+  const second = makeAgent({
+    pubkey: PUB_B,
+    displayName: "Will",
+    isAgent: false,
+    isGlobalSearchResult: true,
+  });
+
+  assert.deepEqual(coalesce([first, second]), [first, second]);
+});

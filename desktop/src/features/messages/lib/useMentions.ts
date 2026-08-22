@@ -13,7 +13,6 @@ import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
   coalesceAgentAutocompleteCandidates,
-  coalesceAutocompleteCandidatesByKey,
   filterAdmittedMentionPubkeys,
   filterCachedAgentSuggestions,
   getAdmittedAgentPubkeys,
@@ -57,7 +56,6 @@ import {
   formatSearchUserDisplayName,
   formatSearchUserSecondaryLabel,
   formatTeamMention,
-  globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
@@ -394,10 +392,7 @@ export function useMentions(
       }))
       .filter((candidate) => candidate.displayName.trim().length > 0);
     return coalesceAgentAutocompleteCandidates(
-      coalesceAutocompleteCandidatesByKey(
-        [...candidatesByPubkey.values(), ...personaCandidates],
-        globalSearchIdentityKey,
-      ),
+      [...candidatesByPubkey.values(), ...personaCandidates],
       {
         currentPubkey,
         getLabel: mentionCandidateLabel,
