@@ -130,6 +130,108 @@ fn emit_runtime_lifecycle(
     }
 }
 
+#[cfg(test)]
+mod workflow_authority_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn workflow_event(signer: &Keys, owner: Option<&str>, marker: bool) -> nostr::Event {
+        let mut tags = Vec::new();
+        if marker {
+            tags.push(Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"));
+        }
+        if let Some(owner) = owner {
+            tags.push(Tag::parse(["workflow-owner", owner]).expect("workflow-owner tag"));
+        }
+        EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "scheduled prompt")
+            .tags(tags)
+            .sign_with_keys(signer)
+            .expect("signed event")
+    }
+
+    #[test]
+    fn trusted_relay_workflow_uses_workflow_owner_tag() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = workflow_event(&relay, Some(&owner), true);
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex())),
+            owner
+        );
+    }
+
+    #[test]
+    fn p_tag_alone_cannot_grant_workflow_authority() {
+        let relay = Keys::generate();
+        let mentioned = Keys::generate().public_key().to_hex();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "scheduled prompt")
+            .tags([
+                Tag::parse(["p", mentioned.as_str()]).expect("p tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"),
+            ])
+            .sign_with_keys(&relay)
+            .expect("signed event");
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex())),
+            relay.public_key().to_hex(),
+            "mention p tags must not become the author-gate principal"
+        );
+    }
+
+    #[test]
+    fn workflow_tag_from_non_relay_cannot_forge_owner() {
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = workflow_event(&attacker, Some(&owner), true);
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex())),
+            attacker.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn relay_signed_non_workflow_keeps_raw_author() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = workflow_event(&relay, Some(&owner), false);
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex())),
+            relay.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn missing_or_ambiguous_workflow_owner_fails_closed() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let relay_hex = relay.public_key().to_hex();
+
+        let missing = workflow_event(&relay, None, true);
+        assert_eq!(
+            effective_prompt_author(&missing, Some(&relay_hex)),
+            relay_hex
+        );
+
+        let duplicate = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "scheduled")
+            .tags([
+                Tag::parse(["buzz:workflow", "true"]).expect("marker"),
+                Tag::parse(["workflow-owner", owner.as_str()]).expect("owner"),
+                Tag::parse(["workflow-owner", owner.as_str()]).expect("owner duplicate"),
+            ])
+            .sign_with_keys(&relay)
+            .expect("signed event");
+        assert_eq!(
+            effective_prompt_author(&duplicate, Some(&relay_hex)),
+            relay_hex
+        );
+    }
+}
+
 /// Resolve the agent's owner pubkey at startup.
 ///
 /// Priority:
@@ -271,6 +373,54 @@ async fn author_allowed(
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
         }
     }
+}
+
+/// Return the workflow principal asserted by a trusted relay-generated event.
+///
+/// Authority requires all of: kind:9, the configured endpoint's NIP-11 `self`
+/// as cryptographic author, exactly one `buzz:workflow=true` marker, and exactly
+/// one valid `workflow-owner` pubkey. `p` tags are deliberately ignored here:
+/// they route mentions and cannot grant authority.
+fn trusted_workflow_owner(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
+    let relay_self = relay_self?;
+    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE
+        || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
+        || event.verify().is_err()
+    {
+        return None;
+    }
+
+    let workflow_markers: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow"))
+        .collect();
+    if workflow_markers.len() != 1 || workflow_markers[0].as_slice() != ["buzz:workflow", "true"] {
+        return None;
+    }
+
+    let owner_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("workflow-owner"))
+        .collect();
+    if owner_tags.len() != 1 || owner_tags[0].as_slice().len() != 2 {
+        return None;
+    }
+    let owner = owner_tags[0].as_slice()[1].to_ascii_lowercase();
+    PublicKey::from_hex(&owner)
+        .ok()
+        .filter(|_| owner.len() == 64 && owner.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|pubkey| pubkey.to_hex())
+}
+
+/// Resolve the author principal used by the inbound author gate.
+///
+/// For trusted relay-signed workflow messages this is the dedicated
+/// `workflow-owner` authority tag. Everything else keeps the raw signer so a
+/// forged mention `p` tag cannot bypass the gate.
+pub(crate) fn effective_prompt_author(event: &nostr::Event, relay_self: Option<&str>) -> String {
+    trusted_workflow_owner(event, relay_self).unwrap_or_else(|| event.pubkey.to_hex())
 }
 
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
@@ -2017,6 +2167,26 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    let relay_self = match relay.rest_client().relay_self().await {
+        Ok(Some(pubkey)) => {
+            tracing::debug!(relay_self = %pubkey, "resolved relay NIP-11 identity");
+            Some(pubkey)
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "relay NIP-11 document has no valid self pubkey — relay-authored workflows will remain fail-closed"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to resolve relay NIP-11 identity — relay-authored workflows will remain fail-closed"
+            );
+            None
+        }
+    };
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -2865,8 +3035,13 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let raw_author = buzz_event.event.pubkey.to_hex();
+                            let workflow_owner =
+                                trusted_workflow_owner(&buzz_event.event, relay_self.as_deref());
+                            let author_hex = workflow_owner
+                                .clone()
+                                .unwrap_or_else(|| raw_author.clone());
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2875,7 +3050,7 @@ async fn tokio_main() -> Result<()> {
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
-                                    &author,
+                                    &author_hex,
                                     is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
@@ -2884,7 +3059,9 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        raw_author = %raw_author,
+                                        effective_author = %author_hex,
+                                        workflow_delegated = workflow_owner.is_some(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -2903,7 +3080,6 @@ async fn tokio_main() -> Result<()> {
                             };
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
-                            let author_hex = buzz_event.event.pubkey.to_hex();
                             let event_id_hex = buzz_event.event.id.to_hex();
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
@@ -5333,6 +5509,7 @@ mod owner_cache_tests {
 #[cfg(test)]
 mod author_gate_tests {
     use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
 
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
@@ -5358,6 +5535,42 @@ mod author_gate_tests {
         cache.cache_sibling(STRANGER.into(), false);
         cache.cache_sibling(EXTERNAL.into(), false);
         cache
+    }
+
+    #[tokio::test]
+    async fn owner_only_accepts_trusted_relay_workflow_from_sibling_owner() {
+        let relay = Keys::generate();
+        let human_owner = Keys::generate();
+        let workflow_owner = Keys::generate();
+        let workflow_owner_hex = workflow_owner.public_key().to_hex();
+        let mentioned = Keys::generate().public_key().to_hex();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "dispatch")
+            .tags([
+                // Mention routing only — must not be treated as authority.
+                Tag::parse(["p", mentioned.as_str()]).expect("mention p tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"),
+                Tag::parse(["workflow-owner", workflow_owner_hex.as_str()])
+                    .expect("workflow-owner tag"),
+            ])
+            .sign_with_keys(&relay)
+            .expect("signed workflow event");
+        let effective_author = effective_prompt_author(&event, Some(&relay.public_key().to_hex()));
+        assert_eq!(effective_author, workflow_owner_hex);
+        let cache = OwnerCache::new(Some(human_owner.public_key().to_hex()));
+        cache.cache_sibling(workflow_owner_hex, true);
+
+        assert!(
+            author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &effective_author,
+                false,
+                &cache,
+                &dummy_rest_client(),
+            )
+            .await,
+            "a relay-signed workflow with workflow-owner sibling must pass OwnerOnly"
+        );
     }
 
     #[tokio::test]

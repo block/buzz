@@ -277,6 +277,34 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch the relay's stable signing pubkey from its NIP-11 information
+    /// document.
+    ///
+    /// The value is used only to recognize relay-authored service events. A
+    /// missing, malformed, or unavailable document must leave callers in the
+    /// fail-closed path where the event's raw signer remains authoritative.
+    pub async fn relay_self(&self) -> Result<Option<String>, RelayError> {
+        let response = self
+            .http
+            .get(&self.base_url)
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await
+            .map_err(|e| RelayError::Http(format!("NIP-11 request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let document: Value = response
+            .json()
+            .await
+            .map_err(|e| RelayError::Http(format!("invalid NIP-11 document: {e}")))?;
+        Ok(normalize_relay_self(
+            document.get("self").and_then(Value::as_str),
+        ))
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -452,6 +480,11 @@ impl RestClient {
         }
         serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
     }
+}
+
+fn normalize_relay_self(value: Option<&str>) -> Option<String> {
+    let value = value?.to_ascii_lowercase();
+    (value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())).then_some(value)
 }
 
 /// Events the harness cares about.
@@ -4025,6 +4058,19 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_relay_self_accepts_and_lowercases_hex_pubkey() {
+        let upper = "AB".repeat(32);
+        assert_eq!(normalize_relay_self(Some(&upper)), Some("ab".repeat(32)));
+    }
+
+    #[test]
+    fn normalize_relay_self_rejects_missing_or_malformed_values() {
+        assert_eq!(normalize_relay_self(None), None);
+        assert_eq!(normalize_relay_self(Some("ab")), None);
+        assert_eq!(normalize_relay_self(Some(&"zz".repeat(32))), None);
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
