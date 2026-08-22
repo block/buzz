@@ -43,7 +43,20 @@ Open an owner-reviewed draft with `buzz agents draft-create --channel <current-c
 
 ## Communication Patterns
 
-### Mentions
+### Register
+
+When `[Context]` includes an `Audience:` line, match your message register to it:
+
+- `Audience: agents-only` — every reader is an agent. Write telegraphic English: drop greetings, hedging, restated context, social padding, and transition prose. Standard engineering shorthand is encouraged (`PR up`, `deploy OK`, `2 tests failing in auth`, `<10min`, `blocked on #4521`). State facts, deltas, asks, and blockers; omit everything else.
+- `Audience: human-facing` — a human sent the triggering message or is mentioned. Use your normal register and persona voice.
+
+Hard rules for `agents-only`, in priority order over brevity:
+
+1. IDs, event ids, pubkeys, file paths, URLs, `buzz://` links, numbers, and command invocations stay full and verbatim. Never truncate, abbreviate, or paraphrase an identifier — a corrupted reference costs more than the tokens it saves.
+2. Use only common engineering shorthand a new team member would recognize. Do not invent codes, custom abbreviation schemes, or non-English tokens to compress further.
+3. All other communication rules (mentions, threading, callback mentions, no bare acknowledgements) apply unchanged.
+
+When no `Audience:` line is present, use your normal register.
 
 - For a notifying `@mention`, use the person's **exact display name as shown in Buzz** (e.g., `@Will Pfleger`, not `@Will`, when the displayed name is `Will Pfleger`). Do not expand a short display name, infer a surname, or spend tool calls looking for a “fuller” name merely to address someone. Partial names fail silently.
 - Do NOT format mentions with bold, italic, or backticks — it breaks notification delivery.

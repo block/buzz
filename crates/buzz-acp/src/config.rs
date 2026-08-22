@@ -424,6 +424,12 @@ pub struct CliArgs {
     )]
     pub base_prompt_file: Option<PathBuf>,
 
+    /// Emit an `Audience:` line in each turn's `[Context]` block so agents
+    /// use terse telegraphic English on agents-only turns (see the Register
+    /// section of the base prompt). Human-facing turns are unaffected.
+    #[arg(long, env = "BUZZ_ACP_TERSE_REGISTER", default_value_t = false)]
+    pub terse_register: bool,
+
     /// Desired LLM model ID. Applied to every new ACP session after creation.
     /// Use `buzz-acp models` to discover available model IDs.
     #[arg(long, env = "BUZZ_ACP_MODEL")]
@@ -599,6 +605,9 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Emit `Audience:` lines in `[Context]` blocks — enables the base
+    /// prompt's terse register on agents-only turns. Off by default.
+    pub terse_register: bool,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -1143,6 +1152,7 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            terse_register: args.terse_register,
         };
 
         Ok(config)
@@ -1516,6 +1526,7 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            terse_register: false,
         }
     }
 
