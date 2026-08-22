@@ -664,7 +664,11 @@ export function MembersSidebar({
           }}
           onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
           onManagedAgentAction={(agent) => {
-            void handleAgentLifecycleAction(agent, managedAgentRuntime);
+            void handleAgentLifecycleAction(
+              agent,
+              managedAgentRuntime,
+              memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null,
+            );
           }}
           onOpenProfile={handleOpenProfile}
           onRemoveMember={handleRemoveMember}
