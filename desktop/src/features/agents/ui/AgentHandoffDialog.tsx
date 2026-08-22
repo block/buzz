@@ -24,11 +24,16 @@ import {
 type AgentHandoffDialogProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name">;
   history: string;
+  initialMode?: "send" | "received";
 };
 
-export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) {
+export function AgentHandoffDialog({
+  agent,
+  history,
+  initialMode = "send",
+}: AgentHandoffDialogProps) {
   const [open, setOpen] = React.useState(false);
-  const [mode, setMode] = React.useState<"send" | "received">("send");
+  const [mode, setMode] = React.useState<"send" | "received">(initialMode);
   const [selectedEvent, setSelectedEvent] = React.useState<string | null>(null);
   const [recipient, setRecipient] = React.useState("");
   const [title, setTitle] = React.useState("");
@@ -75,6 +80,14 @@ export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) 
     setOpen(true);
   }
 
+  function openDialog() {
+    if (initialMode === "received") {
+      openReceived();
+      return;
+    }
+    openSend();
+  }
+
   const availableAgents = managedAgents.filter(
     (candidate) => candidate.pubkey !== agent.pubkey,
   );
@@ -83,14 +96,22 @@ export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) 
     <>
       <div className="flex items-center gap-1">
         <Button
-          aria-label="Send agent handoff"
+          aria-label={
+            initialMode === "received"
+              ? "View agent handoff history"
+              : "Send agent handoff"
+          }
           className="h-8 gap-1.5 px-2 text-xs"
-          onClick={openSend}
+          onClick={openDialog}
           size="sm"
           variant="outline"
         >
-          <Send className="h-3.5 w-3.5" />
-          Handoff
+          {initialMode === "received" ? (
+            <BookOpen className="h-3.5 w-3.5" />
+          ) : (
+            <Send className="h-3.5 w-3.5" />
+          )}
+          {initialMode === "received" ? "History" : "Handoff"}
         </Button>
         <Button
           aria-label="View received agent handoffs"
@@ -112,7 +133,8 @@ export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) 
               Agent handoff
             </DialogTitle>
             <DialogDescription>
-              Share a curated task snapshot with another Agent. Hidden reasoning and credentials are excluded.
+              Share a curated task snapshot with another Agent. Hidden reasoning
+              and credentials are excluded.
             </DialogDescription>
           </DialogHeader>
 
@@ -178,7 +200,9 @@ export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) 
               </label>
               {send.error ? (
                 <p className="text-sm text-destructive">
-                  {send.error instanceof Error ? send.error.message : String(send.error)}
+                  {send.error instanceof Error
+                    ? send.error.message
+                    : String(send.error)}
                 </p>
               ) : null}
               <div className="flex justify-end gap-2">
@@ -186,7 +210,12 @@ export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) 
                   Cancel
                 </Button>
                 <Button
-                  disabled={!recipient || !title.trim() || !body.trim() || send.isPending}
+                  disabled={
+                    !recipient ||
+                    !title.trim() ||
+                    !body.trim() ||
+                    send.isPending
+                  }
                   onClick={() => send.mutate()}
                 >
                   <Send className="mr-1.5 h-4 w-4" />
@@ -196,27 +225,48 @@ export function AgentHandoffDialog({ agent, history }: AgentHandoffDialogProps) 
             </div>
           ) : (
             <div className="grid min-h-0 gap-4 overflow-y-auto px-6 pb-6 pt-4">
-              {received.isPending ? <p className="text-sm text-muted-foreground">Loading handoffs…</p> : null}
-              {received.error ? <p className="text-sm text-destructive">Unable to load handoffs.</p> : null}
-              {!received.isPending && !received.error && (received.data?.length ?? 0) === 0 ? (
-                <p className="text-sm text-muted-foreground">No handoffs have been sent to this Agent.</p>
+              {received.isPending ? (
+                <p className="text-sm text-muted-foreground">
+                  Loading handoffs…
+                </p>
+              ) : null}
+              {received.error ? (
+                <p className="text-sm text-destructive">
+                  Unable to load handoffs.
+                </p>
+              ) : null}
+              {!received.isPending &&
+              !received.error &&
+              (received.data?.length ?? 0) === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No handoffs have been sent to this Agent.
+                </p>
               ) : null}
               <div className="grid gap-2">
                 {received.data?.map((item) => (
                   <button
                     className={cn(
                       "rounded-md border px-3 py-2 text-left transition-colors hover:bg-muted/60",
-                      selectedEvent === item.eventId && "border-primary bg-muted/50",
+                      selectedEvent === item.eventId &&
+                        "border-primary bg-muted/50",
                     )}
                     key={item.eventId}
                     onClick={() => setSelectedEvent(item.eventId)}
                     type="button"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{item.title}</span>
-                      <Badge variant="outline">{new Date(item.createdAt * 1000).toLocaleDateString()}</Badge>
+                      <span className="truncate text-sm font-medium">
+                        {item.title}
+                      </span>
+                      <Badge variant="outline">
+                        {new Date(item.createdAt * 1000).toLocaleDateString()}
+                      </Badge>
                     </div>
-                    {item.summary ? <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.summary}</p> : null}
+                    {item.summary ? (
+                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                        {item.summary}
+                      </p>
+                    ) : null}
                   </button>
                 ))}
               </div>
@@ -234,9 +284,13 @@ function HandoffDetail({ record }: { record: AgentHandoffRecord }) {
     <section className="grid gap-2 rounded-md border bg-muted/20 p-4">
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold">{record.title}</h4>
-        <span className="text-xs text-muted-foreground">from {record.senderPubkey.slice(0, 12)}…</span>
+        <span className="text-xs text-muted-foreground">
+          from {record.senderPubkey.slice(0, 12)}…
+        </span>
       </div>
-      {record.summary ? <p className="text-sm text-muted-foreground">{record.summary}</p> : null}
+      {record.summary ? (
+        <p className="text-sm text-muted-foreground">{record.summary}</p>
+      ) : null}
       <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-background p-3 font-mono text-xs">
         {record.history}
       </pre>

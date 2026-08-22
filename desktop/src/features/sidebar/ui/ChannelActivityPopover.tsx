@@ -5,6 +5,7 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { AgentHandoffDialog } from "@/features/agents/ui/AgentHandoffDialog";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { buildInboxItems, type InboxItem } from "@/features/home/lib/inbox";
 import { getGroupedInboxItemIds } from "@/features/home/useHomeInboxReadState";
@@ -154,33 +155,42 @@ function WorkingAgentRow({
   pubkey: string;
 }) {
   return (
-    <button
-      className="flex w-full min-w-0 items-start gap-2.5 border-t border-border/50 px-3 py-3 text-left transition-colors first:border-t-0 hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-hidden"
-      data-testid={`channel-activity-agent-${pubkey}`}
-      onClick={onOpen}
-      type="button"
-    >
-      <UserAvatar
-        avatarUrl={avatarUrl}
-        className="h-9 w-9 shrink-0"
-        displayName={name}
-        size="md"
-      />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-start gap-2">
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold leading-4 text-foreground">
-            {name}
-          </span>
-          <span className="shrink-0 text-xs leading-4 text-muted-foreground/70">
-            {elapsed}
+    <div className="group/agent relative border-t border-border/50 first:border-t-0">
+      <button
+        className="flex w-full min-w-0 items-start gap-2.5 px-3 py-3 pr-14 text-left transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-hidden"
+        data-testid={`channel-activity-agent-${pubkey}`}
+        onClick={onOpen}
+        type="button"
+      >
+        <UserAvatar
+          avatarUrl={avatarUrl}
+          className="h-9 w-9 shrink-0"
+          displayName={name}
+          size="md"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold leading-4 text-foreground">
+              {name}
+            </span>
+            <span className="shrink-0 text-xs leading-4 text-muted-foreground/70">
+              {elapsed}
+            </span>
+          </div>
+          <span className="mt-0.5 flex items-center gap-1.5 text-xs leading-4 text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary/70" />
+            Working
           </span>
         </div>
-        <span className="mt-0.5 flex items-center gap-1.5 text-xs leading-4 text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary/70" />
-          Working
-        </span>
+      </button>
+      <div className="absolute right-2 top-2 opacity-0 transition-opacity group-hover/agent:opacity-100 focus-within:opacity-100">
+        <AgentHandoffDialog
+          agent={{ name, pubkey }}
+          history=""
+          initialMode="received"
+        />
       </div>
-    </button>
+    </div>
   );
 }
 
