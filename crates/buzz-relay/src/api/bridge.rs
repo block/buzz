@@ -811,13 +811,12 @@ async fn submit_event_authed(
     )
     .await
     {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
-            } else {
-                None
-            }
-        }),
+        // A direct member may still be a managed agent. Always verify a supplied
+        // NIP-OA attestation so older direct-member rows get their owner mapping
+        // materialized before owner-gated events (for example NIP-AM metrics)
+        // reach ingest. This cannot grant membership: that decision was already
+        // made above, and the attestation remains cryptographically verified.
+        Ok(owner) => super::relay_members::resolve_nip_oa_owner(owner, &pubkey_bytes, auth_tag),
         Err(e) => {
             return SubmitOutcome::Err {
                 status: e.0,
