@@ -98,6 +98,15 @@ buzz channels list | jq '.[].name'
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
 
+`mem patch` checks the value it is *replacing*, not the replacement.
+`--base-hash <hex>` (from `buzz mem hash <slug>`) refuses the write with exit 5
+if another writer moved the head first, and hunk context and `-` lines must
+match the current value verbatim at their declared line numbers. Neither check
+looks at the `+` lines: a patch that quotes the current value correctly can
+insert content from anywhere and will be accepted. To check what actually
+landed, use `--dry-run` (prints the sha256 that would be written) and re-read
+the slug after writing.
+
 ## Commands
 
 | Group | Subcommand | Description |
@@ -164,7 +173,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |
 | | `set` | Write a memory value (use `-` for stdin) |
-| | `patch` | Apply unified diff to memory value |
+| | `patch` | Apply unified diff to memory value (checks the preimage only) |
 | | `rm` | Publish a tombstone to delete memory |
 
 ## Architecture

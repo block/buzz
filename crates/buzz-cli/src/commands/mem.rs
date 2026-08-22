@@ -419,6 +419,13 @@ fn sha256_hex(s: &str) -> String {
 /// the hunk — at which point regenerating the patch is the correct response,
 /// not silently landing the change at a different position.
 ///
+/// **Scope: the preimage only.** `Line::Insert` is filtered out below, so the
+/// replacement text is never examined. A patch whose context and deletions
+/// quote the current value exactly, but whose insertions are unrelated
+/// content, satisfies this function. It is a positional-integrity check on
+/// what is being replaced, not an authenticity check on what replaces it —
+/// see `tests::strict_position_authenticates_preimage_only_not_postimage`.
+///
 /// Returns `Ok(())` on a clean match, `Err(message)` otherwise.
 ///
 /// Line-number convention: unified-diff `@@ -N,M @@` uses 1-based line
@@ -554,14 +561,30 @@ pub async fn cmd_hash(
 /// content fuzz; diffy will refuse a hunk whose context lines don't match
 /// the file verbatim), and writes the result.
 ///
-/// Safety properties:
+/// Safety properties — all of them about the value being *replaced*:
 /// - `--base-hash <hex>` is **required** unless `--no-base-hash` is passed.
-///   This makes concurrent edits safe: if the slug has changed since the
-///   patch was generated, the write is refused.
+///   It proves the slug still holds the value the patch was generated
+///   against: if another writer moved the head first, the write is refused
+///   with `Conflict` (exit 5).
+/// - Hunk context and deletions must match the current value verbatim at the
+///   declared line numbers (see [`verify_hunks_at_declared_position`]).
 /// - The result is rejected if it would be empty, unless `--allow-empty`.
 /// - `--dry-run` prints the post-application diff and exits without writing.
 /// - On a successful write, the new sha256 is printed to stderr so callers
 ///   can chain edits.
+///
+/// **What these checks do NOT do.** They authenticate the *preimage* only.
+/// `verify_hunks_at_declared_position` filters `Line::Insert` out before
+/// comparing, and `--base-hash` hashes the pre-edit value — so a patch whose
+/// context and `-` lines quote the real current value while its `+` lines
+/// carry content from somewhere else entirely passes every check here and is
+/// written. Pinned by
+/// `tests::strict_position_authenticates_preimage_only_not_postimage`.
+///
+/// To gain confidence in the *postimage*, the caller must inspect the bytes
+/// being written: `--dry-run` reports the sha256 that would be published, and
+/// re-reading the slug after the write and diffing it against the intended
+/// content is the only check that inspects what actually landed.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_patch(
     client: &BuzzClient,
@@ -1069,6 +1092,71 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    /// Pins the *limit* of `mem patch`'s safety, which the docs must not
+    /// overstate: the strict-position check reads only `Context` and `Delete`
+    /// lines (it filters `Insert` out), so it authenticates the **preimage**
+    /// side of the edit and says nothing about the postimage.
+    ///
+    /// Consequence: a patch that quotes the real current value in its context
+    /// and deletions, but whose `+` lines are content from somewhere else
+    /// entirely, is **accepted**. `--base-hash` does not change this — it
+    /// hashes the pre-edit value, which such a patch matches exactly. The
+    /// only defence is checking the postimage, e.g. re-reading the slug after
+    /// the write and diffing it against the bytes you meant to publish.
+    ///
+    /// Positive control included: corrupting the *preimage* side of the same
+    /// patch is refused, proving the check runs at all rather than being a
+    /// no-op that accepts everything.
+    #[test]
+    fn strict_position_authenticates_preimage_only_not_postimage() {
+        let current = "mine: alpha\nmine: beta\n";
+
+        // Real preimage (context + deletion quote the current value exactly),
+        // foreign postimage (the `+` line is another agent's content).
+        let foreign_postimage = "\
+--- a/x
++++ b/x
+@@ -1,2 +1,2 @@
+ mine: alpha
+-mine: beta
++SOMEONE ELSE'S MEMORY
+";
+        let patch = diffy::Patch::from_str(foreign_postimage).unwrap();
+        verify_hunks_at_declared_position(current, &patch)
+            .expect("preimage-side check accepts a foreign postimage — this is the known limit");
+
+        // And it really does apply, producing content the operator never wrote.
+        assert_eq!(
+            diffy::apply(current, &patch).unwrap(),
+            "mine: alpha\nSOMEONE ELSE'S MEMORY\n"
+        );
+
+        // `--base-hash` cannot catch it either: the gate compares against the
+        // *pre-edit* value, which this patch's preimage matches verbatim.
+        // (`cmd_patch` compares `sha256_hex(&current)` to the flag.)
+        assert_eq!(
+            sha256_hex(current),
+            sha256_hex("mine: alpha\nmine: beta\n"),
+            "base-hash is computed over the preimage, which the patch matches"
+        );
+
+        // Positive control: corrupt the preimage side and the same check
+        // refuses. Only the `-` line differs from the accepted patch above.
+        let foreign_preimage = "\
+--- a/x
++++ b/x
+@@ -1,2 +1,2 @@
+ mine: alpha
+-SOMEONE ELSE'S MEMORY
++mine: gamma
+";
+        let patch = diffy::Patch::from_str(foreign_preimage).unwrap();
+        assert!(
+            verify_hunks_at_declared_position(current, &patch).is_err(),
+            "preimage-side corruption must be refused"
+        );
     }
 
     // ── Off-curve pubkey handling ─────────────────────────────────────────
