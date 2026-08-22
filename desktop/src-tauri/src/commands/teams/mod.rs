@@ -194,19 +194,56 @@ fn apply_team_membership_delta(
     changed
 }
 
+mod adopt;
+mod pending;
+mod sharing;
+pub use adopt::add_team_from_catalog;
+pub use sharing::set_team_shared;
+
+/// Refresh the shared 30178 catalog heads of every team that includes
+/// `persona_id` as a member, after a successful persona edit.
+///
+/// `pub(crate)` so persona-edit commands can trigger a catalog refresh without
+/// crossing into the `commands::teams` private module. Best-effort: failures
+/// are logged, not returned.
+pub(crate) fn refresh_team_catalog_heads_for_persona(
+    app: &AppHandle,
+    state: &AppState,
+    persona_id: &str,
+) {
+    pending::refresh_shared_team_catalog_heads_for_persona(app, state, persona_id);
+}
+
 /// Retain a freshly authored team event in the local store, flagged for relay
 /// sync. Called inside a command's `managed_agents_store_lock`-held body after
 /// `save_teams`; the background flush loop publishes it out-of-band.
 ///
-/// Mirrors `commands::personas::retain_persona_pending`. Built-in teams are not
-/// owner-authored, so the caller skips them — this helper assumes the team is
-/// publishable. Best-effort: a failure here is logged and swallowed so a
-/// retention hiccup never blocks the disk-authoritative write.
+/// Mirrors `commands::personas::retain_persona_pending`. The caller skips
+/// built-in teams, so this assumes the team is publishable. Best-effort: a
+/// failure is logged and swallowed so a retention hiccup never blocks the
+/// disk-authoritative write.
 ///
-/// Unlike `retain_managed_agent_pending`, this has no projection-equality
-/// short-circuit: teams have no start/stop runtime churn, so a republish only
-/// happens on an actual user edit. The guard is intentionally omitted.
+/// Unlike `retain_managed_agent_pending`, no projection-equality short-circuit:
+/// teams have no start/stop runtime churn, so a republish only happens on an
+/// actual user edit.
 pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
+    let result = (|| -> Result<(), String> {
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        retain_team_pending_at(&scope, team)
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-retain: {e}");
+    }
+}
+
+/// Scope-level team retention: sign and durably enqueue a team head in an
+/// already-resolved retention scope. Team adoption resolves the scope once for
+/// its batch and calls this alongside [`personas::retain_persona_pending_at`];
+/// [`retain_team_pending`] is the `AppHandle` wrapper for single writes.
+pub(super) fn retain_team_pending_at(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    team: &TeamRecord,
+) -> Result<(), String> {
     use crate::managed_agents::{
         persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
@@ -215,33 +252,26 @@ pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &Team
     use buzz_core_pkg::kind::KIND_TEAM;
     use nostr::JsonUtil;
 
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let conn = open_retention_db(&scope.db_path)?;
-        let pubkey = scope.owner_keys.public_key().to_hex();
-        // Monotonic created_at: bump past the retained head (NIP-AP step 3).
-        let prior =
-            get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
-        let event = build_team_event(team)?
-            .custom_created_at(monotonic_created_at(prior))
-            .sign_with_keys(&scope.owner_keys)
-            .map_err(|e| format!("failed to sign team event: {e}"))?;
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_TEAM,
-                pubkey,
-                d_tag: team.id.clone(),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-retain: {e}");
-    }
+    let conn = open_retention_db(&scope.db_path)?;
+    let pubkey = scope.owner_keys.public_key().to_hex();
+    // Monotonic created_at: bump past the retained head (NIP-AP step 3).
+    let prior = get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
+    let event = build_team_event(team)?
+        .custom_created_at(monotonic_created_at(prior))
+        .sign_with_keys(&scope.owner_keys)
+        .map_err(|e| format!("failed to sign team event: {e}"))?;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_TEAM,
+            pubkey,
+            d_tag: team.id.clone(),
+            content: event.content.to_string(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: true,
+        },
+    )
 }
 
 /// Purge a deleted team's pending row and enqueue a NIP-09 tombstone, both
@@ -253,11 +283,37 @@ pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &Team
 /// `(5, pubkey, d_tag)` coordinate with `pending_sync = 1`. Best-effort: a
 /// failure is logged and swallowed so a retention hiccup never blocks the
 /// disk-authoritative delete.
+///
+/// Timestamp-domination invariant: the retained 30176 head may be future-dated
+/// (`retain_team_pending` signs it with `monotonic_created_at`), and the relay
+/// only soft-deletes coordinate versions with `created_at <=` the tombstone's.
+/// So the kind:5 is signed with `monotonic_created_at(Some(head.created_at))` —
+/// the head's `created_at` read before the purge — so a future-dated head cannot
+/// survive its own tombstone. Without a head, fall back to
+/// `monotonic_created_at(None)`.
 fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
+    let result = (|| -> Result<(), String> {
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        tombstone_team_at(&scope.db_path, &scope.owner_keys, d_tag)
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-tombstone: {e}");
+    }
+}
+
+/// Scope-free core of [`tombstone_team_pending`], so the purge and enqueue can
+/// be asserted directly against a retention database (mirrors
+/// `pending::tombstone_team_catalog_at` for the 30178 coordinate).
+pub(super) fn tombstone_team_at(
+    db_path: &std::path::Path,
+    keys: &nostr::Keys,
+    d_tag: &str,
+) -> Result<(), String> {
     use crate::managed_agents::{
+        persona_events::monotonic_created_at,
         retention::{
-            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
-            RetainedEvent,
+            delete_retained_event, get_retained_event, open_retention_db, retain_event,
+            tombstone_retention_d_tag, RetainedEvent,
         },
         team_events::build_team_delete,
     };
@@ -266,32 +322,31 @@ fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
 
     const KIND_DELETE: u32 = 5;
 
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let pubkey = scope.owner_keys.public_key().to_hex();
-        let event = build_team_delete(d_tag, &pubkey)?
-            .sign_with_keys(&scope.owner_keys)
-            .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
-        let conn = open_retention_db(&scope.db_path)?;
-        delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_DELETE,
-                pubkey,
-                // Key by the target coordinate so cross-kind d-tag tombstones
-                // occupy distinct rows (F2c).
-                d_tag: tombstone_retention_d_tag(KIND_TEAM, d_tag),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-tombstone: {e}");
-    }
+    let pubkey = keys.public_key().to_hex();
+    let conn = open_retention_db(db_path)?;
+    // Read the retained head's created_at before the purge, then sign the
+    // kind:5 strictly past it so the relay cannot reject the deletion.
+    let prior_head =
+        get_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?.map(|row| row.created_at);
+    let event = build_team_delete(d_tag, &pubkey)?
+        .custom_created_at(monotonic_created_at(prior_head))
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
+    delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_DELETE,
+            pubkey,
+            // Key by the target coordinate so cross-kind d-tag tombstones
+            // occupy distinct rows (F2c).
+            d_tag: tombstone_retention_d_tag(KIND_TEAM, d_tag),
+            content: event.content.to_string(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: true,
+        },
+    )
 }
 
 #[tauri::command]
@@ -303,7 +358,9 @@ pub async fn list_teams(app: AppHandle) -> Result<Vec<TeamRecord>, String> {
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        load_teams(&app)
+        let mut teams = load_teams(&app)?;
+        pending::project_active_team_sharing(&app, &state, &mut teams);
+        Ok(teams)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -333,6 +390,10 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             instructions,
             persona_ids: input.persona_ids,
             is_builtin: false,
+            // View projection only — `list_teams` recomputes it from the
+            // scoped 30178 head. A new team has no catalog head yet.
+            shared: false,
+            catalog_source: None,
             source_dir: None,
             is_symlink: false,
             symlink_target: None,
@@ -371,6 +432,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
         let mut teams = load_teams(&app)?;
+        pending::project_active_team_sharing(&app, &state, &mut teams);
         let updated = commit_team_update(
             &mut teams,
             &input.id,
@@ -386,270 +448,17 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         // Built-in teams are not owner-authored — never publish them.
         if !updated.is_builtin {
             retain_team_pending(&app, &state, &updated);
+            // Reproject the shared 30178 head immediately so the catalog
+            // reflects the edit. Resolution failure (a member was deleted
+            // mid-edit) is treated as a projection failure — the shared head
+            // is tombstoned and the owner is notified via a typed notice.
+            // Best-effort: a retention hiccup never blocks the team edit.
+            pending::refresh_shared_team_catalog_head_resolving(&app, &state, &updated, &personas);
         }
         Ok(updated)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{apply_team_membership_delta, commit_team_create, commit_team_update};
-    use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
-    use std::cell::RefCell;
-
-    /// A running instance: `pubkey` set, linked to a persona, optional binding.
-    fn instance(seed: char, persona_id: &str, team_id: Option<&str>) -> ManagedAgentRecord {
-        let mut record = serde_json::from_value::<ManagedAgentRecord>(serde_json::json!({
-            "pubkey": seed.to_string().repeat(64),
-            "name": persona_id,
-            "persona_id": persona_id,
-            "relay_url": "ws://localhost:3000",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": "prompt",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-        }))
-        .unwrap();
-        record.team_id = team_id.map(str::to_string);
-        record
-    }
-
-    fn ids(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// A metadata-only edit (no roster change) never re-points an instance —
-    /// including an unbound instance of a persona this team shares with another.
-    #[test]
-    fn metadata_only_edit_leaves_bindings_untouched() {
-        let mut records = vec![instance('a', "duncan", None)];
-        let roster = ids(&["duncan"]);
-        assert!(!apply_team_membership_delta(
-            &mut records,
-            "team-a",
-            &roster,
-            &roster
-        ));
-        assert_eq!(records[0].team_id, None);
-    }
-
-    /// Only the *added* persona's unbound instance is bound; an untouched member
-    /// already present in the previous roster is not re-pointed.
-    #[test]
-    fn added_persona_backfills_only_its_unbound_instance() {
-        let mut records = vec![
-            instance('a', "duncan", None),
-            instance('b', "paul", Some("team-b")),
-        ];
-        assert!(apply_team_membership_delta(
-            &mut records,
-            "team-a",
-            &ids(&["paul"]),
-            &ids(&["paul", "duncan"]),
-        ));
-        assert_eq!(records[0].team_id.as_deref(), Some("team-a"));
-        // Paul was already on the team and bound elsewhere — untouched.
-        assert_eq!(records[1].team_id.as_deref(), Some("team-b"));
-    }
-
-    /// An added persona binds even when shared across teams: an explicit add is
-    /// legitimate evidence (unlike the boot-repair's order-blind case).
-    #[test]
-    fn added_shared_persona_binds_to_the_edited_team() {
-        let mut records = vec![instance('a', "duncan", None)];
-        assert!(apply_team_membership_delta(
-            &mut records,
-            "team-a",
-            &[],
-            &ids(&["duncan"]),
-        ));
-        assert_eq!(records[0].team_id.as_deref(), Some("team-a"));
-    }
-
-    /// Removing a persona ("keep agents") clears its binding to *this* team so a
-    /// kept instance stops drawing the team's instructions at spawn.
-    #[test]
-    fn removed_persona_detaches_instance_bound_to_this_team() {
-        let mut records = vec![instance('a', "duncan", Some("team-a"))];
-        assert!(apply_team_membership_delta(
-            &mut records,
-            "team-a",
-            &ids(&["duncan"]),
-            &[],
-        ));
-        assert_eq!(records[0].team_id, None);
-    }
-
-    /// Removal only clears a binding pointing at *this* team — an instance of
-    /// the same persona bound to a different team is left alone.
-    #[test]
-    fn removed_persona_leaves_other_team_binding_untouched() {
-        let mut records = vec![instance('a', "duncan", Some("team-b"))];
-        assert!(!apply_team_membership_delta(
-            &mut records,
-            "team-a",
-            &ids(&["duncan"]),
-            &[],
-        ));
-        assert_eq!(records[0].team_id.as_deref(), Some("team-b"));
-    }
-
-    /// A minimal owner-authored team record for wiring tests.
-    fn team(id: &str, persona_ids: &[&str]) -> TeamRecord {
-        TeamRecord {
-            id: id.to_string(),
-            name: id.to_string(),
-            description: None,
-            instructions: None,
-            persona_ids: ids(persona_ids),
-            is_builtin: false,
-            source_dir: None,
-            is_symlink: false,
-            symlink_target: None,
-            version: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-        }
-    }
-
-    /// Records the injected store IO a commit performs, so a test can assert
-    /// the wiring saved (or deliberately did not) the agent store.
-    #[derive(Default)]
-    struct StoreSpy {
-        saved: Option<Vec<ManagedAgentRecord>>,
-    }
-
-    /// Metadata-only `update_team` must pass the TRUE prior roster into the
-    /// delta, so an unchanged roster is an empty delta and no agent write fires.
-    /// The `&previous_persona_ids` → `&[]` miswire would drop the prior roster,
-    /// making the whole roster look "added" and re-pointing the unbound instance.
-    #[test]
-    fn commit_team_update_uses_true_prior_roster() {
-        let mut teams = vec![team("team-a", &["duncan"])];
-        let existing = vec![instance('a', "duncan", None)];
-        let spy = RefCell::new(StoreSpy::default());
-
-        let updated = commit_team_update(
-            &mut teams,
-            "team-a",
-            "Team A".to_string(),
-            None,
-            Some("new instructions".to_string()),
-            ids(&["duncan"]),
-            "2026-02-02T00:00:00Z".to_string(),
-            |_| Ok(()),
-            || Ok(existing.clone()),
-            |records| {
-                spy.borrow_mut().saved = Some(records.to_vec());
-                Ok(())
-            },
-        )
-        .expect("metadata-only update succeeds");
-
-        assert_eq!(updated.instructions.as_deref(), Some("new instructions"));
-        // Empty delta ⇒ nothing changed ⇒ no save (the true-prior-roster gate).
-        assert!(
-            spy.borrow().saved.is_none(),
-            "metadata-only edit must not write the agent store"
-        );
-    }
-
-    /// Removing a persona from the roster must reach the detach branch through
-    /// the command wiring: the instance bound to this team is cleared and saved.
-    #[test]
-    fn commit_team_update_removal_detaches_through_wiring() {
-        let mut teams = vec![team("team-a", &["duncan"])];
-        let existing = vec![instance('a', "duncan", Some("team-a"))];
-        let spy = RefCell::new(StoreSpy::default());
-
-        commit_team_update(
-            &mut teams,
-            "team-a",
-            "team-a".to_string(),
-            None,
-            None,
-            ids(&[]),
-            "2026-02-02T00:00:00Z".to_string(),
-            |_| Ok(()),
-            || Ok(existing.clone()),
-            |records| {
-                spy.borrow_mut().saved = Some(records.to_vec());
-                Ok(())
-            },
-        )
-        .expect("removal update succeeds");
-
-        let saved = spy.borrow().saved.clone().expect("detach must save");
-        assert_eq!(saved[0].team_id, None, "removed persona detaches from team");
-    }
-
-    /// `create_team` has no prior roster, so its whole roster is the added delta:
-    /// the unbound instance of a listed persona is bound through the wiring.
-    #[test]
-    fn commit_team_create_treats_full_roster_as_added() {
-        let mut teams: Vec<TeamRecord> = Vec::new();
-        let existing = vec![instance('a', "duncan", None)];
-        let spy = RefCell::new(StoreSpy::default());
-
-        let created = commit_team_create(
-            &mut teams,
-            team("team-a", &["duncan"]),
-            |_| Ok(()),
-            || Ok(existing.clone()),
-            |records| {
-                spy.borrow_mut().saved = Some(records.to_vec());
-                Ok(())
-            },
-        )
-        .expect("create succeeds");
-
-        assert_eq!(created.id, "team-a");
-        let saved = spy.borrow().saved.clone().expect("backfill must save");
-        assert_eq!(
-            saved[0].team_id.as_deref(),
-            Some("team-a"),
-            "whole roster is the added delta on create"
-        );
-    }
-
-    /// A failing secondary agent write after successful `save_teams` is
-    /// swallowed: both commits still return the persisted team. Otherwise a UI
-    /// retry of a create whose team already landed would mint a duplicate.
-    #[test]
-    fn commit_returns_ok_when_agent_save_fails() {
-        let mut teams: Vec<TeamRecord> = Vec::new();
-        let created = commit_team_create(
-            &mut teams,
-            team("team-a", &["duncan"]),
-            |_| Ok(()),
-            || Ok(vec![instance('a', "duncan", None)]),
-            |_| Err("disk full".to_string()),
-        )
-        .expect("create swallows secondary-store failure");
-        assert_eq!(created.id, "team-a");
-
-        let mut teams = vec![team("team-a", &["duncan"])];
-        let updated = commit_team_update(
-            &mut teams,
-            "team-a",
-            "team-a".to_string(),
-            None,
-            None,
-            ids(&[]),
-            "2026-02-02T00:00:00Z".to_string(),
-            |_| Ok(()),
-            || Err("agent store unreadable".to_string()),
-            |_| Ok(()),
-        )
-        .expect("update swallows secondary-store failure");
-        assert_eq!(updated.persona_ids, Vec::<String>::new());
-    }
 }
 
 #[tauri::command]
@@ -666,6 +475,11 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
         // so reaching here means this team was owner-published — tombstone it. The
         // d_tag is the team id, captured before the record left the store.
         tombstone_team_pending(&app, &state, &id);
+        // The catalog projection is a separate coordinate with its own
+        // retained head, so the 30176 tombstone above does not retract it.
+        // Without this, deleting a shared team would leave a live catalog
+        // entry the owner can no longer see or unshare.
+        pending::tombstone_team_catalog_pending(&app, &state, &id);
         // Tombstone the cascaded personas too, so their orphaned kind:30175 heads
         // don't linger on the relay (F4). Each d-tag was captured pre-removal.
         for persona_d_tag in &cascaded_persona_d_tags {
@@ -677,3 +491,6 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
+
+#[cfg(test)]
+mod tests;

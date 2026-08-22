@@ -46,6 +46,17 @@ pub(in crate::commands) fn retain_persona_pending(
     }
 }
 
+/// Scope-level persona retention: sign and durably enqueue a persona head in an
+/// already-resolved retention scope. Callers that resolve the scope once for a
+/// batch (team adoption) use this to avoid a keyring round-trip per member;
+/// [`retain_persona_pending`] is the `AppHandle` wrapper for single writes.
+pub(in crate::commands) fn retain_persona_pending_at(
+    scope: &RetentionScope,
+    persona: &AgentDefinition,
+) -> Result<(), String> {
+    prepare_persona_publication_at(&scope.db_path, &scope.owner_keys, persona, None).map(|_| ())
+}
+
 /// Build, sign, and durably retain a persona event in the active relay+owner
 /// scope.
 ///
@@ -274,6 +285,7 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
