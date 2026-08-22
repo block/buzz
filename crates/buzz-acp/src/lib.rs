@@ -82,6 +82,21 @@ fn current_working_directory() -> Result<String> {
     Ok(cwd.to_string_lossy().into_owned())
 }
 
+/// Fallback log filter when `RUST_LOG` is unset.
+///
+/// Nearly every event in this crate is emitted on one of its own target
+/// families — `acp::*`, `pool::*`, `canvas::*`, `engram::*`, `observer` — not
+/// under the crate path. `EnvFilter` matches directives by target prefix, so
+/// `buzz_acp=info` alone silences all of them — warn and error events
+/// included — and leaves a log holding little more than the startup line.
+///
+/// The families are enabled at `warn`, not `info`: their info-level events
+/// carry conversation content (`acp::stream` logs the model's reply verbatim),
+/// and a default must not persist that. Content stays behind an explicit
+/// `RUST_LOG` opt-in. Keep in sync with the desktop's copy in
+/// `desktop/src-tauri/src/managed_agents/runtime/log_filter.rs`.
+const LOG_FILTER: &str = "buzz_acp=info,acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn";
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1937,7 +1952,7 @@ async fn tokio_main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(LOG_FILTER)),
         )
         .compact()
         .init();
