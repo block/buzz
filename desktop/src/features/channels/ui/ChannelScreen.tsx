@@ -44,7 +44,10 @@ import {
 import { buildMessageComposerEditTarget } from "@/features/messages/lib/draftMentionRefs";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
-import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  getThreadReference,
+  isThreadReply,
+} from "@/features/messages/lib/threading";
 import {
   resolveTimelineLoadingLatch,
   selectTimelineLoadingState,
@@ -165,11 +168,15 @@ export function ChannelScreen({
   const activeChannelId = activeChannel?.id ?? null;
   const isHuddleTranscript = useIsHuddleTranscript(activeChannelId);
   const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
+  const requireThreadEditResolutionRef = React.useRef<() => boolean>(
+    () => true,
+  );
   const effectiveOpenThreadHeadId = useHuddleThreadIsolation({
     closeThread: setOpenThreadHeadId,
     isHuddleTranscript,
     openThreadHeadId,
     optimisticOpenThreadHeadId,
+    requireThreadEditResolutionRef,
   });
   const isNotifiedForEffectiveThread =
     effectiveOpenThreadHeadId != null
@@ -459,8 +466,10 @@ export function ChannelScreen({
   });
   const editTargetMessage = React.useMemo(
     () =>
-      timelineMessages.find((message) => message.id === editTargetId) ?? null,
-    [editTargetId, timelineMessages],
+      timelineMessages.find((message) => message.id === editTargetId) ??
+      threadPanelData.messages.find((message) => message.id === editTargetId) ??
+      null,
+    [editTargetId, threadPanelData.messages, timelineMessages],
   );
   const [emptyDeleteId, setEmptyDeleteId] = React.useState<string | null>(null);
   const {
@@ -472,6 +481,7 @@ export function ChannelScreen({
     handleEditSave,
     handleExpandThreadReplies,
     handleOpenThread,
+    requireThreadEditResolution,
     handleSendMessage,
     handleSendToChannel,
     handleSendThreadReply,
@@ -481,6 +491,8 @@ export function ChannelScreen({
     deleteMessageMutation,
     editMessageMutation,
     editTargetId,
+    editTargetIsThreadReply:
+      editTargetMessage !== null && isThreadReply(editTargetMessage.tags ?? []),
     expandedThreadReplyIds,
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
@@ -499,6 +511,7 @@ export function ChannelScreen({
     threadReplyTargetId,
     toggleReactionMutation,
   });
+  requireThreadEditResolutionRef.current = requireThreadEditResolution;
   const effectiveToggleReaction = React.useMemo(
     () =>
       activeChannel && !activeChannel.archivedAt && activeChannel.isMember
@@ -574,6 +587,7 @@ export function ChannelScreen({
     openAgentSessionPubkey,
     openThreadHeadId: effectiveOpenThreadHeadId,
     profilePanelPubkey,
+    requireThreadEditResolution,
     setChannelManagementOpen,
     setExpandedThreadReplyIds,
     setOpenAgentSessionChannelId,
@@ -587,6 +601,7 @@ export function ChannelScreen({
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,
       openProfilePanel,
+      requireThreadEditResolution,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,
@@ -644,6 +659,7 @@ export function ChannelScreen({
     activeChannel,
     activeChannelId,
     closeAgentSession: handleCloseAgentSession,
+    requireThreadEditResolution,
     setEditTargetId,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,
@@ -702,6 +718,7 @@ export function ChannelScreen({
     enabled: !isSinglePanelView,
   });
   const handleManageChannel = React.useCallback(() => {
+    if (!requireThreadEditResolution()) return;
     if (activeChannel?.channelType === "forum") {
       openGlobalChannelManagement();
       return;
@@ -721,6 +738,7 @@ export function ChannelScreen({
     activeChannel?.channelType,
     channelManagementOpen,
     openGlobalChannelManagement,
+    requireThreadEditResolution,
     setChannelManagementOpen,
     setOpenThreadHeadId,
     handleCloseAgentSession,

@@ -56,6 +56,7 @@ export function useChannelRouteTarget({
   activeChannel,
   activeChannelId,
   closeAgentSession,
+  requireThreadEditResolution,
   setEditTargetId,
   setExpandedThreadReplyIds,
   setOpenThreadHeadId,
@@ -68,6 +69,7 @@ export function useChannelRouteTarget({
   activeChannel: Channel | null;
   activeChannelId: string | null;
   closeAgentSession: () => void;
+  requireThreadEditResolution: () => boolean;
   setEditTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   setOpenThreadHeadId: PanelValueSetter;
@@ -115,6 +117,9 @@ export function useChannelRouteTarget({
     }
 
     if (!targetMessage.parentId) {
+      if (!requireThreadEditResolution()) {
+        return;
+      }
       closeAgentSession();
       // Root message links should open the reply panel for that root. The
       // timeline scroll/highlight target alone is not enough: root links have
@@ -141,6 +146,9 @@ export function useChannelRouteTarget({
     if (!routeTarget) {
       return;
     }
+    if (!requireThreadEditResolution()) {
+      return;
+    }
 
     closeAgentSession();
     // Replace so the deep-link entry itself carries the opened thread —
@@ -156,6 +164,7 @@ export function useChannelRouteTarget({
     activeChannel,
     activeChannelId,
     closeAgentSession,
+    requireThreadEditResolution,
     setEditTargetId,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,

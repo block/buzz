@@ -11,6 +11,7 @@ import { cn } from "@/shared/lib/cn";
 type FocusThreadDrawerProps = {
   channelName: string;
   children: React.ReactNode;
+  hasActiveEdit: boolean;
   onClose: () => void;
 };
 
@@ -139,6 +140,7 @@ const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
 export function FocusThreadDrawer({
   channelName,
   children,
+  hasActiveEdit,
   onClose,
 }: FocusThreadDrawerProps) {
   const prefersReducedMotion = useReducedMotion();
@@ -149,6 +151,14 @@ export function FocusThreadDrawer({
   React.useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
+      const target = event.target;
+      if (
+        hasActiveEdit &&
+        target instanceof Node &&
+        drawerRef.current?.contains(target)
+      ) {
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       onClose();
@@ -158,7 +168,7 @@ export function FocusThreadDrawer({
     return () => {
       window.removeEventListener("keydown", handleEscape, { capture: true });
     };
-  }, [onClose]);
+  }, [hasActiveEdit, onClose]);
 
   React.useLayoutEffect(() => {
     previousFocusRef.current =
