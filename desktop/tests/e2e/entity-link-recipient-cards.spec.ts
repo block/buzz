@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installBridge,
+  installMockBridge,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 
 const SHOTS = "test-results/entity-link-recipient-cards";
 
@@ -438,6 +442,67 @@ test("desktop composer and sent message keep Buzz entities chip-only", async ({
     animations: "disabled",
     path: `${SHOTS}/03-sent-entity-chip-tooltip.png`,
   });
+});
+
+// The composer and the renderer must classify a same-relay clone URL
+// identically. Both read the active relay origin: without it the composer
+// treats the URL as an external link, shows a loading standalone card, and
+// enters sender-snapshot fetching — a preview the sent message then
+// contradicts by rendering the same URL as a repository chip.
+test("composer classifies a same-relay clone URL as a repository chip, not a card", async ({
+  page,
+}) => {
+  // The default mock relay is http://localhost:3000, and generic external
+  // previews are HTTPS-only — an http clone URL is unclassifiable either way,
+  // so the mismatch cannot appear. Point the bridge at an https relay so the
+  // composer's classification is the only variable.
+  const relayHttpUrl = "https://relay.e2e.example";
+  const cloneHref = `${relayHttpUrl}/git/${DEFAULT_MOCK_PUBKEY}/buzz.git`;
+  await installBridge(page, {
+    mode: "mock",
+    relayHttpUrl,
+    relayWsUrl: relayHttpUrl.replace(/^https/, "wss"),
+    // Serve external metadata so a misclassified clone URL produces a
+    // persistent standalone card rather than a card that loads and then
+    // disappears on a null result — the assertions below would otherwise pass
+    // by racing the loading window instead of by correct classification.
+    mock: {
+      linkPreviewMetadata: {
+        title: "Misclassified as external",
+        siteName: "relay.e2e.example",
+        description: "Sender-snapshot metadata for an external link",
+        imageDataUrl: null,
+        imageDomain: null,
+      },
+    },
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+
+  await page.getByTestId("message-input").fill(`Clone it: ${cloneHref}`);
+  // Past the composer's 350ms resolution debounce: a same-relay clone URL must
+  // never reach the standalone preview surface, loading card included.
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
+  await page.waitForTimeout(600);
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
+
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row.locator("[data-link-preview]")).toHaveCount(0);
+  const repoChip = row.getByRole("button", { name: "Open repository buzz" });
+  await expect(repoChip).toBeVisible();
+  await repoChip.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Relay, desktop, and mobile clients");
+
+  // The chip navigates in-app, proving the clone URL resolved onto the
+  // canonical buzz://repo target rather than being handed to the OS.
+  await repoChip.click();
+  await expect(page.locator("[data-project-detail-screen]")).toBeVisible();
 });
 
 test("reopening the same entity link reapplies its workspace state", async ({
