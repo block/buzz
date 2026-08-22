@@ -18,12 +18,15 @@ type AgentRuntimeAvatarControlProps = {
   errorTestId?: string;
   isActive: boolean;
   isRestarting?: boolean;
+  isStopping?: boolean;
   isStarting: boolean;
   label: string;
   requiresRestart?: boolean;
   startTestId: string;
+  stopTestId?: string;
   onOpenError?: () => void;
   onStart: () => void;
+  onStop?: () => void;
 };
 
 const TAILWIND_SPACING = {
@@ -132,12 +135,15 @@ export function AgentRuntimeAvatarControl({
   errorTestId,
   isActive,
   isRestarting = false,
+  isStopping = false,
   isStarting,
   label,
   requiresRestart = false,
   startTestId,
+  stopTestId,
   onOpenError,
   onStart,
+  onStop,
 }: AgentRuntimeAvatarControlProps) {
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
@@ -152,6 +158,7 @@ export function AgentRuntimeAvatarControl({
   const actionText = isRestartAction ? "Restart" : "Start";
   const isPending = isStarting || isRestarting;
   const showRunningDot = isActive && !isRestartAction;
+  const stopLabel = isStopping ? `Stopping ${label}` : `Stop ${label}`;
   const hasError = !isActive && !isPending && Boolean(errorLabel);
   const errorActionLabel = `${label} has a runtime error. Open runtime details.`;
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
@@ -171,13 +178,30 @@ export function AgentRuntimeAvatarControl({
       badge={
         <span className="grid h-full w-full place-items-center">
           {showRunningDot ? (
-            <span
-              aria-label={`${label} is running`}
-              className="h-full w-full rounded-full"
-              data-testid={activeTestId}
-              role="img"
-              title={`${label} is running`}
-            />
+            <button
+              aria-label={stopLabel}
+              className="pointer-events-auto flex h-full w-full items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90"
+              data-testid={stopTestId ?? activeTestId}
+              disabled={isStopping}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStop?.();
+              }}
+              title={stopLabel}
+              type="button"
+            >
+              {isStopping ? (
+                <Spinner aria-label={stopLabel} className="h-4 w-4 border-2" />
+              ) : (
+                <span
+                  aria-label={`${label} is running`}
+                  className="h-full w-full rounded-full"
+                  data-testid={activeTestId}
+                  role="img"
+                  title={`${label} is running`}
+                />
+              )}
+            </button>
           ) : (
             <button
               aria-label={hasError ? errorActionLabel : actionLabel}
