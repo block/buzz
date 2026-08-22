@@ -371,7 +371,28 @@ pub async fn match_event(
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
 ) -> Option<MatchedRule> {
+    match_event_with_thread_follow(event, channel_id, rules, agent_pubkey_hex, false).await
+}
+
+/// Match an event, allowing a non-mentioned reply only when its NIP-10 root
+/// belongs to a locally authorized, actively followed thread.
+///
+/// Relay delivery is bounded by the corresponding `#e` root filters, but this
+/// local gate remains authoritative: a stale, malformed, or otherwise
+/// unauthorized event must not reach the queue. Own-authored thread events
+/// are always rejected here to prevent self-trigger loops.
+pub async fn match_event_with_thread_follow(
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    rules: &[SubscriptionRule],
+    agent_pubkey_hex: &str,
+    followed_thread: bool,
+) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
+
+    if followed_thread && event.pubkey.to_hex() == agent_pubkey_hex {
+        return None;
+    }
 
     for (index, rule) in rules.iter().enumerate() {
         // 1. Channel scope check.
@@ -393,7 +414,7 @@ pub async fn match_event(
                 s.first().map(|k| k.as_str()) == Some("p")
                     && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
             });
-            if !mentioned {
+            if !mentioned && !followed_thread {
                 continue;
             }
         }
@@ -481,6 +502,14 @@ mod tests {
         EventBuilder::new(Kind::Custom(kind as u16), content)
             .tags([p_tag])
             .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    fn make_thread_event(kind: u32, content: &str, root: &str, keys: &Keys) -> nostr::Event {
+        let root_tag = Tag::parse(["e", root, "", "root"]).expect("root tag parse");
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags([root_tag])
+            .sign_with_keys(keys)
             .unwrap()
     }
 
@@ -661,6 +690,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_followed_thread_reply_bypasses_mention_but_not_self_suppression() {
+        let root = "a".repeat(64);
+        let participant_keys = Keys::generate();
+        let participant = make_thread_event(9, "reply", &root, &participant_keys);
+        let agent_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key().to_hex();
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            Some("thread-reply"),
+        )];
+
+        let matched =
+            match_event_with_thread_follow(&participant, channel_id, &rules, &agent_pubkey, true)
+                .await;
+        assert!(
+            matched.is_some(),
+            "authorized thread participants need no @mention"
+        );
+
+        let self_reply = make_thread_event(9, "self reply", &root, &agent_keys);
+        let matched =
+            match_event_with_thread_follow(&self_reply, channel_id, &rules, &agent_pubkey, true)
+                .await;
+        assert!(
+            matched.is_none(),
+            "own followed-thread events must not retrigger the agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unfollowed_thread_reply_still_requires_mention() {
+        let root = "b".repeat(64);
+        let keys = Keys::generate();
+        let reply = make_thread_event(9, "reply", &root, &keys);
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+
+        let matched = match_event_with_thread_follow(
+            &reply,
+            any_channel(),
+            &rules,
+            &Keys::generate().public_key().to_hex(),
+            false,
+        )
+        .await;
+        assert!(matched.is_none());
     }
 
     #[tokio::test]
