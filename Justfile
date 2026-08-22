@@ -268,7 +268,26 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
-    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+    if [[ "$(uname -s)" == "Darwin" && "$TARGET" == *-apple-darwin ]]; then
+        # Tauri's DMG bundler runs Finder AppleScript, which blocks on headless
+        # macOS. Build only the app, then use our hdiutil packager whose Finder
+        # styling is best-effort.
+        cd {{desktop_dir}}
+        pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app
+        cd ..
+        DMG_DIR="desktop/src-tauri/target/$TARGET/release/bundle/dmg"
+        APP_PATH="desktop/src-tauri/target/$TARGET/release/bundle/macos/Buzz.app"
+        DMG_ARCH="${TARGET%%-*}"
+        if [[ "$DMG_ARCH" == "x86_64" ]]; then
+            DMG_ARCH=x64
+        fi
+        VERSION="$(node -p "require('./desktop/package.json').version")"
+        ./desktop/scripts/package-macos-dmg.sh \
+            "$APP_PATH" \
+            "$DMG_DIR/Buzz_${VERSION}_${DMG_ARCH}.dmg"
+    else
+        cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target "$TARGET"
+    fi
 
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
