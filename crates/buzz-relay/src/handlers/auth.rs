@@ -2,9 +2,10 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
-//! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! NIP-OA owner-delegation fallback on closed relays. After admission, the auth
+//! handler independently resolves a valid NIP-OA owner whenever membership did
+//! not already return one, including for directly admitted agents. This keeps
+//! membership admission separate from agent→owner attribution (observer auth).
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -33,6 +34,21 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
         return None; // NIP-OA spec: treat >1 auth tag as no valid auth tag
     }
     serde_json::to_string(first.as_slice()).ok()
+}
+
+/// Resolve the authenticated agent's owner independently of membership admission.
+///
+/// Delegated admission already returns the verified owner. Direct members and
+/// open-relay callers return no owner from the membership helper, but may still
+/// carry a cryptographically valid NIP-OA tag that must be materialized for
+/// observer authorization.
+fn resolve_nip_oa_owner(
+    agent_pubkey: &[u8],
+    membership_owner: Option<nostr::PublicKey>,
+    auth_tag_json: Option<&str>,
+) -> Option<nostr::PublicKey> {
+    membership_owner
+        .or_else(|| crate::api::relay_members::extract_nip_oa_owner(agent_pubkey, auth_tag_json))
 }
 
 /// Handle a NIP-42 AUTH message: verify the challenge response and transition
@@ -237,20 +253,12 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
-            let nip_oa_owner = nip_oa_owner.or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                    )
-                } else {
-                    None
-                }
-            });
+            // Resolve a valid NIP-OA owner even when the agent is already a direct
+            // relay member. Membership admission and owner attribution are separate:
+            // direct membership grants access but does not identify who may observe
+            // the agent's kind-24200 activity.
+            let nip_oa_owner =
+                resolve_nip_oa_owner(pubkey.as_bytes(), nip_oa_owner, auth_tag_json.as_deref());
 
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.
@@ -296,7 +304,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 
 #[cfg(test)]
 mod tests {
-    use super::extract_auth_tag_json;
+    use super::{extract_auth_tag_json, resolve_nip_oa_owner};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     /// Build a signed NIP-98 (kind 27235) event carrying the given tags. The
@@ -323,6 +331,20 @@ mod tests {
         let extracted = extract_auth_tag_json(&event).expect("auth tag present");
         let expected = serde_json::to_string(&["auth", owner.as_str(), "", sig.as_str()]).unwrap();
         assert_eq!(extracted, expected);
+    }
+
+    /// A direct relay member can still prove an owner for observer authorization.
+    #[test]
+    fn direct_member_valid_auth_tag_resolves_owner() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key();
+        let tag_json = buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_pubkey, "")
+            .expect("valid NIP-OA tag");
+
+        let resolved = resolve_nip_oa_owner(agent_pubkey.as_bytes(), None, Some(&tag_json));
+
+        assert_eq!(resolved, Some(owner_keys.public_key()));
     }
 
     /// No `auth` tag → `None` (the direct-member path, tag absent).
