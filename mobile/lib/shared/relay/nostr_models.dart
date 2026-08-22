@@ -41,6 +41,13 @@ abstract final class EventKind {
   static const jobError = 43006;
   static const forumPost = 45001;
   static const forumComment = 45003;
+
+  /// NIP-MR agent mention acknowledgement. An agent publishes this to report
+  /// that it accepted or declined a mention. Overlay only — it must never
+  /// render as a timeline row. Mirrors `KIND_AGENT_MENTION_ACK` in
+  /// `crates/buzz-core/src/kind.rs` and desktop's `KIND_AGENT_MENTION_ACK`.
+  static const agentMentionAck = 44102;
+
   static const huddleStarted = 48100;
   static const huddleParticipantJoined = 48101;
   static const huddleParticipantLeft = 48102;
@@ -69,6 +76,7 @@ abstract final class EventKind {
     huddleParticipantJoined, // 48101 — huddle lifecycle metadata
     huddleParticipantLeft, // 48102 — huddle lifecycle metadata
     huddleEnded, // 48103 — visible huddle ended row
+    agentMentionAck, // 44102 — NIP-MR ack overlay, never a timeline row
   ];
 
   /// Auxiliary timeline kinds that overlay or hide existing rows.
@@ -77,6 +85,7 @@ abstract final class EventKind {
     reaction,
     nip29DeleteEvent,
     streamMessageEdit,
+    agentMentionAck,
   ];
 
   /// Visible content kinds requested by the NIP-CW channel-window path.
