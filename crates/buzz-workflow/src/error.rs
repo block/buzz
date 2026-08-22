@@ -60,6 +60,12 @@ pub enum WorkflowError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// The workflow definition has `enabled: false`, execution is refused.
+    /// The YAML `enabled:` flag is honored at execution time regardless of
+    /// the DB `enabled` column, which the definition never writes.
+    #[error("workflow is disabled (enabled: false)")]
+    Disabled,
+
     /// The action is defined but not yet implemented.
     #[error("action not implemented: {0}")]
     NotImplemented(String),

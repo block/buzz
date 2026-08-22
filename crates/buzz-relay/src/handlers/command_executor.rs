@@ -1375,6 +1375,16 @@ async fn resume_workflow_after_approval(
         }
     };
 
+    // SEC-006: the same lifecycle gate as webhook and manual-trigger paths.
+    // A workflow disabled after the approval request (operator disable, owner
+    // membership loss) must not resume into execution.
+    if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
+        tracing::warn!(
+            "resume_workflow: workflow {workflow_id} is disabled or inactive; refusing resume"
+        );
+        return;
+    }
+
     let def: buzz_workflow::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
     {
         Ok(d) => d,

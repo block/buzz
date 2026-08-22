@@ -26,6 +26,17 @@ pub const LIST_DEFAULT_LIMIT: i64 = 100;
 /// Hard cap on rows returned by list queries.
 pub const LIST_MAX_LIMIT: i64 = 1000;
 
+/// Read the workflow enable flag from a definition. Returns `None` when the
+/// definition carries no `enabled` field, so callers can distinguish an
+/// explicit flag from the schema default and avoid clobbering independent
+/// runtime disables with the legacy `true` default.
+fn enabled_from_definition(definition_json: &str) -> Result<Option<bool>> {
+    let definition: serde_json::Value = serde_json::from_str(definition_json)?;
+    Ok(definition
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool))
+}
+
 /// SHA-256 hash of a raw approval token. Returns the 32-byte digest.
 ///
 /// Approval tokens are stored hashed so that a DB read does not expose
@@ -272,7 +283,7 @@ pub struct ApprovalRecord {
 // -- Workflow CRUD ------------------------------------------------------------
 
 /// Insert a new workflow record. Returns the new workflow's UUID.
-/// New workflows start as `active` and `enabled = TRUE`.
+/// New workflows start as `active` and use the definition's `enabled` flag.
 ///
 /// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
 /// creation path is [`upsert_workflow`] via event ingest. (No current callers.)
@@ -286,12 +297,14 @@ pub async fn create_workflow(
     definition_hash: &[u8],
 ) -> Result<Uuid> {
     let id = Uuid::new_v4();
+    // New workflows default to enabled when the definition omits the flag.
+    let enabled = enabled_from_definition(definition_json)?.unwrap_or(true);
 
     sqlx::query(
         r#"
         INSERT INTO workflows
             (id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', $8)
         "#,
     )
     .bind(id)
@@ -301,6 +314,7 @@ pub async fn create_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(enabled)
     .execute(pool)
     .await?;
 
@@ -323,15 +337,23 @@ pub async fn upsert_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    // Upsert semantics: an explicit `enabled` field in the definition wins on
+    // both insert and conflict; an absent field preserves whatever the row
+    // currently holds (`COALESCE($8, TRUE)` on insert, `COALESCE($8,
+    // workflows.enabled)` on conflict). That keeps operator / membership-loss
+    // runtime disables from being silently re-enabled by a definition update
+    // that never mentions `enabled`.
+    let enabled = enabled_from_definition(definition_json)?;
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
             (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', COALESCE($8, TRUE))
         ON CONFLICT (community_id, id) DO UPDATE
         SET name = EXCLUDED.name,
             definition = EXCLUDED.definition,
             definition_hash = EXCLUDED.definition_hash,
+            enabled = COALESCE($8, workflows.enabled),
             updated_at = NOW()
         WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
           AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
@@ -345,6 +367,7 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(enabled)
     .fetch_optional(pool)
     .await?;
 
@@ -1490,6 +1513,27 @@ mod tests {
         };
         assert!(!record.enabled);
         assert_eq!(record.status, WorkflowStatus::Active);
+    }
+
+    #[test]
+    fn enabled_from_definition_honors_explicit_flag_and_default() {
+        assert_eq!(
+            enabled_from_definition(r#"{"enabled":false}"#).expect("parse"),
+            Some(false)
+        );
+        assert_eq!(
+            enabled_from_definition(r#"{"enabled":true}"#).expect("parse"),
+            Some(true)
+        );
+        assert_eq!(
+            enabled_from_definition(r#"{"name":"legacy"}"#).expect("parse"),
+            None
+        );
+    }
+
+    #[test]
+    fn enabled_from_definition_rejects_invalid_json() {
+        assert!(enabled_from_definition("not-json").is_err());
     }
 
     // -- WorkflowRunRecord ----------------------------------------------------

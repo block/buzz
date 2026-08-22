@@ -40,6 +40,24 @@ pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
 
+/// Fail-closed execution gate: a workflow whose definition has
+/// `enabled: false` must never execute its steps, no matter which path
+/// created the run.
+///
+/// The cron scheduler and event paths pre-filter on `def.enabled`, and the
+/// webhook, manual-trigger, and approval-resume paths gate on the persisted
+/// `enabled` column, but nothing else reads the YAML flag at execution time,
+/// so a YAML-disabled workflow could still execute through those entries.
+/// Both executor entry points call this before touching the run, making
+/// `enabled: false` honored everywhere regardless of the stored column.
+pub(crate) fn ensure_workflow_enabled(def: &WorkflowDef) -> Result<(), WorkflowError> {
+    if def.enabled {
+        Ok(())
+    } else {
+        Err(WorkflowError::Disabled)
+    }
+}
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -1049,6 +1067,37 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_yaml(enabled_line: Option<&str>) -> String {
+        let enabled = enabled_line.map(|l| format!("{l}\n")).unwrap_or_default();
+        format!(
+            "{enabled}name: Test\ntrigger:\n  on: webhook\nsteps:\n  - id: s1\n    action: delay\n    duration: 1m\n"
+        )
+    }
+
+    #[test]
+    fn ensure_workflow_enabled_allows_enabled_def() {
+        let (def, _) = schema::parse_yaml(&sample_yaml(Some("enabled: true"))).expect("parse");
+        assert!(def.enabled);
+        assert!(ensure_workflow_enabled(&def).is_ok());
+    }
+
+    #[test]
+    fn ensure_workflow_enabled_defaults_to_enabled() {
+        let (def, _) = schema::parse_yaml(&sample_yaml(None)).expect("parse");
+        assert!(def.enabled, "absent enabled field must default to true");
+        assert!(ensure_workflow_enabled(&def).is_ok());
+    }
+
+    #[test]
+    fn ensure_workflow_enabled_refuses_disabled_def() {
+        let (def, _) = schema::parse_yaml(&sample_yaml(Some("enabled: false"))).expect("parse");
+        assert!(!def.enabled);
+        assert!(matches!(
+            ensure_workflow_enabled(&def),
+            Err(WorkflowError::Disabled)
+        ));
+    }
 
     #[test]
     fn cron_fire_instant_matches_within_window() {
