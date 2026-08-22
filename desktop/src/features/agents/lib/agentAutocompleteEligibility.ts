@@ -10,13 +10,24 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 }
 
 export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "channelIds" | "ownerPubkey" | "respondTo" | "respondToAllowlist"
+  >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
+
+  if (
+    agent.respondTo === "owner-only" &&
+    normalizedCurrentPubkey &&
+    agent.ownerPubkey
+  ) {
+    return normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey;
+  }
 
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
     return agent.respondToAllowlist
@@ -31,7 +42,10 @@ export function relayAgentIsSharedWithUser(
 }
 
 export function relayAgentCanRespondInChannel(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "channelIds" | "ownerPubkey" | "respondTo" | "respondToAllowlist"
+  >,
   channelId: string,
   currentPubkey?: string | null,
 ) {
@@ -96,65 +110,40 @@ export type AgentMentionAdmission = "allow" | "deny" | "unknown";
 
 export function getAgentMentionAdmission({
   isAgent,
-  isManagedAgent,
   pubkey,
-  ownerPubkey,
-  currentPubkey,
   mentionableAgentPubkeys,
   directoryReady,
-  ownerOnly,
 }: {
   isAgent: boolean;
-  isManagedAgent: boolean;
   pubkey: string;
-  ownerPubkey?: string | null;
-  currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryReady: boolean;
-  ownerOnly: boolean | undefined;
 }): AgentMentionAdmission {
   if (!isAgent) return "allow";
-  if (!directoryReady || ownerOnly === undefined) return "unknown";
+  if (!directoryReady) return "unknown";
 
-  const normalized = normalizePubkey(pubkey);
-  if (!mentionableAgentPubkeys.has(normalized)) return "deny";
-  if (!ownerOnly || isManagedAgent) return "allow";
-  if (!ownerPubkey || !currentPubkey) return "unknown";
-
-  return normalizePubkey(ownerPubkey) === normalizePubkey(currentPubkey)
+  return mentionableAgentPubkeys.has(normalizePubkey(pubkey))
     ? "allow"
     : "deny";
 }
 
 export function shouldHideAgentFromMentions({
   isAgent,
-  isManagedAgent = false,
   pubkey,
-  ownerPubkey,
-  currentPubkey,
   mentionableAgentPubkeys,
   directoryReady = true,
-  ownerOnly,
 }: {
   isAgent: boolean;
-  isManagedAgent?: boolean;
   pubkey: string;
-  ownerPubkey?: string | null;
-  currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryReady?: boolean;
-  ownerOnly: boolean | undefined;
 }) {
   return (
     getAgentMentionAdmission({
       isAgent,
-      isManagedAgent,
       pubkey,
-      ownerPubkey,
-      currentPubkey,
       mentionableAgentPubkeys,
       directoryReady,
-      ownerOnly,
     }) !== "allow"
   );
 }

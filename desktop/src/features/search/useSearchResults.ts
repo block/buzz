@@ -12,6 +12,10 @@ import {
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
 import {
+  mergeOpenChannelDirectory,
+  useOpenChannelDirectoryQuery,
+} from "@/features/channels/openChannelDirectory";
+import {
   getMinimumSearchQueryLength,
   MIN_SEARCH_QUERY_LENGTH,
   useSearchMessagesQuery,
@@ -97,7 +101,7 @@ function resolveAuthorFromOperator(
 
 export function useSearchResults({
   channelLabels,
-  channels,
+  channels: memberChannels,
   enabled,
   limit = 12,
   scopeChannelId,
@@ -112,15 +116,34 @@ export function useSearchResults({
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const parsedQuery = React.useMemo(
+    () => parseSearchOperators(debouncedQuery),
+    [debouncedQuery],
+  );
+  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
+  const hasSearchQuery =
+    debouncedQuery.trim().length >= minimumQueryLength ||
+    parsedQuery.since !== null ||
+    parsedQuery.until !== null ||
+    parsedQuery.from !== null ||
+    parsedQuery.in !== null;
+  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+
+  // Global search surfaces non-member open channels, but only after a query
+  // needs search-backed results. Opening Cmd-K with an empty query must keep
+  // its suggestions local and avoid the all-open discovery scan. Scoped search
+  // (channelId set) needs no directory.
+  const openDirectoryQuery = useOpenChannelDirectoryQuery({
+    enabled: searchBackedQueriesEnabled && !scopeChannelId,
+  });
+  const channels = React.useMemo(
+    () => mergeOpenChannelDirectory(memberChannels, openDirectoryQuery.data),
+    [memberChannels, openDirectoryQuery.data],
+  );
 
   const channelLookup = React.useMemo(
     () => new Map(channels.map((channel) => [channel.id, channel])),
     [channels],
-  );
-
-  const parsedQuery = React.useMemo(
-    () => parseSearchOperators(debouncedQuery),
-    [debouncedQuery],
   );
 
   const channelResolution = React.useMemo<OperatorResolveResult<string>>(
@@ -132,16 +155,7 @@ export function useSearchResults({
   );
 
   const ftsQuery = parsedQuery.text;
-  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
 
-  const hasSearchQuery =
-    debouncedQuery.trim().length >= minimumQueryLength ||
-    parsedQuery.since !== null ||
-    parsedQuery.until !== null ||
-    parsedQuery.from !== null ||
-    parsedQuery.in !== null;
-
-  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
   const needsAuthorResolution = Boolean(parsedQuery.from);
   const entitySearchEnabled = searchBackedQueriesEnabled && !scopeChannelId;
 

@@ -5,7 +5,15 @@ pub(crate) fn managed_agent_access_policy_changed(
     current_allowlist: &[String],
     prospective_mode: crate::managed_agents::RespondTo,
     prospective_allowlist: &[String],
+    enforced_owner_only: bool,
 ) -> bool {
+    // Stored policy remains portable across OSS and owner-only builds, but a
+    // marked build always projects both states to the same owner-only runtime
+    // gate. Do not restart a fleet merely because relay state differs in bytes
+    // that this build cannot execute.
+    if enforced_owner_only {
+        return false;
+    }
     prospective_mode != current_mode
         || (prospective_mode == crate::managed_agents::RespondTo::Allowlist
             && prospective_allowlist != current_allowlist)
@@ -169,6 +177,7 @@ pub async fn update_managed_agent(
             &record.respond_to_allowlist,
             prospective_mode,
             &prospective_allowlist,
+            crate::managed_agents::owner_only_access_build(),
         );
         ensure_access_policy_change_supported(record, access_policy_changed)?;
 
@@ -241,16 +250,7 @@ pub async fn update_managed_agent(
             None
         };
 
-        let summary = {
-            let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )?
-        };
+        let summary = { super::super::agents::summarize_from_disk(&app, record, &runtimes)? };
         let rollback = name_changed
             .then(|| AgentUpdateRollback::new(previous_record, record, access_policy_changed));
         (

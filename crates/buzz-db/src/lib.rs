@@ -68,7 +68,7 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
-fn event_replacement_lock_key(
+pub(crate) fn event_replacement_lock_key(
     community_id: CommunityId,
     kind: i32,
     pubkey: &[u8],
@@ -2390,6 +2390,24 @@ impl Db {
         channel::set_canvas(&self.pool, community_id, channel_id, canvas).await
     }
 
+    /// Verify the mixed-version channel-roster database fence end to end.
+    #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
+    pub async fn verify_channel_roster_fence(&self) -> Result<()> {
+        channel::verify_channel_roster_fence_catalog(&self.pool).await?;
+        channel::verify_channel_roster_fence_behavior(&self.pool).await
+    }
+
+    /// Capture the active roster while holding the membership-writer lock.
+    #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
+    pub async fn lock_member_snapshot(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        relay_pubkey: &[u8],
+    ) -> Result<channel::LockedMemberSnapshot> {
+        channel::lock_member_snapshot(&self.pool, community_id, channel_id, relay_pubkey).await
+    }
+
     /// Adds a member to a channel.
     #[datastore_span(name = "add_member", system = "postgresql")]
     pub async fn add_member(
@@ -2474,6 +2492,24 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
         channel::get_accessible_channel_ids(&self.pool, community_id, pubkey).await
+    }
+
+    /// Returns large active-channel rosters whose relay-authored snapshots differ.
+    #[datastore_span(
+        name = "list_large_channel_rosters_needing_reconciliation",
+        system = "postgresql"
+    )]
+    pub async fn list_large_channel_rosters_needing_reconciliation(
+        &self,
+        minimum_members: i64,
+        relay_pubkey: &[u8],
+    ) -> Result<Vec<channel::LargeChannelRoster>> {
+        channel::list_large_channel_rosters_needing_reconciliation(
+            &self.pool,
+            minimum_members,
+            relay_pubkey,
+        )
+        .await
     }
 
     /// Lists channels, optionally filtered by visibility.
@@ -5482,6 +5518,113 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn unmigrated_roster_fence_blocks_startup_until_0032_is_applied() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) =
+            create_scratch_db_through(&admin, "roster_fence_unmigrated", Some(31)).await;
+        let db = Db::from_pool(pool.clone());
+
+        let error = db
+            .verify_channel_roster_fence()
+            .await
+            .expect_err("pre-0032 schema must block roster publishers");
+        assert!(
+            error.to_string().contains("channel roster fence trigger"),
+            "startup gate must report the missing schema fence: {error}"
+        );
+        let rows_before: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE kind = 39002")
+            .fetch_one(&pool)
+            .await
+            .expect("count pre-migration rosters");
+        assert_eq!(
+            rows_before, 0,
+            "failed startup gate must not publish a roster"
+        );
+
+        migration::run_migrations(&pool)
+            .await
+            .expect("apply migration 0032");
+        db.verify_channel_roster_fence()
+            .await
+            .expect("0032 must open the startup gate");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_roster_fence_behavior_verification_detects_inert_function() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_inert").await;
+        let db = Db::from_pool(pool.clone());
+
+        sqlx::raw_sql(
+            "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot() \
+             RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;",
+        )
+        .execute(&pool)
+        .await
+        .expect("replace roster fence with inert body");
+        let error = db
+            .verify_channel_roster_fence()
+            .await
+            .expect_err("inert roster fence must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("stale probe roster was accepted"),
+            "behavior probe must identify inert semantics: {error}"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_roster_fence_catalog_verification_fails_closed() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_catalog").await;
+        let db = Db::from_pool(pool.clone());
+
+        db.verify_channel_roster_fence()
+            .await
+            .expect("migrated roster fence must verify");
+
+        let child: String = sqlx::query_scalar(
+            "SELECT n.nspname || '.' || c.relname \
+             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE i.inhparent = 'public.events'::regclass ORDER BY i.inhrelid LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load event partition");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {child} DISABLE TRIGGER trg_events_guard_channel_roster_snapshot"
+        )))
+        .execute(&pool)
+        .await
+        .expect("disable partition roster trigger");
+        let error = db
+            .verify_channel_roster_fence()
+            .await
+            .expect_err("disabled partition roster fence must fail closed");
+        assert!(
+            error.to_string().contains(&child),
+            "verification must identify the unfenced partition: {error}"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn addressable_replacement_rolls_back_when_mention_indexing_fails() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -5493,13 +5636,14 @@ mod tests {
         let community_uuid = Uuid::new_v4();
         let channel = Uuid::new_v4();
         let keys = Keys::generate();
-        seed_community_channel(&pool, community_uuid, channel, &keys).await;
+        let owner_keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
         let community = CommunityId::from_uuid(community_uuid);
-        let member = Keys::generate().public_key().to_hex();
+        let member = owner_keys.public_key().to_hex();
         let tags = || {
             vec![
                 Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
-                Tag::parse(["p", member.as_str(), "", "member"]).expect("p tag"),
+                Tag::parse(["p", member.as_str(), "", "owner"]).expect("p tag"),
             ]
         };
         let base = Timestamp::now().as_secs();
@@ -5557,6 +5701,238 @@ mod tests {
                 .await
                 .expect("count rolled-back event");
         assert_eq!(new_rows, 0, "new roster must roll back with its index");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_legacy_roster_cannot_replace_new_locked_snapshot() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (setup_pool, scratch_name) = create_scratch_db(&admin, "mixed_roster_writer").await;
+        let base_url = admin_url().await;
+        let slash = base_url.rfind('/').expect("database URL has path segment");
+        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect(&scratch_url)
+            .await
+            .expect("connect one-connection scratch pool");
+        setup_pool.close().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = Uuid::new_v4();
+        let relay_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_bytes();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
+
+        // This is the old pod's unlocked capture A. It remains in process memory
+        // while a role-only canonical mutation advances and the new pod publishes B.
+        let base = Timestamp::now().as_secs();
+        let roster = |members: &[(&[u8], &str)], timestamp| {
+            let tags =
+                std::iter::once(Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"))
+                    .chain(members.iter().map(|(member, role)| {
+                        Tag::parse(["p", hex::encode(member).as_str(), "", *role]).expect("p tag")
+                    }))
+                    .collect::<Vec<_>>();
+            EventBuilder::new(Kind::Custom(39002), "")
+                .tags(tags)
+                .custom_created_at(Timestamp::from(timestamp))
+                .sign_with_keys(&relay_keys)
+                .expect("sign roster")
+        };
+
+        let newcomer = Keys::generate().public_key().to_bytes();
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'member', $4)",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(newcomer.as_slice())
+        .bind(owner.as_slice())
+        .execute(&pool)
+        .await
+        .expect("seed member before legacy capture");
+        let stale_a = roster(
+            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "member")],
+            base + 2,
+        );
+
+        sqlx::query(
+            "UPDATE channel_members SET role = 'admin' \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(newcomer.as_slice())
+        .execute(&pool)
+        .await
+        .expect("commit newer canonical role");
+
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let mut snapshot = db
+            .lock_member_snapshot(community, channel, &relay_pubkey)
+            .await
+            .expect("new writer captures locked roster B");
+        let fresh_b = roster(
+            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "admin")],
+            base + 1,
+        );
+        assert!(
+            snapshot
+                .replace_member_event(community, channel, &fresh_b)
+                .await
+                .expect("new writer publishes B")
+                .1
+        );
+        snapshot
+            .release()
+            .await
+            .expect("commit B and release locks");
+
+        // The legacy canonical path takes the replacement key, soft-deletes B,
+        // then attempts its newer-timestamp stale A. Migration 0032 rejects the
+        // INSERT; transaction rollback must restore B. A one-connection pool
+        // proves the lock order does not turn this compatibility path into a
+        // self-deadlock.
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            db.replace_addressable_event(community, &stale_a, Some(channel)),
+        )
+        .await
+        .expect("legacy replacement must not deadlock")
+        .expect_err("stale captured roster A must be rejected");
+        assert!(
+            matches!(
+                error,
+                DbError::Sqlx(sqlx::Error::Database(ref db_error))
+                    if db_error.code().as_deref() == Some("23514")
+            ),
+            "expected roster fence check violation, got {error:?}"
+        );
+
+        let live_ids: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39002 AND pubkey=$3 AND deleted_at IS NULL",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(relay_pubkey.as_slice())
+        .fetch_all(&pool)
+        .await
+        .expect("load live roster heads");
+        assert_eq!(live_ids, vec![fresh_b.id.as_bytes().to_vec()]);
+        let stale_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_uuid)
+                .bind(stale_a.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rejected stale roster");
+        assert_eq!(stale_rows, 0, "stale roster insert must roll back");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn desired_schema_rejects_stale_legacy_roster_role() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let scratch_name = format!("schema_roster_role_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE {scratch_name}"
+        )))
+        .execute(&admin)
+        .await
+        .expect("create desired-schema scratch db");
+        let base_url = admin_url().await;
+        let slash = base_url.rfind('/').expect("database URL has path segment");
+        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&scratch_url)
+            .await
+            .expect("connect desired-schema scratch db");
+        sqlx::raw_sql(include_str!("../../../schema/schema.sql"))
+            .execute(&pool)
+            .await
+            .expect("apply desired-state schema");
+
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = Uuid::new_v4();
+        let relay_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_bytes();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
+        let member = Keys::generate().public_key().to_bytes();
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'admin', $4)",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(member.as_slice())
+        .bind(owner.as_slice())
+        .execute(&pool)
+        .await
+        .expect("seed canonical admin");
+
+        let roster = |role: &str, timestamp| {
+            EventBuilder::new(Kind::Custom(39002), "")
+                .tags(vec![
+                    Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
+                    Tag::parse(["p", hex::encode(owner).as_str(), "", "owner"])
+                        .expect("owner p tag"),
+                    Tag::parse(["p", hex::encode(member).as_str(), "", role])
+                        .expect("member p tag"),
+                ])
+                .custom_created_at(Timestamp::from(timestamp))
+                .sign_with_keys(&relay_keys)
+                .expect("sign roster")
+        };
+        let base = Timestamp::now().as_secs();
+        let fresh = roster("admin", base);
+        assert!(
+            db.replace_addressable_event(community, &fresh, Some(channel))
+                .await
+                .expect("publish canonical role")
+                .1
+        );
+        let stale = roster("member", base + 1);
+        let error = db
+            .replace_addressable_event(community, &stale, Some(channel))
+            .await
+            .expect_err("desired-state fence must reject stale role");
+        assert!(matches!(
+            error,
+            DbError::Sqlx(sqlx::Error::Database(ref db_error))
+                if db_error.code().as_deref() == Some("23514")
+        ));
+        let live_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39002 AND deleted_at IS NULL",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("load desired-state live roster");
+        assert_eq!(live_id, fresh.id.as_bytes().to_vec());
 
         drop_scratch_db(&admin, pool, &scratch_name).await;
     }
@@ -6917,9 +7293,12 @@ mod tests {
         std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
     }
 
-    /// Create a fresh scratch database on the same server and run migrations.
-    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+    /// Create a fresh scratch database on the same server and optionally run migrations.
+    async fn create_scratch_db_through(
+        admin: &PgPool,
+        prefix: &str,
+        target: Option<i64>,
+    ) -> (PgPool, String) {
         let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
         sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
             .execute(admin)
@@ -6934,10 +7313,21 @@ mod tests {
         let pool = PgPool::connect(&scratch_url)
             .await
             .expect("connect scratch db");
-        migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
+        match target {
+            Some(target) => migration::run_migrations_through(&pool, target)
+                .await
+                .expect("migrate scratch db through target"),
+            None => migration::run_migrations(&pool)
+                .await
+                .expect("migrate scratch db"),
+        }
         (pool, name)
+    }
+
+    /// Create a fresh scratch database on the same server and run all migrations.
+    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
+    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+        create_scratch_db_through(admin, prefix, None).await
     }
 
     async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {

@@ -101,6 +101,57 @@ void main() {
     },
   );
 
+  test('retains historical and live Huddle end events in the window', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _huddleEvent(
+            id: 'ended-history',
+            kind: EventKind.huddleEnded,
+            createdAt: 20,
+          ),
+          _huddleEvent(
+            id: 'started',
+            kind: EventKind.huddleStarted,
+            createdAt: 10,
+          ),
+          _bounds(),
+        ],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['started', 'ended-history'],
+    );
+
+    relaySession.emit(
+      _huddleEvent(
+        id: 'ended-live',
+        kind: EventKind.huddleEnded,
+        createdAt: 30,
+      ),
+    );
+    await _pumpEventQueue();
+
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['started', 'ended-history', 'ended-live'],
+    );
+  });
+
   test('still loads history when live subscription fails', () async {
     final relaySession = _RecordingRelaySessionNotifier(failSubscribe: true);
     final container = _buildContainer(relaySession);
@@ -736,6 +787,26 @@ NostrEvent _event({
       ...extraTags,
     ],
     content: id,
+    sig: 'sig',
+  );
+}
+
+NostrEvent _huddleEvent({
+  required String id,
+  required int kind,
+  required int createdAt,
+}) {
+  return NostrEvent(
+    id: id,
+    pubkey: 'alice',
+    createdAt: createdAt,
+    kind: kind,
+    tags: const [
+      ['h', _channelId],
+    ],
+    content: jsonEncode({
+      'ephemeral_channel_id': '22222222-2222-4222-8222-222222222222',
+    }),
     sig: 'sig',
   );
 }

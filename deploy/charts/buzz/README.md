@@ -205,6 +205,8 @@ default so long-lived WebSocket connections have time to drain.
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
 
+Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 
 ## Backups

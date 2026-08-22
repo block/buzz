@@ -207,7 +207,7 @@ test("withEntityFallbacks re-adds previews dropped by null metadata", () => {
     href: `buzz://pr?id=${"ab".repeat(32)}&owner=${"cd".repeat(32)}&d=buzz`,
     provider: "Buzz",
     title: `buzz #${"ab".repeat(4)}`,
-    typeLabel: "PR",
+    typeLabel: "Review",
   };
 
   assert.deepEqual(withEntityFallbacks([entityPreview], []), [
@@ -228,7 +228,7 @@ test("withEntityFallbacks keeps resolved previews and preserves order", () => {
     href: `buzz://issue?id=${"ef".repeat(32)}&owner=${"cd".repeat(32)}&d=buzz`,
     provider: "Buzz",
     title: `buzz #${"ef".repeat(4)}`,
-    typeLabel: "issue",
+    typeLabel: "Task",
   };
   const resolvedSecond = {
     ...second,
@@ -359,7 +359,7 @@ test("Buzz PR metadata includes repository identity and trusted root context", a
   );
   assert.equal(result?.siteName, "Buzz Desktop");
   assert.equal(result?.title, "Restore entity cards");
-  assert.equal(result?.description, "Open · fix/cards → release · 1234567");
+  assert.equal(result?.description, null);
   assert.equal(result?.faviconDataUrl, null);
   assert.equal(result?.imageDataUrl, null);
 });

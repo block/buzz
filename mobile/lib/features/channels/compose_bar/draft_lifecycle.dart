@@ -1,5 +1,67 @@
 part of '../compose_bar.dart';
 
+Future<void> _sendTextOnlyDraft({
+  required BuildContext context,
+  required _MarkdownEditingController controller,
+  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
+  required ObjectRef<int> draftRevision,
+  required int submittedDraftRevision,
+  required FocusNode focusNode,
+  required VoidCallback clearComposer,
+  required Future<void> Function() addMentionedNonMembers,
+  required _ComposeDraftPayload payload,
+  required _OutgoingMentions outgoing,
+  required ComposeBarOnSend onSend,
+  required ScaffoldMessengerState? messenger,
+}) async {
+  TextEditingValue? clearedDraftText;
+  Map<String, MentionCandidate>? clearedDraftMentions;
+  int? clearedDraftRevision;
+
+  void restoreClearedDraft() {
+    if (!context.mounted ||
+        clearedDraftText == null ||
+        clearedDraftMentions == null ||
+        clearedDraftRevision == null ||
+        draftRevision.value != clearedDraftRevision) {
+      return;
+    }
+    controller.value = clearedDraftText;
+    mentionMap.value
+      ..clear()
+      ..addAll(clearedDraftMentions);
+    focusNode.requestFocus();
+  }
+
+  try {
+    await addMentionedNonMembers();
+    // Clear before optimistic insertion so the outgoing row and draft never
+    // appear simultaneously during the send transition. If the user edited
+    // while membership changes were pending, preserve that newer draft.
+    if (context.mounted && draftRevision.value == submittedDraftRevision) {
+      clearedDraftText = controller.value;
+      clearedDraftMentions = Map<String, MentionCandidate>.of(mentionMap.value);
+      clearComposer();
+      clearedDraftRevision = draftRevision.value;
+    }
+    await onSend(
+      payload.content,
+      outgoing.pubkeys,
+      mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
+    );
+  } on StateError {
+    restoreClearedDraft();
+    _reportSendCancelledByCommunitySwitch(messenger);
+  } catch (error) {
+    // The caller runs unawaited, so surface publish failures and restore the
+    // sent draft unless the user has already started a new one.
+    restoreClearedDraft();
+    messenger?.showSnackBar(
+      SnackBar(content: Text(_composeSendErrorMessage(error))),
+    );
+  }
+}
+
 void _useComposeDraftLifecycle({
   required WidgetRef ref,
   required _MarkdownEditingController controller,

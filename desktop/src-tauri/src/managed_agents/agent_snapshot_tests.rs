@@ -73,6 +73,7 @@ fn minimal_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: vec!["abc123def".to_string()],
         definition_parallelism: Some(4),
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -233,7 +234,60 @@ fn png_snapshot_transcodes_jpeg_avatar_into_image_body() {
     assert_eq!((reader.info().width, reader.info().height), (3, 2));
 }
 
-// ── PNG memory parity ─────────────────────────────────────────────────────
+#[test]
+fn png_snapshot_downscales_oversize_avatar_under_cap() {
+    // A large avatar (mirrors Gurney's 2764×4096 image that encoded to ~26 MB)
+    // must be downscaled for the PNG body so the snapshot stays under the
+    // 10 MiB cap — while the manifest keeps the untouched source reference.
+    // An already-PNG oversize avatar exercises the `png_within_body_cap` guard
+    // that routes it through the downscaling transcode path.
+    let avatar = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(2764, 4096, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+    }));
+    let mut source_bytes = Vec::new();
+    avatar
+        .write_to(&mut Cursor::new(&mut source_bytes), image::ImageFormat::Png)
+        .unwrap();
+
+    let snapshot = build_snapshot(
+        &minimal_record(),
+        MemoryLevel::None,
+        vec![],
+        Some(&source_bytes),
+    );
+    let png_bytes = encode_snapshot_png(&snapshot, Some(&source_bytes)).unwrap();
+
+    assert!(
+        png_bytes.len()
+            <= super::MAX_PNG_BODY_EDGE as usize * super::MAX_PNG_BODY_EDGE as usize * 4,
+        "downscaled snapshot ({} bytes) must be far under the 10 MiB cap",
+        png_bytes.len()
+    );
+
+    let reader = Decoder::new(Cursor::new(png_bytes)).read_info().unwrap();
+    let (width, height) = (reader.info().width, reader.info().height);
+    assert!(
+        width <= 512 && height <= 512,
+        "body dimensions {width}×{height} must fit the 512px cap"
+    );
+    // Aspect ratio preserved: the longest edge (height) is clamped to the cap.
+    assert_eq!(height, 512, "longest edge should hit the 512px cap");
+
+    // The manifest keeps the untouched full-resolution source reference — only
+    // the PNG body is downscaled. The oversize source bytes exceed the inline
+    // cap, so the manifest falls back to the record's `avatar_url`.
+    let manifest =
+        decode_snapshot_png(&encode_snapshot_png(&snapshot, Some(&source_bytes)).unwrap()).unwrap();
+    assert_eq!(
+        manifest.profile.avatar_url.as_deref(),
+        Some("https://example.com/avatar.png"),
+        "manifest must preserve the untouched source avatar reference"
+    );
+    assert!(
+        manifest.profile.avatar_data_url.is_none(),
+        "oversize source bytes must not be inlined into the manifest"
+    );
+}
 
 #[test]
 fn png_round_trip_with_core_memory() {
