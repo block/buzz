@@ -716,23 +716,19 @@ pub fn validate_archived_verification_sources(
                     AND aes.relay_url = ae.relay_url
                     AND aes.id = ae.id
                   WHERE ae.identity_pubkey = ?1
-                    AND ae.relay_url = ?2
-                    AND ae.id = ?3
+                    AND ae.id = ?2
                     AND aes.scope_type = 'owner_p'
                     AND aes.scope_value = ?1",
             )
             .map_err(|error| format!("prepare verification source read: {error}"))?;
         let rows = stmt
-            .query_map(
-                params![identity_pubkey, relay_url, source_event_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
+            .query_map(params![identity_pubkey, source_event_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
             .map_err(|error| format!("read verification source event: {error}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("read verification source row: {error}"))?;
@@ -743,7 +739,18 @@ pub fn validate_archived_verification_sources(
         }
         let mut validation_errors = Vec::new();
         let mut valid = false;
-        for (relay_url, kind, raw_json) in rows {
+        for (stored_relay_url, kind, raw_json) in rows {
+            match normalize_relay_scope(&stored_relay_url) {
+                Ok(stored_scope) if stored_scope == relay_url => {}
+                Ok(_) => {
+                    validation_errors.push("source is archived under another relay".into());
+                    continue;
+                }
+                Err(error) => {
+                    validation_errors.push(format!("stored relay is invalid: {error}"));
+                    continue;
+                }
+            }
             if kind != 24200 {
                 validation_errors.push("not an observer event".to_string());
                 continue;
@@ -771,7 +778,7 @@ pub fn validate_archived_verification_sources(
                 &identity_pubkey,
                 conn,
                 &identity_pubkey,
-                &relay_url,
+                &stored_relay_url,
             ) {
                 validation_errors.push(format!("observer authorization failed: {error}"));
                 continue;

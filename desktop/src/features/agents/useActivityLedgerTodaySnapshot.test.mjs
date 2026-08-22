@@ -5,6 +5,7 @@ import {
   activityLedgerTodaySnapshotDayGate,
   activityLedgerTodaySnapshotExpiresAt,
   canPublishActivityLedgerTodaySnapshot,
+  createActivityLedgerTodayPublicationCoordinator,
   loadActivityLedgerTodayAuthority,
 } from "./useActivityLedgerTodaySnapshot.ts";
 
@@ -46,6 +47,33 @@ test("Today snapshot validity is clipped at the next local midnight", () => {
     activityLedgerTodaySnapshotExpiresAt(beforeMidnight),
     Math.floor(midnight.getTime() / 1_000),
   );
+});
+
+test("a retired hung roster generation does not block its replacement", async () => {
+  const coordinator = createActivityLedgerTodayPublicationCoordinator();
+  const writes = [];
+  const hungBuild = new Promise(() => {});
+  const oldGeneration = coordinator.beginGeneration();
+  void hungBuild.then(() => {
+    if (coordinator.isCurrent(oldGeneration)) writes.push("old-roster");
+  });
+  coordinator.invalidate(oldGeneration);
+  const newGeneration = coordinator.beginGeneration();
+  assert.equal(coordinator.isCurrent(newGeneration), true);
+  await Promise.resolve().then(() => writes.push("new-roster"));
+  assert.deepEqual(writes, ["new-roster"]);
+});
+
+test("a late older write requests a current-roster repair", () => {
+  const coordinator = createActivityLedgerTodayPublicationCoordinator();
+  const writes = [];
+  const oldGeneration = coordinator.beginGeneration();
+  coordinator.invalidate(oldGeneration);
+  const newGeneration = coordinator.beginGeneration();
+  coordinator.setCurrentRepublish(newGeneration, () => writes.push("repair"));
+  writes.push("new-finished", "old-finished");
+  coordinator.noteWriteCompleted(oldGeneration);
+  assert.deepEqual(writes, ["new-finished", "old-finished", "repair"]);
 });
 
 test("Today authority is loaded by retained journal id across day boundaries", async () => {

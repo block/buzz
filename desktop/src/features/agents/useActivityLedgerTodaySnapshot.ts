@@ -22,6 +22,42 @@ const SNAPSHOT_REFRESH_MS = 60_000;
 const SNAPSHOT_LIFETIME_SECONDS = 5 * 60;
 const AUTHORITY_READ_CONCURRENCY = 8;
 
+export type ActivityLedgerTodayPublicationCoordinator = {
+  beginGeneration: () => number;
+  invalidate: (generation: number) => void;
+  isCurrent: (generation: number) => boolean;
+  setCurrentRepublish: (generation: number, republish: () => void) => void;
+  noteWriteCompleted: (generation: number) => void;
+};
+
+/** Let new rosters overtake stale work and repair any older write that lands. */
+export function createActivityLedgerTodayPublicationCoordinator(): ActivityLedgerTodayPublicationCoordinator {
+  let currentGeneration = 0;
+  let currentRepublish: (() => void) | null = null;
+  return {
+    beginGeneration() {
+      currentGeneration += 1;
+      currentRepublish = null;
+      return currentGeneration;
+    },
+    invalidate(generation) {
+      if (currentGeneration === generation) {
+        currentGeneration += 1;
+        currentRepublish = null;
+      }
+    },
+    isCurrent(generation) {
+      return generation === currentGeneration;
+    },
+    setCurrentRepublish(generation, republish) {
+      if (generation === currentGeneration) currentRepublish = republish;
+    },
+    noteWriteCompleted(generation) {
+      if (generation !== currentGeneration) currentRepublish?.();
+    },
+  };
+}
+
 function localDay(now: Date): string {
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
@@ -125,6 +161,9 @@ export function useActivityLedgerTodaySnapshot(): void {
   const ownerPubkey = useIdentityQuery().data?.pubkey;
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data ?? [];
+  const [publicationCoordinator] = React.useState(
+    createActivityLedgerTodayPublicationCoordinator,
+  );
   const managedIdentities = React.useMemo(
     () =>
       managedAgents.map((agent) => ({
@@ -145,11 +184,24 @@ export function useActivityLedgerTodaySnapshot(): void {
     }
     let disposed = false;
     let inFlight: Promise<void> | null = null;
+    let republishRequested = false;
+    const publicationGeneration = publicationCoordinator.beginGeneration();
 
     const publish = () => {
-      if (disposed || inFlight) return;
+      if (disposed) return;
+      if (inFlight) {
+        republishRequested = true;
+        return;
+      }
       inFlight = (async () => {
+        if (!publicationCoordinator.isCurrent(publicationGeneration)) return;
         const relayUrl = await getRelayWsUrl();
+        if (
+          disposed ||
+          !publicationCoordinator.isCurrent(publicationGeneration)
+        ) {
+          return;
+        }
         let day = localDay(new Date());
         let rebuildAttempted = false;
         for (;;) {
@@ -163,6 +215,12 @@ export function useActivityLedgerTodaySnapshot(): void {
             agents: managedIdentities,
             pages: archivedPages,
           });
+          if (
+            disposed ||
+            !publicationCoordinator.isCurrent(publicationGeneration)
+          ) {
+            return;
+          }
           const authority = await loadActivityLedgerTodayAuthority(
             relayUrl,
             observedSurface.journals.map((journal) => ({
@@ -170,6 +228,12 @@ export function useActivityLedgerTodaySnapshot(): void {
               journalId: journal.id,
             })),
           );
+          if (
+            disposed ||
+            !publicationCoordinator.isCurrent(publicationGeneration)
+          ) {
+            return;
+          }
           const surface = buildBoundedTodayActivitySurface(
             applyAuthorityToTodayActivity(observedSurface, authority, relayUrl),
           );
@@ -191,17 +255,30 @@ export function useActivityLedgerTodaySnapshot(): void {
           const generatedAt = Math.floor(publicationTime.getTime() / 1_000);
           const expiresAt =
             activityLedgerTodaySnapshotExpiresAt(publicationTime);
-          if (expiresAt <= generatedAt) return;
-          await writeOwnerTodaySnapshot({
-            schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
-            ownerPubkey,
-            relayUrl,
-            generatedAt,
-            expiresAt,
-            capability: OWNER_TODAY_SNAPSHOT_CAPABILITY,
-            surface,
-            rawEvents: [],
-          });
+          if (
+            disposed ||
+            !publicationCoordinator.isCurrent(publicationGeneration) ||
+            expiresAt <= generatedAt
+          ) {
+            return;
+          }
+          try {
+            await writeOwnerTodaySnapshot({
+              schema: OWNER_TODAY_SNAPSHOT_SCHEMA,
+              ownerPubkey,
+              relayUrl,
+              generatedAt,
+              expiresAt,
+              capability: OWNER_TODAY_SNAPSHOT_CAPABILITY,
+              surface,
+              rawEvents: [],
+            });
+          } finally {
+            // A native call cannot be cancelled once dispatched. If this
+            // generation was retired while it ran, ensure the current roster
+            // publishes again after this write settles (successfully or not).
+            publicationCoordinator.noteWriteCompleted(publicationGeneration);
+          }
           return;
         }
       })()
@@ -213,14 +290,25 @@ export function useActivityLedgerTodaySnapshot(): void {
         })
         .finally(() => {
           inFlight = null;
+          if (!disposed && republishRequested) {
+            republishRequested = false;
+            publish();
+          }
         });
     };
 
+    publicationCoordinator.setCurrentRepublish(publicationGeneration, publish);
     publish();
     const interval = window.setInterval(publish, SNAPSHOT_REFRESH_MS);
     return () => {
       disposed = true;
+      publicationCoordinator.invalidate(publicationGeneration);
       window.clearInterval(interval);
     };
-  }, [managedAgentsQuery.isSuccess, managedIdentities, ownerPubkey]);
+  }, [
+    managedAgentsQuery.isSuccess,
+    managedIdentities,
+    ownerPubkey,
+    publicationCoordinator,
+  ]);
 }

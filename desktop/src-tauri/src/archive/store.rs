@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS archived_events (
     archived_at     INTEGER NOT NULL,
     PRIMARY KEY (identity_pubkey, relay_url, id)
 );
-
+CREATE INDEX IF NOT EXISTS idx_archived_events_identity_id ON archived_events (identity_pubkey, id);
 CREATE TABLE IF NOT EXISTS archived_event_scopes (
     identity_pubkey TEXT NOT NULL,
     relay_url       TEXT NOT NULL,

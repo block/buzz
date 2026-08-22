@@ -288,7 +288,7 @@ fn verification_sources_must_exist_and_remain_valid_in_owner_archive() {
     assert!(
         validate_archived_verification_sources(&conn, &owner, &artifact)
             .unwrap_err()
-            .contains("is not archived")
+            .contains("another relay")
     );
 
     archive_observer(&conn, &owner_pk, relay_url, &event);
@@ -329,6 +329,33 @@ fn verification_sources_must_exist_and_remain_valid_in_owner_archive() {
             .unwrap_err()
             .contains("failed validation")
     );
+}
+
+#[test]
+fn verification_finds_source_stored_under_equivalent_raw_relay_spelling() {
+    let conn = in_memory();
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let owner_pk = owner.public_key().to_hex();
+    let agent_pk = agent.public_key().to_hex();
+    let raw_relay = "ws://localhost:3000";
+    let event = observer_event(&owner, &agent, "agent:channel:turn-1", "tool-call-1");
+    archive_observer(&conn, &owner_pk, raw_relay, &event);
+    scope_observer(&conn, &owner_pk, raw_relay, &event);
+    store::upsert_save_subscription(
+        &conn, &owner_pk, raw_relay, "owner_p", &owner_pk, "[24200]", 1,
+    )
+    .unwrap();
+
+    let input = JournalVerificationInput {
+        agent_pubkey: agent_pk.clone(),
+        source_event_ids: vec![event.id.to_hex()],
+        ..verification_input()
+    };
+    let raw = build_verification_event(&owner, raw_relay, &input, 1).unwrap();
+    let artifact =
+        validate_signed_artifact(&raw, &owner_pk, "ws://127.0.0.1:3000", &agent_pk).unwrap();
+    validate_archived_verification_sources(&conn, &owner, &artifact).unwrap();
 }
 
 #[test]
