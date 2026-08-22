@@ -1,5 +1,6 @@
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 import {
+  credentialProviderForRuntime,
   getBakedSatisfiedEnvKeys,
   getProviderApiKeyEnvVar,
   requiredCredentialEnvKeys,
@@ -18,8 +19,16 @@ export function getGlobalAgentCredentialState({
   runtimeFileConfig: RuntimeFileConfigSubset | null | undefined;
   runtimeId: string;
 }) {
-  const requiredEnvKeys = requiredCredentialEnvKeys(runtimeId, provider);
-  const apiKeyEnvVar = getProviderApiKeyEnvVar(provider);
+  const credentialProvider = credentialProviderForRuntime(
+    runtimeId,
+    provider,
+    runtimeFileConfig,
+  );
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    runtimeId,
+    credentialProvider,
+  );
+  const apiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
   const bakedSatisfiedEnvKeys = getBakedSatisfiedEnvKeys(
     requiredEnvKeys,
     envVars,
@@ -65,6 +74,7 @@ export function getGlobalAgentCredentialState({
     apiKeyFileSatisfied,
     apiKeyInherited,
     apiKeyValue,
+    credentialProvider,
     credentialsValid: !advancedCredentialMissing && !apiKeyMissing,
   };
 }

@@ -112,27 +112,28 @@ fn goose_file_config_silences_provider_and_model_but_not_anthropic_key() {
 }
 
 #[test]
-fn goose_env_provider_wins_over_file_provider_for_cred_check() {
-    // Env has GOOSE_PROVIDER=anthropic (different from file's databricks_v2).
-    // The env provider must win for credential checking.
+fn goose_file_provider_owns_transport_auth_when_buzz_selects_a_model_family() {
+    // Buzz selects the Anthropic model family while Goose's native config uses
+    // Databricks v2 as its transport/auth provider.
     let env = env_with(&[
         ("GOOSE_PROVIDER", "anthropic"),
         ("GOOSE_MODEL", "claude-opus-4-5"),
     ]);
     let cfg = databricks_file_config(); // has provider=databricks_v2
     let result = goose_requirements(&env, Some(&cfg));
-    // anthropic requires ANTHROPIC_API_KEY, not DATABRICKS_HOST.
+    // The native Databricks provider remains authoritative, and the file also
+    // satisfies DATABRICKS_HOST. No direct Anthropic key is required.
     assert!(
-        result.contains(&Requirement::EnvKey {
+        !result.contains(&Requirement::EnvKey {
             key: "ANTHROPIC_API_KEY".to_string()
         }),
-        "env provider=anthropic must require ANTHROPIC_API_KEY"
+        "a model-family selection must not require direct Anthropic auth"
     );
     assert!(
         !result.contains(&Requirement::EnvKey {
             key: "DATABRICKS_HOST".to_string()
         }),
-        "env provider=anthropic must NOT require DATABRICKS_HOST"
+        "the native file config must satisfy DATABRICKS_HOST"
     );
 }
 

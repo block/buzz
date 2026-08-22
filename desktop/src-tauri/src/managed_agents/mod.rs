@@ -18,6 +18,7 @@ pub(crate) mod effective_config;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
+mod goose_transport;
 mod managed_node_paths;
 mod nest;
 pub(crate) mod parallelism;

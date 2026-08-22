@@ -6,6 +6,7 @@ import {
 } from "@/features/agents/hooks";
 
 import {
+  credentialProviderForRuntime,
   getBakedSatisfiedEnvKeys,
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
@@ -15,6 +16,8 @@ import { hasMissingRequiredEnvKey } from "./personaRuntimeModel";
 
 /** Derived required-credential state for the Edit Agent dialog's Advanced section. */
 export interface RequiredCredentialState {
+  /** Provider whose native transport/authentication requirements apply. */
+  credentialProvider: string;
   /** Required env keys still unset and not satisfied by the runtime file config. */
   requiredEnvKeys: string[];
   /** Required keys already satisfied by the runtime file config (shown as info rows). */
@@ -71,12 +74,6 @@ export function useRequiredCredentialState(params: {
     personaEnvVars = {},
   } = params;
 
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
-    ? provider.trim() || globalProvider.trim()
-    : "";
-
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
     prospectiveRuntimeId,
     { enabled: open },
@@ -84,11 +81,21 @@ export function useRequiredCredentialState(params: {
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
+  const selectedProvider = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider.trim() || globalProvider.trim()
+    : "";
+  const credentialProvider = credentialProviderForRuntime(
+    prospectiveRuntimeId,
+    selectedProvider,
+    runtimeFileConfig,
+  );
+
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
-    () =>
-      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
-    [prospectiveRuntimeId, providerForRequiredKeys],
+    () => requiredCredentialEnvKeys(prospectiveRuntimeId, credentialProvider),
+    [prospectiveRuntimeId, credentialProvider],
   );
 
   // Keys covered by the baked build env — silenced, produce no info row.
@@ -132,6 +139,7 @@ export function useRequiredCredentialState(params: {
   );
 
   return {
+    credentialProvider,
     requiredEnvKeys,
     fileSatisfiedEnvKeys,
     requiredEnvKeyMissing,

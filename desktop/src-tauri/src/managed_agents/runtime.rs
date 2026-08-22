@@ -804,11 +804,11 @@ pub fn spawn_agent_child(
         );
     }
 
-    // User env (descriptor.env): fully-layered floor→runtime→definition→global→persona→agent,
-    // reserved-key filtered. Written last so user-explicit values win over Buzz-set env.
+    // Layered user env is reserved-key filtered and normally wins over Buzz-set env.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    super::goose_transport::apply_native_provider(&mut command, runtime_meta);
 
     // B5: carry persisted effort; harness resolves thought_level configId at first session.
     // Written AFTER descriptor.env so the canonical persisted value wins over any

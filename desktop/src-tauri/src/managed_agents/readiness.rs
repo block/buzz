@@ -563,13 +563,12 @@ fn goose_requirements(
         .filter(|v| !v.is_empty())
         .map(String::as_str);
 
-    // Effective provider for credential checking: prefer env layer, then file.
-    let effective_provider = provider.or_else(|| {
-        file_cfg
-            .as_ref()
-            .and_then(|c| c.provider.as_deref())
-            .filter(|v| !v.is_empty())
-    });
+    // Goose's native provider owns auth; Buzz may only select a model family.
+    let effective_provider = file_cfg
+        .as_ref()
+        .and_then(|c| c.provider.as_deref())
+        .filter(|v| !v.is_empty())
+        .or(provider);
 
     if provider.is_none() {
         // Silenced if the file config provides a provider.
