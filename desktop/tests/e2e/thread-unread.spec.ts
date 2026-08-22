@@ -127,9 +127,9 @@ test.describe("thread unread indicator", () => {
     });
 
     // Open the thread to establish a read frontier, then close it
-    const threadSummary = page.getByTestId("message-thread-summary").first();
-    await expect(threadSummary).toBeVisible();
-    await threadSummary.click();
+    const initialThreadSummary = page.getByTestId("message-thread-summary").first();
+    await expect(initialThreadSummary).toBeVisible();
+    await initialThreadSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
     await expect(
       page
@@ -162,9 +162,14 @@ test.describe("thread unread indicator", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-    const badge = page.getByTestId("thread-unread-badge");
+    const threadSummary = page.getByTestId("message-thread-summary").first();
+    const badge = threadSummary.getByTestId("thread-unread-badge");
     await expect(badge).toBeVisible();
-    await expect(badge).toContainText("3");
+    await expect(badge).toHaveText("3 new");
+    await expect(threadSummary).toHaveAttribute(
+      "aria-label",
+      /3 unread/,
+    );
   });
 
   test("02-thread-new-divider", async ({ page }) => {

@@ -95,9 +95,15 @@ export function MessageThreadSummaryRow({
     THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
   )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
+  const unreadCountText =
+    unreadCount != null && unreadCount > 0 ? `${unreadCount} unread` : "";
   const summaryAriaLabel = summary.lastReplyAt
-    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
-    : `View thread with ${summary.replyCount} ${replyLabel}`;
+    ? `View thread with ${summary.replyCount} ${replyLabel}, ${
+        unreadCountText ? `${unreadCountText}, ` : ""
+      }last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
+    : `View thread with ${summary.replyCount} ${replyLabel}${
+        unreadCountText ? `, ${unreadCountText}` : ""
+      }`;
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
     : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
@@ -111,6 +117,13 @@ export function MessageThreadSummaryRow({
 
   return (
     <div className="relative pb-1 pt-0.5">
+      {unreadCountText ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute bottom-1 left-0 top-1 z-20 w-0.5 rounded-full bg-primary/60"
+          data-testid="thread-unread-accent"
+        />
+      ) : null}
       {showDepthGuides && depthGuideItems.length > 0 ? (
         <div
           aria-hidden={
@@ -245,9 +258,14 @@ export function MessageThreadSummaryRow({
             <span className="font-medium transition-colors group-hover:text-foreground">
               {summary.replyCount} {replyLabel}
             </span>
-            {unreadCount != null && unreadCount > 0 ? (
-              <span className="ml-1" data-testid="thread-unread-badge">
-                ({unreadCount} new)
+            {unreadCountText ? (
+              <span
+                className={cn(
+                  "ml-1 inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-2xs font-semibold leading-none text-primary tabular-nums",
+                )}
+                data-testid="thread-unread-badge"
+              >
+                {unreadCount} new
               </span>
             ) : null}
             {summary.lastReplyAt ? (
