@@ -12,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'event_signing.dart';
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
@@ -615,6 +616,7 @@ class MediaUploadService {
       content: 'Upload buzz-media',
       tags: tags,
       secretKey: privkeyHex,
+      pubkey: pubkeyForPrivkey(privkeyHex),
       verify: false,
     );
   }

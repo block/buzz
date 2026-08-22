@@ -1,5 +1,6 @@
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'event_signing.dart';
 import 'nostr_models.dart';
 import 'relay_session.dart';
 
@@ -48,6 +49,7 @@ class SignedEventRelay {
       content: content,
       tags: tags,
       secretKey: privkeyHex,
+      pubkey: pubkeyForPrivkey(privkeyHex),
       createdAt: createdAt,
       verify: false,
     );

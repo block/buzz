@@ -99,6 +99,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
       content: trimmed,
       tags: tags,
       secretKey: privkeyHex,
+      pubkey: pubkeyForPrivkey(privkeyHex),
       verify: false,
     );
 

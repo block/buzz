@@ -810,6 +810,7 @@ class PairingNotifier extends Notifier<PairingState> {
       content: content,
       tags: tags,
       secretKey: _ephemeralPrivkey!,
+      pubkey: pubkeyForPrivkey(_ephemeralPrivkey!),
       createdAt: createdAt,
     );
 
