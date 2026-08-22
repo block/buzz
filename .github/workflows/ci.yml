@@ -89,6 +89,8 @@ jobs:
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size policy
         run: just file-size-check
+      - name: Disk space preflight unit tests
+        run: scripts/test-check-disk-space.sh
 
   rust-lint:
     name: Rust Lint
