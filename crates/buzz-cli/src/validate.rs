@@ -476,6 +476,16 @@ mod tests {
         assert_eq!(super::read_or_stdin("").unwrap(), "");
     }
 
+    #[test]
+    fn read_or_stdin_dash_reads_stdin_not_literal_dash() {
+        // Regression for the edit-vs-send mismatch in #4361: callers passing
+        // "-" expected stdin to be read, not the literal "-" published. A
+        // test runner's stdin is empty (or closed), so `read_to_string` returns
+        // Ok("") — the point is that the result is *not* the literal "-".
+        let got = super::read_or_stdin("-").unwrap();
+        assert_ne!(got, "-", "`-` must be treated as a stdin marker, not content");
+    }
+
     // --- read_file_or_stdin ---
 
     #[test]
