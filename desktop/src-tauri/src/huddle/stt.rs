@@ -665,6 +665,7 @@ fn process_16k_samples(
                         endpoint.voiced_frames,
                     ));
                 }
+            }
             VadFrameAction::Flush => {
                 match speculative.take() {
                     Some((text, decoded_at)) if decoded_at == endpoint.voiced_frames => {
