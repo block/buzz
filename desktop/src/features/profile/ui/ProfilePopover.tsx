@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Smile } from "lucide-react";
+import { Plus, Smile } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -32,6 +32,7 @@ interface ProfilePopoverProps {
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
+  onAddCommunity: () => void;
   onSendFeedback?: () => void;
   children: React.ReactNode;
   // Optional outer container whose clicks should NOT close the popover.
@@ -62,6 +63,7 @@ export function ProfilePopover({
   onSetUserStatus,
   onClearUserStatus,
   onOpenSettings,
+  onAddCommunity,
   onSendFeedback,
   children,
   triggerContainerRef,
@@ -240,6 +242,21 @@ export function ProfilePopover({
                 <hr className="my-1 h-px border-0 bg-border/60" />
               </>
             ) : null}
+
+            <button
+              className={MENU_ITEM_CLASS}
+              onClick={() => {
+                closePopover();
+                window.requestAnimationFrame(() => {
+                  onAddCommunity();
+                });
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Add a community</span>
+            </button>
 
             {onSendFeedback ? (
               <button
