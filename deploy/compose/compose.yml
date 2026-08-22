@@ -102,6 +102,41 @@ services:
     networks:
       - buzz-net
 
+  # Ephemeral NIP-AB device-pairing relay (kind 24134). Separate from the main
+  # relay on purpose: a device mid-pairing holds a fresh ephemeral key that is
+  # not a relay member yet, so it cannot pass BUZZ_REQUIRE_RELAY_MEMBERSHIP.
+  # No persistence, no auth, no history.
+  #
+  # Published on loopback only. It has no auth by design, so exposing it on a
+  # public interface is not an acceptable default; a reverse proxy on this host
+  # reaches it at 127.0.0.1:5000 and compose.caddy.yml unpublishes it entirely.
+  # BUZZ_PAIR_RELAY_HOST_IP widens it — see README.md § Device pairing.
+  #
+  # Nothing needs to be added to the relay's environment: with
+  # BUZZ_PAIRING_RELAY_URL unset, clients fall back to <RELAY_URL>/pair, which
+  # is the route the Caddyfile serves. Setting it is for split-host setups, and
+  # the relay reads it from .env through its env_file.
+  pairing-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    # The image ENTRYPOINT is buzz-relay, so this must override entrypoint, not
+    # command. Compose `command:` maps to CMD and would pass args to buzz-relay.
+    # (Helm can use command: because k8s command maps to ENTRYPOINT.)
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "${BUZZ_PAIR_RELAY_HOST_IP:-127.0.0.1}:${BUZZ_PAIR_RELAY_PORT:-5000}:5000"
+    # Same /dev/tcp trick as the relay: the runtime image has bash but no curl.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
   minio-init:
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
