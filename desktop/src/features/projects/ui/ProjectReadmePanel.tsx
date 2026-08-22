@@ -9,6 +9,7 @@ import {
 import type { ProjectRepoFile } from "@/features/projects/hooks";
 import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import { normalizeReadmeMarkdown } from "@/features/projects/lib/projectReadmeMarkdown";
 import { formatLastChangedAt } from "@/features/projects/lib/projectsViewHelpers";
 import { Button } from "@/shared/ui/button";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
@@ -33,60 +34,6 @@ export function findReadmeFile(files: ProjectRepoFile[]) {
   );
 
   return readmes.find((file) => !file.path.includes("/")) ?? readmes[0] ?? null;
-}
-
-function decodeHtmlEntities(value: string) {
-  return value
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function htmlInlineToMarkdown(value: string): string {
-  return decodeHtmlEntities(value)
-    .replace(/<br\s*\/?\s*>/gi, "\n")
-    .replace(/<img\b([^>]*)>/gi, (_match: string, attrs: string) => {
-      const src = attrs.match(/\bsrc=["']([^"']+)["']/i)?.[1];
-      const alt = attrs.match(/\balt=["']([^"']*)["']/i)?.[1] ?? "";
-      return src ? `![${alt}](${src})` : "";
-    })
-    .replace(
-      /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
-      (_match: string, href: string, label: string) =>
-        `[${htmlInlineToMarkdown(label).trim()}](${href})`,
-    )
-    .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
-    .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
-    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, "`$1`")
-    .replace(/<sub\b[^>]*>([\s\S]*?)<\/sub>/gi, "$1")
-    .replace(/<span\b[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-    .replace(/<[^>]+>/g, "")
-    .trim();
-}
-
-function normalizeReadmeMarkdown(content: string) {
-  return content
-    .replace(
-      /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
-      (_match, depth: string, value: string) =>
-        `${"#".repeat(Number(depth))} ${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(
-      /<p\b[^>]*>([\s\S]*?)<\/p>/gi,
-      (_match, value: string) => `${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(
-      /<div\b[^>]*>([\s\S]*?)<\/div>/gi,
-      (_match, value: string) => `${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(
-      /<center\b[^>]*>([\s\S]*?)<\/center>/gi,
-      (_match, value: string) => `${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 export function ReadmePanel({
