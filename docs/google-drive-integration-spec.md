@@ -10,6 +10,29 @@ shaped the way they are.
 
 ---
 
+## What this assumes — read this first
+
+This is a **specific workflow**, not a general storage abstraction. It works
+well, and it works well for a particular shape of team. Decide in thirty
+seconds whether that is you:
+
+| Assumption | Why it matters |
+|---|---|
+| Everyone signs in with a **Google Workspace** account on a shared domain | A personal Gmail account has no domain to share to |
+| An admin has set Drive's general access default to **"anyone in \<domain\> with the link"** | The app sets **no** per-file permission; it relies entirely on this default |
+| The build supplies **Google OAuth client credentials** at compile time | Unconfigured builds compile fine and report the feature unavailable |
+| The team is content with **5 MB** as the threshold | It is a constant, not a setting |
+| Drive is connected under **Settings → Voice**, alongside Google Meet | One Google connection serves both; you cannot have Drive without also granting Meet's scope |
+
+**The sharp edge is row two.** If that default is not set, the upload succeeds,
+the link posts, and nobody but the sender can open it — silently, with no error.
+The app does not detect this.
+
+Anyone wanting this outside those assumptions should read "Generalising this" at
+the end.
+
+---
+
 ## Why
 
 Two problems, one answer.
@@ -296,6 +319,37 @@ file browser inside Buzz.
 - **Two file systems.** Some files live in the relay, some in Drive. The Files
   tab hides the seam, but download behaviour, permissions and deletion all
   differ underneath.
+
+---
+
+## Generalising this
+
+Offered as-is, because it solves a real problem well for the teams it fits and
+waiting for a perfect abstraction would have meant shipping nothing. For anyone
+wanting to widen it, here is the work, in the order it matters:
+
+1. **Set permissions explicitly instead of assuming the domain default.** This
+   is the only change that fixes a *silent* failure rather than an inconvenience.
+   Workspace accounts get `{type: "domain", domain: <the user's domain>, role:
+   "reader"}`; personal accounts get `{type: "anyone", role: "reader"}` behind a
+   clear warning, because that is a genuine disclosure; either failing surfaces
+   an error and does not post the link. Roughly half a day, and it makes the
+   feature survive an admin changing the default later.
+2. **Give Drive its own home in Settings.** It currently borrows Meet's
+   connection, so you cannot have one without the other. Either a shared "Google
+   account" section, or its own.
+3. **Make the threshold configurable**, or argue the constant properly. 5 MB was
+   chosen because it is where Drive's simple upload endpoint stops working, which
+   is a coincidence worth noticing but not a product justification.
+4. **Cover the Drive path in e2e.** It is deliberately gated off today (see
+   below), so the routing rules have unit tests and the upload itself has none.
+
+The seam is already in the right place for a pluggable backend:
+`routedMediaUpload.ts` is the single decision point, and the `external`
+attachment flag in `imetaMediaMarkdown.ts` is the primitive any
+storage-elsewhere implementation needs — no `imeta` tag, always a link, never
+inline media. S3, Dropbox or a self-hosted bucket would slot in beside Drive
+without touching the composer.
 
 ---
 

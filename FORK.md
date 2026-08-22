@@ -28,10 +28,24 @@ upstream — see [`docs/upstream-candidates.md`](docs/upstream-candidates.md).
 
 ## What this fork adds
 
+### The Files tab, and everything in it
+
+Upstream has no per-channel Files view. The tab itself, the in-app document
+preview behind it, and the version chains described below are all additions
+here — worth stating plainly, because the rest of this section reads as though
+the tab were pre-existing furniture.
+
+- **Files tab** — every file and link shared in a channel, with uploader, date,
+  time and size (`shared/api/channelFiles.ts`, `features/channels/ui/FilesPanel.tsx`).
+- **In-app document preview** — PDF, Word, Excel, PowerPoint, Markdown and
+  plain text open inside Buzz rather than downloading
+  (`shared/ui/filePreview/`, 8 components, plus `commands/pptx_conversion.rs`
+  and a LibreOffice path for higher-fidelity PowerPoint).
+
 ### File versioning
 
-The largest addition. A file can be marked as a newer version of an earlier
-one, and every surface then tells you which is current.
+A file can be marked as a newer version of an earlier one, and every surface
+then tells you which is current.
 
 - At upload time the composer asks whether the file supersedes an existing one,
   with fuzzy filename matching that recognises `report-v2.pdf`, `report (1).pdf`,
@@ -159,6 +173,12 @@ to `block/buzz`.
 
 ### Smaller things
 
+- **Pinned messages** — up to 3 per channel or DM, in a bar above the timeline
+  (`PinnedMessagesBar.tsx`, `commands/pinned_messages.rs`). Not an upstream
+  feature, despite reading like one.
+- **Message multi-select and forwarding** — Ctrl/Cmd+click to select, then
+  forward to another person or channel (`ForwardMessageDialog.tsx`,
+  `MessageSelectionContext.tsx`).
 - Windows toast notifications via AUMID/Start-Menu-shortcut repair.
 - Full release history in Settings → Updates, including upstream Buzz releases
   interleaved by date up to the version this build is based on.

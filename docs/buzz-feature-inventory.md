@@ -11,6 +11,17 @@ fork of the open-source `block/buzz` project, currently at version `0.5.17-1`
 **Who uses it.** A team of ~40 senior professionals, predominantly on Windows,
 whose prior habit was WhatsApp.
 
+**Origin of these features.** This document describes *the product as it ships
+to our team*, not what upstream `block/buzz` provides. The two are not the same,
+and conflating them has caused repeated wasted work. Verified against
+`desktop-v0.5.18`, these are **fork additions, absent upstream**: pinned
+messages, the Files tab, links as file entries, file versioning, in-app document
+preview, Google Drive routing, Google Meet, `@channel`/`@here`, the three-lane
+Inbox, message forwarding and multi-select, the What's New splash, the
+upstream-interleaved release history (the base auto-updater *is* upstream's),
+Windows toast notifications, collapsed-section unread rollup (channel sections
+themselves are upstream's), and Google SSO. Everything else is upstream's.
+
 **Why this document exists.** To be fed to an analysis tool alongside community
 discussion (Reddit and similar) about Slack, WhatsApp, WeChat, Discord and
 Google Chat, to identify what users of those products complain about that Buzz

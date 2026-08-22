@@ -81,6 +81,15 @@ artifact.
 These extend things upstream already built, and should be uncontroversial in
 shape even if the details get debated.
 
+**Only the first entry actually qualifies.** Verified against `desktop-v0.5.18`
+on 2026-08-21: upstream has channel sections, so the rollup genuinely extends
+their work. It has **no Files tab** — `shared/api/channelFiles.ts` and
+`features/channels/ui/FilesPanel.tsx` do not exist upstream at all — so the two
+file-related entries below build on nothing of upstream's and are a much larger
+proposition than their placement here implies. They are kept in this section
+because they are still the things we would most like taken; read their own
+notes for the real scope.
+
 ### Collapsed sections do not show what is inside them
 
 Upstream has channel sections — creation, icons, ordering, per-channel
@@ -99,7 +108,58 @@ header cannot contradict the rows it is hiding.
 `features/sidebar/ui/SidebarSection.tsx`, one addition to `AppShellContext`.
 *Risk:* low. The rollup is pure and fully tested.
 
+### Links are invisible to the Files tab
+
+**Scope warning:** upstream has no Files tab. This cannot be offered on its own
+— it is the top of a stack that is entirely ours (Files tab → version chains →
+links), and any PR must either carry that stack or rewrite links to stand alone
+without versioning. The "additive" risk note below is true only relative to our
+own code.
+
+A channel's Files tab lists uploads and nothing else, but a lot of what a team
+actually works from is a link — a Google Doc, a dashboard, a file too large to
+upload. Those are scattered through the timeline and findable only by scrolling.
+
+This fork makes any http(s) URL in a message a first-class entry in the same
+list: one row per unique URL, dated at its earliest appearance, removed when its
+message is deleted.
+
+**The reason it is small is worth stating**, because it is a property of
+upstream's own design rather than anything this fork invented. The supersedes
+tag references an **event**, not a file, so nothing in the version-chain
+machinery ever cared whether the entry behind an event id was an upload. Links
+therefore get version chains, tombstone handling and the composer's supersedes
+picker with no new tag, no new event kind and no relay change. A Google Doc can
+supersede an uploaded PDF, and vice versa.
+
+Naming is the only hard part, since the document title is not in the event and
+link previews are fetched at render time rather than stored. The chain is: the
+sender's own markdown label (`[Q3 Budget](https://…)`), then a recognised Google
+surface (`Google Doc`, `Google Drive file`), then the last non-opaque path
+segment, then the host. Opaque ids are skipped rather than shown — a bare Drive
+id in a file list is worse than the hostname.
+
+Two rules that look arbitrary and are not, both found by writing the tests:
+
+- **A URL already present as an upload's own `url` never becomes a link entry.**
+  The markdown renderer embeds an attachment's URL in the message body, so
+  without this every upload also produces a duplicate link row beside itself.
+- **A supersedes tag reaches a link only when its message carries exactly one
+  link and no attachment.** Otherwise two links in one message both claim the
+  same predecessor, or a link takes a tag belonging to the file beside it.
+
+*Files:* `shared/lib/channelLinkEntries.mjs` (+ `.d.mts`, 30 tests), a `kind`
+discriminator on `ChannelFileEntry`, and link rows in `FilesPanel.tsx`.
+*Risk:* low. The extraction and naming are pure and fully tested; the merge into
+`listChannelFiles` is additive.
+
 ### File versioning
+
+**Scope warning:** same as above — the Files tab it renders into is ours, not
+upstream's, and so is the in-app file preview (`shared/ui/filePreview/`, 8
+components plus `commands/pptx_conversion.rs`) that `FilesPanel` opens. A PR
+should drop the preview and download on click instead, or it becomes three
+features at once.
 
 The largest piece, and the one we would most like upstream to take, because
 "which version of this is current" is a problem every team hits and no amount
@@ -144,10 +204,61 @@ team works, and upstream may reasonably disagree.
 - **Unread-only by default** in the Inbox.
 - **Google Meet integration.** Useful, but it presumes Google accounts and
   build-time OAuth credentials.
+- **Routing large files, video and audio to the sender's Google Drive.** See
+  the section below — offered on its own terms rather than filed away.
 - **Upstream release history in Settings → Updates.** Only meaningful for a
   fork.
 - **The single-job Windows release pipeline.** Deliberately not upstream's
   multi-platform workflow, which hardcodes publishing to `block/buzz`.
+
+---
+
+## Offered as-is — Google Drive routing
+
+Filed separately because it does not fit the tiers above. It is not a bug fix,
+it is not built on an upstream primitive, and it is more opinionated than Tier 3
+usually implies. It is also the single most useful thing in this fork for the
+team that runs it, which is why it is here rather than kept private.
+
+**The problem is general.** Relay uploads of large media are fragile: video
+requires ffmpeg on the sender's machine (not preinstalled on macOS), transcodes
+locally, then lands on a relay whose size caps, retention and version the client
+does not control. On a hosted community that is someone else's storage budget.
+The failure mode we hit was an mp4 reaching 100% and then failing with "unknown
+error" — which is also how the `getErrorMessage` bug in Tier 1 was found.
+
+**The solution is specific.** Files over 5 MB, and all video and audio at any
+size, upload to a "Buzz uploads" folder in the sender's own Drive on the
+narrow, non-restricted `drive.file` scope, and post as a labelled link. It
+assumes a Google Workspace domain, an admin-set "anyone in the domain with the
+link" sharing default, and build-time OAuth credentials.
+`docs/google-drive-integration-spec.md` states every assumption in a table at
+the top, and closes with a "Generalising this" section listing exactly what
+would have to change to widen it — the load-bearing item being explicit
+`permissions.create` calls instead of relying on that default, which is the one
+assumption whose absence fails *silently*.
+
+**Two parts of it are general even if the whole is not:**
+
+- **The `external` attachment flag** (`imetaMediaMarkdown.ts`, ~15 lines) means
+  "the bytes live outside the relay". Such an attachment emits no `imeta` tag —
+  there is no blob and no sha256 to honestly assert — and always renders as a
+  plain `[filename](url)` link, never inline, because a `<video>` pointed at a
+  viewer page is a permanently broken player. That is the primitive any
+  storage-elsewhere backend needs.
+- **The single seam.** `routedMediaUpload.ts` is signature-compatible with
+  `uploadMediaFile`, so the composer and the deferred-upload queue each changed
+  one import and nothing else. S3, Dropbox or a self-hosted bucket would slot in
+  beside Drive without touching composer code.
+
+*Files:* `src-tauri/src/google_meet/drive.rs`, scope and token changes in
+`google_meet.rs`, `features/messages/lib/{driveUploadRouting.mjs,
+routedMediaUpload.ts}`, `shared/api/tauriDrive.ts`, the `external` flag in
+`imetaMediaMarkdown.ts`, and one-line import swaps in `useMediaUpload.ts` and
+`backgroundMediaUploadStore.ts`.
+*Risk:* moderate. Routing rules are pure and tested; the upload path is
+deliberately excluded from e2e (no Google account in CI) and is verified by use
+rather than by CI.
 
 ---
 
