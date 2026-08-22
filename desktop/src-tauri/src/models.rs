@@ -191,6 +191,12 @@ pub struct FeedItemInfo {
     pub channel_type: Option<String>,
     pub tags: Vec<Vec<String>>,
     pub category: String,
+    /// True when this item only reaches the user because it replies to one of
+    /// their messages. A reply `p`-tags the author it answers so agent
+    /// `require_mention` subscriptions receive it, which makes the mention
+    /// feed's `#p` query indistinguishable from a real mention without this.
+    #[serde(default)]
+    pub reply_to_self: bool,
 }
 
 #[derive(Serialize, Deserialize)]

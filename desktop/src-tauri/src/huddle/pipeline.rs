@@ -669,7 +669,11 @@ pub(crate) fn spawn_transcription_task(
                 channel_uuid,
                 &t,
                 None,
-                &p_tags,
+                // The huddle addresses its agents; nobody typed their names.
+                events::Recipients {
+                    addressed: &p_tags,
+                    ..Default::default()
+                },
                 &[],
                 &[],
                 &[],

@@ -32,6 +32,7 @@ mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
+mod p_tag_role;
 mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
@@ -47,6 +48,8 @@ mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
 mod unread_catch_up;
+mod unread_notify;
+mod unread_parent_authors;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
