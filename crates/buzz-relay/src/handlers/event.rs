@@ -1511,6 +1511,14 @@ mod tests {
             )
         }
 
+        fn register_nip43_delta_sub(
+            state: &AppState,
+            sub_id: &str,
+            kind: u16,
+        ) -> (Uuid, mpsc::Receiver<Message>) {
+            register_global_sub(state, sub_id, Filter::new().kind(Kind::Custom(kind)), None)
+        }
+
         fn presence_event(status: &str) -> nostr::Event {
             EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
                 .sign_with_keys(&Keys::generate())
@@ -1525,6 +1533,16 @@ mod tests {
                 ])
                 .sign_with_keys(&Keys::generate())
                 .expect("sign membership notification")
+        }
+
+        fn nip43_delta_event(kind: u16, target: &Keys) -> nostr::Event {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .tags([
+                    nostr::Tag::parse(["-"]).expect("protected tag"),
+                    nostr::Tag::parse(["p", &target.public_key().to_hex()]).expect("p tag"),
+                ])
+                .sign_with_keys(&Keys::generate())
+                .expect("sign NIP-43 delta")
         }
 
         fn event_from_ws_message(msg: Message) -> nostr::Event {
@@ -1657,6 +1675,33 @@ mod tests {
                 other_rx.try_recv().is_err(),
                 "membership notification should only reach matching #p subscribers"
             );
+        }
+
+        #[tokio::test]
+        async fn global_nip43_delta_pubsub_events_fan_out_by_kind() {
+            for kind in [8000_u16, 8001_u16] {
+                let state = test_state().await;
+                let target = Keys::generate();
+                let (_conn_id, mut rx) =
+                    register_nip43_delta_sub(&state, &format!("nip43-{kind}"), kind);
+                let event = nip43_delta_event(kind, &target);
+                let event_id = event.id;
+
+                fan_out_pubsub_event(
+                    &state,
+                    ChannelEvent {
+                        community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                        topic: EventTopic::Global,
+                        event,
+                    },
+                )
+                .await;
+
+                let delivered =
+                    event_from_ws_message(rx.try_recv().expect("NIP-43 delta delivered"));
+                assert_eq!(delivered.id, event_id);
+                assert!(rx.try_recv().is_err(), "NIP-43 delta is delivered once");
+            }
         }
 
         async fn redis_url_if_available() -> Option<String> {
