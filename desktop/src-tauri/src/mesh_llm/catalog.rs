@@ -13,20 +13,20 @@ use mesh_llm_system::hardware;
 use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};
 
 /// Buzz-curated tier picks. These are the models we know survive the agent
-/// harness on shared compute — deliberately non-reasoning instruction models,
-/// so agents stay snappy instead of burning hidden reasoning tokens.
+/// harness on shared compute.
 ///
-/// The large pick is resolved through mesh-llm's remote catalog
-/// (huggingface.co/datasets/meshllm/catalog), so it does not need to exist in
-/// the compiled `MODEL_CATALOG`; the entry is synthesized below.
-const CURATED_LARGE: &str = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M";
-const CURATED_LARGE_ALIAS: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
-const CURATED_LARGE_SIZE: &str = "17GB";
-const CURATED_LARGE_FILE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf";
-const CURATED_LARGE_DESCRIPTION: &str =
-    "Gemma 4 26B MoE (4B active) — Buzz default for 64GB+ machines";
+/// The large pick is Qwen3.8 27B dense: mesh-llm 0.76 routes Qwen3.8
+/// identities to the `qwen35` recurrent family (Mesh-LLM/mesh-llm#1283) and
+/// ships it in the compiled `MODEL_CATALOG` (#1343), so the entry below is
+/// canonicalized from that catalog rather than synthesized.
+const CURATED_LARGE: &str = "unsloth/Qwen3.8-27B-GGUF:Q4_K_M";
+const CURATED_LARGE_ALIAS: &str = "Qwen3.8-27B-Q4_K_M";
 const CURATED_SMALL: &str = "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M";
 const CURATED_SMALL_ALIAS: &str = "Gemma-4-E4B-it-Q4_K_M";
+/// Superseded large pick, still mapped so machines that already selected it
+/// keep resolving to a model id Mesh's OpenAI ingress accepts.
+const LEGACY_LARGE: &str = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M";
+const LEGACY_LARGE_ALIAS: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
 /// Rated-capacity boundary between the two curated tiers, in GB (marketing
 /// capacity — a "64GB" Mac rates as 64 even though usable AI memory is less).
 const CURATED_LARGE_MIN_RATED_GB: u64 = 64;
@@ -39,12 +39,13 @@ fn buzz_recommended_model(rated_gb: Option<u64>) -> &'static str {
     }
 }
 
-/// Convert Buzz's pre-0.74 curated package aliases into the canonical model
+/// Convert Buzz's historical curated package aliases into the canonical model
 /// ids advertised and accepted by Mesh's OpenAI ingress.
 pub(crate) fn canonical_curated_model_id(model_id: &str) -> &str {
     match model_id.trim() {
         CURATED_SMALL_ALIAS => CURATED_SMALL,
         CURATED_LARGE_ALIAS => CURATED_LARGE,
+        LEGACY_LARGE_ALIAS => LEGACY_LARGE,
         other => other,
     }
 }
@@ -172,24 +173,6 @@ fn build_catalog(
         })
         .collect();
 
-    // The compiled MODEL_CATALOG does not know the Buzz large pick; it
-    // resolves through mesh-llm's remote catalog at download time. Synthesize
-    // its entry so the picker can offer it.
-    if !entries.iter().any(|e| e.name == CURATED_LARGE) {
-        let size_gb = parse_size_gb(CURATED_LARGE_SIZE);
-        entries.push(MeshCatalogEntry {
-            fit: fit_code(size_gb, vram_gb),
-            installed: is_installed(CURATED_LARGE_FILE, CURATED_LARGE)
-                || is_installed(CURATED_LARGE_FILE, CURATED_LARGE_ALIAS),
-            recommended: false,
-            curated: false,
-            name: CURATED_LARGE.to_string(),
-            size: CURATED_LARGE_SIZE.to_string(),
-            size_gb,
-            description: CURATED_LARGE_DESCRIPTION.to_string(),
-        });
-    }
-
     let recommended = Some(buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
     for entry in &mut entries {
         entry.recommended = recommended.as_deref() == Some(entry.name.as_str());
@@ -271,7 +254,7 @@ mod tests {
     #[test]
     fn recommendation_follows_buzz_curated_tiers() {
         assert_eq!(CURATED_SMALL, "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M");
-        assert_eq!(CURATED_LARGE, "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M");
+        assert_eq!(CURATED_LARGE, "unsloth/Qwen3.8-27B-GGUF:Q4_K_M");
         // 64GB+ rated machines get the large curated pick.
         let large = build_catalog(None, 64_000_000_000, 64.0, &[]);
         assert_eq!(large.recommended.as_deref(), Some(CURATED_LARGE));
@@ -295,6 +278,7 @@ mod tests {
             canonical_curated_model_id(CURATED_LARGE_ALIAS),
             CURATED_LARGE
         );
+        assert_eq!(canonical_curated_model_id(LEGACY_LARGE_ALIAS), LEGACY_LARGE);
         assert_eq!(
             canonical_curated_model_id("other/model:Q4"),
             "other/model:Q4"
@@ -311,7 +295,8 @@ mod tests {
         assert_eq!(catalog.entries[1].name, CURATED_SMALL);
         assert!(catalog.entries[1].curated && !catalog.entries[1].recommended);
         assert!(catalog.entries[2..].iter().all(|e| !e.curated));
-        // The synthesized large pick carries a real size for fit ranking.
+        // The large pick comes from the compiled catalog with a real size, so
+        // fit ranking is meaningful rather than a placeholder.
         assert!(catalog.entries[0].size_gb > 10.0);
     }
 

@@ -548,7 +548,11 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     fi
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
-    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+    fi
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs
