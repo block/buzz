@@ -910,3 +910,32 @@ fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
 
     assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
 }
+
+#[test]
+fn inbound_team_rejects_invisible_instructions() {
+    let mut inbound = team_content("Review Team");
+    inbound.instructions = Some(Some("Be\u{200B} thorough.".to_string()));
+
+    let error = validate_inbound_team_definition(&inbound)
+        .expect_err("relay sync must reject invisible team instructions");
+
+    assert!(error.contains("U+200B"));
+}
+
+#[test]
+fn inbound_team_rejects_bidirectional_name() {
+    let inbound = team_content("Review\u{202E} Team");
+
+    let error = validate_inbound_team_definition(&inbound)
+        .expect_err("relay sync must reject bidirectional team names");
+
+    assert!(error.contains("U+202E"));
+}
+
+#[test]
+fn inbound_team_accepts_visible_multiline_instructions() {
+    let mut inbound = team_content("Review Team");
+    inbound.instructions = Some(Some("Review changes.\n\tCall out risks.".to_string()));
+
+    assert!(validate_inbound_team_definition(&inbound).is_ok());
+}

@@ -64,8 +64,12 @@ pub fn team_event_content(record: &TeamRecord) -> TeamEventContent {
 
 /// Build a kind:30176 event from a `TeamRecord`.
 ///
-/// Returns an unsigned `EventBuilder` — the caller signs and submits.
+/// Returns an unsigned `EventBuilder` — the caller signs and submits. Unsafe
+/// names or instructions fail here so a dirty `teams.json` cannot be signed
+/// during startup migration, matching [`super::agent_events::build_agent_event`].
 pub fn build_team_event(record: &TeamRecord) -> Result<EventBuilder, String> {
+    super::validate_team_definition_text(&record.name, record.instructions.as_deref())
+        .map_err(|error| format!("Team definition is unsafe to publish: {error}"))?;
     let content = serde_json::to_string(&team_event_content(record))
         .map_err(|e| format!("failed to serialize team content: {e}"))?;
     let tags =
@@ -127,6 +131,21 @@ mod tests {
         let keys = nostr::Keys::generate();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind.as_u16() as u32, KIND_TEAM);
+    }
+
+    #[test]
+    fn publication_rejects_unsafe_team_name_and_instructions() {
+        let mut unsafe_name = sample_team();
+        unsafe_name.name = "Review\u{200B} Team".to_string();
+        let error = build_team_event(&unsafe_name)
+            .expect_err("publication must reject an invisible team name");
+        assert!(error.contains("U+200B"), "unexpected error: {error}");
+
+        let mut unsafe_instructions = sample_team();
+        unsafe_instructions.instructions = Some("Be\u{202E} thorough.".to_string());
+        let error = build_team_event(&unsafe_instructions)
+            .expect_err("publication must reject bidi formatting in team instructions");
+        assert!(error.contains("U+202E"), "unexpected error: {error}");
     }
 
     #[test]
