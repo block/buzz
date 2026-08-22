@@ -21,8 +21,10 @@ use crate::filter::SubscriptionRule;
 /// Sized for slow turns where the agent may go silent on its outer ACP channel
 /// while running long sub-tools (e.g. a buzz-agent running another agent, or
 /// codex/claude doing multi-minute single tool calls). 900s gives 300s of
-/// breathing room above the 600s max shell timeout, so legitimate long-running
-/// tool calls don't race the idle deadline.
+/// breathing room above buzz-dev-mcp's default 600s shell-timeout ceiling, so
+/// legitimate long-running tool calls don't race the idle deadline. Operators
+/// who raise that ceiling (`BUZZ_DEV_MCP_MAX_TIMEOUT_MS`) must raise this
+/// timeout to match, or long tool calls die here instead.
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
