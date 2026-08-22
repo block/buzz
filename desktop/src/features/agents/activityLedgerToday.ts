@@ -20,6 +20,8 @@ export type ArchivedObserverEventPage = {
   events: readonly RelayEvent[];
   /** Frames already excluded because no trustworthy inner time was indexable. */
   unindexedObserverFrames: number;
+  archiveRevision?: number;
+  reset?: boolean;
 };
 
 export const TODAY_SNAPSHOT_SURFACE_MAX_BYTES = 6 * 1024 * 1024;
@@ -37,6 +39,7 @@ export type TodaySnapshotProjection = {
   omittedEvents: number;
   excludedObserverFrames: number;
   unindexedObserverFrames: number;
+  archiveRevision: number;
   textFieldsTruncated: number;
 };
 
@@ -175,6 +178,7 @@ function snapshotSurfaceFromJournals(input: {
   originalEventCount: number;
   excludedObserverFrames: number;
   unindexedObserverFrames: number;
+  archiveRevision: number;
   textFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
   const channels = new Map<
@@ -250,6 +254,7 @@ function snapshotSurfaceFromJournals(input: {
       omittedEvents,
       excludedObserverFrames: input.excludedObserverFrames,
       unindexedObserverFrames: input.unindexedObserverFrames,
+      archiveRevision: input.archiveRevision,
       textFieldsTruncated: input.textFieldsTruncated,
     },
   };
@@ -308,6 +313,7 @@ export function buildBoundedTodayActivitySurface(
       originalEventCount,
       excludedObserverFrames: previousProjection?.excludedObserverFrames ?? 0,
       unindexedObserverFrames: previousProjection?.unindexedObserverFrames ?? 0,
+      archiveRevision: previousProjection?.archiveRevision ?? 0,
       textFieldsTruncated,
     });
   const compactedTextCount =
@@ -377,6 +383,7 @@ function buildArchiveReconstructionCheckpoint(input: {
   originalEventCount: number;
   excludedObserverFrames: number;
   unindexedObserverFrames: number;
+  archiveRevision: number;
   previousTextFieldsTruncated: number;
 }): BoundedTodayActivitySurface {
   const ordered = [...input.surface.journals].sort(
@@ -402,6 +409,7 @@ function buildArchiveReconstructionCheckpoint(input: {
       originalEventCount: input.originalEventCount,
       excludedObserverFrames: input.excludedObserverFrames,
       unindexedObserverFrames: input.unindexedObserverFrames,
+      archiveRevision: input.archiveRevision,
       textFieldsTruncated,
     });
   const all = compacted.map((item) => item.journal);
@@ -444,6 +452,7 @@ function isObserverEvent(value: unknown): value is ObserverEvent {
     Number.isFinite(candidate.seq) &&
     typeof candidate.timestamp === "string" &&
     candidate.timestamp.length > 0 &&
+    Number.isFinite(Date.parse(candidate.timestamp)) &&
     typeof candidate.kind === "string" &&
     candidate.kind.length > 0 &&
     "payload" in candidate
@@ -525,12 +534,25 @@ async function buildTodayActivityFromArchivedEventPages(input: {
   let originalEventCount = 0;
   let excludedObserverFrames = 0;
   let unindexedObserverFrames = 0;
+  let archiveRevision = 0;
   let textFieldsTruncated = 0;
   let checkpoint: BoundedTodayActivitySurface | null = null;
 
   for await (const archivedPage of input.pages) {
     const page = "events" in archivedPage ? archivedPage.events : archivedPage;
     if ("events" in archivedPage) {
+      if (archivedPage.reset) {
+        retainedEvents = new Map();
+        journalEventCounts.clear();
+        originalEventCount = 0;
+        excludedObserverFrames = 0;
+        unindexedObserverFrames = 0;
+        textFieldsTruncated = 0;
+        checkpoint = null;
+        archiveRevision = archivedPage.archiveRevision ?? archiveRevision;
+        continue;
+      }
+      archiveRevision = archivedPage.archiveRevision ?? archiveRevision;
       unindexedObserverFrames += archivedPage.unindexedObserverFrames;
       excludedObserverFrames += archivedPage.unindexedObserverFrames;
     }
@@ -634,6 +656,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalEventCount,
       excludedObserverFrames,
       unindexedObserverFrames,
+      archiveRevision,
       previousTextFieldsTruncated: textFieldsTruncated,
     });
     textFieldsTruncated = checkpoint.snapshotProjection.textFieldsTruncated;
@@ -659,6 +682,7 @@ async function buildTodayActivityFromArchivedEventPages(input: {
       originalEventCount: 0,
       excludedObserverFrames,
       unindexedObserverFrames,
+      archiveRevision,
       textFieldsTruncated: 0,
     })
   );

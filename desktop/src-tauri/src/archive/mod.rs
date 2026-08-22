@@ -22,6 +22,7 @@ mod archive_db;
 mod journal_authority;
 pub mod journal_authority_commands;
 mod metric_store;
+mod observer_revision;
 mod observer_time;
 mod pipeline;
 pub mod retention;
@@ -610,6 +611,7 @@ pub struct ArchivedObserverRangeInput {
     channel_id: Option<String>,
     before_created_at: Option<i64>,
     before_id: Option<String>,
+    archive_revision: Option<i64>,
     limit: Option<i64>,
 }
 
@@ -619,6 +621,8 @@ pub struct ArchivedObserverRangeOutput {
     events: Vec<String>,
     backfill_complete: bool,
     unindexed_observer_frames: i64,
+    archive_revision: i64,
+    restart_required: bool,
 }
 
 #[tauri::command]
@@ -633,6 +637,7 @@ pub async fn read_archived_observer_events_for_range(
         channel_id,
         before_created_at,
         before_id,
+        archive_revision,
         limit,
     } = input;
     if start_created_at >= end_created_at {
@@ -640,6 +645,9 @@ pub async fn read_archived_observer_events_for_range(
     }
     if before_created_at.is_some() != before_id.is_some() {
         return Err("archive range cursor requires both before_created_at and before_id".into());
+    }
+    if archive_revision.is_some_and(|revision| revision < 0) {
+        return Err("archive revision must be non-negative".into());
     }
     let limit = limit.unwrap_or(DEFAULT_READ_LIMIT);
     if !(1..=500).contains(&limit) {
@@ -658,16 +666,32 @@ pub async fn read_archived_observer_events_for_range(
             let backfill_complete =
                 observer_time::backfill_missing(conn, &identity_pk, &relay_url, &owner_keys)?;
             if !backfill_complete {
+                let current_revision = observer_revision::current(conn, &identity_pk, &relay_url)?;
                 return Ok(ArchivedObserverRangeOutput {
                     events: Vec::new(),
                     backfill_complete: false,
                     unindexed_observer_frames: 0,
+                    archive_revision: current_revision,
+                    restart_required: false,
+                });
+            }
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| format!("begin observer range snapshot: {error}"))?;
+            let current_revision = observer_revision::current(&tx, &identity_pk, &relay_url)?;
+            if archive_revision.is_some_and(|expected| expected != current_revision) {
+                return Ok(ArchivedObserverRangeOutput {
+                    events: Vec::new(),
+                    backfill_complete: true,
+                    unindexed_observer_frames: 0,
+                    archive_revision: current_revision,
+                    restart_required: true,
                 });
             }
             let unindexed_observer_frames =
-                store::count_unindexed_observer_frames(conn, &identity_pk, &relay_url)?;
+                store::count_unindexed_observer_frames(&tx, &identity_pk, &relay_url)?;
             let events = store::read_archived_observer_events_for_range(
-                conn,
+                &tx,
                 &identity_pk,
                 &relay_url,
                 start_created_at,
@@ -678,10 +702,14 @@ pub async fn read_archived_observer_events_for_range(
                 before_id.as_deref(),
                 limit,
             )?;
+            tx.commit()
+                .map_err(|error| format!("finish observer range snapshot: {error}"))?;
             Ok(ArchivedObserverRangeOutput {
                 events,
                 backfill_complete: true,
                 unindexed_observer_frames,
+                archive_revision: current_revision,
+                restart_required: false,
             })
         })
         .await

@@ -244,3 +244,56 @@ async fn test_with_conn_read_guard_blocks_writer_until_connection_drops() {
         "write guard is free again after the connection drops"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_exclusive_connection_blocks_ordinary_archive_work() {
+    let (_dir, path) = temp_db();
+    let db = Arc::new(ArchiveDb::with_test_path(path));
+    db.warm_init().await.expect("init must succeed");
+
+    let exclusive_entered = Arc::new(AtomicUsize::new(0));
+    let ordinary_entered = Arc::new(AtomicUsize::new(0));
+    let hold = Latch::new();
+    let exclusive = {
+        let db = Arc::clone(&db);
+        let exclusive_entered = Arc::clone(&exclusive_entered);
+        let hold = Arc::clone(&hold);
+        tokio::spawn(async move {
+            db.with_exclusive_conn(move |_conn| {
+                exclusive_entered.fetch_add(1, Ordering::SeqCst);
+                hold.wait();
+                Ok(())
+            })
+            .await
+        })
+    };
+    await_until(
+        "exclusive connection to enter",
+        Duration::from_secs(10),
+        || exclusive_entered.load(Ordering::SeqCst) == 1,
+    )
+    .await;
+
+    let ordinary = {
+        let db = Arc::clone(&db);
+        let ordinary_entered = Arc::clone(&ordinary_entered);
+        tokio::spawn(async move {
+            db.with_conn(move |_conn| {
+                ordinary_entered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        ordinary_entered.load(Ordering::SeqCst),
+        0,
+        "ordinary work must wait for the exclusive archive connection"
+    );
+
+    hold.release();
+    assert!(exclusive.await.unwrap().is_ok());
+    assert!(ordinary.await.unwrap().is_ok());
+    assert_eq!(ordinary_entered.load(Ordering::SeqCst), 1);
+}

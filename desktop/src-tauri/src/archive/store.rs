@@ -203,6 +203,7 @@ pub fn open_archive_db(path: &Path) -> Result<Connection, String> {
 
     conn.execute_batch(SCHEMA)
         .map_err(|e| format!("failed to initialize archive schema: {e}"))?;
+    super::observer_revision::ensure_schema(&conn)?;
 
     apply_schema_migrations(&conn)?;
 

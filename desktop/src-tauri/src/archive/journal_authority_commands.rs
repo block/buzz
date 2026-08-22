@@ -6,7 +6,7 @@ use super::journal_authority::{
     self, JournalAuthorityArtifact, JournalVerificationInput, OwnerJournalOverrideInput,
 };
 use super::today_snapshot::{self, TodaySnapshotReceipt};
-use super::{identity_pubkey, now_secs, observer_time, store};
+use super::{identity_pubkey, now_secs, observer_revision, observer_time, store};
 use crate::app_state::AppState;
 use crate::managed_agents::nest_dir;
 use crate::relay::relay_ws_url_with_override;
@@ -173,13 +173,22 @@ pub async fn query_journal_authority_artifacts(
         .await
 }
 
-fn validate_snapshot_unindexed_fence(snapshot_json: &str, current: i64) -> Result<(), String> {
+fn validate_snapshot_archive_fence(
+    snapshot_json: &str,
+    current_revision: i64,
+    current_unindexed: i64,
+) -> Result<(), String> {
     let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
         .map_err(|error| format!("invalid Today snapshot JSON: {error}"))?;
     let projection = snapshot
         .pointer("/surface/snapshotProjection")
         .and_then(serde_json::Value::as_object)
         .ok_or("Today snapshot must include snapshotProjection")?;
+    let declared_revision = projection
+        .get("archiveRevision")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or("Today snapshot must disclose archiveRevision")?;
     let declared = projection
         .get("unindexedObserverFrames")
         .and_then(serde_json::Value::as_i64)
@@ -198,16 +207,22 @@ fn validate_snapshot_unindexed_fence(snapshot_json: &str, current: i64) -> Resul
     {
         return Err("Today snapshot with excluded observer frames must be bounded".into());
     }
-    if current > declared {
+    if declared_revision != current_revision {
         return Err(format!(
-            "Today snapshot archive fence changed: declared {declared}, current {current}"
+            "Today snapshot archive revision changed: declared {declared_revision}, current {current_revision}"
+        ));
+    }
+    if current_unindexed > declared {
+        return Err(format!(
+            "Today snapshot archive exclusions changed: declared {declared}, current {current_unindexed}"
         ));
     }
     Ok(())
 }
 
-/// Publish while holding the archive actor so accepted observer evidence
-/// cannot overtake the signed unindexed-frame disclosure.
+/// Publish under both the process-exclusive archive guard and a SQLite
+/// immediate transaction so no in-process or second-process writer can
+/// overtake the signed archive revision before atomic file replacement.
 #[tauri::command]
 pub async fn write_owner_today_snapshot(
     state: State<'_, AppState>,
@@ -219,20 +234,30 @@ pub async fn write_owner_today_snapshot(
     let nest = nest_dir().ok_or("cannot resolve nest directory for Today snapshot")?;
     state
         .archive_db
-        .with_conn(move |conn| {
+        .with_exclusive_conn(move |conn| {
             if !observer_time::backfill_missing(conn, &identity_pk, &relay_url, &keys)? {
                 return Err("Today snapshot archive fence requires completed backfill".into());
             }
-            let current = store::count_unindexed_observer_frames(conn, &identity_pk, &relay_url)?;
-            validate_snapshot_unindexed_fence(&snapshot_json, current)?;
-            today_snapshot::write_owner_today_snapshot(
+            let tx = rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )
+            .map_err(|error| format!("begin Today snapshot archive fence: {error}"))?;
+            let current_revision = observer_revision::current(&tx, &identity_pk, &relay_url)?;
+            let current_unindexed =
+                store::count_unindexed_observer_frames(&tx, &identity_pk, &relay_url)?;
+            validate_snapshot_archive_fence(&snapshot_json, current_revision, current_unindexed)?;
+            let receipt = today_snapshot::write_owner_today_snapshot(
                 &nest,
                 &keys,
                 &identity_pk,
                 &relay_url,
                 &snapshot_json,
                 now_secs(),
-            )
+            )?;
+            tx.commit()
+                .map_err(|error| format!("finish Today snapshot archive fence: {error}"))?;
+            Ok(receipt)
         })
         .await
 }
@@ -248,18 +273,21 @@ pub fn read_owner_today_snapshot(state: State<'_, AppState>) -> Result<String, S
 
 #[cfg(test)]
 mod snapshot_fence_tests {
-    use super::validate_snapshot_unindexed_fence;
+    use super::validate_snapshot_archive_fence;
 
     #[test]
     fn snapshot_fence_rejects_a_newly_hidden_observer_frame() {
-        let snapshot = r#"{"surface":{"snapshotProjection":{"bounded":true,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
-        assert!(validate_snapshot_unindexed_fence(snapshot, 2).is_ok());
-        assert!(validate_snapshot_unindexed_fence(snapshot, 1).is_ok());
-        assert!(validate_snapshot_unindexed_fence(snapshot, 3)
+        let snapshot = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":true,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
+        assert!(validate_snapshot_archive_fence(snapshot, 7, 2).is_ok());
+        assert!(validate_snapshot_archive_fence(snapshot, 7, 1).is_ok());
+        assert!(validate_snapshot_archive_fence(snapshot, 8, 2)
+            .unwrap_err()
+            .contains("revision changed"));
+        assert!(validate_snapshot_archive_fence(snapshot, 7, 3)
             .unwrap_err()
             .contains("declared 2, current 3"));
-        let false_complete = r#"{"surface":{"snapshotProjection":{"bounded":false,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
-        assert!(validate_snapshot_unindexed_fence(false_complete, 2)
+        let false_complete = r#"{"surface":{"snapshotProjection":{"archiveRevision":7,"bounded":false,"excludedObserverFrames":2,"unindexedObserverFrames":2}}}"#;
+        assert!(validate_snapshot_archive_fence(false_complete, 7, 2)
             .unwrap_err()
             .contains("must be bounded"));
     }

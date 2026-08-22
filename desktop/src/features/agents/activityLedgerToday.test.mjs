@@ -165,6 +165,53 @@ test("Today reconstruction counts malformed members of a partially valid batch",
   assert.equal(surface.snapshotProjection.bounded, true);
 });
 
+test("Today reconstruction counts batch members with invalid timestamps", async () => {
+  const timestamp = "2026-08-21T14:00:00.000Z";
+  const event = relayEvent({
+    id: "invalid-time-batch",
+    decoded: {
+      seq: 3,
+      timestamp,
+      kind: "batch",
+      payload: {
+        events: [
+          {
+            seq: 1,
+            timestamp,
+            kind: "turn_started",
+            agentIndex: 0,
+            channelId: "channel-1",
+            sessionId: "session-1",
+            turnId: "turn-invalid-time",
+            payload: {},
+          },
+          {
+            seq: 2,
+            timestamp: "not-a-date",
+            kind: "turn_error",
+            agentIndex: 0,
+            channelId: "channel-1",
+            sessionId: "session-1",
+            turnId: "turn-invalid-time",
+            payload: {},
+          },
+        ],
+      },
+    },
+  });
+  const surface = await buildTodayActivityFromArchivedEvents({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [event],
+    decrypt: async (candidate) => candidate.decoded,
+  });
+
+  assert.equal(surface.counts.journals, 1);
+  assert.equal(surface.journals[0].status, "incomplete");
+  assert.equal(surface.snapshotProjection.excludedObserverFrames, 1);
+  assert.equal(surface.snapshotProjection.bounded, true);
+});
+
 test("Today reconstruction expands every inner event from one signed batch", async () => {
   const timestamp = "2026-08-21T14:00:00.000Z";
   const batch = relayEvent({
@@ -217,6 +264,52 @@ test("Today reconstruction expands every inner event from one signed batch", asy
     surface.journals[0].events.map((event) => event.provenance.sourceEventId),
     ["batch-frame", "batch-frame"],
   );
+});
+
+test("Today reconstruction discards earlier pages after an archive restart", async () => {
+  const event = (id, turnId) =>
+    relayEvent({
+      id,
+      decoded: {
+        seq: 1,
+        timestamp: "2026-08-21T14:00:00.000Z",
+        kind: "turn_started",
+        turnId,
+        payload: {},
+      },
+    });
+  const oldEvent = event("old-frame", "old-turn");
+  const currentEvent = event("current-frame", "current-turn");
+  const surface = await buildTodayActivityFromArchivedPages({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    pages: [
+      {
+        events: [oldEvent],
+        unindexedObserverFrames: 1,
+        archiveRevision: 7,
+      },
+      {
+        events: [],
+        unindexedObserverFrames: 0,
+        archiveRevision: 8,
+        reset: true,
+      },
+      {
+        events: [currentEvent],
+        unindexedObserverFrames: 0,
+        archiveRevision: 8,
+      },
+    ],
+    decrypt: async (candidate) => candidate.decoded,
+  });
+
+  assert.deepEqual(
+    surface.journals.map((journal) => journal.journalKey),
+    ["current-turn"],
+  );
+  assert.equal(surface.snapshotProjection.unindexedObserverFrames, 0);
+  assert.equal(surface.snapshotProjection.archiveRevision, 8);
 });
 
 test("Today archive decryption is concurrency-bounded and page-incremental", async () => {

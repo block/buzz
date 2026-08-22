@@ -6,8 +6,28 @@ import {
   activityLedgerTodaySnapshotExpiresAt,
   canPublishActivityLedgerTodaySnapshot,
   createActivityLedgerTodayPublicationCoordinator,
+  isActivityLedgerTodayArchiveFenceError,
   loadActivityLedgerTodayAuthority,
 } from "./useActivityLedgerTodaySnapshot.ts";
+
+test("Today publication retries only transient archive fence changes", () => {
+  assert.equal(
+    isActivityLedgerTodayArchiveFenceError(
+      "Today snapshot archive revision changed: declared 7, current 8",
+    ),
+    true,
+  );
+  assert.equal(
+    isActivityLedgerTodayArchiveFenceError(
+      new Error("Today snapshot archive fence requires completed backfill"),
+    ),
+    true,
+  );
+  assert.equal(
+    isActivityLedgerTodayArchiveFenceError("invalid owner signature"),
+    false,
+  );
+});
 
 test("Today publishing waits for a successful managed-agent roster read", () => {
   assert.equal(canPublishActivityLedgerTodaySnapshot(undefined, true), false);

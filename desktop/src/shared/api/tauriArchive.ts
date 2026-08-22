@@ -466,6 +466,8 @@ export type ArchivedObserverRangePage = {
   backfillComplete: boolean;
   /** Owner-scoped frames whose missing inner time prevents day attribution. */
   unindexedObserverFrames: number;
+  archiveRevision: number;
+  restartRequired: boolean;
   hasMore: boolean;
   nextBefore: ArchivedObserverRangeCursor | null;
 };
@@ -480,6 +482,7 @@ export async function readArchivedObserverEventsForRange(opts: {
   agentPubkey?: string | null;
   channelId?: string | null;
   before?: ArchivedObserverRangeCursor | null;
+  archiveRevision?: number | null;
   limit?: number;
 }): Promise<ArchivedObserverRangePage> {
   const limit = opts.limit ?? 200;
@@ -492,6 +495,8 @@ export async function readArchivedObserverEventsForRange(opts: {
     events: string[];
     backfillComplete: boolean;
     unindexedObserverFrames: number;
+    archiveRevision: number;
+    restartRequired: boolean;
   }>("read_archived_observer_events_for_range", {
     input: {
       startCreatedAt: opts.startCreatedAt,
@@ -500,6 +505,7 @@ export async function readArchivedObserverEventsForRange(opts: {
       channelId: opts.channelId ?? null,
       beforeCreatedAt: opts.before?.createdAt ?? null,
       beforeId: opts.before?.id ?? null,
+      archiveRevision: opts.archiveRevision ?? null,
       limit,
     },
   });
@@ -528,11 +534,22 @@ export async function readArchivedObserverEventsForRange(opts: {
       "Archived observer range returned an invalid exclusion count.",
     );
   }
+  if (
+    !Number.isSafeInteger(rawPage.archiveRevision) ||
+    rawPage.archiveRevision < 0 ||
+    typeof rawPage.restartRequired !== "boolean"
+  ) {
+    throw new Error("Archived observer range returned an invalid revision.");
+  }
   return {
     events,
     backfillComplete: rawPage.backfillComplete,
     unindexedObserverFrames: rawPage.unindexedObserverFrames,
-    hasMore: !rawPage.backfillComplete || rawPage.events.length === limit,
+    archiveRevision: rawPage.archiveRevision,
+    restartRequired: rawPage.restartRequired,
+    hasMore:
+      !rawPage.backfillComplete ||
+      (!rawPage.restartRequired && rawPage.events.length === limit),
     nextBefore: oldest ? { createdAt: oldest.created_at, id: oldest.id } : null,
   };
 }
@@ -547,13 +564,29 @@ export async function readAllArchivedObserverEventsForRange(opts: {
 }): Promise<import("@/shared/api/types").RelayEvent[]> {
   const all: import("@/shared/api/types").RelayEvent[] = [];
   let before: ArchivedObserverRangeCursor | null = null;
+  let archiveRevision: number | null = null;
+  let restarts = 0;
   for (;;) {
     const page = await readArchivedObserverEventsForRange({
       ...opts,
       before,
+      archiveRevision,
       limit: opts.pageSize ?? 200,
     });
     if (!page.backfillComplete) continue;
+    if (page.restartRequired) {
+      restarts += 1;
+      if (restarts > 3) {
+        throw new Error(
+          "Archived observer range changed repeatedly during reconstruction.",
+        );
+      }
+      all.length = 0;
+      before = null;
+      archiveRevision = page.archiveRevision;
+      continue;
+    }
+    archiveRevision = page.archiveRevision;
     all.push(...page.events);
     if (!page.hasMore) return all;
     if (!page.nextBefore) {
@@ -575,9 +608,13 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
 }): AsyncGenerator<{
   events: import("@/shared/api/types").RelayEvent[];
   unindexedObserverFrames: number;
+  archiveRevision: number;
+  reset: boolean;
 }> {
   let before: ArchivedObserverRangeCursor | null = null;
+  let archiveRevision: number | null = null;
   let disclosedUnindexedFrames = 0;
+  let restarts = 0;
   const disclosureDelta = (observed: number) => {
     const next = Math.max(disclosedUnindexedFrames, observed);
     const delta = next - disclosedUnindexedFrames;
@@ -588,31 +625,36 @@ export async function* iterateArchivedObserverEventPagesForRange(opts: {
     const page = await readArchivedObserverEventsForRange({
       ...opts,
       before,
+      archiveRevision,
       limit: opts.pageSize ?? 200,
     });
     if (!page.backfillComplete) continue;
+    if (page.restartRequired) {
+      restarts += 1;
+      if (restarts > 3) {
+        throw new Error(
+          "Archived observer range changed repeatedly during reconstruction.",
+        );
+      }
+      archiveRevision = page.archiveRevision;
+      before = null;
+      disclosedUnindexedFrames = 0;
+      yield {
+        events: [],
+        unindexedObserverFrames: 0,
+        archiveRevision,
+        reset: true,
+      };
+      continue;
+    }
+    archiveRevision = page.archiveRevision;
     yield {
       events: page.events,
       unindexedObserverFrames: disclosureDelta(page.unindexedObserverFrames),
+      archiveRevision,
+      reset: false,
     };
-    if (!page.hasMore) {
-      // Fence concurrent ingest after the final event page. The count is
-      // monotonic for this reconstruction: retention may lower the archive
-      // total, but it must never retract an omission already disclosed.
-      for (;;) {
-        const finalPage = await readArchivedObserverEventsForRange({
-          ...opts,
-          before: null,
-          limit: 1,
-        });
-        if (!finalPage.backfillComplete) continue;
-        const finalDelta = disclosureDelta(finalPage.unindexedObserverFrames);
-        if (finalDelta > 0) {
-          yield { events: [], unindexedObserverFrames: finalDelta };
-        }
-        return;
-      }
-    }
+    if (!page.hasMore) return;
     if (!page.nextBefore) {
       throw new Error(
         "Archived observer range reported more rows without a cursor.",

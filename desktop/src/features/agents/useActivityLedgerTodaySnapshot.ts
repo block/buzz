@@ -21,6 +21,7 @@ import {
 const SNAPSHOT_REFRESH_MS = 60_000;
 const SNAPSHOT_LIFETIME_SECONDS = 5 * 60;
 const AUTHORITY_READ_CONCURRENCY = 8;
+const ARCHIVE_FENCE_RETRY_LIMIT = 3;
 
 export type ActivityLedgerTodayPublicationCoordinator = {
   beginGeneration: () => number;
@@ -96,6 +97,17 @@ export function canPublishActivityLedgerTodaySnapshot(
   managedAgentsLoaded: boolean,
 ): ownerPubkey is string {
   return Boolean(ownerPubkey && managedAgentsLoaded);
+}
+
+export function isActivityLedgerTodayArchiveFenceError(
+  error: unknown,
+): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("Today snapshot archive revision changed") ||
+    message.includes("Today snapshot archive exclusions changed") ||
+    message.includes("Today snapshot archive fence requires completed backfill")
+  );
 }
 
 /**
@@ -185,6 +197,7 @@ export function useActivityLedgerTodaySnapshot(): void {
     let disposed = false;
     let inFlight: Promise<void> | null = null;
     let republishRequested = false;
+    let archiveFenceRetries = 0;
     const publicationGeneration = publicationCoordinator.beginGeneration();
 
     const publish = () => {
@@ -273,6 +286,16 @@ export function useActivityLedgerTodaySnapshot(): void {
               surface,
               rawEvents: [],
             });
+            archiveFenceRetries = 0;
+          } catch (error) {
+            if (
+              isActivityLedgerTodayArchiveFenceError(error) &&
+              archiveFenceRetries < ARCHIVE_FENCE_RETRY_LIMIT
+            ) {
+              archiveFenceRetries += 1;
+              republishRequested = true;
+            }
+            throw error;
           } finally {
             // A native call cannot be cancelled once dispatched. If this
             // generation was retired while it ran, ensure the current roster
