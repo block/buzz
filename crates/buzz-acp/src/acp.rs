@@ -139,6 +139,11 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
+    /// Whether the in-flight turn has emitted any `agent_message_chunk` text.
+    /// Reset at each `session/prompt`. A turn that ends cleanly having emitted
+    /// nothing is indistinguishable from a successful turn unless it is tracked
+    /// here — see `last_turn_emitted_text`.
+    turn_emitted_text: bool,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
@@ -546,6 +551,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            turn_emitted_text: false,
             child,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
@@ -768,6 +774,18 @@ impl AcpClient {
         .await
     }
 
+    /// Whether the most recent turn emitted any non-whitespace assistant text.
+    ///
+    /// A CLI runtime that refuses to start — lost or expired credentials, an
+    /// untrusted working directory, a missing provider config — commonly exits
+    /// its turn cleanly without emitting anything. That is protocol-legal, so
+    /// the harness sees `StopReason::EndTurn` and reports a successful turn
+    /// while nothing is posted and no error is logged. Callers use this to tell
+    /// "worked, said nothing" apart from "never ran".
+    pub fn last_turn_emitted_text(&self) -> bool {
+        self.turn_emitted_text
+    }
+
     /// Like [`session_prompt_with_idle_timeout`](Self::session_prompt_with_idle_timeout),
     /// but sends each entry in `prompt_blocks` as a separate text content block.
     ///
@@ -784,6 +802,9 @@ impl AcpClient {
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
+        // Per-turn, not per-session: a runtime that refuses one prompt may serve
+        // the next, so staleness here would mask a recurring refusal.
+        self.turn_emitted_text = false;
 
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
@@ -1755,6 +1776,9 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    if !text.trim().is_empty() {
+                        self.turn_emitted_text = true;
+                    }
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3758,6 +3782,42 @@ mod tests {
         let _ = client.handle_session_update(&msg);
 
         assert_eq!(client.active_run_id(), Some("run-abc-123"));
+    }
+
+    /// A runtime that refuses to start its turn (expired credentials, untrusted
+    /// working directory, missing provider config) ends the session cleanly with
+    /// no `agent_message_chunk`. That must remain distinguishable from a turn
+    /// that actually produced output, otherwise the harness reports success and
+    /// posts nothing.
+    #[tokio::test]
+    async fn turn_emitted_text_tracks_assistant_output() {
+        let mut client = spawn_inert_client().await;
+        assert!(
+            !client.last_turn_emitted_text(),
+            "a fresh client has emitted nothing"
+        );
+
+        // Whitespace-only chunks are not output — a runtime that emits a stray
+        // newline before refusing must still count as empty.
+        let blank = serde_json::json!({
+            "params": {"update": {"sessionUpdate": "agent_message_chunk",
+                                  "content": {"text": "   \n"}}}
+        });
+        let _ = client.handle_session_update(&blank);
+        assert!(
+            !client.last_turn_emitted_text(),
+            "whitespace-only output must not count as assistant text"
+        );
+
+        let real = serde_json::json!({
+            "params": {"update": {"sessionUpdate": "agent_message_chunk",
+                                  "content": {"text": "PONG"}}}
+        });
+        let _ = client.handle_session_update(&real);
+        assert!(
+            client.last_turn_emitted_text(),
+            "non-whitespace assistant text must be recorded"
+        );
     }
 
     #[tokio::test]

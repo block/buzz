@@ -4035,7 +4035,14 @@ fn handle_prompt_result(
         result.agent.state.invalidate_channel(ch);
     }
 
+    // A turn that ends cleanly having emitted no assistant text is reported
+    // separately from a normal success. Runtimes that refuse to start — expired
+    // credentials, an untrusted working directory, a missing provider config —
+    // end the session protocol-legally with no output, which is otherwise
+    // indistinguishable from a healthy turn and leaves the agent looking idle.
+    let emitted_text = result.agent.acp.last_turn_emitted_text();
     let outcome_label = match &result.outcome {
+        PromptOutcome::Ok(_) if !emitted_text => "empty",
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
@@ -4085,11 +4092,25 @@ fn handle_prompt_result(
     match result.outcome {
         // Successful prompt — return agent to pool.
         PromptOutcome::Ok(_) => {
-            tracing::debug!(
-                agent = agent_index,
-                outcome = outcome_label,
-                "agent_returned"
-            );
+            if emitted_text {
+                tracing::debug!(
+                    agent = agent_index,
+                    outcome = outcome_label,
+                    "agent_returned"
+                );
+            } else {
+                // WARN, not DEBUG: this is the only signal that a runtime ran
+                // and produced nothing. At DEBUG it is invisible on a default
+                // deployment, which is exactly when it needs to be seen.
+                tracing::warn!(
+                    agent = agent_index,
+                    outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
+                    "agent_returned — turn produced no assistant text; check the \
+                     runtime's credentials, working directory, and provider config"
+                );
+            }
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
