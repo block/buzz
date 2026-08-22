@@ -30,7 +30,7 @@ import type { AutocompleteEdit } from "./useRichTextEditor";
 import type { ChannelMember, ChannelType } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, normalizePubkeySet } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
 import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
@@ -155,12 +155,7 @@ export function useMentions(
     [managedAgentsQuery.data],
   );
   const managedAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (managedAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
+    () => normalizePubkeySet(managedAgentsQuery.data),
     [managedAgentsQuery.data],
   );
   const relayAgentNamesByPubkey = React.useMemo(
@@ -184,9 +179,18 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
+  // Defined here rather than beside its other consumers below: the agent
+  // eligibility memo needs it, and it merges the dedicated roster with the
+  // active channel's signed member projection, so it is the freshest view of
+  // who is in this channel.
+  const memberPubkeys = React.useMemo(
+    () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
+    [channelId, channelsQuery.data, members],
+  );
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
+        channelMemberPubkeys: memberPubkeys,
         currentPubkey,
         phase: "prepare",
         eligibilityScope: mentionChannelId
@@ -203,6 +207,7 @@ export function useMentions(
       channelId,
       options?.channelType,
       managedAgentPubkeys,
+      memberPubkeys,
       mentionChannelId,
       relayAgentsQuery.data,
       sharedChannelIds,
@@ -236,10 +241,6 @@ export function useMentions(
   const activePersonaIds = React.useMemo(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
-  );
-  const memberPubkeys = React.useMemo(
-    () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
-    [channelId, channelsQuery.data, members],
   );
   const agentIdentityPubkeys = React.useMemo(
     () =>
@@ -765,6 +766,7 @@ export function useMentions(
   ).current;
   const revalidateMentionPubkeys = useAgentMentionRevalidation({
     agentPubkeys: agentIdentityPubkeys,
+    channelMemberPubkeys: memberPubkeys,
     getSelectedAgentPubkeys,
     currentPubkey,
     eligibilityScope: mentionChannelId
