@@ -48,6 +48,31 @@ services:
     networks:
       - buzz-net
 
+  # Ephemeral NIP-AB device-pairing sidecar. The relay image already ships the
+  # binary; without this service the desktop QR resolves to a /pair endpoint the
+  # relay itself does not serve and mobile pairing fails. Published directly on
+  # BUZZ_PAIR_RELAY_PORT, mirroring the relay's BUZZ_HTTP_PORT; compose.caddy.yml
+  # unpublishes it and routes /pair through Caddy instead (see README.md
+  # § Device pairing).
+  pair:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "${BUZZ_PAIR_RELAY_PORT:-5000}:5000"
+    # The sidecar speaks only WebSocket upgrades and answers a plain GET with 400,
+    # so probe the raw TCP port over /dev/tcp rather than expecting an HTTP 200.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
   postgres:
     image: postgres:17-alpine
     environment:
