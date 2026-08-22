@@ -1817,6 +1817,11 @@ pub enum MemCmd {
     /// Reads the diff from stdin or `--patch-file`. Refuses to apply if the
     /// slug has changed since `--base-hash` was captured, and refuses
     /// hunks whose context doesn't match the current value verbatim.
+    ///
+    /// Both checks cover the value being *replaced*, not the replacement:
+    /// a patch that quotes the current value correctly can still insert
+    /// content from anywhere. Verify the result (`--dry-run` prints the
+    /// sha256 that would be written; re-read the slug after writing).
     Patch {
         slug: String,
         /// Read the patch from a file instead of stdin.
@@ -1825,12 +1830,13 @@ pub enum MemCmd {
         /// sha256 hex digest (lowercase) of the value the patch was generated
         /// against. Hashes the exact UTF-8 bytes returned by `buzz mem get`,
         /// not normalized lines. Run `buzz mem hash <slug>` to capture this
-        /// before editing.
+        /// before editing. Proves the head has not moved; says nothing about
+        /// the content the patch inserts.
         #[arg(long)]
         base_hash: Option<String>,
-        /// Skip the base-hash check. Unsafe if concurrent edits are possible —
-        /// the patch will be applied against whatever the current value is,
-        /// even if another agent rewrote it after the patch was generated.
+        /// Skip the base-hash check. The patch will be applied against
+        /// whatever the current value is, even if another agent rewrote it
+        /// after the patch was generated — a lost update becomes possible.
         #[arg(long, default_value_t = false)]
         no_base_hash: bool,
         /// Echo the input patch + resulting sha256 and exit without writing.
