@@ -80,6 +80,14 @@ const BUZZ_AGENT_RUNTIME = {
   mcp_command: null,
 };
 
+const CLAUDE_RUNTIME = {
+  ...GOOSE_RUNTIME,
+  id: "claude",
+  label: "Claude",
+  command: "claude-agent-acp",
+  mcp_command: null,
+};
+
 function rawPinnedAgent({
   commandOverride = "goose-cmd",
   args = PINNED_ARGS,
@@ -230,10 +238,13 @@ function installTauriBridge() {
   createManagedAgentCalls = [];
   listManagedAgentsResult = [rawPinnedAgent()];
   let resolveList;
-  listManagedAgentsDeferred = new Promise((resolve) => {
+  let rejectList;
+  listManagedAgentsDeferred = new Promise((resolve, reject) => {
     resolveList = resolve;
+    rejectList = reject;
   });
   listManagedAgentsDeferred.resolve = resolveList;
+  listManagedAgentsDeferred.reject = rejectList;
 
   const internals = {
     invoke(command, args) {
@@ -241,13 +252,22 @@ function installTauriBridge() {
         case "list_managed_agents":
           return listManagedAgentsDeferred.then(() => listManagedAgentsResult);
         case "discover_acp_providers":
-          return Promise.resolve([GOOSE_RUNTIME, BUZZ_AGENT_RUNTIME]);
+          return Promise.resolve([
+            GOOSE_RUNTIME,
+            CLAUDE_RUNTIME,
+            BUZZ_AGENT_RUNTIME,
+          ]);
         case "get_global_agent_config":
           return Promise.resolve({
             env_vars: {},
             provider: null,
             model: null,
             preferred_runtime: null,
+          });
+        case "get_identity":
+          return Promise.resolve({
+            pubkey: "11".repeat(32),
+            display_name: "Test Owner",
           });
         case "get_channels":
           return Promise.resolve({
@@ -312,6 +332,19 @@ beforeEach(() => {
   dom.window.document.hasFocus = () => true;
   dom.window.localStorage.clear();
   dom.window.localStorage.setItem("buzz-follow-system", "false");
+  dom.window.localStorage.setItem(
+    "buzz-communities",
+    JSON.stringify([
+      {
+        id: "community-1",
+        name: "Test Community",
+        relayUrl: "wss://relay.example",
+        pubkey: "11".repeat(32),
+        addedAt: "2026-01-01T00:00:00Z",
+      },
+    ]),
+  );
+  dom.window.localStorage.setItem("buzz-active-community-id", "community-1");
   installTauriBridge();
 });
 
@@ -326,7 +359,7 @@ function renderDialog() {
       mutations: { retry: false },
     },
   });
-  return render(
+  const view = render(
     createElement(
       ThemeProvider,
       null,
@@ -347,6 +380,7 @@ function renderDialog() {
       ),
     ),
   );
+  return { queryClient, view };
 }
 
 function deployButton() {
@@ -362,12 +396,28 @@ async function resolveManagedAgents() {
   });
 }
 
-test("pending managed-agents query keeps Deploy disabled", async () => {
-  renderDialog();
+async function rejectManagedAgents(error) {
+  await act(async () => {
+    listManagedAgentsDeferred.reject(error);
+    await listManagedAgentsDeferred.catch(() => undefined);
+  });
+}
 
+async function waitForNonManagedDeployGates(queryClient) {
   await waitFor(() => {
-    assert.equal(screen.getByText("Dolomite").textContent, "Dolomite");
+    const channelSelect = screen.getByLabelText(/^Channel$/);
+    assert.equal(channelSelect.value, "chan-1");
+    assert.equal(
+      queryClient.getQueryState(["acp-runtimes"])?.status,
+      "success",
+    );
   }, SUITE_WAIT);
+}
+
+test("pending managed-agents query keeps Deploy disabled", async () => {
+  const { queryClient } = renderDialog();
+
+  await waitForNonManagedDeployGates(queryClient);
 
   assert.equal(deployButton().disabled, true);
   assert.equal(createManagedAgentCalls.length, 0);
@@ -379,7 +429,27 @@ test("pending managed-agents query keeps Deploy disabled", async () => {
   assert.equal(createManagedAgentCalls.length, 0);
 });
 
-test("Deploy after a resolved pin sends command and args through create_managed_agent", async () => {
+test("managed-agents query error is surfaced and creates nothing", async () => {
+  const { queryClient } = renderDialog();
+
+  await waitForNonManagedDeployGates(queryClient);
+  await rejectManagedAgents(new Error("Managed agent lookup failed."));
+
+  await waitFor(() => {
+    assert.ok(screen.getByText("Managed agent lookup failed."));
+  }, SUITE_WAIT);
+  assert.equal(deployButton().disabled, true);
+  fireEvent.click(deployButton());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  assert.equal(createManagedAgentCalls.length, 0);
+});
+
+test("Deploy preserves a full-path pin through create_managed_agent", async () => {
+  listManagedAgentsResult = [
+    rawPinnedAgent({ commandOverride: "/opt/homebrew/bin/goose-cmd" }),
+  ];
   renderDialog();
 
   await waitFor(() => {
@@ -402,7 +472,7 @@ test("Deploy after a resolved pin sends command and args through create_managed_
   }, SUITE_WAIT);
 
   const input = createManagedAgentCalls[0].input;
-  assert.equal(input.agentCommand, "goose-cmd");
+  assert.equal(input.agentCommand, "/opt/homebrew/bin/goose-cmd");
   assert.equal(input.harnessOverride, true);
   assert.deepEqual(input.agentArgs, PINNED_ARGS);
   assert.equal(input.personaId, "p-1");
@@ -412,6 +482,63 @@ test("Deploy after a resolved pin sends command and args through create_managed_
     "goose-mcp",
     "create must use catalog MCP, not the source agent's ignored mcp_command",
   );
+});
+
+test("Deploy preserves a supported alias through create_managed_agent", async () => {
+  listManagedAgentsResult = [
+    rawPinnedAgent({
+      commandOverride: "/opt/bin/claude-code-acp",
+      args: ["--permission-mode", "plan"],
+    }),
+  ];
+  renderDialog();
+
+  await resolveManagedAgents();
+
+  await waitFor(() => {
+    assert.ok(screen.getByText("Claude"));
+    assert.equal(deployButton().disabled, false);
+  }, SUITE_WAIT);
+
+  fireEvent.click(deployButton());
+  await waitFor(() => {
+    assert.equal(createManagedAgentCalls.length, 1);
+  }, SUITE_WAIT);
+
+  const input = createManagedAgentCalls[0].input;
+  assert.equal(input.agentCommand, "/opt/bin/claude-code-acp");
+  assert.equal(input.harnessOverride, true);
+  assert.deepEqual(input.agentArgs, ["--permission-mode", "plan"]);
+});
+
+test("conflicting personal runtimes require setup and create nothing", async () => {
+  listManagedAgentsResult = [
+    rawPinnedAgent({
+      commandOverride: "goose-cmd",
+      args: ["--profile", "goose-work"],
+    }),
+    {
+      ...rawPinnedAgent({
+        commandOverride: "codex-acp",
+        args: ["--sandbox", "workspace-write"],
+      }),
+      pubkey: "cc".repeat(32),
+      name: "Dolomite 2",
+    },
+  ];
+  renderDialog();
+
+  await resolveManagedAgents();
+
+  await waitFor(() => {
+    assert.ok(screen.getAllByText(/different runtime settings/i).length > 0);
+  }, SUITE_WAIT);
+  assert.equal(deployButton().disabled, true);
+  fireEvent.click(deployButton());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  assert.equal(createManagedAgentCalls.length, 0);
 });
 
 test("unresolved pin leaves Deploy disabled and creates nothing", async () => {

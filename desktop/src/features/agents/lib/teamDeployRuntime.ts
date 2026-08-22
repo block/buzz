@@ -18,6 +18,7 @@ export type TeamDeployRuntimePick = Pick<
 export type TeamPersonaDeployReady = {
   status: "ready";
   runtime: TeamDeployRuntimePick;
+  agentCommand: string;
   harnessOverride: boolean;
   agentArgs: string[];
 };
@@ -37,25 +38,46 @@ export type TeamDeploySourceQuery = {
   isFetched: boolean;
 };
 
+export type TeamDeploySourcePick =
+  | { status: "none" }
+  | { status: "ready"; source: ManagedAgent }
+  | { status: "ambiguous" };
+
+function sourceRuntimeConfiguration(agent: ManagedAgent): string {
+  return JSON.stringify([
+    agent.agentCommandOverride?.trim() || null,
+    agent.agentArgs ?? [],
+  ]);
+}
+
 /**
  * Personal (non-team) **local** instance for this persona. Provider-backed
  * agents are not portable runtime intent: their command/path is an execution
  * target, not a harness pin we can mint onto a new local clone.
  */
-export function sourceAgentForPersona(
+export function sourceConfigurationForPersona(
   managedAgents: readonly ManagedAgent[],
   personaId: string,
-): ManagedAgent | undefined {
+): TeamDeploySourcePick {
   const matches = managedAgents.filter(
     (agent) =>
       agent.personaId === personaId &&
       !agent.teamId &&
       agent.backend?.type === "local",
   );
-  return (
-    matches.find((agent) => Boolean(agent.agentCommandOverride?.trim())) ??
-    matches[0]
-  );
+  const source = matches[0];
+  if (!source) {
+    return { status: "none" };
+  }
+  const configuration = sourceRuntimeConfiguration(source);
+  if (
+    matches.some(
+      (candidate) => sourceRuntimeConfiguration(candidate) !== configuration,
+    )
+  ) {
+    return { status: "ambiguous" };
+  }
+  return { status: "ready", source };
 }
 
 export function isTeamDeploySourceReady(query: TeamDeploySourceQuery): {
@@ -83,7 +105,17 @@ export function runtimeForTeamPersonaDeploy(input: {
   defaultProvider: AcpRuntime | null;
   managedAgents: readonly ManagedAgent[];
 }): TeamPersonaDeployPlan {
-  const source = sourceAgentForPersona(input.managedAgents, input.persona.id);
+  const sourcePick = sourceConfigurationForPersona(
+    input.managedAgents,
+    input.persona.id,
+  );
+  if (sourcePick.status === "ambiguous") {
+    return {
+      status: "setup-required",
+      reason: `Setup required: ${input.persona.displayName}'s personal agents use different runtime settings.`,
+    };
+  }
+  const source = sourcePick.status === "ready" ? sourcePick.source : undefined;
   const override = source?.agentCommandOverride?.trim();
   if (override) {
     const matching = input.runtimes.find(
@@ -100,6 +132,7 @@ export function runtimeForTeamPersonaDeploy(input: {
     return {
       status: "ready",
       runtime: matching,
+      agentCommand: override,
       harnessOverride: true,
       agentArgs: [...(source?.agentArgs ?? [])],
     };
@@ -111,15 +144,16 @@ export function runtimeForTeamPersonaDeploy(input: {
     input.defaultProvider,
   );
   const runtime = personaRuntime ?? input.defaultProvider;
-  if (!runtime) {
+  if (!runtime?.command) {
     return {
       status: "setup-required",
-      reason: `Setup required: no local runtime is available for ${input.persona.displayName}.`,
+      reason: `Setup required: no runnable local runtime is available for ${input.persona.displayName}.`,
     };
   }
   return {
     status: "ready",
     runtime,
+    agentCommand: runtime.command,
     harnessOverride: false,
     agentArgs: [],
   };
@@ -149,7 +183,7 @@ export function createInputForTeamPersonaDeploy(input: {
     name: input.persona.displayName,
     personaId: input.persona.id,
     teamId: input.teamId,
-    agentCommand: input.plan.runtime.command,
+    agentCommand: input.plan.agentCommand,
     harnessOverride: input.plan.harnessOverride,
     agentArgs: input.plan.agentArgs,
     backend: { type: "local" },

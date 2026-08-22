@@ -499,12 +499,68 @@ fn create_time_override_preserves_selected_runtime_alias() {
 }
 
 #[test]
-fn create_time_override_inherits_exact_persona_command() {
+fn create_time_override_preserves_exact_persona_command_when_explicit() {
     let personas = vec![persona_with_runtime("p1", Some("claude"))];
     assert_eq!(
         create_time_agent_command_override(Some("p1"), &personas, Some("claude-agent-acp"), true),
-        None
+        Some("claude-agent-acp".to_string())
     );
+}
+
+#[test]
+fn full_path_create_pin_survives_persona_runtime_edit_with_args() {
+    let original_personas = vec![persona_with_runtime("p1", Some("goose"))];
+    let stored_override = create_time_agent_command_override(
+        Some("p1"),
+        &original_personas,
+        Some("/opt/homebrew/bin/goose"),
+        true,
+    );
+    let mut stored_record = record_with(Some("goose"), Some("p1"), stored_override.as_deref());
+    stored_record.agent_args = vec!["--profile".to_string(), "goose-work".to_string()];
+
+    let edited_personas = vec![persona_with_runtime("p1", Some("codex"))];
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        &stored_record,
+        &edited_personas,
+        &Default::default(),
+    )
+    .expect("the exact stored path should remain a resolvable Goose pin");
+
+    assert_eq!(
+        stored_record.agent_command_override.as_deref(),
+        Some("/opt/homebrew/bin/goose")
+    );
+    assert_eq!(descriptor.command, "/opt/homebrew/bin/goose");
+    assert_eq!(descriptor.args, ["--profile", "goose-work"]);
+}
+
+#[test]
+fn alias_create_pin_survives_persona_runtime_edit_with_args() {
+    let original_personas = vec![persona_with_runtime("p1", Some("claude"))];
+    let stored_override = create_time_agent_command_override(
+        Some("p1"),
+        &original_personas,
+        Some("claude-code-acp"),
+        true,
+    );
+    let mut stored_record = record_with(Some("claude"), Some("p1"), stored_override.as_deref());
+    stored_record.agent_args = vec!["--permission-mode".to_string(), "plan".to_string()];
+
+    let edited_personas = vec![persona_with_runtime("p1", Some("goose"))];
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        &stored_record,
+        &edited_personas,
+        &Default::default(),
+    )
+    .expect("the stored alias should remain a resolvable Claude pin");
+
+    assert_eq!(
+        stored_record.agent_command_override.as_deref(),
+        Some("claude-code-acp")
+    );
+    assert_eq!(descriptor.command, "claude-code-acp");
+    assert_eq!(descriptor.args, ["--permission-mode", "plan"]);
 }
 
 #[test]

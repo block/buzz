@@ -175,7 +175,7 @@ export function AddTeamToChannelDialog({
           runtime: {
             id: plan.runtime.id,
             label: plan.runtime.label,
-            command: plan.runtime.command,
+            command: plan.agentCommand,
             defaultArgs: plan.runtime.defaultArgs,
             mcpCommand: plan.runtime.mcpCommand,
           },

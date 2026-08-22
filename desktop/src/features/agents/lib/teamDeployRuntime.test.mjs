@@ -5,7 +5,7 @@ import {
   createInputForTeamPersonaDeploy,
   isTeamDeploySourceReady,
   runtimeForTeamPersonaDeploy,
-  sourceAgentForPersona,
+  sourceConfigurationForPersona,
 } from "./teamDeployRuntime.ts";
 
 const gooseRuntime = {
@@ -102,6 +102,7 @@ test("team deploy copies a local pin onto create command, args, and harnessOverr
     plan,
   });
   assert.equal(create.agentCommand, "goose-cmd");
+  assert.equal(plan.agentCommand, "goose-cmd");
   assert.equal(create.harnessOverride, true);
   assert.deepEqual(create.agentArgs, ["--acp"]);
   assert.equal(create.backend?.type, "local");
@@ -129,8 +130,15 @@ test("pinned Homebrew path matches the catalog command via commandsMatch", () =>
     return;
   }
   assert.equal(plan.runtime.id, "goose");
+  assert.equal(plan.agentCommand, "/opt/homebrew/bin/goose-cmd");
   assert.equal(plan.harnessOverride, true);
   assert.deepEqual(plan.agentArgs, ["--acp"]);
+  const create = createInputForTeamPersonaDeploy({
+    persona: persona(),
+    teamId: "team-1",
+    plan,
+  });
+  assert.equal(create.agentCommand, "/opt/homebrew/bin/goose-cmd");
 });
 
 test("claude-code-acp pin matches the claude-acp catalog command", () => {
@@ -157,6 +165,7 @@ test("claude-code-acp pin matches the claude-acp catalog command", () => {
     return;
   }
   assert.equal(plan.runtime.id, "claude-acp");
+  assert.equal(plan.agentCommand, "/opt/bin/claude-code-acp");
 });
 
 test("unresolved local pin is Setup required, not a silent default fallback", () => {
@@ -193,11 +202,12 @@ test("team deploy without override falls back to persona runtime with empty args
   }
   assert.equal(plan.harnessOverride, false);
   assert.equal(plan.runtime.id, "goose");
+  assert.equal(plan.agentCommand, "goose-cmd");
   assert.deepEqual(plan.agentArgs, []);
 });
 
-test("sourceAgentForPersona ignores provider-backed and team clones", () => {
-  const source = sourceAgentForPersona(
+test("source configuration ignores provider-backed and team clones", () => {
+  const source = sourceConfigurationForPersona(
     [
       managedAgent({
         pubkey: "remote",
@@ -205,16 +215,65 @@ test("sourceAgentForPersona ignores provider-backed and team clones", () => {
         agentCommandOverride: "/remote/openclaw",
       }),
       managedAgent({ pubkey: "team-clone", teamId: "t-1" }),
-      managedAgent({
-        pubkey: "plain",
-        agentCommandOverride: null,
-        agentArgs: [],
-      }),
       managedAgent({ pubkey: "pinned" }),
     ],
     "p-1",
   );
-  assert.equal(source?.pubkey, "pinned");
+  assert.equal(source.status, "ready");
+  if (source.status === "ready") {
+    assert.equal(source.source.pubkey, "pinned");
+  }
+});
+
+test("conflicting personal instance settings fail closed in either record order", () => {
+  const goose = managedAgent({
+    pubkey: "zz",
+    name: "Zulu",
+    agentCommandOverride: "goose-cmd",
+    agentArgs: ["--profile", "goose-work"],
+  });
+  const codex = managedAgent({
+    pubkey: "aa",
+    name: "Alpha",
+    agentCommandOverride: "codex-acp",
+    agentArgs: ["--sandbox", "workspace-write"],
+  });
+
+  for (const managedAgents of [
+    [goose, codex],
+    [codex, goose],
+  ]) {
+    const source = sourceConfigurationForPersona(managedAgents, "p-1");
+    assert.equal(source.status, "ambiguous");
+
+    const plan = runtimeForTeamPersonaDeploy({
+      persona: persona(),
+      runtimes: [gooseRuntime, buzzAgentRuntime],
+      defaultProvider: buzzAgentRuntime,
+      managedAgents,
+    });
+    assert.equal(plan.status, "setup-required");
+    if (plan.status === "setup-required") {
+      assert.match(plan.reason, /different runtime settings/);
+    }
+  }
+});
+
+test("identical personal instance settings are unambiguous in either record order", () => {
+  const first = managedAgent({ pubkey: "zz", name: "Zulu" });
+  const second = managedAgent({ pubkey: "aa", name: "Alpha" });
+
+  for (const managedAgents of [
+    [first, second],
+    [second, first],
+  ]) {
+    const source = sourceConfigurationForPersona(managedAgents, "p-1");
+    assert.equal(source.status, "ready");
+    if (source.status === "ready") {
+      assert.equal(source.source.agentCommandOverride, "goose-cmd");
+      assert.deepEqual(source.source.agentArgs, ["--acp"]);
+    }
+  }
 });
 
 test("provider-backed pin is not copied onto a local clone", () => {
