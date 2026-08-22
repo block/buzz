@@ -6,6 +6,7 @@ import { nsecToNpub } from "@/shared/lib/nostrUtils";
 import {
   classifyKeyImportInput,
   isPlausibleNcryptsec,
+  isPlausibleTwoSkdBackup,
   keyImportSubmitEnabled,
 } from "../lib/keyImportInput";
 import { Button } from "@/shared/ui/button";
@@ -22,7 +23,7 @@ import {
 } from "./BackupPasswordTimeline";
 import { OnboardingFooter } from "./OnboardingFooter";
 
-const NOSTR_KEY_FILE_MAX_BYTES = 1024;
+const NOSTR_KEY_FILE_MAX_BYTES = 4096;
 
 export type NostrKeyImportStage = "key-entry" | "backup-password";
 
@@ -31,7 +32,11 @@ type NostrKeyImportFormProps = {
   disabled?: boolean;
   errorMessage?: string | null;
   onBack: () => void;
-  onImport: (nsec: string, password?: string) => Promise<void>;
+  onImport: (
+    nsec: string,
+    password?: string,
+    recoverySecret?: string,
+  ) => Promise<void>;
   /** Reports whether an import is in flight so host-owned navigation can be disabled. */
   onImportingChange?: (isImporting: boolean) => void;
   onStageChange?: (stage: NostrKeyImportStage) => void;
@@ -70,6 +75,7 @@ export function NostrKeyImportForm({
 }: NostrKeyImportFormProps) {
   const [nsecInput, setNsecInput] = React.useState("");
   const [passphrase, setPassphrase] = React.useState("");
+  const [recoverySecret, setRecoverySecret] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
   const importInFlightRef = React.useRef(false);
   const [importError, setImportError] = React.useState<string | null>(null);
@@ -78,13 +84,16 @@ export function NostrKeyImportForm({
   const [isRevealed, setIsRevealed] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const passphraseInputRef = React.useRef<HTMLInputElement | null>(null);
+  const recoverySecretInputRef = React.useRef<HTMLInputElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const previewNpub = React.useMemo(() => nsecToNpub(nsecInput), [nsecInput]);
   const trimmedInput = nsecInput.trim();
   const hasInput = trimmedInput.length > 0;
   const inputKind = classifyKeyImportInput(nsecInput);
   const isEncryptedInput = inputKind === "ncryptsec";
-  const isPasswordStage = isPlausibleNcryptsec(nsecInput);
+  const isTwoSkdInput = inputKind === "two-skd";
+  const isPasswordStage =
+    isPlausibleNcryptsec(nsecInput) || isPlausibleTwoSkdBackup(nsecInput);
 
   // Masked-by-default must re-assert whenever the field empties: a sticky
   // reveal from a previous key must never apply to newly pasted content the
@@ -99,9 +108,10 @@ export function NostrKeyImportForm({
   React.useEffect(() => {
     if (!isPasswordStage) {
       setPassphrase("");
+      setRecoverySecret("");
     }
   }, [isPasswordStage]);
-  const isValid = keyImportSubmitEnabled(nsecInput, passphrase);
+  const isValid = keyImportSubmitEnabled(nsecInput, passphrase, recoverySecret);
   const isInteractionDisabled = disabled || isImporting;
   const showInvalidHint =
     hasInput &&
@@ -113,11 +123,12 @@ export function NostrKeyImportForm({
 
   React.useLayoutEffect(() => {
     if (isPasswordStage) {
-      passphraseInputRef.current?.focus();
+      if (isTwoSkdInput) recoverySecretInputRef.current?.focus();
+      else passphraseInputRef.current?.focus();
     } else {
       inputRef.current?.focus();
     }
-  }, [isPasswordStage]);
+  }, [isPasswordStage, isTwoSkdInput]);
 
   React.useEffect(() => {
     onStageChange?.(isPasswordStage ? "backup-password" : "key-entry");
@@ -217,7 +228,11 @@ export function NostrKeyImportForm({
     setImportError(null);
 
     try {
-      await onImport(trimmedInput, isPasswordStage ? passphrase : undefined);
+      await onImport(
+        trimmedInput,
+        isPasswordStage ? passphrase : undefined,
+        isTwoSkdInput ? recoverySecret.trim() : undefined,
+      );
     } catch (error) {
       setImportError(
         error instanceof Error ? error.message : "Couldn't import this key.",
@@ -231,10 +246,12 @@ export function NostrKeyImportForm({
     isEncryptedInput,
     isInteractionDisabled,
     isPasswordStage,
+    isTwoSkdInput,
     isValid,
     onImport,
     onImportingChange,
     passphrase,
+    recoverySecret,
     trimmedInput,
   ]);
 
@@ -246,6 +263,7 @@ export function NostrKeyImportForm({
 
     setNsecInput("");
     setPassphrase("");
+    setRecoverySecret("");
     setImportError(null);
     setIsRevealed(false);
     onStageChange?.("key-entry");
@@ -359,11 +377,10 @@ export function NostrKeyImportForm({
       ) : null}
 
       {/* Hidden file input shared by both variants: the default drop zone and
-          the spotlight "Choose a backup file" button both open it. Accepts the
-          .ncryptsec backups our own save flow emits alongside raw .key files. */}
+          the spotlight "Choose a backup file" button both open it. */}
       {mode === "backup" || variant !== "spotlight" ? (
         <input
-          accept=".key,.ncryptsec,text/plain"
+          accept=".key,.ncryptsec,.buzzbackup,text/plain"
           className="sr-only"
           data-testid="nostr-import-file-input"
           disabled={isInteractionDisabled}
@@ -495,6 +512,28 @@ export function NostrKeyImportForm({
             Backup password
           </label>
           <div className="relative z-10">
+            {isTwoSkdInput ? (
+              <div className="mb-3">
+                <label className="sr-only" htmlFor="nostr-import-recovery-code">
+                  Recovery code
+                </label>
+                <Input
+                  autoComplete="off"
+                  autoCorrect="off"
+                  className="h-12 rounded-2xl border-black/20 bg-white px-6 text-center font-mono text-sm text-black/80 shadow-none placeholder:text-black/55 focus-visible:ring-black/35"
+                  data-testid="nostr-import-recovery-code"
+                  id="nostr-import-recovery-code"
+                  onChange={(event) => {
+                    setRecoverySecret(event.target.value);
+                    setImportError(null);
+                  }}
+                  placeholder="Recovery code"
+                  ref={recoverySecretInputRef}
+                  spellCheck={false}
+                  value={recoverySecret}
+                />
+              </div>
+            ) : null}
             <Input
               autoComplete="current-password"
               autoCorrect="off"
@@ -575,9 +614,11 @@ export function NostrKeyImportForm({
 
           {showInvalidHint && !errorMessage ? (
             <p className="text-sm text-muted-foreground">
-              {isEncryptedInput
-                ? "Waiting for a complete ncryptsec backup"
-                : "Waiting for a valid nsec1 key"}
+              {isTwoSkdInput
+                ? "Waiting for a complete Buzz recovery backup"
+                : isEncryptedInput
+                  ? "Waiting for a complete ncryptsec backup"
+                  : "Waiting for a valid nsec1 key"}
             </p>
           ) : null}
 

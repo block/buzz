@@ -4,6 +4,7 @@ import * as React from "react";
 
 import {
   verifyNcryptsecBackup,
+  verifyTwoSkdBackup,
   type BackupVerification,
 } from "@/shared/api/tauriIdentity";
 import { Button } from "@/shared/ui/button";
@@ -119,6 +120,7 @@ export function BackupTestFlow({
 }: BackupTestFlowProps) {
   const reduceMotion = useReducedMotion() ?? false;
   const { stage, fileName, ncryptsec, result } = progress;
+  const isTwoSkd = ncryptsec?.startsWith("buzz2skd1:") === true;
   // True while a file drag is anywhere over the window — the drop overlay
   // takes over the host surface only for the duration of the drag.
   const [isWindowDragging, setIsWindowDragging] = React.useState(false);
@@ -155,6 +157,7 @@ export function BackupTestFlow({
   // The password attempt is component-local, never host state: it is cleared
   // when verification is submitted and when this component unmounts.
   const [attempt, setAttempt] = React.useState("");
+  const [recoveryAttempt, setRecoveryAttempt] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [isVerifying, setIsVerifying] = React.useState(false);
   const [isRevealed, setIsRevealed] = React.useState(false);
@@ -171,6 +174,7 @@ export function BackupTestFlow({
       mountedRef.current = false;
       requestRef.current += 1;
       setAttempt("");
+      setRecoveryAttempt("");
     };
   }, []);
 
@@ -188,12 +192,16 @@ export function BackupTestFlow({
         return;
       }
       if (!mountedRef.current) return;
-      if (!text.toLowerCase().startsWith("ncryptsec1")) {
+      if (
+        !text.toLowerCase().startsWith("ncryptsec1") &&
+        !text.startsWith("buzz2skd1:")
+      ) {
         setError("That doesn't look like a key backup file.");
         return;
       }
       setError(null);
       setAttempt("");
+      setRecoveryAttempt("");
       onProgressChange({
         stage: "password",
         fileName: file.name,
@@ -205,8 +213,15 @@ export function BackupTestFlow({
   );
 
   const handleVerify = React.useCallback(async () => {
-    if (!ncryptsec || !attempt || isVerifying) return;
+    if (
+      !ncryptsec ||
+      !attempt ||
+      (isTwoSkd && !recoveryAttempt.trim()) ||
+      isVerifying
+    )
+      return;
     const password = attempt;
+    const recoverySecret = recoveryAttempt.trim();
     const requestId = ++requestRef.current;
     setIsVerifying(true);
     setError(null);
@@ -214,8 +229,11 @@ export function BackupTestFlow({
     // Clear the attempt the moment it's handed to Rust — success or failure,
     // the typed password never lingers in the field.
     setAttempt("");
+    setRecoveryAttempt("");
     try {
-      const verified = await verifyNcryptsecBackup(ncryptsec, password);
+      const verified = isTwoSkd
+        ? await verifyTwoSkdBackup(ncryptsec, password, recoverySecret)
+        : await verifyNcryptsecBackup(ncryptsec, password);
       if (!mountedRef.current || requestId !== requestRef.current) return;
       onProgressChange((prev) => ({
         ...prev,
@@ -231,7 +249,14 @@ export function BackupTestFlow({
       if (mountedRef.current && requestId === requestRef.current)
         setIsVerifying(false);
     }
-  }, [attempt, isVerifying, ncryptsec, onProgressChange]);
+  }, [
+    attempt,
+    isTwoSkd,
+    isVerifying,
+    ncryptsec,
+    onProgressChange,
+    recoveryAttempt,
+  ]);
 
   if (stage === "success" && result) {
     return (
@@ -299,7 +324,7 @@ export function BackupTestFlow({
       {stage === "drop" ? (
         <>
           <input
-            accept=".ncryptsec,text/plain"
+            accept=".ncryptsec,.buzzbackup,text/plain"
             className="sr-only"
             data-testid="backup-test-file-input"
             onChange={(event) => {
@@ -370,8 +395,23 @@ export function BackupTestFlow({
             <Check aria-hidden="true" className="h-4 w-4 text-primary" />
           </div>
           <p className="text-center text-sm leading-6 text-muted-foreground">
-            That's the one. Now enter your password to prove you can unlock it.
+            {isTwoSkd
+              ? "That’s the one. Enter its separate recovery code and password."
+              : "That’s the one. Now enter your password to prove you can unlock it."}
           </p>
+          {isTwoSkd ? (
+            <Input
+              aria-label="Recovery code"
+              autoComplete="off"
+              className="h-10 bg-background font-mono"
+              data-testid="backup-test-recovery-code"
+              disabled={isVerifying}
+              onChange={(event) => setRecoveryAttempt(event.target.value)}
+              placeholder="Recovery code"
+              spellCheck={false}
+              value={recoveryAttempt}
+            />
+          ) : null}
           <div className="relative">
             <Input
               aria-label="Backup password"
@@ -421,7 +461,9 @@ export function BackupTestFlow({
             <Button
               className="h-9 rounded-full bg-primary px-6 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
               data-testid="backup-test-verify"
-              disabled={!attempt || isVerifying}
+              disabled={
+                !attempt || (isTwoSkd && !recoveryAttempt.trim()) || isVerifying
+              }
               onClick={() => void handleVerify()}
               type="button"
             >

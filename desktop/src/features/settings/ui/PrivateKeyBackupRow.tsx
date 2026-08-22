@@ -1,4 +1,4 @@
-import { Download, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { Download, Eye, EyeOff, KeyRound, ShieldCheck } from "lucide-react";
 import * as React from "react";
 
 import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
@@ -11,6 +11,7 @@ import {
   initialBackupTestProgress,
 } from "@/features/settings/ui/BackupTestFlow";
 import { EncryptedBackupCreator } from "@/features/settings/ui/EncryptedBackupCreator";
+import { TwoSkdRecoveryCreator } from "@/features/settings/ui/TwoSkdRecoveryCreator";
 import { getNsec } from "@/shared/api/tauriIdentity";
 import { Button } from "@/shared/ui/button";
 import {
@@ -64,6 +65,7 @@ export function PrivateKeyBackupRow() {
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [testOpen, setTestOpen] = React.useState(false);
+  const [recoveryKitOpen, setRecoveryKitOpen] = React.useState(false);
   const [testProgress, setTestProgress] = React.useState(
     initialBackupTestProgress,
   );
@@ -172,6 +174,12 @@ export function PrivateKeyBackupRow() {
               <NsecMaskedDisplay
                 actions={[
                   {
+                    icon: <KeyRound aria-hidden="true" />,
+                    label: "Create recovery kit",
+                    onSelect: () => setRecoveryKitOpen(true),
+                    testId: "private-key-create-recovery-kit",
+                  },
+                  {
                     icon: <Download aria-hidden="true" />,
                     label: "Create backup",
                     onSelect: handleCreateBackup,
@@ -191,13 +199,17 @@ export function PrivateKeyBackupRow() {
         ) : null}
       </div>
       <EncryptedBackupCreator onOpenChange={setCreateOpen} open={createOpen} />
+      <TwoSkdRecoveryCreator
+        onOpenChange={setRecoveryKitOpen}
+        open={recoveryKitOpen}
+      />
       <Dialog onOpenChange={handleTestOpenChange} open={testOpen}>
         <DialogContent className="max-w-lg" data-testid="backup-test-dialog">
           <DialogHeader className="pr-8">
             <DialogTitle>Test a key backup</DialogTitle>
             <DialogDescription>
-              Confirm that a backup file and its password can unlock an
-              identity.
+              Confirm that a backup file and its required recovery inputs can
+              unlock an identity.
             </DialogDescription>
           </DialogHeader>
           <BackupTestFlow
@@ -205,8 +217,8 @@ export function PrivateKeyBackupRow() {
             progress={testProgress}
           />
           <p className="text-xs leading-5 text-muted-foreground">
-            Backups use the standard NIP-49 format, so this works for backups
-            from compatible Nostr apps too.
+            Buzz recovery kits use 2SKD. Standard NIP-49 backups from compatible
+            Nostr apps remain supported.
           </p>
         </DialogContent>
       </Dialog>
