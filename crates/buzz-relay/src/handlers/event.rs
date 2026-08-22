@@ -600,6 +600,37 @@ async fn enqueue_event_created_audit(
     }
 }
 
+/// Write an `EventDeleted` audit entry after a successful soft-delete.
+///
+/// Follows the same pattern as [`enqueue_event_created_audit`]: bounded channel,
+/// backpressure-propagating send, fire-and-log on error. Called from every path
+/// that removes an event from the live set (NIP-09 e-tag, NIP-09 a-tag, NIP-29
+/// kind:9005 admin delete).
+///
+/// `pub(super)` so `side_effects.rs` sibling handlers can call it.
+pub(super) async fn enqueue_event_deleted_audit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    actor_pubkey_hex: &str,
+    event_id_hex: &str,
+    detail: serde_json::Value,
+) {
+    let Some(audit_tx) = &state.audit_tx else {
+        return;
+    };
+    let audit_entry = buzz_audit::NewAuditEntry {
+        community_id: tenant.community(),
+        action: buzz_audit::AuditAction::EventDeleted,
+        actor_pubkey: hex::decode(actor_pubkey_hex).ok(),
+        object_id: Some(event_id_hex.to_owned()),
+        detail,
+    };
+    if let Err(e) = audit_tx.send(audit_entry).await {
+        error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
+        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    }
+}
+
 /// Handle an EVENT message from a WebSocket connection.
 ///
 /// Extracts auth from the WS connection, dispatches ephemeral events locally,
