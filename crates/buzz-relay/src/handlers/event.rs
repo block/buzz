@@ -346,7 +346,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
 /// audit DB is overloaded; the spawned task still runs the same guarded fan-out
 /// path, Redis publish, `mark_local_event` echo dedupe, and delivery metrics as
 /// the former inline path.
-pub(crate) async fn dispatch_persistent_event(
+pub async fn dispatch_persistent_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     stored_event: &StoredEvent,

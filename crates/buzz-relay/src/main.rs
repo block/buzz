@@ -657,6 +657,77 @@ async fn main() -> anyhow::Result<()> {
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
 
+    // Relay self-identity profile — publish a kind:0 profile for the relay's
+    // own pubkey so clients render relay-authored posts (workflow notifications,
+    // moderation notices) with a recognizable name instead of a raw pubkey.
+    // Replaceable (NIP-01), so re-publishing at every startup is idempotent and
+    // lets operators update the name via BUZZ_RELAY_PROFILE_NAME without DB edits.
+    {
+        let profile_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let name = std::env::var("BUZZ_RELAY_PROFILE_NAME")
+                .unwrap_or_else(|_| "buzz-relay".to_string());
+            let about = std::env::var("BUZZ_RELAY_PROFILE_ABOUT").unwrap_or_else(|_| {
+                "Relay infrastructure: workflow notifications, reminders, \
+                 and moderation notices are authored by this key."
+                    .to_string()
+            });
+            let metadata = serde_json::json!({
+                "name": name,
+                "display_name": name,
+                "about": about,
+            });
+            let event = match nostr::EventBuilder::new(nostr::Kind::Metadata, metadata.to_string())
+                .sign_with_keys(&profile_state.relay_keypair)
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "relay profile signing failed");
+                    return;
+                }
+            };
+            let tenant = match buzz_relay::tenant::bind_deployment_community(
+                &profile_state.db,
+                &profile_state.config.relay_url,
+            )
+            .await
+            {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    warn!(
+                        error = ?e,
+                        "relay profile publish skipped: relay host is not mapped to a community"
+                    );
+                    return;
+                }
+            };
+            let relay_pubkey_hex = profile_state.relay_keypair.public_key().to_hex();
+            match profile_state
+                .db
+                .replace_addressable_event(tenant.community(), &event, None)
+                .await
+            {
+                Ok((stored, was_inserted)) => {
+                    if was_inserted {
+                        let kind_u32 =
+                            buzz_core::kind::event_kind_u32(&stored.event);
+                        buzz_relay::handlers::event::dispatch_persistent_event(
+                            &tenant,
+                            &profile_state,
+                            &stored,
+                            kind_u32,
+                            &relay_pubkey_hex,
+                            None,
+                        )
+                        .await;
+                    }
+                    info!(name = %name, "relay identity profile published");
+                }
+                Err(e) => warn!(error = %e, "relay profile publish failed"),
+            }
+        });
+    }
+
     // Ephemeral channel reaper — archives channels whose TTL deadline has passed.
     // Runs every 60s, matching the workflow cron loop pattern. The SQL UPDATE
     // uses `archived_at IS NULL` as a guard, so concurrent runs from multiple
