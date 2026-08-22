@@ -1,6 +1,14 @@
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The `rg` filename as it appears on disk for this target. Without the `.exe`
+/// suffix the Windows lookup never matched a real binary.
+#[cfg(windows)]
+const RG_EXE: &str = "rg.exe";
+#[cfg(not(windows))]
+const RG_EXE: &str = "rg";
 
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1MB per line — skip files with longer lines (likely binary)
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
@@ -28,30 +36,38 @@ fn try_system_rg(args: &[String]) -> Option<i32> {
     Some(status.code().unwrap_or(2))
 }
 
-fn clean_path(self_canon: &Path) -> String {
-    let original = std::env::var("PATH").unwrap_or_default();
-    original
-        .split(':')
-        .filter(|dir| {
-            if dir.is_empty() {
-                return false;
-            }
-            let candidate = Path::new(dir).join("rg");
-            match std::fs::canonicalize(&candidate) {
-                Ok(c) => c != *self_canon,
-                Err(_) => true,
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(":")
+/// `PATH` with any directory holding *this* shim removed, so the spawned `rg` is
+/// always the real one and never a recursive call back into us.
+///
+/// Entries are split with `env::split_paths` rather than on `':'`: Windows
+/// separates with `;` and every entry carries a drive colon, so a `':'` split
+/// tore `C:\tools\bin` into `C` and `\tools\bin` and left no usable directory
+/// behind — the shim then never found a system `rg` on Windows at all.
+///
+/// A `join_paths` failure (an entry containing the separator itself) yields an
+/// empty `PATH`, which makes `which_rg` find nothing and drops us to the
+/// built-in walker. That is the safe direction: returning the original would put
+/// this shim's own directory back in play.
+fn clean_path(self_canon: &Path) -> OsString {
+    let original = std::env::var_os("PATH").unwrap_or_default();
+    let kept = std::env::split_paths(&original).filter(|dir| {
+        if dir.as_os_str().is_empty() {
+            return false;
+        }
+        match std::fs::canonicalize(dir.join(RG_EXE)) {
+            Ok(canonical) => canonical != *self_canon,
+            Err(_) => true,
+        }
+    });
+    std::env::join_paths(kept).unwrap_or_default()
 }
 
-fn which_rg(path: &str) -> Option<PathBuf> {
-    for dir in path.split(':') {
-        if dir.is_empty() {
+fn which_rg(path: &OsStr) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = Path::new(dir).join("rg");
+        let candidate = dir.join(RG_EXE);
         if candidate.is_file() && is_executable(&candidate) {
             return Some(candidate);
         }
@@ -487,5 +503,62 @@ mod tests {
         let mut printed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         let found = scan_file(&f, "NEEDLE", &opts, &mut sink, &mut printed);
         assert!(found, "expected NEEDLE to be found");
+    }
+
+    /// Regression guard for the `':'`-split lookup. Both entries are absolute, so
+    /// on Windows they carry drive colons — splitting on `':'` mangled every one
+    /// and `which_rg` returned `None` no matter what was installed.
+    #[test]
+    fn which_rg_finds_the_binary_past_an_earlier_path_entry() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let holding = tempfile::tempdir().expect("tempdir");
+        let binary = holding.path().join(RG_EXE);
+        std::fs::write(&binary, b"#!/bin/sh\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let path = std::env::join_paths([empty.path(), holding.path()]).expect("join_paths");
+
+        assert_eq!(which_rg(&path).as_deref(), Some(binary.as_path()));
+    }
+
+    #[test]
+    fn which_rg_returns_none_when_no_entry_holds_the_binary() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let path = std::env::join_paths([empty.path()]).expect("join_paths");
+
+        assert!(which_rg(&path).is_none());
+    }
+
+    #[test]
+    fn which_rg_ignores_empty_path_entries() {
+        assert!(which_rg(OsStr::new("")).is_none());
+    }
+
+    #[test]
+    fn clean_path_drops_the_directory_holding_this_shim() {
+        let shim_dir = tempfile::tempdir().expect("tempdir");
+        let shim = shim_dir.path().join(RG_EXE);
+        std::fs::write(&shim, b"shim").expect("write");
+        let shim_canon = std::fs::canonicalize(&shim).expect("canonicalize");
+
+        // `clean_path` reads the process PATH, so assert on the predicate it
+        // applies rather than mutating global env from a test thread.
+        let kept: Vec<PathBuf> =
+            std::env::split_paths(&std::env::join_paths([shim_dir.path()]).expect("join_paths"))
+                .filter(|dir| match std::fs::canonicalize(dir.join(RG_EXE)) {
+                    Ok(canonical) => canonical != shim_canon,
+                    Err(_) => true,
+                })
+                .collect();
+
+        assert!(
+            kept.is_empty(),
+            "the shim's own directory must be filtered out: {kept:?}"
+        );
     }
 }
