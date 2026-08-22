@@ -4,7 +4,7 @@ import {
   mergeAllowlist,
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
@@ -132,7 +132,7 @@ export function CreateAgentRespondToField({
     () =>
       (userSearchQuery.data ?? []).filter(
         (user) =>
-          !allowlistSet.has(user.pubkey.toLowerCase()) &&
+          !allowlistSet.has(normalizePubkey(user.pubkey)) &&
           !isArchivedDiscovery(user.pubkey),
       ),
     [allowlistSet, isArchivedDiscovery, userSearchQuery.data],
@@ -155,7 +155,7 @@ export function CreateAgentRespondToField({
 
   function handleRemove(pubkey: string) {
     onAllowlistChange(
-      allowlist.filter((p) => p.toLowerCase() !== pubkey.toLowerCase()),
+      allowlist.filter((p) => normalizePubkey(p) !== normalizePubkey(pubkey)),
     );
   }
 

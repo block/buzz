@@ -1,4 +1,5 @@
 import type { Channel, ManagedAgent } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 /**
  * Defers the trust decision until both ownership and channel membership have
@@ -14,15 +15,15 @@ export function classifyAgentManagementOrigin(
   channelId: string,
 ): "buffer" | "accept" | "reject" {
   if (agents === undefined || channels === undefined) return "buffer";
-  const normalizedAgentPubkey = agentPubkey.toLowerCase();
+  const normalizedAgentPubkey = normalizePubkey(agentPubkey);
   const isOwnedAgent = agents.some(
-    (agent) => agent.pubkey.toLowerCase() === normalizedAgentPubkey,
+    (agent) => normalizePubkey(agent.pubkey) === normalizedAgentPubkey,
   );
   const originChannel = channels.find((channel) => channel.id === channelId);
   return isOwnedAgent &&
     originChannel?.isMember === true &&
     originChannel.memberPubkeys.some(
-      (pubkey) => pubkey.toLowerCase() === normalizedAgentPubkey,
+      (pubkey) => normalizePubkey(pubkey) === normalizedAgentPubkey,
     )
     ? "accept"
     : "reject";

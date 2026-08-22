@@ -1,4 +1,5 @@
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type AgentCommunityAvailability =
   | "Here"
@@ -97,7 +98,7 @@ export function findManagedAgentRuntime(
   pubkey: string,
   relayUrl: string,
 ): ManagedAgentRuntimeStatus | undefined {
-  const normalizedPubkey = pubkey.toLowerCase();
+  const normalizedPubkey = normalizePubkey(pubkey);
   // Backend rows carry the canonical pair URL; the caller passes the
   // community's stored URL, which may differ in spelling (localhost vs
   // 127.0.0.1, default port, trailing slash). Compare canonically, keeping
@@ -105,7 +106,7 @@ export function findManagedAgentRuntime(
   const canonical = canonicalRelayUrl(relayUrl);
   return runtimes.find(
     (runtime) =>
-      runtime.pubkey.toLowerCase() === normalizedPubkey &&
+      normalizePubkey(runtime.pubkey) === normalizedPubkey &&
       (runtime.relayUrl === relayUrl ||
         runtime.requestedRelayUrl === relayUrl ||
         (canonical !== null && runtime.relayUrl === canonical)),

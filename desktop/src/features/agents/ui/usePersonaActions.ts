@@ -63,6 +63,7 @@ import {
   buildInstanceInputForDefinition,
   type BackendIntent,
 } from "../lib/instanceInputForDefinition";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
@@ -131,7 +132,10 @@ export function usePersonaActions() {
   const personas = personasQuery.data ?? [];
   const publications = catalogQuery.data ?? [];
   const sharedCatalogPersonaIdSet = React.useMemo(() => {
-    const currentPubkey = identityQuery.data?.pubkey.toLowerCase();
+    const identityPubkey = identityQuery.data?.pubkey;
+    const currentPubkey = identityPubkey
+      ? normalizePubkey(identityPubkey)
+      : undefined;
     return new Set(
       publications
         .filter((publication) => publication.ownerPubkey === currentPubkey)
@@ -400,7 +404,7 @@ export function usePersonaActions() {
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
       void queryClient.invalidateQueries({
-        queryKey: ["user-profile", result.newPubkey.toLowerCase()],
+        queryKey: ["user-profile", normalizePubkey(result.newPubkey)],
       });
       if (result.memoryErrors.length > 0) {
         setPersonaErrorMessage(
