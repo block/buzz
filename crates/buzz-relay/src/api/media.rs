@@ -46,9 +46,32 @@ enum UploadRouteMode {
     LegacyMedia,
 }
 
-fn should_stream_as_video(sniff: &[u8]) -> bool {
-    infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
-        || buzz_media::looks_like_iso_bmff(sniff)
+fn should_stream_as_video(sniff: &[u8], signals_calendar: bool) -> bool {
+    !signals_calendar
+        && (infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
+            || buzz_media::looks_like_iso_bmff(sniff))
+}
+
+fn calendar_upload_hints(headers: &HeaderMap) -> Option<buzz_media::FileUploadHints> {
+    let declared_mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let extension = headers
+        .get("x-buzz-file-extension")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    (declared_mime.as_deref() == Some("text/calendar") || extension.as_deref() == Some("ics"))
+        .then_some(buzz_media::FileUploadHints {
+            declared_mime,
+            extension,
+        })
 }
 
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
@@ -322,6 +345,7 @@ pub async fn upload_blob(
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
     let attribution = upload_attribution(&state, &auth, &headers).await;
+    let calendar_hints = calendar_upload_hints(&headers);
 
     let serving_write =
         buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
@@ -357,70 +381,92 @@ pub async fn upload_blob(
 
     let mut descriptor = serving_write
         .protect(async {
-            Ok(if should_stream_as_video(&sniff) {
-                // Video path: stream body directly to disk — never fully buffered in RAM.
-                let content_length = headers
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok());
-                buzz_media::process_video_upload(
-                    &state.media_storage,
-                    &state.config.media,
-                    &auth.tenant,
-                    &auth.auth_event,
-                    replay,
-                    content_length,
-                    attribution,
-                )
-                .await?
-            } else {
-                // Non-video path: buffer the body (bounded by the larger of the image
-                // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-                // Images go through the thumbnailing pipeline; non-media attachments
-                // (docs, archives, text, data) take the generic file path and are
-                // served as downloads. Recognized audio/video cannot fall through it.
-                let max = state
-                    .config
-                    .media
-                    .max_image_bytes
-                    .max(state.config.media.max_file_bytes);
-                let bytes =
-                    axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
-                        .await
-                        .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
-
-                let is_image = matches!(
-                    infer::get(&bytes).map(|t| t.mime_type()),
-                    Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
-                );
-
-                if is_image {
-                    buzz_media::process_upload(
+            Ok(
+                if should_stream_as_video(&sniff, calendar_hints.is_some()) {
+                    // Video path: stream body directly to disk — never fully buffered in RAM.
+                    let content_length = headers
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok());
+                    buzz_media::process_video_upload(
                         &state.media_storage,
                         &state.config.media,
                         &auth.tenant,
                         &auth.auth_event,
-                        bytes,
+                        replay,
+                        content_length,
                         attribution,
                     )
                     .await?
-                } else if auth.route_mode == UploadRouteMode::LegacyMedia {
-                    let mime = infer::get(&bytes)
-                        .map(|kind| kind.mime_type().to_string())
-                        .unwrap_or_else(|| "application/octet-stream".to_string());
-                    return Err(MediaError::DisallowedContentType(mime));
                 } else {
-                    buzz_media::process_file_upload(
-                        &state.media_storage,
-                        &state.config.media,
-                        &auth.tenant,
-                        &auth.auth_event,
-                        bytes,
-                        attribution,
-                    )
-                    .await?
-                }
-            })
+                    // Non-video path: buffer the body (bounded by the larger of the image
+                    // and generic-file caps), then decide image-vs-generic by sniffed MIME.
+                    // Images go through the thumbnailing pipeline; non-media attachments
+                    // (docs, archives, text, data) take the generic file path and are
+                    // served as downloads. Recognized audio/video cannot fall through it.
+                    let max = if calendar_hints.is_some() {
+                        state
+                            .config
+                            .media
+                            .max_file_bytes
+                            .min(buzz_media::validation::MAX_CALENDAR_BYTES)
+                    } else {
+                        state
+                            .config
+                            .media
+                            .max_image_bytes
+                            .max(state.config.media.max_file_bytes)
+                    };
+                    let bytes =
+                        axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
+                            .await
+                            .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
+
+                    if let Some(hints) = calendar_hints {
+                        if auth.route_mode == UploadRouteMode::LegacyMedia {
+                            return Err(MediaError::DisallowedContentType("text/calendar".into()));
+                        }
+                        buzz_media::process_file_upload_with_hints(
+                            &state.media_storage,
+                            &state.config.media,
+                            &auth.tenant,
+                            &auth.auth_event,
+                            bytes,
+                            attribution,
+                            hints,
+                        )
+                        .await?
+                    } else if matches!(
+                        infer::get(&bytes).map(|t| t.mime_type()),
+                        Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
+                    ) {
+                        buzz_media::process_upload(
+                            &state.media_storage,
+                            &state.config.media,
+                            &auth.tenant,
+                            &auth.auth_event,
+                            bytes,
+                            attribution,
+                        )
+                        .await?
+                    } else if auth.route_mode == UploadRouteMode::LegacyMedia {
+                        let mime = infer::get(&bytes)
+                            .map(|kind| kind.mime_type().to_string())
+                            .unwrap_or_else(|| "application/octet-stream".to_string());
+                        return Err(MediaError::DisallowedContentType(mime));
+                    } else {
+                        buzz_media::process_file_upload(
+                            &state.media_storage,
+                            &state.config.media,
+                            &auth.tenant,
+                            &auth.auth_event,
+                            bytes,
+                            attribution,
+                        )
+                        .await?
+                    }
+                },
+            )
         })
         .await
         .map_err(|error| {
@@ -939,6 +985,25 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn calendar_hints_require_calendar_validation_before_media_routing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "text/calendar; charset=utf-8".parse().unwrap(),
+        );
+        headers.insert("x-buzz-file-extension", "ICS".parse().unwrap());
+
+        let hints = calendar_upload_hints(&headers).expect("calendar hints");
+        assert_eq!(hints.declared_mime.as_deref(), Some("text/calendar"));
+        assert_eq!(hints.extension.as_deref(), Some("ics"));
+
+        headers.remove("x-buzz-file-extension");
+        let mismatched =
+            calendar_upload_hints(&headers).expect("MIME alone still signals calendar");
+        assert_eq!(mismatched.extension, None);
+    }
+
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
@@ -983,7 +1048,8 @@ mod tests {
     fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
         let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(bytes).is_none());
-        assert!(should_stream_as_video(bytes));
+        assert!(should_stream_as_video(bytes, false));
+        assert!(!should_stream_as_video(bytes, true));
     }
 
     async fn test_state() -> Arc<AppState> {

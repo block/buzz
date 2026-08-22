@@ -14,6 +14,10 @@ use crate::error::MediaError;
 /// `video/mp4` and `validate_content()` rejects it here.
 const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// Maximum accepted size for an iCalendar attachment, even when the operator's
+/// generic file limit is larger.
+pub const MAX_CALENDAR_BYTES: u64 = 10 * 1024 * 1024;
+
 const MP4_BRANDS: &[[u8; 4]] = &[
     *b"isom", *b"iso2", *b"iso3", *b"iso4", *b"iso5", *b"iso6", *b"iso7", *b"iso8", *b"iso9",
     *b"mp41", *b"mp42", *b"avc1", *b"dash", *b"M4V ",
@@ -180,6 +184,13 @@ pub fn validate_file_content(
         });
     }
 
+    // Canonicalize valid iCalendar bytes even when an older/generic client did
+    // not send hints. Sidecars are keyed only by the byte hash, so the same
+    // bytes must never alternate between `.bin` and `.ics` classifications.
+    if signals_calendar_content(bytes) {
+        return validate_calendar_content(bytes, config);
+    }
+
     // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
     // valid MP4 signatures. Never let an `ftyp` container fall through as an
     // opaque attachment merely because its brand is unfamiliar.
@@ -216,6 +227,151 @@ pub fn validate_file_content(
         }
         None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
     }
+}
+
+/// Validate a generic file upload with optional untrusted format hints.
+///
+/// The existing deny-list path remains the default. The only hint pair that
+/// changes classification is `text/calendar` plus `ics`, because iCalendar is
+/// UTF-8 text and has no reliable magic-byte signature. Either calendar signal
+/// without the other fails closed.
+pub fn validate_file_content_with_hints(
+    bytes: &[u8],
+    config: &MediaConfig,
+    declared_mime: Option<&str>,
+    extension: Option<&str>,
+) -> Result<(String, String), MediaError> {
+    let signals_calendar = declared_mime == Some("text/calendar") || extension == Some("ics");
+    if !signals_calendar {
+        return validate_file_content(bytes, config);
+    }
+    if declared_mime != Some("text/calendar") || extension != Some("ics") {
+        return Err(MediaError::DisallowedContentType(
+            declared_mime
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+        ));
+    }
+
+    validate_calendar_content(bytes, config)
+}
+
+fn signals_calendar_content(bytes: &[u8]) -> bool {
+    let unfolded = unfold_calendar_bytes(bytes);
+    std::str::from_utf8(&unfolded).is_ok_and(|text| {
+        text.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCALENDAR"))
+    })
+}
+
+fn unfold_calendar_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut unfolded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let crlf_fold = bytes.get(index) == Some(&b'\r')
+            && bytes.get(index + 1) == Some(&b'\n')
+            && bytes
+                .get(index + 2)
+                .is_some_and(|byte| matches!(*byte, b' ' | b'\t'));
+        if crlf_fold {
+            index += 3;
+            continue;
+        }
+        let lf_fold = bytes.get(index) == Some(&b'\n')
+            && bytes
+                .get(index + 1)
+                .is_some_and(|byte| matches!(*byte, b' ' | b'\t'));
+        if lf_fold {
+            index += 2;
+            continue;
+        }
+        unfolded.push(bytes[index]);
+        index += 1;
+    }
+    unfolded
+}
+
+fn validate_calendar_content(
+    bytes: &[u8],
+    config: &MediaConfig,
+) -> Result<(String, String), MediaError> {
+    let max = config.max_file_bytes.min(MAX_CALENDAR_BYTES);
+    if bytes.len() as u64 > max {
+        return Err(MediaError::FileTooLarge {
+            size: bytes.len() as u64,
+            max,
+        });
+    }
+    if bytes.contains(&0) {
+        return Err(MediaError::UnknownContentType);
+    }
+    let unfolded = unfold_calendar_bytes(bytes);
+    let text = std::str::from_utf8(&unfolded).map_err(|_| MediaError::UnknownContentType)?;
+    let mut lines: Vec<String> = Vec::new();
+    for raw_line in text.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let previous = lines.last_mut().ok_or(MediaError::UnknownContentType)?;
+            previous.push_str(&line[1..]);
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+
+    let first = lines.first().ok_or(MediaError::UnknownContentType)?;
+    let last = lines.last().ok_or(MediaError::UnknownContentType)?;
+    if !first.eq_ignore_ascii_case("BEGIN:VCALENDAR") || !last.eq_ignore_ascii_case("END:VCALENDAR")
+    {
+        return Err(MediaError::UnknownContentType);
+    }
+
+    let mut components: Vec<&str> = Vec::new();
+    for line in &lines {
+        let (name_and_params, value) =
+            line.split_once(':').ok_or(MediaError::UnknownContentType)?;
+        let name = name_and_params.split(';').next().unwrap_or_default();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(MediaError::UnknownContentType);
+        }
+
+        if name.eq_ignore_ascii_case("BEGIN") {
+            if name_and_params.len() != name.len()
+                || value.is_empty()
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || (components.is_empty() && !value.eq_ignore_ascii_case("VCALENDAR"))
+                || (!components.is_empty() && value.eq_ignore_ascii_case("VCALENDAR"))
+            {
+                return Err(MediaError::UnknownContentType);
+            }
+            components.push(value);
+        } else if name.eq_ignore_ascii_case("END") {
+            if name_and_params.len() != name.len()
+                || components
+                    .pop()
+                    .is_none_or(|component| !component.eq_ignore_ascii_case(value))
+            {
+                return Err(MediaError::UnknownContentType);
+            }
+        } else if components.is_empty() {
+            return Err(MediaError::UnknownContentType);
+        }
+    }
+    if !components.is_empty() {
+        return Err(MediaError::UnknownContentType);
+    }
+
+    Ok(("text/calendar".to_string(), "ics".to_string()))
 }
 
 /// Whether a stored blob should be served inline (rendered in the client) or as
@@ -2636,6 +2792,105 @@ mod tests {
         let (mime, ext) = validate_file_content(b"hello, this is a text file\n", &config).unwrap();
         assert_eq!(mime, "application/octet-stream");
         assert_eq!(ext, "bin");
+    }
+
+    #[test]
+    fn test_validate_calendar_from_matching_untrusted_hints() {
+        let calendar = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nSUMMARY:Planning\r\nEND:VCALENDAR\r\n";
+        assert_eq!(
+            validate_file_content(calendar, &test_config()).unwrap(),
+            ("text/calendar".to_string(), "ics".to_string())
+        );
+        let (mime, ext) = validate_file_content_with_hints(
+            calendar,
+            &test_config(),
+            Some("text/calendar"),
+            Some("ics"),
+        )
+        .unwrap();
+
+        assert_eq!(mime, "text/calendar");
+        assert_eq!(ext, "ics");
+    }
+
+    #[test]
+    fn test_validate_calendar_unfolds_bytes_before_utf8_validation() {
+        let calendar =
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nSUMMARY:Caf\xc3\r\n \xa9\r\nEND:VCALENDAR\r\n";
+        let expected = ("text/calendar".to_string(), "ics".to_string());
+
+        assert_eq!(
+            validate_file_content(calendar, &test_config()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            validate_file_content_with_hints(
+                calendar,
+                &test_config(),
+                Some("text/calendar"),
+                Some("ics"),
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_validate_calendar_rejects_bad_content_and_mismatched_hints() {
+        let config = test_config();
+        let valid = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+        let malformed = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n";
+        let nul = b"BEGIN:VCALENDAR\r\nSUMMARY:bad\0value\r\nEND:VCALENDAR\r\n";
+        let invalid_utf8 = b"BEGIN:VCALENDAR\r\nSUMMARY:\xff\r\nEND:VCALENDAR\r\n";
+        let wrapped_html =
+            b"BEGIN:VCALENDAR\r\n<!DOCTYPE html><script>alert(1)</script>\r\nEND:VCALENDAR\r\n";
+        let folded_envelope_junk = b"BEGIN:VCALENDAR\r\n EVIL\r\nEND:VCALENDAR\r\n";
+        let unbalanced_component = b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        for bytes in [
+            malformed.as_slice(),
+            nul,
+            invalid_utf8,
+            wrapped_html,
+            folded_envelope_junk,
+            unbalanced_component,
+        ] {
+            assert!(validate_file_content_with_hints(
+                bytes,
+                &config,
+                Some("text/calendar"),
+                Some("ics"),
+            )
+            .is_err());
+        }
+        for (mime, ext) in [
+            (Some("text/calendar"), None),
+            (None, Some("ics")),
+            (Some("text/plain"), Some("ics")),
+            (Some("text/calendar"), Some("txt")),
+        ] {
+            assert!(validate_file_content_with_hints(valid, &config, mime, ext).is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_calendar_has_ten_mib_hard_limit() {
+        let mut config = test_config();
+        config.max_file_bytes = 100 * 1024 * 1024;
+        let oversized = vec![b'A'; MAX_CALENDAR_BYTES as usize + 1];
+
+        assert!(matches!(
+            validate_file_content_with_hints(
+                &oversized,
+                &config,
+                Some("text/calendar"),
+                Some("ics"),
+            ),
+            Err(MediaError::FileTooLarge {
+                max: MAX_CALENDAR_BYTES,
+                ..
+            })
+        ));
     }
 
     #[test]
