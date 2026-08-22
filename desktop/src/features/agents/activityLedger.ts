@@ -827,7 +827,11 @@ export function groupMissionJournals(
     return {
       id: key,
       journalKey: key,
-      correlationId: bucket[0]?.correlationId ?? key,
+      // Journal authority needs a correlation that survives bounded paging,
+      // restarts, and midnight. The source-derived journal key (normally the
+      // observer turnId) is stable even when the turn_started envelope is not
+      // in today's window. Per-event tool/message correlations remain intact.
+      correlationId: key,
       channelId: bucket[0]?.channelId ?? null,
       sessionId: bucket.find((event) => event.sessionId)?.sessionId ?? null,
       turnId: bucket.find((event) => event.turnId)?.turnId ?? null,

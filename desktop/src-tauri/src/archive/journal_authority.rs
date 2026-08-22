@@ -11,8 +11,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub const KIND_JOURNAL_AUTHORITY: u16 = 24201;
-const ARTIFACT_SCHEMA: &str = "buzz.activity-journal-authority/v1";
+const ARTIFACT_SCHEMA: &str = "buzz.activity-journal-authority/v2";
 const ARTIFACT_MARKER: &str = "buzz-activity-journal";
+const MAX_RELAY_URL_BYTES: usize = 2_048;
 const MAX_JOURNAL_ID_CHARS: usize = 512;
 const MAX_CORRELATION_ID_CHARS: usize = 512;
 const MAX_TEXT_CHARS: usize = 20_000;
@@ -39,6 +40,7 @@ impl JournalAuthorityArtifactType {
 #[serde(rename_all = "camelCase")]
 struct SignedArtifactContent {
     schema: String,
+    relay_url: String,
     artifact_type: JournalAuthorityArtifactType,
     journal_id: String,
     correlation_id: String,
@@ -54,6 +56,7 @@ struct SignedArtifactContent {
 #[serde(rename_all = "camelCase")]
 pub struct JournalAuthorityArtifact {
     pub owner_pubkey: String,
+    pub relay_url: String,
     pub event_id: String,
     pub signature: String,
     pub created_at: i64,
@@ -88,12 +91,23 @@ pub struct JournalVerificationInput {
 #[derive(Debug)]
 struct StoredArtifactRow {
     identity_pubkey: String,
+    relay_url: String,
     journal_id: String,
     artifact_type: String,
     event_id: String,
     created_at: i64,
     revision: i64,
     raw_json: String,
+}
+
+pub fn normalize_relay_scope(relay_url: &str) -> Result<String, String> {
+    if relay_url.is_empty() || relay_url.len() > MAX_RELAY_URL_BYTES {
+        return Err(format!(
+            "journal authority relay URL must contain between 1 and {MAX_RELAY_URL_BYTES} bytes"
+        ));
+    }
+    buzz_core_pkg::relay::normalize_relay_url(relay_url)
+        .map_err(|error| format!("journal authority relay URL is invalid: {error}"))
 }
 
 fn checked_nonempty(value: &str, label: &str, max_chars: usize) -> Result<String, String> {
@@ -171,12 +185,18 @@ fn validate_content(content: &SignedArtifactContent) -> Result<(), String> {
     if content.schema != ARTIFACT_SCHEMA {
         return Err("unsupported journal authority artifact schema".into());
     }
+    if normalize_relay_scope(&content.relay_url)? != content.relay_url {
+        return Err("journal authority relay URL must be canonical".into());
+    }
     checked_nonempty(&content.journal_id, "journalId", MAX_JOURNAL_ID_CHARS)?;
     checked_nonempty(
         &content.correlation_id,
         "correlationId",
         MAX_CORRELATION_ID_CHARS,
     )?;
+    if content.correlation_id != content.journal_id {
+        return Err("journal authority correlationId must equal the stable journalId".into());
+    }
     if content.revision < 1 {
         return Err("journal authority revision must be positive".into());
     }
@@ -213,6 +233,7 @@ fn validate_content(content: &SignedArtifactContent) -> Result<(), String> {
 fn artifact_from_event(event: &Event, content: SignedArtifactContent) -> JournalAuthorityArtifact {
     JournalAuthorityArtifact {
         owner_pubkey: event.pubkey.to_hex(),
+        relay_url: content.relay_url,
         event_id: event.id.to_hex(),
         signature: event.sig.to_string(),
         created_at: event.created_at.as_secs() as i64,
@@ -231,7 +252,9 @@ fn artifact_from_event(event: &Event, content: SignedArtifactContent) -> Journal
 pub fn validate_signed_artifact(
     raw_json: &str,
     expected_owner_pubkey: &str,
+    expected_relay_url: &str,
 ) -> Result<JournalAuthorityArtifact, String> {
+    let expected_relay_url = normalize_relay_scope(expected_relay_url)?;
     let event = Event::from_json(raw_json)
         .map_err(|error| format!("parse journal authority event: {error}"))?;
     event
@@ -250,7 +273,12 @@ pub fn validate_signed_artifact(
         .map_err(|error| format!("parse journal authority content: {error}"))?;
     validate_content(&content)?;
 
+    if content.relay_url != expected_relay_url {
+        return Err("journal authority event relay is not the active relay".into());
+    }
+
     if single_tag(&event, "t")? != ARTIFACT_MARKER
+        || single_tag(&event, "relay_url")? != content.relay_url
         || single_tag(&event, "artifact_type")? != content.artifact_type.as_str()
         || single_tag(&event, "journal_id")? != content.journal_id
         || single_tag(&event, "correlation_id")? != content.correlation_id
@@ -290,6 +318,7 @@ fn build_signed_artifact(keys: &Keys, content: SignedArtifactContent) -> Result<
     validate_content(&content)?;
     let mut tags = vec![
         tag("t", ARTIFACT_MARKER)?,
+        tag("relay_url", &content.relay_url)?,
         tag("artifact_type", content.artifact_type.as_str())?,
         tag("journal_id", &content.journal_id)?,
         tag("correlation_id", &content.correlation_id)?,
@@ -312,11 +341,13 @@ fn build_signed_artifact(keys: &Keys, content: SignedArtifactContent) -> Result<
 
 pub fn build_owner_override_event(
     keys: &Keys,
+    relay_url: &str,
     input: &OwnerJournalOverrideInput,
     revision: i64,
 ) -> Result<String, String> {
     let content = SignedArtifactContent {
         schema: ARTIFACT_SCHEMA.to_string(),
+        relay_url: normalize_relay_scope(relay_url)?,
         artifact_type: JournalAuthorityArtifactType::OwnerOverride,
         journal_id: checked_nonempty(&input.journal_id, "journalId", MAX_JOURNAL_ID_CHARS)?,
         correlation_id: checked_nonempty(
@@ -335,11 +366,13 @@ pub fn build_owner_override_event(
 
 pub fn build_verification_event(
     keys: &Keys,
+    relay_url: &str,
     input: &JournalVerificationInput,
     revision: i64,
 ) -> Result<String, String> {
     let content = SignedArtifactContent {
         schema: ARTIFACT_SCHEMA.to_string(),
+        relay_url: normalize_relay_scope(relay_url)?,
         artifact_type: JournalAuthorityArtifactType::Verification,
         journal_id: checked_nonempty(&input.journal_id, "journalId", MAX_JOURNAL_ID_CHARS)?,
         correlation_id: checked_nonempty(
@@ -363,14 +396,21 @@ pub fn build_verification_event(
 pub fn next_revision(
     conn: &Connection,
     identity_pubkey: &str,
+    relay_url: &str,
     journal_id: &str,
     artifact_type: JournalAuthorityArtifactType,
 ) -> Result<i64, String> {
     let current = conn
         .query_row(
             "SELECT revision FROM journal_authority_artifacts
-             WHERE identity_pubkey = ?1 AND journal_id = ?2 AND artifact_type = ?3",
-            params![identity_pubkey, journal_id, artifact_type.as_str()],
+             WHERE identity_pubkey = ?1 AND relay_url = ?2
+               AND journal_id = ?3 AND artifact_type = ?4",
+            params![
+                identity_pubkey,
+                relay_url,
+                journal_id,
+                artifact_type.as_str()
+            ],
             |row| row.get::<_, i64>(0),
         )
         .optional()
@@ -391,19 +431,23 @@ fn rollback(conn: &Connection) {
 pub fn upsert_signed_artifact(
     conn: &Connection,
     identity_pubkey: &str,
+    relay_url: &str,
     raw_json: &str,
     stored_at: i64,
 ) -> Result<JournalAuthorityArtifact, String> {
-    let artifact = validate_signed_artifact(raw_json, identity_pubkey)?;
+    let relay_url = normalize_relay_scope(relay_url)?;
+    let artifact = validate_signed_artifact(raw_json, identity_pubkey, &relay_url)?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|error| format!("begin journal authority upsert: {error}"))?;
     let result = (|| -> Result<JournalAuthorityArtifact, String> {
         let current = conn
             .query_row(
                 "SELECT event_id, revision FROM journal_authority_artifacts
-                 WHERE identity_pubkey = ?1 AND journal_id = ?2 AND artifact_type = ?3",
+                 WHERE identity_pubkey = ?1 AND relay_url = ?2
+                   AND journal_id = ?3 AND artifact_type = ?4",
                 params![
                     identity_pubkey,
+                    relay_url,
                     artifact.journal_id,
                     artifact.artifact_type.as_str()
                 ],
@@ -416,11 +460,13 @@ pub fn upsert_signed_artifact(
             if current_event_id == artifact.event_id {
                 conn.execute(
                     "UPDATE journal_authority_artifacts SET raw_json = ?1, stored_at = ?2
-                     WHERE identity_pubkey = ?3 AND journal_id = ?4 AND artifact_type = ?5",
+                     WHERE identity_pubkey = ?3 AND relay_url = ?4
+                       AND journal_id = ?5 AND artifact_type = ?6",
                     params![
                         raw_json,
                         stored_at,
                         identity_pubkey,
+                        relay_url,
                         artifact.journal_id,
                         artifact.artifact_type.as_str()
                     ],
@@ -446,10 +492,10 @@ pub fn upsert_signed_artifact(
 
         conn.execute(
             "INSERT INTO journal_authority_artifacts
-                 (identity_pubkey, journal_id, artifact_type, event_id, created_at,
-                  revision, raw_json, stored_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT (identity_pubkey, journal_id, artifact_type) DO UPDATE SET
+                 (identity_pubkey, relay_url, journal_id, artifact_type, event_id,
+                  created_at, revision, raw_json, stored_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (identity_pubkey, relay_url, journal_id, artifact_type) DO UPDATE SET
                  event_id = excluded.event_id,
                  created_at = excluded.created_at,
                  revision = excluded.revision,
@@ -457,6 +503,7 @@ pub fn upsert_signed_artifact(
                  stored_at = excluded.stored_at",
             params![
                 identity_pubkey,
+                relay_url,
                 artifact.journal_id,
                 artifact.artifact_type.as_str(),
                 artifact.event_id,
@@ -488,9 +535,12 @@ pub fn upsert_signed_artifact(
 fn validate_stored_row(
     row: StoredArtifactRow,
     expected_identity: &str,
+    expected_relay_url: &str,
 ) -> Result<JournalAuthorityArtifact, String> {
-    let artifact = validate_signed_artifact(&row.raw_json, expected_identity)?;
+    let artifact = validate_signed_artifact(&row.raw_json, expected_identity, expected_relay_url)?;
     if row.identity_pubkey != expected_identity
+        || row.relay_url != expected_relay_url
+        || row.relay_url != artifact.relay_url
         || row.journal_id != artifact.journal_id
         || row.artifact_type != artifact.artifact_type.as_str()
         || row.event_id != artifact.event_id
@@ -505,36 +555,42 @@ fn validate_stored_row(
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredArtifactRow> {
     Ok(StoredArtifactRow {
         identity_pubkey: row.get(0)?,
-        journal_id: row.get(1)?,
-        artifact_type: row.get(2)?,
-        event_id: row.get(3)?,
-        created_at: row.get(4)?,
-        revision: row.get(5)?,
-        raw_json: row.get(6)?,
+        relay_url: row.get(1)?,
+        journal_id: row.get(2)?,
+        artifact_type: row.get(3)?,
+        event_id: row.get(4)?,
+        created_at: row.get(5)?,
+        revision: row.get(6)?,
+        raw_json: row.get(7)?,
     })
 }
 
 pub fn get_journal_authority_artifacts(
     conn: &Connection,
     identity_pubkey: &str,
+    relay_url: &str,
     journal_id: &str,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
+    let relay_url = normalize_relay_scope(relay_url)?;
     let mut stmt = conn
         .prepare(
-            "SELECT identity_pubkey, journal_id, artifact_type, event_id,
+            "SELECT identity_pubkey, relay_url, journal_id, artifact_type, event_id,
                     created_at, revision, raw_json
              FROM journal_authority_artifacts
-             WHERE identity_pubkey = ?1 AND journal_id = ?2
+             WHERE identity_pubkey = ?1 AND relay_url = ?2 AND journal_id = ?3
              ORDER BY artifact_type ASC",
         )
         .map_err(|error| format!("prepare journal authority read: {error}"))?;
     let rows = stmt
-        .query_map(params![identity_pubkey, journal_id], row_from_sql)
+        .query_map(
+            params![identity_pubkey, relay_url, journal_id],
+            row_from_sql,
+        )
         .map_err(|error| format!("query journal authority artifacts: {error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("read journal authority artifact row: {error}"))?
         .into_iter()
-        .map(|row| validate_stored_row(row, identity_pubkey))
+        .map(|row| validate_stored_row(row, identity_pubkey, &relay_url))
         .collect()
 }
 
@@ -544,10 +600,12 @@ pub fn get_journal_authority_artifacts(
 pub fn query_journal_authority_artifacts(
     conn: &Connection,
     identity_pubkey: &str,
+    relay_url: &str,
     start_created_at: i64,
     end_created_at: i64,
     limit: i64,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
+    let relay_url = normalize_relay_scope(relay_url)?;
     if start_created_at >= end_created_at {
         return Err("journal authority range must be half-open and non-empty".into());
     }
@@ -556,24 +614,31 @@ pub fn query_journal_authority_artifacts(
     }
     let mut stmt = conn
         .prepare(
-            "SELECT identity_pubkey, journal_id, artifact_type, event_id,
+            "SELECT identity_pubkey, relay_url, journal_id, artifact_type, event_id,
                     created_at, revision, raw_json
              FROM journal_authority_artifacts
-             WHERE identity_pubkey = ?1 AND created_at >= ?2 AND created_at < ?3
+             WHERE identity_pubkey = ?1 AND relay_url = ?2
+               AND created_at >= ?3 AND created_at < ?4
              ORDER BY created_at DESC, event_id DESC
-             LIMIT ?4",
+             LIMIT ?5",
         )
         .map_err(|error| format!("prepare journal authority range query: {error}"))?;
     let rows = stmt
         .query_map(
-            params![identity_pubkey, start_created_at, end_created_at, limit],
+            params![
+                identity_pubkey,
+                relay_url,
+                start_created_at,
+                end_created_at,
+                limit
+            ],
             row_from_sql,
         )
         .map_err(|error| format!("query journal authority range: {error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("read journal authority range row: {error}"))?
         .into_iter()
-        .map(|row| validate_stored_row(row, identity_pubkey))
+        .map(|row| validate_stored_row(row, identity_pubkey, &relay_url))
         .collect()
 }
 
@@ -593,6 +658,7 @@ pub fn validate_archived_verification_sources(
     if artifact.owner_pubkey != identity_pubkey {
         return Err("verification artifact owner does not match the active identity".into());
     }
+    let relay_url = normalize_relay_scope(&artifact.relay_url)?;
     let mut correlation_bound = artifact.correlation_id == artifact.journal_id;
     for source_event_id in &artifact.source_event_ids {
         let mut stmt = conn
@@ -604,19 +670,23 @@ pub fn validate_archived_verification_sources(
                     AND aes.relay_url = ae.relay_url
                     AND aes.id = ae.id
                   WHERE ae.identity_pubkey = ?1
-                    AND ae.id = ?2
+                    AND ae.relay_url = ?2
+                    AND ae.id = ?3
                     AND aes.scope_type = 'owner_p'
                     AND aes.scope_value = ?1",
             )
             .map_err(|error| format!("prepare verification source read: {error}"))?;
         let rows = stmt
-            .query_map(params![identity_pubkey, source_event_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
+            .query_map(
+                params![identity_pubkey, relay_url, source_event_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
             .map_err(|error| format!("read verification source event: {error}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("read verification source row: {error}"))?;

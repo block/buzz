@@ -865,3 +865,54 @@ fn migration_m3_reopen_twice_is_idempotent() {
         "M3: marker must still be present after idempotent second open"
     );
 }
+
+#[test]
+fn migration_m5_quarantines_unscoped_journal_authority() {
+    let db_file = tempfile::NamedTempFile::new().unwrap();
+    {
+        let conn = Connection::open(db_file.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE journal_authority_artifacts (
+                identity_pubkey TEXT NOT NULL,
+                journal_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                raw_json TEXT NOT NULL,
+                stored_at INTEGER NOT NULL,
+                PRIMARY KEY (identity_pubkey, journal_id, artifact_type),
+                UNIQUE (identity_pubkey, event_id)
+             );
+             INSERT INTO journal_authority_artifacts VALUES
+                ('owner', 'journal', 'owner_override', 'event', 1, 1, '{}', 1);",
+        )
+        .unwrap();
+    }
+
+    let conn = open_archive_db(db_file.path()).unwrap();
+    let scoped_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(journal_authority_artifacts)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(scoped_columns.iter().any(|name| name == "relay_url"));
+    let active_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM journal_authority_artifacts",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let quarantined_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM journal_authority_artifacts_unscoped_v1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_rows, 0);
+    assert_eq!(quarantined_rows, 1);
+}

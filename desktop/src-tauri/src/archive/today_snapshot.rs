@@ -95,9 +95,12 @@ fn validate_hex(value: &str, label: &str, expected_len: usize) -> Result<(), Str
     Ok(())
 }
 
-fn reject_identity_secret_material(value: &serde_json::Value) -> Result<(), String> {
+const REDACTED_IDENTITY_SECRET_TEXT: &str = "[REDACTED: identity secret material]";
+
+fn redact_identity_secret_text(value: &mut serde_json::Value) -> Result<usize, String> {
     match value {
         serde_json::Value::Object(object) => {
+            let mut redactions = 0;
             for (key, child) in object {
                 let normalized_key = key
                     .chars()
@@ -110,22 +113,63 @@ fn reject_identity_secret_material(value: &serde_json::Value) -> Result<(), Stri
                 ) {
                     return Err("Today snapshot cannot contain identity secret fields".into());
                 }
-                reject_identity_secret_material(child)?;
+                redactions += redact_identity_secret_text(child)?;
             }
+            Ok(redactions)
         }
         serde_json::Value::Array(values) => {
+            let mut redactions = 0;
             for child in values {
-                reject_identity_secret_material(child)?;
+                redactions += redact_identity_secret_text(child)?;
             }
+            Ok(redactions)
         }
         serde_json::Value::String(text) => {
             let lowercase = text.to_ascii_lowercase();
             if lowercase.contains("nsec1") || lowercase.contains("nostr_secret_key=") {
-                return Err("Today snapshot cannot contain identity secret material".into());
+                *text = REDACTED_IDENTITY_SECRET_TEXT.into();
+                return Ok(1);
             }
+            Ok(0)
         }
-        _ => {}
+        _ => Ok(0),
     }
+}
+
+fn clear_identity_secret_redaction_marker(surface: &mut serde_json::Value) -> Result<(), String> {
+    let surface = surface
+        .as_object_mut()
+        .ok_or_else(|| "Today snapshot surface must be a JSON object".to_string())?;
+    if let Some(projection) = surface.get_mut("snapshotProjection") {
+        let projection = projection.as_object_mut().ok_or_else(|| {
+            "Today snapshot surface.snapshotProjection must be a JSON object".to_string()
+        })?;
+        projection.remove("identitySecretsRedacted");
+    }
+    Ok(())
+}
+
+fn record_identity_secret_redactions(
+    surface: &mut serde_json::Value,
+    redactions: usize,
+) -> Result<(), String> {
+    if redactions == 0 {
+        return Ok(());
+    }
+    let surface = surface
+        .as_object_mut()
+        .ok_or_else(|| "Today snapshot surface must be a JSON object".to_string())?;
+    let projection = surface
+        .entry("snapshotProjection")
+        .or_insert_with(|| serde_json::json!({}));
+    let projection = projection.as_object_mut().ok_or_else(|| {
+        "Today snapshot surface.snapshotProjection must be a JSON object".to_string()
+    })?;
+    projection.insert(
+        "identitySecretsRedacted".into(),
+        serde_json::Value::from(redactions),
+    );
+    projection.insert("bounded".into(), serde_json::Value::Bool(true));
     Ok(())
 }
 
@@ -135,6 +179,7 @@ fn parse_unsigned_snapshot(
     expected_relay_url: &str,
     now: i64,
     require_unexpired: bool,
+    redact_secret_text: bool,
 ) -> Result<UnsignedOwnerTodaySnapshot, String> {
     if snapshot_json.is_empty() || snapshot_json.len() > MAX_SNAPSHOT_BYTES {
         return Err(format!(
@@ -181,9 +226,23 @@ fn parse_unsigned_snapshot(
             "Today snapshot rawEvents exceeds {MAX_RAW_EVENTS} records"
         ));
     }
-    reject_identity_secret_material(&snapshot.surface)?;
-    for event in &snapshot.raw_events {
-        reject_identity_secret_material(event)?;
+    if redact_secret_text {
+        clear_identity_secret_redaction_marker(&mut snapshot.surface)?;
+        let mut redactions = redact_identity_secret_text(&mut snapshot.surface)?;
+        for event in &mut snapshot.raw_events {
+            redactions += redact_identity_secret_text(event)?;
+        }
+        record_identity_secret_redactions(&mut snapshot.surface, redactions)?;
+    } else {
+        let mut sanitized_surface = snapshot.surface.clone();
+        let mut redactions = redact_identity_secret_text(&mut sanitized_surface)?;
+        for event in &snapshot.raw_events {
+            let mut sanitized_event = event.clone();
+            redactions += redact_identity_secret_text(&mut sanitized_event)?;
+        }
+        if redactions > 0 {
+            return Err("Today snapshot contains unsanitized identity secret material".into());
+        }
     }
     Ok(snapshot)
 }
@@ -288,6 +347,7 @@ fn parse_and_validate_signed_snapshot(
         expected_relay_url,
         now,
         require_unexpired,
+        false,
     )?;
     validate_hex(&snapshot.snapshot_sha256, "snapshotSha256", 64)?;
     validate_hex(&snapshot.event_id, "eventId", 64)?;
@@ -341,6 +401,7 @@ pub fn write_owner_today_snapshot(
         expected_owner_pubkey,
         expected_relay_url,
         now,
+        true,
         true,
     )?;
     let signed_snapshot = build_signed_snapshot(owner_keys, snapshot)?;
@@ -604,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_rejects_identity_secret_fields_and_nsec_values() {
+    fn snapshot_redacts_identity_secret_fields_and_values_without_suppressing_today() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::parse(&"a".repeat(64)).unwrap();
         let owner = keys.public_key().to_hex();
@@ -622,17 +683,43 @@ mod tests {
         .contains("identity secret"));
 
         let mut value: serde_json::Value = serde_json::from_str(&snapshot(&owner, 1000)).unwrap();
+        value["surface"]["journals"] = serde_json::json!([{
+            "id": "journal-with-example",
+            "summary": "Documentation example: NoStR_SeCrEt_KeY=redacted-placeholder",
+            "detail": "A generic secret-handling note is safe"
+        }]);
         value["rawEvents"][0]["detail"] = "nsec1should-never-leave-the-owner-boundary".into();
-        assert!(write_owner_today_snapshot(
+        let receipt = write_owner_today_snapshot(
             dir.path(),
             &keys,
             &owner,
             TEST_RELAY,
             &value.to_string(),
-            1000
+            1000,
         )
-        .unwrap_err()
-        .contains("identity secret"));
+        .unwrap();
+        let raw = read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1001).unwrap();
+        assert!(!raw.contains("do-not-export"));
+        assert!(!raw.to_ascii_lowercase().contains("nsec1"));
+        assert!(!raw.to_ascii_lowercase().contains("nostr_secret_key="));
+        let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            stored["surface"]["snapshotProjection"]["identitySecretsRedacted"],
+            2
+        );
+        assert_eq!(
+            stored["surface"]["journals"][0]["summary"],
+            "[REDACTED: identity secret material]"
+        );
+        assert_eq!(
+            stored["surface"]["journals"][0]["detail"],
+            "A generic secret-handling note is safe"
+        );
+        assert_eq!(
+            stored["rawEvents"][0]["detail"],
+            "[REDACTED: identity secret material]"
+        );
+        assert_eq!(receipt.owner_pubkey, owner);
     }
 
     #[test]

@@ -145,6 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_metric_created
 -- authority state.
 CREATE TABLE IF NOT EXISTS journal_authority_artifacts (
     identity_pubkey TEXT NOT NULL,
+    relay_url       TEXT NOT NULL,
     journal_id      TEXT NOT NULL,
     artifact_type   TEXT NOT NULL,
     event_id        TEXT NOT NULL,
@@ -152,14 +153,13 @@ CREATE TABLE IF NOT EXISTS journal_authority_artifacts (
     revision        INTEGER NOT NULL,
     raw_json        TEXT NOT NULL,
     stored_at       INTEGER NOT NULL,
-    PRIMARY KEY (identity_pubkey, journal_id, artifact_type),
-    UNIQUE (identity_pubkey, event_id),
+    PRIMARY KEY (identity_pubkey, relay_url, journal_id, artifact_type),
+    UNIQUE (identity_pubkey, relay_url, event_id),
     CHECK (artifact_type IN ('owner_override', 'verification')),
     CHECK (revision > 0)
 );
 CREATE INDEX IF NOT EXISTS idx_journal_authority_created
-    ON journal_authority_artifacts
-       (identity_pubkey, created_at DESC, event_id DESC);
+    ON journal_authority_artifacts (identity_pubkey, created_at DESC, event_id DESC);
 ";
 
 // ── Open / init ─────────────────────────────────────────────────────────────

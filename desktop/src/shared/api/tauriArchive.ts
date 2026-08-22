@@ -578,6 +578,7 @@ export type JournalAuthorityArtifactType = "owner_override" | "verification";
 /** An artifact returned only after backend signature and evidence validation. */
 export type JournalAuthorityArtifact = {
   ownerPubkey: string;
+  relayUrl: string;
   eventId: string;
   signature: string;
   createdAt: number;
@@ -591,15 +592,18 @@ export type JournalAuthorityArtifact = {
   sourceEventIds: string[];
 };
 
-export async function upsertOwnerJournalOverride(input: {
-  journalId: string;
-  correlationId: string;
-  summary: string;
-  note?: string | null;
-}): Promise<JournalAuthorityArtifact> {
+export async function upsertOwnerJournalOverride(
+  relayUrl: string,
+  input: {
+    journalId: string;
+    correlationId: string;
+    summary: string;
+    note?: string | null;
+  },
+): Promise<JournalAuthorityArtifact> {
   return invokeTauri<JournalAuthorityArtifact>(
     "upsert_owner_journal_override",
-    { input },
+    { relayUrl, input },
   );
 }
 
@@ -607,27 +611,33 @@ export async function upsertOwnerJournalOverride(input: {
  * Create an owner-signed verification artifact. The backend rejects missing,
  * cross-owner, non-observer, or signature-invalid source event IDs.
  */
-export async function upsertJournalVerification(input: {
-  journalId: string;
-  correlationId: string;
-  receiptRef: string;
-  sourceEventIds: string[];
-}): Promise<JournalAuthorityArtifact> {
+export async function upsertJournalVerification(
+  relayUrl: string,
+  input: {
+    journalId: string;
+    correlationId: string;
+    receiptRef: string;
+    sourceEventIds: string[];
+  },
+): Promise<JournalAuthorityArtifact> {
   return invokeTauri<JournalAuthorityArtifact>("upsert_journal_verification", {
+    relayUrl,
     input,
   });
 }
 
 export async function getJournalAuthorityArtifacts(
+  relayUrl: string,
   journalId: string,
 ): Promise<JournalAuthorityArtifact[]> {
   return invokeTauri<JournalAuthorityArtifact[]>(
     "get_journal_authority_artifacts",
-    { journalId },
+    { relayUrl, journalId },
   );
 }
 
 export async function queryJournalAuthorityArtifacts(opts: {
+  relayUrl: string;
   startCreatedAt: number;
   endCreatedAt: number;
   limit?: number;
@@ -636,6 +646,7 @@ export async function queryJournalAuthorityArtifacts(opts: {
     "query_journal_authority_artifacts",
     {
       startCreatedAt: opts.startCreatedAt,
+      relayUrl: opts.relayUrl,
       endCreatedAt: opts.endCreatedAt,
       limit: opts.limit ?? null,
     },

@@ -13,15 +13,26 @@ use crate::relay::relay_ws_url_with_override;
 
 // ── Activity Ledger owner authority ─────────────────────────────────────────
 
+fn active_relay_scope(state: &AppState, requested_relay_url: &str) -> Result<String, String> {
+    let active = journal_authority::normalize_relay_scope(&relay_ws_url_with_override(state))?;
+    let requested = journal_authority::normalize_relay_scope(requested_relay_url)?;
+    if requested != active {
+        return Err("journal authority request relay is not the active relay".into());
+    }
+    Ok(active)
+}
+
 /// Persist an owner-authenticated journal summary override. The backend signs
 /// the artifact with the active identity; callers never receive key material.
 #[tauri::command]
 pub async fn upsert_owner_journal_override(
     state: State<'_, AppState>,
+    relay_url: String,
     input: OwnerJournalOverrideInput,
 ) -> Result<JournalAuthorityArtifact, String> {
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
+    let relay_url = active_relay_scope(&state, &relay_url)?;
     let now = now_secs();
     state
         .archive_db
@@ -29,11 +40,13 @@ pub async fn upsert_owner_journal_override(
             let revision = journal_authority::next_revision(
                 conn,
                 &identity_pk,
+                &relay_url,
                 input.journal_id.trim(),
                 journal_authority::JournalAuthorityArtifactType::OwnerOverride,
             )?;
-            let raw = journal_authority::build_owner_override_event(&keys, &input, revision)?;
-            journal_authority::upsert_signed_artifact(conn, &identity_pk, &raw, now)
+            let raw =
+                journal_authority::build_owner_override_event(&keys, &relay_url, &input, revision)?;
+            journal_authority::upsert_signed_artifact(conn, &identity_pk, &relay_url, &raw, now)
         })
         .await
 }
@@ -44,10 +57,12 @@ pub async fn upsert_owner_journal_override(
 #[tauri::command]
 pub async fn upsert_journal_verification(
     state: State<'_, AppState>,
+    relay_url: String,
     input: JournalVerificationInput,
 ) -> Result<JournalAuthorityArtifact, String> {
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
+    let relay_url = active_relay_scope(&state, &relay_url)?;
     let now = now_secs();
     state
         .archive_db
@@ -55,13 +70,16 @@ pub async fn upsert_journal_verification(
             let revision = journal_authority::next_revision(
                 conn,
                 &identity_pk,
+                &relay_url,
                 input.journal_id.trim(),
                 journal_authority::JournalAuthorityArtifactType::Verification,
             )?;
-            let raw = journal_authority::build_verification_event(&keys, &input, revision)?;
-            let artifact = journal_authority::validate_signed_artifact(&raw, &identity_pk)?;
+            let raw =
+                journal_authority::build_verification_event(&keys, &relay_url, &input, revision)?;
+            let artifact =
+                journal_authority::validate_signed_artifact(&raw, &identity_pk, &relay_url)?;
             journal_authority::validate_archived_verification_sources(conn, &keys, &artifact)?;
-            journal_authority::upsert_signed_artifact(conn, &identity_pk, &raw, now)
+            journal_authority::upsert_signed_artifact(conn, &identity_pk, &relay_url, &raw, now)
         })
         .await
 }
@@ -71,10 +89,12 @@ pub async fn upsert_journal_verification(
 #[tauri::command]
 pub async fn get_journal_authority_artifacts(
     state: State<'_, AppState>,
+    relay_url: String,
     journal_id: String,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
+    let relay_url = active_relay_scope(&state, &relay_url)?;
     let journal_id = journal_id.trim().to_owned();
     state
         .archive_db
@@ -82,6 +102,7 @@ pub async fn get_journal_authority_artifacts(
             let artifacts = journal_authority::get_journal_authority_artifacts(
                 conn,
                 &identity_pk,
+                &relay_url,
                 &journal_id,
             )?;
             for artifact in &artifacts {
@@ -97,18 +118,21 @@ pub async fn get_journal_authority_artifacts(
 #[tauri::command]
 pub async fn query_journal_authority_artifacts(
     state: State<'_, AppState>,
+    relay_url: String,
     start_created_at: i64,
     end_created_at: i64,
     limit: Option<i64>,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
     let keys = state.signing_keys()?;
     let identity_pk = keys.public_key().to_hex();
+    let relay_url = active_relay_scope(&state, &relay_url)?;
     state
         .archive_db
         .with_conn(move |conn| {
             let artifacts = journal_authority::query_journal_authority_artifacts(
                 conn,
                 &identity_pk,
+                &relay_url,
                 start_created_at,
                 end_created_at,
                 limit.unwrap_or(200),

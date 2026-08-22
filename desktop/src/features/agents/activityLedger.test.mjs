@@ -485,7 +485,7 @@ test("buildTodayActivitySurface keeps multi-agent handoffs distinct while aggreg
   assert.equal(feed.journals.length, 2);
   assert.deepEqual(
     feed.journals.map((journal) => journal.correlationId),
-    ["f".repeat(64), "f".repeat(64)],
+    ["turn-a", "turn-b"],
   );
   assert.equal(feed.channels[0].channelId, CHANNEL_A);
   assert.deepEqual(

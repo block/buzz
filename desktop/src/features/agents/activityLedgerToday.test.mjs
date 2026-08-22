@@ -398,22 +398,27 @@ test("Today authority overlay recomputes evidence-gap counts", async () => {
     decrypt: async (candidate) => candidate.decoded,
   });
   const journal = surface.journals[0];
-  const updated = applyAuthorityToTodayActivity(surface, [
-    {
-      ownerPubkey: "owner-a",
-      eventId: "c".repeat(64),
-      signature: "owner-signature",
-      createdAt: ended.created_at + 1,
-      artifactType: "verification",
-      journalId: journal.id,
-      correlationId: journal.correlationId,
-      revision: 1,
-      summary: null,
-      note: null,
-      receiptRef: "receipt:owner-check",
-      sourceEventIds: [event.id, ended.id].sort(),
-    },
-  ]);
+  const updated = applyAuthorityToTodayActivity(
+    surface,
+    [
+      {
+        ownerPubkey: "owner-a",
+        relayUrl: "wss://relay.example",
+        eventId: "c".repeat(64),
+        signature: "owner-signature",
+        createdAt: ended.created_at + 1,
+        artifactType: "verification",
+        journalId: journal.id,
+        correlationId: journal.correlationId,
+        revision: 1,
+        summary: null,
+        note: null,
+        receiptRef: "receipt:owner-check",
+        sourceEventIds: [event.id, ended.id].sort(),
+      },
+    ],
+    "wss://relay.example",
+  );
 
   assert.equal(updated.journals[0].proofState, "VERIFIED");
   assert.equal(updated.counts.claimedWithoutEvidence, 0);

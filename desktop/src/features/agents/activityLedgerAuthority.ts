@@ -3,10 +3,12 @@ import {
   type MissionJournal,
   type NormalizedActivityEvent,
 } from "./activityLedger";
+import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
 
 /** A signature-verified owner artifact returned by the Tauri authority store. */
 export type ValidatedJournalAuthorityArtifact = {
   ownerPubkey: string;
+  relayUrl: string;
   eventId: string;
   signature: string;
   createdAt: number;
@@ -75,9 +77,9 @@ function currentVerificationSourceEventId(
 }
 
 /**
- * Bind verification to both the receipted work and the observer frame that
- * carries the journal-level correlation. Those can be separate signed relay
- * events when the observer batch flushes between turn start and tool output.
+ * Bind verification to receipted work and the latest retained observer frame.
+ * The stable journal/turn correlation is bound separately by the backend; the
+ * source lookup below is a fail-closed fallback for nonstandard journals.
  */
 export function journalVerificationSources(
   journal: MissionJournal,
@@ -120,18 +122,22 @@ export function journalVerificationSources(
 /**
  * Overlay owner authority without rewriting the observed source journal.
  *
- * The backend verifies artifact ids, signatures, signer identity, tags, and
- * revision ordering before returning these values. The frontend additionally
- * requires every verification source id to belong to this exact journal, so a
- * valid owner signature for one turn cannot promote a different turn.
+ * The backend verifies artifact ids, signatures, signer identity, relay scope,
+ * revision ordering, and every cited observer source before returning these
+ * values. The frontend additionally requires the latest retained evidence to
+ * be covered, so older verification cannot overwrite later activity.
  */
 export function applyValidatedJournalAuthority(
   journal: MissionJournal,
   artifacts: readonly ValidatedJournalAuthorityArtifact[],
+  relayUrl: string,
 ): MissionJournal {
+  const relayScope = canonicalRelayUrl(relayUrl);
+  if (!relayScope) return journal;
   const matching = artifacts
     .filter(
       (artifact) =>
+        artifact.relayUrl === relayScope &&
         artifact.journalId === journal.id &&
         artifact.correlationId === journal.correlationId,
     )
@@ -159,11 +165,6 @@ export function applyValidatedJournalAuthority(
     });
   }
 
-  const sourceEventIds = new Set(
-    journal.events
-      .map((event) => event.provenance.sourceEventId)
-      .filter((id): id is string => Boolean(id)),
-  );
   const currentSourceEventId = currentVerificationSourceEventId(journal);
   const latestVerification = matching
     .filter(
@@ -171,7 +172,10 @@ export function applyValidatedJournalAuthority(
         artifact.artifactType === "verification" &&
         Boolean(artifact.receiptRef?.trim()) &&
         artifact.sourceEventIds.length > 0 &&
-        artifact.sourceEventIds.every((id) => sourceEventIds.has(id)) &&
+        // The backend revalidates every cited source against this exact
+        // owner+relay+journal. A bounded Today window may omit the prior-day
+        // correlation root, so require the latest retained source here rather
+        // than incorrectly requiring all historical sources to be in memory.
         validSourceEventId(currentSourceEventId) &&
         artifact.sourceEventIds.includes(currentSourceEventId),
     )

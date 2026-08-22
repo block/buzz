@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   buildMissionJournal,
   normalizeActivityEvents,
@@ -98,6 +99,7 @@ export function ManagedAgentSessionPanel({
   rawEventsOverride,
   transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
+  const relayUrl = useCommunities().activeCommunity?.relayUrl ?? null;
   const hasObserver = isManagedAgentActive(agent);
   // Always read from the store — archived frames are ingested regardless of
   // live status and must be renderable for idle agents with channel history.
@@ -176,8 +178,8 @@ export function ManagedAgentSessionPanel({
         />
       ) : null}
 
-      {latestJournal.eventCount > 0 ? (
-        <MissionJournalSummary journal={latestJournal} />
+      {latestJournal.eventCount > 0 && relayUrl ? (
+        <MissionJournalSummary journal={latestJournal} relayUrl={relayUrl} />
       ) : null}
 
       <SessionBody
@@ -221,7 +223,13 @@ function journalStatusLabel(status: MissionJournal["status"]): string {
   }
 }
 
-function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
+function MissionJournalSummary({
+  journal,
+  relayUrl,
+}: {
+  journal: MissionJournal;
+  relayUrl: string;
+}) {
   const [artifacts, setArtifacts] = React.useState<JournalAuthorityArtifact[]>(
     [],
   );
@@ -233,9 +241,9 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
   const [error, setError] = React.useState<string | null>(null);
 
   const reloadAuthority = React.useCallback(async () => {
-    const current = await getJournalAuthorityArtifacts(journal.id);
+    const current = await getJournalAuthorityArtifacts(relayUrl, journal.id);
     setArtifacts(current);
-  }, [journal.id]);
+  }, [journal.id, relayUrl]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -245,7 +253,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     setReceiptRef("");
     setAuthorityLoading(true);
     setError(null);
-    getJournalAuthorityArtifacts(journal.id)
+    getJournalAuthorityArtifacts(relayUrl, journal.id)
       .then((current) => {
         if (!cancelled) setArtifacts(current);
       })
@@ -264,11 +272,11 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     return () => {
       cancelled = true;
     };
-  }, [journal.id, journal.summary]);
+  }, [journal.id, journal.summary, relayUrl]);
 
   const authorizedJournal = React.useMemo(
-    () => applyValidatedJournalAuthority(journal, artifacts),
-    [artifacts, journal],
+    () => applyValidatedJournalAuthority(journal, artifacts, relayUrl),
+    [artifacts, journal, relayUrl],
   );
   React.useEffect(() => {
     if (mode !== "summary") setSummary(authorizedJournal.summary);
@@ -282,7 +290,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     setSaving(true);
     setError(null);
     try {
-      await upsertOwnerJournalOverride({
+      await upsertOwnerJournalOverride(relayUrl, {
         journalId: journal.id,
         correlationId: journal.correlationId,
         summary: summary.trim(),
@@ -313,7 +321,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     setSaving(true);
     setError(null);
     try {
-      await upsertJournalVerification({
+      await upsertJournalVerification(relayUrl, {
         journalId: journal.id,
         correlationId: journalAuthorityCorrelationId(journal),
         receiptRef: receiptRef.trim(),

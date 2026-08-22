@@ -652,9 +652,10 @@ export async function buildTodayActivityFromArchivedPages(input: {
 export function applyAuthorityToTodayActivity(
   surface: TodayActivitySurface,
   artifacts: readonly ValidatedJournalAuthorityArtifact[],
+  relayUrl: string,
 ): TodayActivitySurface {
   const journals: TodayActivityJournal[] = surface.journals.map((journal) => ({
-    ...applyValidatedJournalAuthority(journal, artifacts),
+    ...applyValidatedJournalAuthority(journal, artifacts, relayUrl),
     agentPubkey: journal.agentPubkey,
     agentName: journal.agentName,
   }));

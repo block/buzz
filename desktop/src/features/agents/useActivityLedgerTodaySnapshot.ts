@@ -41,8 +41,10 @@ export function canPublishActivityLedgerTodaySnapshot(
  * journal can span midnight while its latest owner edit belongs to yesterday.
  */
 export async function loadActivityLedgerTodayAuthority(
+  relayUrl: string,
   journalIds: readonly string[],
   load: (
+    relayUrl: string,
     journalId: string,
   ) => Promise<JournalAuthorityArtifact[]> = getJournalAuthorityArtifacts,
 ): Promise<JournalAuthorityArtifact[]> {
@@ -58,7 +60,7 @@ export async function loadActivityLedgerTodayAuthority(
       nextIndex += 1;
       const journalId = uniqueJournalIds[index];
       if (journalId === undefined) return;
-      byJournal[index] = await load(journalId);
+      byJournal[index] = await load(relayUrl, journalId);
     }
   };
   await Promise.all(
@@ -116,10 +118,11 @@ export function useActivityLedgerTodaySnapshot(): void {
           pages: archivedPages,
         });
         const authority = await loadActivityLedgerTodayAuthority(
+          relayUrl,
           observedSurface.journals.map((journal) => journal.id),
         );
         const surface = buildBoundedTodayActivitySurface(
-          applyAuthorityToTodayActivity(observedSurface, authority),
+          applyAuthorityToTodayActivity(observedSurface, authority, relayUrl),
         );
         // Timestamp the artifact at publication, not before archive paging,
         // decryption, authority loading, and projection. A slow reconstruction

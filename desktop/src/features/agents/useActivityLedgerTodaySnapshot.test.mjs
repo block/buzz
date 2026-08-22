@@ -15,9 +15,10 @@ test("Today publishing waits for a successful managed-agent roster read", () => 
 test("Today authority is loaded by retained journal id across day boundaries", async () => {
   const calls = [];
   const artifacts = await loadActivityLedgerTodayAuthority(
+    "wss://relay.example",
     ["journal-across-midnight", "journal-today", "journal-across-midnight"],
-    async (journalId) => {
-      calls.push(journalId);
+    async (relayUrl, journalId) => {
+      calls.push([relayUrl, journalId]);
       return [
         {
           journalId,
@@ -27,7 +28,10 @@ test("Today authority is loaded by retained journal id across day boundaries", a
     },
   );
 
-  assert.deepEqual(calls, ["journal-across-midnight", "journal-today"]);
+  assert.deepEqual(calls, [
+    ["wss://relay.example", "journal-across-midnight"],
+    ["wss://relay.example", "journal-today"],
+  ]);
   assert.deepEqual(
     artifacts.map((artifact) => artifact.journalId),
     ["journal-across-midnight", "journal-today"],

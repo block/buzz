@@ -17,13 +17,157 @@ use rusqlite::{params, Connection};
 ///
 /// Ordering: M2 (column additions) runs before M1 (index rebuild) so that
 /// the M1 rebuild, which calls `insert_metric_index_row`, always operates
-/// against a schema that includes the cache-read columns. M4 (`archive_meta`
-/// + scope-age index) runs last; it is independent of M1–M3.
+/// against a schema that includes the cache-read columns. M4 adds
+/// `archive_meta` and the scope-age index independently of M1–M3. M5 then
+/// scopes journal authority to the canonical relay.
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
     migrate_add_harness_to_metric_index(conn)?;
-    migrate_add_archive_meta(conn)
+    migrate_add_archive_meta(conn)?;
+    migrate_scope_journal_authority_to_relay(conn)
+}
+
+const RELAY_SCOPED_JOURNAL_AUTHORITY_SCHEMA: &str = r#"
+CREATE TABLE journal_authority_artifacts (
+    identity_pubkey TEXT NOT NULL,
+    relay_url       TEXT NOT NULL,
+    journal_id      TEXT NOT NULL,
+    artifact_type   TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    revision        INTEGER NOT NULL,
+    raw_json        TEXT NOT NULL,
+    stored_at       INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, relay_url, journal_id, artifact_type),
+    UNIQUE (identity_pubkey, relay_url, event_id),
+    CHECK (artifact_type IN ('owner_override', 'verification')),
+    CHECK (revision > 0)
+);
+CREATE INDEX idx_journal_authority_created
+    ON journal_authority_artifacts
+       (identity_pubkey, relay_url, created_at DESC, event_id DESC);
+"#;
+
+/// M5: replace the unreleased owner+journal authority key with an
+/// owner+relay+journal key. Legacy events did not sign a relay and therefore
+/// cannot be safely inferred or copied into the authoritative table. Preserve
+/// them under an explicitly unscoped quarantine name for audit/recovery, while
+/// all current reads fail closed against the new table.
+fn migrate_scope_journal_authority_to_relay(conn: &Connection) -> Result<(), String> {
+    const MARKER: &str = "scope_journal_authority_to_relay";
+    let already_run: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
+            [MARKER],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("migration M5: guard check: {error}"))?
+        > 0;
+    if already_run {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| format!("migration M5: begin immediate: {error}"))?;
+    let result = (|| -> Result<(), String> {
+        let already_run: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
+                [MARKER],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("migration M5: in-lock guard check: {error}"))?
+            > 0;
+        if already_run {
+            return Ok(());
+        }
+
+        let columns: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(journal_authority_artifacts)")
+                .map_err(|error| format!("migration M5: inspect authority table: {error}"))?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))
+                .map_err(|error| format!("migration M5: query authority columns: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("migration M5: read authority columns: {error}"))?;
+            rows
+        };
+        let relay_scoped = columns.iter().any(|(name, _)| name == "relay_url");
+        if relay_scoped {
+            let primary_key = columns
+                .iter()
+                .filter(|(_, position)| *position > 0)
+                .map(|(name, position)| (*position, name.as_str()))
+                .collect::<Vec<_>>();
+            if primary_key
+                != [
+                    (1, "identity_pubkey"),
+                    (2, "relay_url"),
+                    (3, "journal_id"),
+                    (4, "artifact_type"),
+                ]
+            {
+                return Err("migration M5: relay-scoped authority primary key is invalid".into());
+            }
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_journal_authority_created;
+                 CREATE INDEX idx_journal_authority_created
+                   ON journal_authority_artifacts
+                      (identity_pubkey, relay_url, created_at DESC, event_id DESC);",
+            )
+            .map_err(|error| format!("migration M5: rebuild scoped index: {error}"))?;
+        } else {
+            let quarantine_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name = 'journal_authority_artifacts_unscoped_v1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| format!("migration M5: inspect quarantine table: {error}"))?
+                > 0;
+            if quarantine_exists {
+                return Err(
+                    "migration M5: unscoped authority quarantine already exists without marker"
+                        .into(),
+                );
+            }
+            conn.execute_batch(
+                "ALTER TABLE journal_authority_artifacts
+                   RENAME TO journal_authority_artifacts_unscoped_v1;
+                 DROP INDEX IF EXISTS idx_journal_authority_created;",
+            )
+            .map_err(|error| format!("migration M5: quarantine unscoped authority: {error}"))?;
+            conn.execute_batch(RELAY_SCOPED_JOURNAL_AUTHORITY_SCHEMA)
+                .map_err(|error| format!("migration M5: create scoped authority table: {error}"))?;
+        }
+
+        conn.execute(
+            "INSERT INTO archive_migrations (name, applied_at) VALUES (?1, ?2)",
+            params![
+                MARKER,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            ],
+        )
+        .map_err(|error| format!("migration M5: record marker: {error}"))?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|error| format!("migration M5: commit: {error}")),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 /// M1: add `harness TEXT` column to `agent_metric_index` and rebuild index
