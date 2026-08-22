@@ -87,12 +87,16 @@ List<MentionCandidate> buildMentionCandidates({
     }
   }
 
+  final currentLower = currentPubkey?.toLowerCase();
   for (final agent in relayAgents) {
     final pk = agent.pubkey;
     if (seen.contains(pk)) continue;
-    if (!sharedAgentPubkeys.contains(pk)) continue;
-    seen.add(pk);
     final profile = userCache[pk];
+    final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
+    final ownedByCurrentUser =
+        currentLower != null && ownerPubkey?.toLowerCase() == currentLower;
+    if (!ownedByCurrentUser && !sharedAgentPubkeys.contains(pk)) continue;
+    seen.add(pk);
     candidates.add(
       MentionCandidate(
         pubkey: pk,
@@ -103,15 +107,37 @@ List<MentionCandidate> buildMentionCandidates({
         avatarUrl: profile?.avatarUrl,
         isAgent: true,
         isMember: false,
-        ownerPubkey: ownerByAgentPubkey[pk] ?? profile?.ownerPubkey,
+        ownerPubkey: ownerPubkey,
       ),
     );
   }
 
-  final currentLower = currentPubkey?.toLowerCase();
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
-    if (seen.contains(pk)) continue;
+    final existingIndex = candidates.indexWhere(
+      (candidate) => candidate.pubkey == pk,
+    );
+    if (existingIndex != -1) {
+      final existing = candidates[existingIndex];
+      if (existing.isAgent && !existing.isMember) {
+        candidates[existingIndex] = MentionCandidate(
+          pubkey: pk,
+          displayName: profile.displayName?.trim().isNotEmpty == true
+              ? profile.displayName!.trim()
+              : existing.displayName,
+          secondaryLabel: profile.nip05Handle ?? existing.secondaryLabel,
+          avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
+          isAgent: true,
+          isMember: false,
+          role: existing.role,
+          ownerPubkey:
+              ownerByAgentPubkey[pk] ??
+              profile.ownerPubkey ??
+              existing.ownerPubkey,
+        );
+      }
+      continue;
+    }
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
     final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
     if (isAgent) {
