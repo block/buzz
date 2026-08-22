@@ -178,17 +178,147 @@ void main() {
     expect(container.read(inviteJoinProvider).status, InviteJoinStatus.idle);
   });
 
-  test('join_policy_required requires a fresh link and cannot retry', () async {
+  test(
+    'policy-gated invite accepts policy and retries claim with receipt',
+    () async {
+      final keys = nostr.Keys.generate();
+      final requests = <http.Request>[];
+      var claimAttempts = 0;
+      var generatedKeys = 0;
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generatedKeys++;
+            return keys;
+          }),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              requests.add(request);
+              if (request.url.path == '/api/join-policy') {
+                return http.Response(
+                  jsonEncode({
+                    'policy': {
+                      'terms_markdown': '# Be kind',
+                      'privacy_markdown': 'We retain your messages.',
+                      'age_attestation_required': true,
+                      'version': 'policy-v1',
+                    },
+                  }),
+                  200,
+                );
+              }
+              if (request.url.path == '/api/invites/accept-policy') {
+                return http.Response(
+                  jsonEncode({'receipt': 'new.receipt'}),
+                  200,
+                );
+              }
+              claimAttempts++;
+              if (claimAttempts == 1) {
+                return http.Response(
+                  jsonEncode({'error': 'join_policy_required'}),
+                  403,
+                );
+              }
+              return http.Response(
+                jsonEncode({
+                  'status': 'joined',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(
+              relayUrl: 'wss://relay.example.com',
+              code: 'code',
+            ),
+          );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+      var state = container.read(inviteJoinProvider);
+      expect(state.status, InviteJoinStatus.reviewingPolicy);
+      expect(state.policy?.termsMarkdown, '# Be kind');
+      expect(state.policy?.privacyMarkdown, 'We retain your messages.');
+      expect(state.ageConfirmed, isFalse);
+      expect(state.agreementConfirmed, isFalse);
+      expect(state.requiresFreshInvite, isFalse);
+
+      await container.read(inviteJoinProvider.notifier).acceptPolicy();
+      state = container.read(inviteJoinProvider);
+      expect(state.status, InviteJoinStatus.reviewingPolicy);
+      expect(state.errorMessage, 'Confirm that you are at least 18 years old.');
+      expect(requests, hasLength(2));
+
+      final notifier = container.read(inviteJoinProvider.notifier);
+      notifier.setAgeConfirmed(true);
+      notifier.setAgreementConfirmed(true);
+      await notifier.acceptPolicy();
+
+      state = container.read(inviteJoinProvider);
+      expect(state.status, InviteJoinStatus.success);
+      expect(claimAttempts, 2);
+      expect(generatedKeys, 1);
+      expect(requests.map((request) => request.url.path), [
+        '/api/invites/claim',
+        '/api/join-policy',
+        '/api/invites/accept-policy',
+        '/api/invites/claim',
+      ]);
+      expect(
+        requests[2].body,
+        jsonEncode({
+          'code': 'code',
+          'policy_version': 'policy-v1',
+          'age_confirmed': true,
+        }),
+      );
+      expect(
+        requests[3].body,
+        jsonEncode({'code': 'code', 'policy_receipt': 'new.receipt'}),
+      );
+      expect(auth.authenticatedCommunities.single.pubkey, keys.public);
+    },
+  );
+
+  test('declining join policy stops without accepting or joining', () async {
     final keys = nostr.Keys.generate();
-    var attempts = 0;
+    final requests = <http.Request>[];
     final storage = CommunityStorage(secure: FakeSecureStorage());
+    final auth = _RecordingAuthNotifier();
     final container = ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(storage),
+        authProvider.overrideWith(() => auth),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
-            attempts++;
+            requests.add(request);
+            if (request.url.path == '/api/join-policy') {
+              return http.Response(
+                jsonEncode({
+                  'policy': {
+                    'terms_markdown': 'Community terms',
+                    'privacy_markdown': null,
+                    'age_attestation_required': true,
+                    'version': 'policy-v1',
+                  },
+                }),
+                200,
+              );
+            }
             return http.Response(
               jsonEncode({'error': 'join_policy_required'}),
               403,
@@ -205,22 +335,140 @@ void main() {
           const InviteDeepLink(
             relayUrl: 'wss://relay.example.com',
             code: 'code',
-            policyReceipt: 'expired.receipt',
           ),
         );
     await container.read(inviteJoinProvider.notifier).confirmJoin();
+    container.read(inviteJoinProvider.notifier).declinePolicy();
 
     final state = container.read(inviteJoinProvider);
-    expect(state.status, InviteJoinStatus.error);
-    expect(state.requiresFreshInvite, isTrue);
+    expect(state.status, InviteJoinStatus.declined);
     expect(
       state.errorMessage,
-      'This invite approval has expired. Re-open the invite link to try again.',
+      'You declined this community\'s join policy. You were not joined.',
     );
-
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
-    expect(attempts, 1);
+    expect(requests, hasLength(2));
+    expect(auth.authenticatedCommunities, isEmpty);
   });
+
+  test('accept-policy failure stays on policy review with an error', () async {
+    final keys = nostr.Keys.generate();
+    final requests = <http.Request>[];
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final auth = _RecordingAuthNotifier();
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        authProvider.overrideWith(() => auth),
+        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+        inviteJoinHttpClientProvider.overrideWithValue(
+          http_testing.MockClient((request) async {
+            requests.add(request);
+            if (request.url.path == '/api/join-policy') {
+              return http.Response(
+                jsonEncode({
+                  'policy': {
+                    'terms_markdown': 'Community terms',
+                    'privacy_markdown': null,
+                    'age_attestation_required': true,
+                    'version': 'policy-v1',
+                  },
+                }),
+                200,
+              );
+            }
+            if (request.url.path == '/api/invites/accept-policy') {
+              return http.Response(
+                jsonEncode({'error': 'temporary_policy_failure'}),
+                503,
+              );
+            }
+            return http.Response(
+              jsonEncode({'error': 'join_policy_required'}),
+              403,
+            );
+          }),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container
+        .read(inviteJoinProvider.notifier)
+        .prepare(
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'code',
+          ),
+        );
+    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    final notifier = container.read(inviteJoinProvider.notifier);
+    notifier.setAgeConfirmed(true);
+    notifier.setAgreementConfirmed(true);
+    await notifier.acceptPolicy();
+
+    final state = container.read(inviteJoinProvider);
+    expect(state.status, InviteJoinStatus.reviewingPolicy);
+    expect(
+      state.errorMessage,
+      'Could not accept this community\'s join policy: temporary_policy_failure',
+    );
+    expect(requests, hasLength(3));
+    expect(auth.authenticatedCommunities, isEmpty);
+  });
+
+  test(
+    'invite carrying a policy receipt claims without policy handshake',
+    () async {
+      final keys = nostr.Keys.generate();
+      final requests = <http.Request>[];
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              requests.add(request);
+              return http.Response(
+                jsonEncode({
+                  'status': 'joined',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(
+              relayUrl: 'wss://relay.example.com',
+              code: 'code',
+              policyReceipt: 'existing.receipt',
+            ),
+          );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(requests, hasLength(1));
+      expect(requests.single.url.path, '/api/invites/claim');
+      expect(
+        requests.single.body,
+        jsonEncode({'code': 'code', 'policy_receipt': 'existing.receipt'}),
+      );
+      expect(auth.authenticatedCommunities, hasLength(1));
+    },
+  );
 
   test('invite_exhausted requires a fresh invite and cannot retry', () async {
     final keys = nostr.Keys.generate();
