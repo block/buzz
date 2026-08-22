@@ -129,6 +129,39 @@ export function useThreadReplies(
 }
 
 /**
+ * Aggregate a set of per-root thread-reply query results into one view for a
+ * multi-root consumer. Pure over the results array so the load-bearing
+ * error-surfacing contract is unit-testable without a live QueryClient.
+ *
+ * `isError`/`error` expose aggregate terminal failure so a consumer never
+ * silently drops a failed reply subtree — the same false-empty class the
+ * single-root panel guards against. `error` carries the first failed subtree's
+ * error; `refetch` re-runs only the failed queries so a partial success is not
+ * needlessly re-fetched.
+ */
+export function combineThreadRepliesResults(
+  results: readonly {
+    data?: RelayEvent[];
+    isPending: boolean;
+    isError: boolean;
+    error: unknown;
+    refetch: () => unknown;
+  }[],
+) {
+  return {
+    events: sortMessages(results.flatMap((result) => result.data ?? [])),
+    isPending: results.some((result) => result.isPending),
+    isError: results.some((result) => result.isError),
+    error: results.find((result) => result.isError)?.error ?? null,
+    refetch: () => {
+      for (const result of results) {
+        if (result.isError) void result.refetch();
+      }
+    },
+  };
+}
+
+/**
  * Load every summarized reply subtree for a channel-style Huddle transcript.
  * Ordinary channels keep replies in their thread panels; Huddles flatten those
  * replies into the chat timeline so companion and in-app presentations show the
@@ -148,9 +181,6 @@ export function useThreadRepliesForRoots(
       staleTime: 0,
       gcTime: 60 * 60 * 1_000,
     })),
-    combine: (results) => ({
-      events: sortMessages(results.flatMap((result) => result.data ?? [])),
-      isPending: results.some((result) => result.isPending),
-    }),
+    combine: combineThreadRepliesResults,
   });
 }
