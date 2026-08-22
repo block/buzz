@@ -55,7 +55,7 @@ final class HuddleConnectionParameters {
 }
 
 /// Fixed NIP-42 + Huddle auth envelope used after the audio relay challenge.
-abstract final class HuddleAuthV3 {
+abstract final class HuddleAuthV2 {
   static Map<String, dynamic> buildMessage({
     required HuddleConnectionParameters parameters,
     required String challenge,
@@ -82,7 +82,7 @@ abstract final class HuddleAuthV3 {
       'type': 'auth',
       'event': event.toMap(),
       'parent_channel_id': parameters.parentChannelId,
-      'protocol_version': HuddleWireV3.protocolVersion,
+      'protocol_version': HuddleWireV2.protocolVersion,
     };
   }
 

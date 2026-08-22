@@ -23,7 +23,7 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Owns microphone permission, foreground communication routing, and the native
  * realtime Opus engine. PCM remains native; Flutter only handles compressed
- * Huddle v3 packets.
+ * Huddle v2 packets.
  */
 internal class HuddleMediaPlugin(
     private val activity: Activity,
@@ -142,14 +142,14 @@ internal class HuddleMediaPlugin(
 
     private fun prepare(arguments: Any?, result: MethodChannel.Result) {
         val values = arguments as? Map<*, *>
-        if (values?.get("protocolVersion") != 3 ||
+        if (values?.get("protocolVersion") != 2 ||
             values["sampleRateHz"] != 48_000 ||
             values["channels"] != 1 ||
             values["frameSamples"] != 960
         ) {
             result.error(
                 "invalid_configuration",
-                "Expected the fixed Huddle Opus v3 media configuration.",
+                "Expected the fixed Huddle Opus v2 media configuration.",
                 null,
             )
             return

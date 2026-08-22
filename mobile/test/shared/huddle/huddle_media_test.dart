@@ -13,7 +13,7 @@ void main() {
   });
 
   test(
-    'prepares the fixed v3 audio session without overstating codecs',
+    'prepares the fixed v2 audio session without overstating codecs',
     () async {
       final calls = <MethodCall>[];
       messenger.setMockMethodCallHandler(channel, (call) async {
@@ -49,7 +49,7 @@ void main() {
       expect(media.state.phase, HuddleMediaPhase.prepared);
       final prepare = calls.singleWhere((call) => call.method == 'prepare');
       expect(prepare.arguments, {
-        'protocolVersion': 3,
+        'protocolVersion': 2,
         'sampleRateHz': 48000,
         'channels': 1,
         'frameSamples': 960,
