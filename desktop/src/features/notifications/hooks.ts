@@ -28,6 +28,7 @@ import {
 import {
   buildHomeBadgeFeedItems,
   isHomeBadgeFeedItemUnread,
+  isMutedOutOfBadgeCount,
   shouldCountTowardHomeBadgeSubtotal,
 } from "./lib/homeBadge";
 
@@ -428,9 +429,29 @@ export function useHomeFeedNotificationState(
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>
     readStoredSeenFeedIds(normalizedPubkey),
   );
+  // The backend leaves `channel_type` unset on feed items, so the DM carve-out in
+  // `buildHomeBadgeFeedItems` has to come from the channel list.
+  //
+  // Keyed on a joined string rather than on `channels`: the parameter defaults to
+  // a fresh `[]` and callers pass a refetched array, so depending on the array
+  // itself would rebuild this Set every render and invalidate `currentFeedItems`
+  // with it.
+  const dmChannelIdKey = channels
+    .filter((channel) => channel.channelType === "dm")
+    .map((channel) => channel.id)
+    .join(",");
+  const dmChannelIds = React.useMemo(
+    () => new Set(dmChannelIdKey.length === 0 ? [] : dmChannelIdKey.split(",")),
+    [dmChannelIdKey],
+  );
   const currentFeedItems = React.useMemo(() => {
-    return buildHomeBadgeFeedItems(feed, extraInboxItems, localUnreadFeedIds);
-  }, [extraInboxItems, feed, localUnreadFeedIds]);
+    return buildHomeBadgeFeedItems(
+      feed,
+      extraInboxItems,
+      localUnreadFeedIds,
+      dmChannelIds,
+    );
+  }, [dmChannelIds, extraInboxItems, feed, localUnreadFeedIds]);
   const currentFeedIds = React.useMemo(
     () => currentFeedItems.map((item) => item.id),
     [currentFeedItems],
@@ -476,11 +497,7 @@ export function useHomeFeedNotificationState(
       if (isHomeActive && !isLocallyUnread) {
         continue;
       }
-      if (
-        item.channelId &&
-        mutedChannelIds?.has(item.channelId) &&
-        item.category !== "mention"
-      ) {
+      if (isMutedOutOfBadgeCount(item, mutedChannelIds)) {
         continue;
       }
       const isUnread = isHomeBadgeFeedItemUnread(item, {
@@ -497,6 +514,7 @@ export function useHomeFeedNotificationState(
           item,
           highPriorityChannelIds,
           isLocallyUnread,
+          dmChannelIds,
         )
       ) {
         excludingHighPriority++;

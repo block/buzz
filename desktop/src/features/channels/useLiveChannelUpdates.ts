@@ -7,13 +7,22 @@ import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
+  getThreadReference,
   isThreadReply,
 } from "@/features/messages/lib/threading";
-import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  lookupReplyParentAuthor,
+  resolveReplyParentAuthor,
+} from "@/features/messages/lib/replyContextEvents";
+import {
+  needsResolvedParentAuthor,
+  shouldNotifyForEvent,
+} from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
+  REPLY_PARENT_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
@@ -40,11 +49,19 @@ export type UseLiveChannelUpdatesOptions = {
    * drive the observed unread-event map that powers sidebar unread state.
    * See `UNREAD_TRIGGER_KINDS` for the exact kind set.
    */
-  onChannelMessage?: (channelId: string, event: RelayEvent) => void;
+  onChannelMessage?: (
+    channelId: string,
+    event: RelayEvent,
+    parentAuthorPubkey: string | null,
+  ) => void;
   /**
    * Fired for thread replies that should be surfaced as Home inbox activity.
    */
-  onThreadReplyNotification?: (channelId: string, event: RelayEvent) => void;
+  onThreadReplyNotification?: (
+    channelId: string,
+    event: RelayEvent,
+    parentAuthorPubkey: string | null,
+  ) => void;
   /**
    * Fired for external thread replies that do not match the locally-known
    * interest sets. Callers can perform an async backfill and then decide
@@ -65,6 +82,7 @@ export type UseLiveChannelUpdatesOptions = {
   participatedRootIds?: ReadonlySet<string>;
   followedRootIds?: ReadonlySet<string>;
   authoredRootIds?: ReadonlySet<string>;
+  mentionedRootIds?: ReadonlySet<string>;
   mutedRootIds?: ReadonlySet<string>;
   mutedChannelIds?: ReadonlySet<string>;
 };
@@ -147,6 +165,17 @@ export function useLiveChannelUpdates(
   // effect: the same event can be replayed repeatedly while a relay flaps, and
   // mention events also arrive through both the channel and mention filters.
   const seenNotificationEventIdsRef = React.useRef(new Set<string>());
+  // Guards the one notification path that resumes after an await. Switching
+  // communities remounts this subtree and disconnects the relay, which rejects
+  // any in-flight parent lookup — without this the continuation would still
+  // toast for a channel in the community the user just left.
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
   const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
   if (channelsInvalidateRef.current === null) {
     channelsInvalidateRef.current = createTrailingDebounce(() => {
@@ -288,37 +317,103 @@ export function useLiveChannelUpdates(
     handleDmEvent(event, isFirstNotificationDelivery);
 
     if (isExternalTriggerEvent && isFirstNotificationDelivery) {
-      const shouldNotify = shouldNotifyForEvent(
-        event,
-        normalizedCurrentPubkey,
-        {
-          participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
-          followedRootIds: options.followedRootIds ?? EMPTY_SET,
-          authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
-          mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
-          mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
-          channelId,
-        },
+      const mutedRootIds = options.mutedRootIds ?? EMPTY_SET;
+      const mutedChannelIds = options.mutedChannelIds ?? EMPTY_SET;
+      const { parentId } = getThreadReference(event.tags);
+      // Capture everything the decision reads before the (rare) await below,
+      // so an escalated lookup cannot resolve against a later render's props.
+      const onChannelMessage = options.onChannelMessage;
+      const onThreadReplyCandidate = options.onThreadReplyCandidate;
+      const onThreadReplyNotification = options.onThreadReplyNotification;
+      const onThreadReplyDesktopNotification =
+        options.onThreadReplyDesktopNotification;
+      const notifyForActiveChannel = options.notifyForActiveChannel;
+      const isDmTarget = dmChannelMap.has(channelId);
+      const isActiveChannel = channelId === activeChannelId;
+
+      const deliver = (parentAuthorPubkey: string | null) => {
+        const shouldNotify = shouldNotifyForEvent(
+          event,
+          normalizedCurrentPubkey,
+          {
+            participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
+            followedRootIds: options.followedRootIds ?? EMPTY_SET,
+            mentionedRootIds: options.mentionedRootIds ?? EMPTY_SET,
+            authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
+            mutedRootIds,
+            mutedChannelIds,
+            channelId,
+            parentAuthorPubkey,
+            isDmChannel,
+          },
+        );
+
+        if (!shouldNotify) {
+          if (isThreadedReply) {
+            onThreadReplyCandidate?.(channelId, event);
+          }
+        } else {
+          onChannelMessage?.(channelId, event, parentAuthorPubkey);
+          if (isHomeActivityEvent(isDmChannel, isThreadedReply)) {
+            // Same parent author `onChannelMessage` just got. This callback
+            // records mentioned thread roots too, and without the author it
+            // re-recorded the very event the guarded call above declined —
+            // marking a thread "mentioned" for a plain reply-to-you. `null` in
+            // a DM, where the addressing tag is the addressing and every other
+            // path deliberately declines to demote it.
+            onThreadReplyNotification?.(
+              channelId,
+              event,
+              isDmChannel ? null : parentAuthorPubkey,
+            );
+          }
+        }
+
+        if (shouldNotify && isThreadedReply) {
+          if (!isDmTarget && (!isActiveChannel || notifyForActiveChannel)) {
+            onThreadReplyDesktopNotification?.(channelId, event);
+          }
+        }
+      };
+
+      // Replies p-tag the author they answer. Without the parent's author that
+      // tag reads as a mention and pierces the channel/thread mute.
+      const cachedParentAuthor = lookupReplyParentAuthor(
+        queryClient,
+        channelId,
+        parentId,
       );
-
-      if (!shouldNotify) {
-        if (isThreadedReply) {
-          options.onThreadReplyCandidate?.(channelId, event);
-        }
+      if (
+        needsResolvedParentAuthor(event, normalizedCurrentPubkey, {
+          cachedParentAuthor,
+          isDmChannel,
+        })
+      ) {
+        void resolveReplyParentAuthor({
+          channelId,
+          fetchEvents: (filter) => relayClient.fetchEvents(filter),
+          kinds: REPLY_PARENT_EVENT_KINDS,
+          parentEventId: parentId,
+          queryClient,
+        })
+          .then((parentAuthor) => {
+            if (!isMountedRef.current) return;
+            // The event's delivery slot stays consumed even when the lookup
+            // came back `unavailable`. `deliver` fails open on a null author, so
+            // an unresolved parent still notifies — releasing the slot would let
+            // the relay's ~5s reconnect overlap deliver the same reply a second
+            // time, and the desktop-notification path has no dedupe of its own.
+            deliver(parentAuthor.pubkey);
+          })
+          .catch((error) => {
+            // `resolveReplyParentAuthor` never rejects — every failure path
+            // returns `unavailable` — so the only way here is `deliver` itself
+            // throwing inside a consumer callback, by which point the
+            // notification has already fired. Log it; do not re-deliver.
+            console.error("reply parent lookup delivery failed", error);
+          });
       } else {
-        options.onChannelMessage?.(channelId, event);
-        if (isHomeActivityEvent(isDmChannel, isThreadedReply)) {
-          options.onThreadReplyNotification?.(channelId, event);
-        }
-      }
-
-      if (shouldNotify && isThreadedReply) {
-        if (
-          !dmChannelMap.has(channelId) &&
-          (channelId !== activeChannelId || options.notifyForActiveChannel)
-        ) {
-          options.onThreadReplyDesktopNotification?.(channelId, event);
-        }
+        deliver(cachedParentAuthor);
       }
     }
 

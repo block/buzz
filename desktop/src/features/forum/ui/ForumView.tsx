@@ -58,7 +58,11 @@ export function ForumView({
     selectedPostId,
   );
   const createPostMutation = useCreateForumPostMutation(channel);
-  const createReplyMutation = useCreateForumReplyMutation(channel);
+  const effectiveCurrentPubkey = currentPubkey ?? profileQuery.data?.pubkey;
+  const createReplyMutation = useCreateForumReplyMutation(
+    channel,
+    effectiveCurrentPubkey,
+  );
   const deletePostMutation = useDeleteForumPostMutation(channel);
   const deleteReplyMutation = useDeleteForumReplyMutation(
     channel,
@@ -104,7 +108,6 @@ export function ForumView({
   const profilesQuery = useUsersBatchQuery(allPubkeys, {
     enabled: allPubkeys.length > 0,
   });
-  const effectiveCurrentPubkey = currentPubkey ?? profileQuery.data?.pubkey;
   const profiles = React.useMemo(
     () =>
       mergeCurrentProfileIntoLookup(
@@ -149,6 +152,9 @@ export function ForumView({
           createReplyMutation.mutateAsync({
             content,
             parentEventId: selectedPostId,
+            // A forum comment answers the post root, so p-tag its author. The
+            // mutation drops self, which is the only case that must not tag.
+            parentAuthorPubkey: threadQuery.data?.post.pubkey ?? null,
             mentionPubkeys,
             mediaTags,
           })

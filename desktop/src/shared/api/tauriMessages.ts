@@ -15,6 +15,7 @@ export async function sendChannelMessage(
   sentFromThreadTag?: string[],
   expectedRelayUrl?: string,
   expectedSignerPubkey?: string,
+  recipientPubkeys?: string[],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -36,6 +37,10 @@ export async function sendChannelMessage(
       // closed when the active identity no longer matches, so a community
       // switch cannot re-sign the captured tenant's content as the new one.
       expectedSignerPubkey: expectedSignerPubkey ?? null,
+      // Addressed by the channel rather than typed in the body — every other
+      // participant in a DM. Kept apart from `mentionPubkeys` so a reply does
+      // not mark their `p` tag as a mention nobody wrote.
+      recipientPubkeys: recipientPubkeys ?? null,
     },
   );
   return {

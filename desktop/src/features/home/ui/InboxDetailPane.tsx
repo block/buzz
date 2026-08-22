@@ -130,6 +130,12 @@ type InboxDetailPaneProps = {
     mediaTags?: string[][];
     mentionPubkeys: string[];
     parentEventId: string | null;
+    /**
+     * Author of `parentEventId`. The Inbox sends without the channel timeline
+     * loaded, so the caller supplies it — a reply must p-tag the author it
+     * answers or an agent's `require_mention` subscription never sees it.
+     */
+    parentAuthorPubkey: string | null;
   }) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -267,14 +273,27 @@ function InboxMessageDetailPane({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       parentEventId?: string,
-    ) =>
-      onSendReply({
+    ) => {
+      const parentId = parentEventId ?? message.id;
+      // A reply addresses the author it answers, and the Inbox sends without a
+      // channel timeline loaded, so the caller has to supply that author — the
+      // backend can only mark the tag it is given.
+      const commentedOnAuthor =
+        parentId === message.id ? message.pubkey : undefined;
+      const parentAuthorPubkey =
+        displayMessages.find((candidate) => candidate.id === parentId)
+          ?.authorPubkey ??
+        commentedOnAuthor ??
+        null;
+      return onSendReply({
         content,
         mediaTags,
         mentionPubkeys,
-        parentEventId: parentEventId ?? message.id,
-      }),
-    [onSendReply],
+        parentAuthorPubkey,
+        parentEventId: parentId,
+      });
+    },
+    [displayMessages, onSendReply],
   );
   const videoReviewPresentation = React.useMemo(
     () =>
@@ -471,6 +490,11 @@ function InboxMessageDetailPane({
   const composerParentEventId =
     replyTarget?.id ??
     (isDirectMessage ? null : (capturedDefaultParentId ?? item.id));
+  const composerParentAuthorPubkey =
+    displayMessages.find((message) => message.id === composerParentEventId)
+      ?.authorPubkey ??
+    (composerParentEventId === item.id ? item.item.pubkey : null) ??
+    null;
   const composerReplyTarget =
     replyTarget && replyTarget.id !== item.id
       ? {
@@ -801,6 +825,7 @@ function InboxMessageDetailPane({
                   content,
                   mediaTags,
                   mentionPubkeys,
+                  parentAuthorPubkey: composerParentAuthorPubkey,
                   parentEventId: composerParentEventId,
                 })
               }
