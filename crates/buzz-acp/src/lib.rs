@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod audit;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -1925,6 +1926,12 @@ async fn tokio_main() -> Result<()> {
         )
         .compact()
         .init();
+
+    // Phase B causal audit sink — global, opt-in, default OFF via
+    // `BUZZ_ACP_AUDIT`. Must run after the tracing subscriber above (so the
+    // sink's own enable/fail-open logging is captured) and before any relay
+    // activity begins. A no-op when the env var is unset — see audit.rs.
+    audit::init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
 
