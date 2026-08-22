@@ -1,0 +1,144 @@
+# OSV scans every supported lockfile without Cargo's target filtering. Keep
+# exceptions explicit and expiring so an upstream fix turns into a visible CI
+# failure instead of a permanent suppression.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+ignoreUntil = 2026-11-20
+reason = "instant is transitive through nostr and has no upstream replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2026-11-20
+reason = "paste is transitive through mesh-llm and iroh with no upstream replacement"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0194"
+ignoreUntil = 2026-11-20
+reason = "quick-xml is transitive through rust-s3 and plist and only parses trusted inputs"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0195"
+ignoreUntil = 2026-11-20
+reason = "quick-xml is transitive through rust-s3 and plist and only parses trusted inputs"
+
+# Tauri's Linux backend currently requires the unmaintained GTK3 Rust
+# bindings. GTK4 is not a compatible lockfile-only upgrade.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+ignoreUntil = 2026-11-20
+reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2026-11-20
+reason = "Tauri pins glib below 0.20; Buzz does not call the affected VariantStrIter API"
+
+# Other unmaintained desktop transitive crates have no compatible replacement
+# in the current Tauri, opus, and urlpattern dependency graphs.
+[[IgnoredVulns]]
+id = "RUSTSEC-2020-0168"
+ignoreUntil = 2026-11-20
+reason = "macOS transitive dependency through Tauri and device libraries"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through Tauri with no maintained compatible release"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0150"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through opus with no maintained compatible sys crate"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through Tauri urlpattern"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through Tauri urlpattern"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through Tauri urlpattern"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through Tauri urlpattern"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2026-11-20
+reason = "transitive dependency through Tauri urlpattern"
+
+# Mesh-LLM 0.75.1 pins the pre-fix OpenTelemetry 0.31 API family. Buzz's
+# direct OpenTelemetry graph is already on 0.32; the remaining copy cannot be
+# upgraded independently across the 0.x compatibility boundary.
+[[IgnoredVulns]]
+id = "GHSA-w9wp-h8wv-79jx"
+ignoreUntil = 2026-09-20
+reason = "transitive through pinned Mesh-LLM 0.75.1; requires an upstream OpenTelemetry 0.32 migration"
+
+# This only affects interrupted interactive password entry. The dependency is
+# in Mesh-LLM's host runtime and Buzz runs that path non-interactively.
+[[IgnoredVulns]]
+id = "GHSA-2p6r-x3vv-xqm2"
+ignoreUntil = 2026-11-20
+reason = "transitive through Mesh-LLM; fixed rpassword 7.5 requires an upstream major-version migration"
+
+# The internal npm mirror has not synchronized the patched Babel 7.29.1
+# release yet. This expires after one week so the exception cannot linger.
+[[IgnoredVulns]]
+id = "GHSA-4x5r-pxfx-6jf8"
+ignoreUntil = 2026-08-27
+reason = "patched @babel/core 7.29.1 is not yet available from the configured registry mirror"

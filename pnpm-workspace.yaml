@@ -4,6 +4,12 @@ packages:
   - "admin-web"
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  # Security fixes must be installable immediately instead of waiting for the
+  # normal dependency cooldown. Keep these exemptions version-specific.
+  - markdown-it@14.2.0
+  - postcss@8.5.26
+  - nanoid@3.3.18
 overrides:
   # Force a single copy of the dismissable-layer. Radix packages otherwise
   # resolve different versions (react-menu pulled 1.1.11, react-dialog 1.1.15),
@@ -18,6 +24,12 @@ overrides:
   # 5.0.1 / 5.0.2 respectively; pin >=5.0.2 to cover both. Removable once
   # markdown-it resolves linkify-it >=5.0.2 on its own.
   linkify-it: "^5.0.2"
+  # These transitive versions contain published security fixes. Exact
+  # overrides keep the remediation narrow; remove each one after every parent
+  # dependency's normal range resolves to a patched release.
+  markdown-it: 14.2.0
+  postcss: 8.5.26
+  nanoid: 3.3.18
 patchedDependencies:
   isomorphic-git: patches/isomorphic-git.patch
   virtua@0.49.3: patches/virtua@0.49.3.patch

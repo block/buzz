@@ -883,7 +883,7 @@ jobs:
           key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
           restore-keys: pub-${{ runner.os }}-
       - name: Install dependencies
-        run: cd mobile && flutter pub get
+        run: cd mobile && flutter pub get --enforce-lockfile
       - name: Save pub cache
         if: always() && steps.pub-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -900,19 +900,57 @@ jobs:
       - name: Build Android debug APK
         run: just mobile-build-android
 
+  osv-lockfile-scan:
+    name: OSV Lockfile Scan
+    permissions:
+      actions: read
+      contents: read
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+    with:
+      upload-sarif: false
+      scan-args: |-
+        --config=./osv-scanner.toml
+        --recursive
+        ./
+
   security:
     name: Security
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    timeout-minutes: 25
+    needs: [osv-lockfile-scan]
+    if: always()
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - name: Dependency policy
-        run: cargo-deny check
+      - name: Require successful lockfile scan
+        env:
+          OSV_RESULT: ${{ needs.osv-lockfile-scan.result }}
+        run: |
+          if [ "$OSV_RESULT" != "success" ]; then
+            echo "::error::OSV lockfile scan finished with status: $OSV_RESULT"
+            exit 1
+          fi
+      - name: Review dependency changes
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+      - name: Root Rust dependency policy
+        run: cargo-deny --locked check
+      - name: Desktop Rust dependency policy
+        run: cargo-deny --locked --manifest-path desktop/src-tauri/Cargo.toml check
+      - name: Python lockfile consistency
+        run: |
+          bin/uv --directory benchmarks/harbor-buzz-orchestra lock --check
+          bin/uv --directory benchmarks/harbor-buzz-orchestra/testbed lock --check
+      - name: JavaScript vulnerability audit
+        run: pnpm audit --audit-level moderate
+      - name: CocoaPods vulnerability audit
+        run: bin/trivy fs --scanners vuln --exit-code 1 --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL mobile/ios/Podfile.lock
 
   dead-token-guard:
     name: Dead Token Reference Guard

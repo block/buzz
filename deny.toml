@@ -15,6 +15,34 @@ ignore = [
     # remove these when upstream catches up.
     { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
     { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # Tauri's Linux backend still uses the GTK3 bindings, whose maintained
+    # replacement is GTK4 rather than a compatible patch release. These are
+    # Linux-only transitive dependencies and cannot be removed independently
+    # of Tauri's GTK backend. Keep each advisory explicit so newly unmaintained
+    # crates still fail the dependency policy.
+    { id = "RUSTSEC-2024-0411", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0412", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0413", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0414", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0415", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0416", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0417", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0418", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0419", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    { id = "RUSTSEC-2024-0420", reason = "Tauri Linux GTK3 transitive dependency; no compatible maintained release" },
+    # The affected glib API is VariantStrIter. Buzz does not call it, and the
+    # Tauri GTK3 graph cannot move to glib 0.20 independently.
+    { id = "RUSTSEC-2024-0429", reason = "Tauri Linux GTK3 transitive dependency; affected VariantStrIter API is unused" },
+    # Remaining unmaintained crates are transitive and have no compatible
+    # maintained replacement in the current upstream dependency graphs.
+    { id = "RUSTSEC-2020-0168", reason = "macOS transitive dependency through Tauri and device libraries; no compatible replacement" },
+    { id = "RUSTSEC-2024-0370", reason = "transitive dependency through Tauri; no compatible maintained release" },
+    { id = "RUSTSEC-2026-0150", reason = "transitive through opus; no compatible maintained sys crate" },
+    { id = "RUSTSEC-2025-0075", reason = "transitive through Tauri urlpattern; no compatible replacement" },
+    { id = "RUSTSEC-2025-0080", reason = "transitive through Tauri urlpattern; no compatible replacement" },
+    { id = "RUSTSEC-2025-0081", reason = "transitive through Tauri urlpattern; no compatible replacement" },
+    { id = "RUSTSEC-2025-0098", reason = "transitive through Tauri urlpattern; no compatible replacement" },
+    { id = "RUSTSEC-2025-0100", reason = "transitive through Tauri urlpattern; no compatible replacement" },
 ]
 
 [licenses]

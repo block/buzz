@@ -1001,25 +1001,20 @@ benchmark-check:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
-    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
-    # which ruff lints. Read the pin from there so this recipe cannot drift
-    # from the workflow (a floating specifier once meant CI failed on RUF100
-    # while the locked local ruff passed).
-    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
     for project in . testbed; do
         (
             cd "$project"
-            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
-            uv run --frozen pytest -q
-            uvx "ruff@$ruff_pin" check .
-            uvx "ruff@$ruff_pin" format --check .
+            echo "── harbor-buzz-orchestra/$project"
+            uv run --frozen --extra dev pytest -q
+            uv run --frozen --extra dev ruff check .
+            uv run --frozen --extra dev ruff format --check .
         )
     done
     # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
     # need the harness config passed explicitly to stay linted.
-    echo "── buzz-dataset (ruff $ruff_pin)"
-    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
-    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
+    echo "── buzz-dataset"
+    uv run --frozen --extra dev ruff check --config pyproject.toml ../buzz-dataset
+    uv run --frozen --extra dev ruff format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
