@@ -12,6 +12,7 @@
 //! The caller signs with their own keys: `builder.sign_with_keys(&keys)?`.
 //! No keys are held here. No network calls are made.
 
+pub mod agent_definitions;
 pub mod builders;
 pub mod mentions;
 pub mod nip_oa;

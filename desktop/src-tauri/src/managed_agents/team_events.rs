@@ -6,46 +6,14 @@
 //! flush loop publish them — this module only owns the kind-specific
 //! projection, build, and tombstone.
 
-use buzz_core_pkg::kind::KIND_TEAM;
-use nostr::{EventBuilder, Kind, Tag};
-use serde::{Deserialize, Serialize};
+use nostr::EventBuilder;
 
 use super::TeamRecord;
 
-/// The JSON body stored in a team event's content field.
-///
-/// Explicit opt-IN projection of the public team fields. A team carries no
-/// secrets, but the projection is still explicit so a future `TeamRecord`
-/// field is published only when deliberately added here. Local-only fields
-/// (`source_dir`, `is_symlink`, `is_builtin`, timestamps) are intentionally
-/// omitted — they describe this client's install, not the shared team.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamEventContent {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Runtime-layered instructions. `Option` is PERMANENT wire semantics
-    /// (not a transitional shim): absent = publisher predates always-publish
-    /// (true value unknown — reconcile must preserve local), `null` =
-    /// explicitly cleared, a string = set. New clients always publish this
-    /// field (outer always `Some`), using `null` for "no instructions" so
-    /// that state round-trips instead of being read back as "unknown".
-    #[serde(
-        default,
-        deserialize_with = "crate::util::double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub instructions: Option<Option<String>>,
-    /// Pack persona members. `Option` is PERMANENT wire semantics, not a
-    /// transitional shim: `None` = publisher predates always-publish (its
-    /// true membership is unknown — reconcile must preserve local), while
-    /// `Some(vec![])` = explicitly emptied. New clients always publish
-    /// `Some(...)`, even when empty. "Cleaning up" the Option later
-    /// reintroduces the bug where an old client's event silently wipes team
-    /// membership (see the Sietch Tabr incident).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona_ids: Option<Vec<String>>,
-}
+/// The published team wire shape, owned by the SDK so the CLI publishes the
+/// identical body — including the `Option` nesting that separates "publisher
+/// predates always-publish, preserve local" from "explicitly emptied".
+pub use buzz_sdk_pkg::agent_definitions::TeamEventContent;
 
 /// Project a `TeamRecord` onto the content fields published in team events.
 /// Centralizes the field mapping so a new published field is added in exactly
@@ -66,11 +34,8 @@ pub fn team_event_content(record: &TeamRecord) -> TeamEventContent {
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits.
 pub fn build_team_event(record: &TeamRecord) -> Result<EventBuilder, String> {
-    let content = serde_json::to_string(&team_event_content(record))
-        .map_err(|e| format!("failed to serialize team content: {e}"))?;
-    let tags =
-        vec![Tag::parse(["d", record.id.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
-    Ok(EventBuilder::new(Kind::Custom(KIND_TEAM as u16), content).tags(tags))
+    buzz_sdk_pkg::agent_definitions::build_team_event(&record.id, &team_event_content(record))
+        .map_err(|e| e.to_string())
 }
 
 /// Parse a kind:30176 event's content into the projection — the inbound
@@ -83,8 +48,7 @@ pub fn build_team_event(record: &TeamRecord) -> Result<EventBuilder, String> {
 /// patches them onto the local record (see `apply_inbound_team`), matching on
 /// the d-tag (the team's id).
 pub fn team_content_from_event(event: &nostr::Event) -> Result<TeamEventContent, String> {
-    serde_json::from_str(event.content.as_ref())
-        .map_err(|e| format!("failed to parse team event content: {e}"))
+    buzz_sdk_pkg::agent_definitions::team_content_from_event(event).map_err(|e| e.to_string())
 }
 
 /// Build a NIP-09 deletion (kind:5) targeting a team's kind:30176 event.
@@ -94,14 +58,15 @@ pub fn team_content_from_event(event: &nostr::Event) -> Result<TeamEventContent,
 /// leaving the parameterized-replaceable coordinate live. The coordinate
 /// delete removes the team for every client and across reboots.
 pub fn build_team_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<EventBuilder, String> {
-    let coord = format!("{KIND_TEAM}:{owner_pubkey_hex}:{d_tag}");
-    let tag = Tag::parse(["a", coord.as_str()]).map_err(|e| format!("invalid a-tag: {e}"))?;
-    Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
+    buzz_sdk_pkg::agent_definitions::build_team_delete(d_tag, owner_pubkey_hex)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core_pkg::kind::KIND_TEAM;
+    use nostr::Kind;
     use std::path::PathBuf;
 
     fn sample_team() -> TeamRecord {

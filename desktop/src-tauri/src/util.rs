@@ -11,13 +11,10 @@ pub fn now_iso() -> String {
 /// "clear this field" indistinguishable from "leave it unchanged". Paired with
 /// `#[serde(default)]`, this yields the tri-state needed for nullable patches:
 /// absent → `None`, `null` → `Some(None)`, value → `Some(Some(value))`.
-pub fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: serde::Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    serde::Deserialize::deserialize(deserializer).map(Some)
-}
+///
+/// Re-exported from the SDK: the persona/team wire shapes live there and depend
+/// on this exact tri-state, so both sides must share one implementation.
+pub use buzz_sdk_pkg::agent_definitions::double_option;
 
 /// Turn a human-readable name into a filesystem-safe slug.
 ///
