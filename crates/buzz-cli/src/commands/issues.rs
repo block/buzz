@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
+use crate::validate::{read_markdown_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
@@ -239,7 +239,7 @@ pub async fn cmd_create_issue(
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
-    let body = read_or_stdin(content)?;
+    let body = read_markdown_or_stdin(content)?;
 
     let meta = GitIssueMeta {
         labels: labels.to_vec(),
@@ -501,7 +501,7 @@ pub async fn cmd_issue_status(
     validate_hex64(issue)?;
     let status = crate::commands::patches::parse_status(status)?;
     let body = match content {
-        Some(c) => read_or_stdin(c)?,
+        Some(c) => read_markdown_or_stdin(c)?,
         None => String::new(),
     };
 
