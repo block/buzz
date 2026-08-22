@@ -80,11 +80,22 @@ pub fn encrypt_observer_payload<T: Serialize>(
     Ok(encrypted)
 }
 
-/// NIP-44 decrypt and deserialize an observer payload from `event`.
-pub fn decrypt_observer_payload<T: DeserializeOwned>(
+/// NIP-44 decrypt an observer payload from `event` and return the plaintext
+/// JSON **verbatim**.
+///
+/// Callers that only need a typed value should prefer
+/// [`decrypt_observer_payload`]. This exists for the one caller that must hash
+/// the bytes it received — the trusted-operation broker's idempotency digest.
+/// Deserializing and re-serializing first would make that digest depend on a
+/// canonical encoding both ends have to agree on; hashing the plaintext as it
+/// arrived needs no such agreement.
+///
+/// The returned `String` is the caller's to zeroize if it is sensitive; the
+/// intermediate copies held here are wiped before return.
+pub fn decrypt_observer_plaintext(
     recipient_keys: &Keys,
     event: &Event,
-) -> Result<T, ObserverPayloadError> {
+) -> Result<String, ObserverPayloadError> {
     if !content_looks_like_nip44(&event.content) {
         return Err(ObserverPayloadError::InvalidCiphertextLength(
             event.content.len(),
@@ -104,7 +115,15 @@ pub fn decrypt_observer_payload<T: DeserializeOwned>(
             got,
         });
     }
+    Ok(plaintext)
+}
 
+/// NIP-44 decrypt and deserialize an observer payload from `event`.
+pub fn decrypt_observer_payload<T: DeserializeOwned>(
+    recipient_keys: &Keys,
+    event: &Event,
+) -> Result<T, ObserverPayloadError> {
+    let mut plaintext = decrypt_observer_plaintext(recipient_keys, event)?;
     let result = serde_json::from_str(&plaintext);
     plaintext.zeroize();
     Ok(result?)
