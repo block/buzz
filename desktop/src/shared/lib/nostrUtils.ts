@@ -56,11 +56,18 @@ export function parsePubkeyInput(input: string): string | null {
  * the input is not a syntactically valid `nsec1…` (does NOT throw — this is
  * intended for live form validation where the user is mid-typing).
  *
- * The input is trimmed first; surrounding whitespace from copy-paste or a
- * dropped `.key` file is tolerated.
+ * The input is trimmed and lowercased first; surrounding whitespace from
+ * copy-paste or a dropped `.key` file is tolerated, and an all-uppercase
+ * bech32 encoding (spec-valid but unusual) resolves identically to
+ * lowercase.
  */
 export function nsecToNpub(nsec: string): string | null {
-  const trimmed = nsec.trim();
+  // Bech32 decoding is case-sensitive per the spec; callers copy-pasting an
+  // all-uppercase key (a valid bech32 encoding) should see it work exactly
+  // like the lowercase form. Trim surrounding whitespace first (shell copy
+  // often picks up a trailing newline), then lowercase before the strict
+  // prefix and checksum checks.
+  const trimmed = nsec.trim().toLowerCase();
   if (!trimmed.startsWith("nsec1")) {
     return null;
   }
