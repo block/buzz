@@ -684,6 +684,7 @@ pub fn run() {
             get_relay_self,
             resolve_oa_owner,
             list_relay_agents,
+            register_existing_relay_agent,
             revalidate_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,

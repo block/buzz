@@ -91,6 +91,24 @@ pub(crate) fn extract_oa_owner(target_kind0: &nostr::Event) -> Option<(String, [
     None
 }
 
+/// Verify the profile event itself before trusting its embedded owner proof.
+pub(crate) fn verified_oa_owner(
+    target_kind0: &nostr::Event,
+    expected_target_pubkey: &str,
+) -> Option<(String, [String; 4])> {
+    if target_kind0.kind != nostr::Kind::Metadata
+        || !target_kind0.verify_id()
+        || !target_kind0.verify_signature()
+        || !target_kind0
+            .pubkey
+            .to_hex()
+            .eq_ignore_ascii_case(expected_target_pubkey)
+    {
+        return None;
+    }
+    extract_oa_owner(target_kind0)
+}
+
 pub(crate) async fn fetch_kind0(
     state: &AppState,
     pubkey: &str,
@@ -133,7 +151,7 @@ pub async fn resolve_oa_owner(
         return Ok(None);
     };
 
-    let Some((owner_hex, _tag)) = extract_oa_owner(&kind0) else {
+    let Some((owner_hex, _tag)) = verified_oa_owner(&kind0, &target_pubkey) else {
         return Ok(None);
     };
 
@@ -445,6 +463,41 @@ pub(crate) async fn fetch_archived_pubkeys_at(
     }
 
     archived_pubkeys_from_snapshot(&snapshot)
+}
+
+/// Strict archive read for trust-boundary mutations. Unlike the display-only
+/// helper above, any missing relay identity, query failure, or invalid signed
+/// snapshot aborts the caller instead of treating the archive as empty.
+pub(crate) async fn fetch_archived_pubkeys_strict_at(
+    state: &AppState,
+    target: &RelayTarget,
+    signer: &nostr::Keys,
+) -> Result<Vec<String>, String> {
+    let relay_self = fetch_relay_self_at(state, &target.ws_url)
+        .await?
+        .ok_or_else(|| "relay archive authority is unavailable".to_string())?;
+    let events = crate::relay::query_relay_at_with_keys(
+        state,
+        &target.api_base_url,
+        &[serde_json::json!({
+            "authors": [relay_self.clone()],
+            "kinds": [13535],
+            "limit": 1,
+        })],
+        signer,
+        None,
+    )
+    .await?;
+    let Some(snapshot) = events.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    if !snapshot.verify_id()
+        || !snapshot.verify_signature()
+        || !snapshot.pubkey.to_hex().eq_ignore_ascii_case(&relay_self)
+    {
+        return Err("relay archive snapshot failed signature verification".to_string());
+    }
+    Ok(archived_pubkeys_from_snapshot(&snapshot))
 }
 
 /// Read the relay's latest valid `kind:13535` archive snapshot. The frontend

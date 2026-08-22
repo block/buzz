@@ -296,6 +296,18 @@ pub enum AgentsCmd {
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
+    /// Open an owner-reviewed form to register an existing remote agent identity
+    DraftAdopt {
+        /// Current channel UUID; used only to authorize the review request
+        #[arg(long)]
+        channel: String,
+        /// Existing agent public key (hex or npub); no private key is imported
+        #[arg(long)]
+        agent_pubkey: String,
+        /// Proposed directory display name
+        #[arg(long)]
+        display_name: String,
+    },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
         after_help = "Auth flow: when target != signer, the CLI fetches the target's kind:0 and \
@@ -2262,6 +2274,7 @@ mod tests {
             vec![
                 "archive",
                 "archived",
+                "draft-adopt",
                 "draft-create",
                 "draft-update",
                 "unarchive"
@@ -2402,7 +2415,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

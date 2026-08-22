@@ -33,9 +33,21 @@ export type AgentManagementUpdateRequest = {
   };
 };
 
+export type AgentManagementAdoptRequest = {
+  type: typeof AGENT_MANAGEMENT_REQUEST;
+  action: "adopt";
+  requestId: string;
+  request: {
+    channelId: string;
+    agentPubkey: string;
+    displayName: string;
+  };
+};
+
 export type AgentManagementRequest =
   | AgentManagementCreateRequest
-  | AgentManagementUpdateRequest;
+  | AgentManagementUpdateRequest
+  | AgentManagementAdoptRequest;
 
 function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -61,7 +73,7 @@ export function parseAgentManagementRequest(
   if (
     payload.type !== AGENT_MANAGEMENT_REQUEST ||
     !isText(payload.requestId) ||
-    (payload.action !== "create" && payload.action !== "update") ||
+    !["create", "update", "adopt"].includes(String(payload.action)) ||
     typeof payload.request !== "object" ||
     payload.request === null
   ) {
@@ -88,6 +100,28 @@ export function parseAgentManagementRequest(
         channelId: request.channelId,
         displayName: request.displayName,
         systemPrompt: request.systemPrompt,
+      },
+    };
+  }
+
+  if (payload.action === "adopt") {
+    if (
+      !hasOnlyKeys(request, ["channelId", "agentPubkey", "displayName"]) ||
+      !isText(request.channelId) ||
+      !isText(request.agentPubkey) ||
+      !/^[0-9a-f]{64}$/i.test(request.agentPubkey) ||
+      !isText(request.displayName)
+    ) {
+      return null;
+    }
+    return {
+      type: AGENT_MANAGEMENT_REQUEST,
+      action: "adopt",
+      requestId: payload.requestId,
+      request: {
+        channelId: request.channelId,
+        agentPubkey: request.agentPubkey.toLowerCase(),
+        displayName: request.displayName,
       },
     };
   }

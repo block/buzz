@@ -13794,6 +13794,26 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "register_existing_relay_agent": {
+        const args = (
+          payload as {
+            input: {
+              agentPubkey: string;
+              displayName: string;
+              expectedOwnerPubkey: string;
+              expectedRelayUrl: string;
+              expectedSignerPubkey: string;
+            };
+          }
+        ).input;
+        assertExpectedRelayScope(args.expectedRelayUrl, activeConfig);
+        assertExpectedSigner(args.expectedSignerPubkey, activeConfig);
+        return {
+          eventId: mockEventId(),
+          agentPubkey: args.agentPubkey,
+          ownerPubkey: args.expectedOwnerPubkey,
+        };
+      }
       case "set_canvas":
         return { ok: true, event_id: mockEventId() };
       case "get_canvas": {
