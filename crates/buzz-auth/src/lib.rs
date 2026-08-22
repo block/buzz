@@ -72,10 +72,18 @@ pub struct AuthContext {
     pub channel_ids: Option<Vec<uuid::Uuid>>,
     /// How the connection was authenticated.
     pub auth_method: AuthMethod,
-    /// NIP-OA verified owner pubkey (if authenticated via owner attestation).
+    /// NIP-OA verified owner pubkey.
     ///
-    /// `None` for direct relay members or non-NIP-OA auth paths.
-    /// Set by the relay membership gate when NIP-OA fallback succeeds.
+    /// Set for any caller whose presented attestation resolved to a trusted
+    /// owner — including a direct relay member, which is why membership alone
+    /// no longer implies `None`. On a closed relay the claimed owner must also
+    /// be a relay member; an expired or not-yet-valid attestation resolves to
+    /// `None`.
+    ///
+    /// `None` for non-NIP-OA auth paths, and whenever the attestation could not
+    /// be trusted. Note this field selects the agent rate class in
+    /// `connection.rs`, so it must never be populated from an unverified or
+    /// untrusted owner.
     pub agent_owner_pubkey: Option<nostr::PublicKey>,
 }
 

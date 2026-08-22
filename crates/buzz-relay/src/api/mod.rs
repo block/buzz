@@ -59,11 +59,22 @@ pub mod relay_members {
     ///
     /// `community` is the server-resolved tenant of the request; membership is
     /// scoped to it so admitting a pubkey to community A never admits it to B.
+    ///
+    /// `auth_event_created_at` is the `created_at` of the signed authentication
+    /// event that carried the NIP-OA tag — the NIP-42 AUTH event on WebSocket,
+    /// the NIP-98 request event over HTTP. NIP-AA Step 4 requires the tag's
+    /// `created_at<t` / `created_at>t` clauses to be evaluated against exactly
+    /// that field, so delegated admission needs it and **`None` denies the
+    /// delegated fallback**: without a trusted timestamp there is nothing to
+    /// judge the attested window against, and admitting anyway would let an
+    /// expired capability back onto a closed relay. Direct membership is
+    /// unaffected — it never consults the tag.
     pub async fn check_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        auth_event_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
             return Ok(MembershipDecision::OpenRelay);
@@ -84,7 +95,18 @@ pub mod relay_members {
                 let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
                     .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
 
-                match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+                // Fail closed: a caller that cannot supply the carrier event's
+                // signed `created_at` cannot have the tag's window evaluated, so
+                // it does not get delegated admission.
+                let Some(created_at) = auth_event_created_at else {
+                    info!(
+                        agent = %pubkey_hex,
+                        "NIP-OA delegation denied: no signed timestamp to evaluate the tag window against"
+                    );
+                    return Ok(MembershipDecision::Denied);
+                };
+
+                match buzz_sdk::nip_oa::verify_auth_tag_at(tag_json, &agent_pubkey, created_at) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
                         let owner_is_member = state
@@ -117,18 +139,33 @@ pub mod relay_members {
     /// its NIP-OA owner *is* — access is granted via delegation.
     ///
     /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
+    /// immediately — no membership check is performed.
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
+    /// no NIP-OA tag is present/applicable (open relay without auth tag). `Ok(None)`
+    /// therefore means "admitted on its own", **not** "has no owner": callers that
+    /// record ownership must pass the result through [`resolve_nip_oa_owner`], which
+    /// recovers the owner from the presented tag in exactly those cases.
+    ///
+    /// `auth_event_created_at` carries the signed timestamp the NIP-OA window is
+    /// judged against; see [`check_relay_membership`]. `None` denies the
+    /// delegated fallback rather than skipping the check.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        auth_event_created_at: Option<u64>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
+        match check_relay_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            auth_event_created_at,
+        )
+        .await
+        {
             Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
             Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
             Ok(MembershipDecision::Denied) => Err((
@@ -145,13 +182,19 @@ pub mod relay_members {
         }
     }
 
-    /// Extract NIP-OA owner from an auth tag without membership enforcement.
+    /// Identify the NIP-OA owner named by an auth tag, **without** enforcing the
+    /// tag's time bounds.
     ///
-    /// Used on open relays (`require_relay_membership = false`) to opportunistically
-    /// extract the owner pubkey for agent→owner backfill. The NIP-OA signature is
-    /// cryptographically self-proving, so no feature flag is needed — if the tag
-    /// verifies, the owner relationship is authentic. Returns `None` if the tag
-    /// is absent or invalid.
+    /// This answers "who does this tag name as the owner?", which is the right
+    /// question for *restriction* paths: the ban cascades in `handlers::auth`
+    /// and `api::git::transport` deny an agent whose owner is banned, and an
+    /// expired attestation must not become an escape hatch from that. Widening
+    /// who gets denied is safe; widening who gets trusted is not.
+    ///
+    /// Anything that *grants* — recording ownership, admitting a session,
+    /// choosing a rate class — must use [`extract_nip_oa_owner_at`] instead, so
+    /// an expired credential cannot confer authority. Returns `None` if the tag
+    /// is absent or fails signature verification.
     pub fn extract_nip_oa_owner(
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
@@ -162,6 +205,130 @@ pub mod relay_members {
             Ok(owner) => Some(owner),
             Err(e) => {
                 info!("extract_nip_oa_owner: invalid auth tag: {e}");
+                None
+            }
+        }
+    }
+
+    /// Verify a NIP-OA auth tag *and* its time bounds, for paths that grant
+    /// authority from the result.
+    ///
+    /// `auth_event_created_at` is the `created_at` of the signed authentication
+    /// event that carried the tag — the NIP-42 AUTH event on WebSocket, the
+    /// NIP-98 request event over HTTP. The bound is part of what the owner
+    /// authorized, so it is judged against the same signed artifact the
+    /// attestation travelled with rather than against wall clock.
+    ///
+    /// Returns `None` if the tag is absent, fails signature verification, or is
+    /// outside its attested window.
+    pub fn extract_nip_oa_owner_at(
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        auth_event_created_at: u64,
+    ) -> Option<nostr::PublicKey> {
+        let tag_json = auth_tag_header?;
+        let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes).ok()?;
+        match buzz_sdk::nip_oa::verify_auth_tag_at(tag_json, &agent_pubkey, auth_event_created_at) {
+            Ok(owner) => Some(owner),
+            Err(e) => {
+                info!("extract_nip_oa_owner_at: auth tag not usable: {e}");
+                None
+            }
+        }
+    }
+
+    /// Resolve the NIP-OA owner to materialize for a caller that has already
+    /// passed the membership gate.
+    ///
+    /// `gate_owner` is what [`enforce_relay_membership`] returned: `Some` only
+    /// when membership was granted *through* the owner, in which case that owner
+    /// has already been proven to be a relay member and is kept as-is. Every
+    /// other admitted caller — a direct relay member on a closed relay, or
+    /// anyone on an open relay — arrives here with `None`, and the `auth` tag
+    /// they presented is verified here instead.
+    ///
+    /// Gating this on `require_relay_membership` inverted the deployment
+    /// posture — the stricter relay was the only one that never recorded
+    /// ownership, so `owner_only` policies, observer-frame authorization and the
+    /// agent rate class all silently degraded for agents enrolled as members
+    /// (#4223, #4937).
+    ///
+    /// # Why a self-presented tag is not sufficient on its own
+    ///
+    /// The attestation proves an owner key signed for this agent. It does *not*
+    /// prove that key is anyone this relay trusts, and the resolved owner is not
+    /// inert metadata: `materialize_nip_oa_owner` creates a user row for it, and
+    /// `connection.rs` derives the agent rate class from the session carrying
+    /// it. Believing an arbitrary key would let any direct member mint a
+    /// throwaway keypair, attest itself, and take the agent message quota —
+    /// while `set_agent_owner` is first-write-wins, so that bogus mapping would
+    /// then be permanent and the real owner refused. On a closed relay the
+    /// claimed owner must therefore be a relay member, exactly as the
+    /// `ViaOwner` branch of [`check_relay_membership`] already requires.
+    ///
+    /// Open relays are unchanged: with no membership boundary to honour there is
+    /// nothing to check the owner against, and extraction stays unconditional.
+    ///
+    /// `allow_nip_oa_auth` is deliberately not consulted — its own doc comment
+    /// scopes it to whether NIP-OA may *grant membership*, which this never
+    /// does. The boundary enforced here is owner membership, not that flag.
+    ///
+    /// `auth_event_created_at` is the `created_at` of the signed authentication
+    /// event that carried the tag; the attestation's own time bounds are
+    /// enforced against it, so an expired or not-yet-valid credential resolves
+    /// to `None`.
+    pub async fn resolve_nip_oa_owner(
+        state: &AppState,
+        community: CommunityId,
+        gate_owner: Option<nostr::PublicKey>,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        auth_event_created_at: u64,
+    ) -> Option<nostr::PublicKey> {
+        // Re-verified here even when the gate already resolved an owner. The two
+        // checks judge the same window against the same signed timestamp, so
+        // this is belt-and-braces rather than a second opinion — it keeps
+        // materialization correct on its own terms if the gate is ever changed
+        // or called differently.
+        let owner = extract_nip_oa_owner_at(pubkey_bytes, auth_tag_header, auth_event_created_at)?;
+
+        if let Some(gate_owner) = gate_owner {
+            // Membership came through this owner, so it is already a proven
+            // relay member and needs no second membership read. The keys are
+            // derived from the same tag and must agree; if they somehow do not,
+            // fail closed rather than pick one.
+            if gate_owner != owner {
+                tracing::error!(
+                    "resolve_nip_oa_owner: gate owner and re-verified owner disagree; \
+                     refusing to record ownership"
+                );
+                return None;
+            }
+            return Some(gate_owner);
+        }
+
+        if !state.config.require_relay_membership {
+            return Some(owner);
+        }
+
+        let owner_hex = owner.to_hex();
+        match state.db.is_relay_member(community, &owner_hex).await {
+            Ok(true) => Some(owner),
+            Ok(false) => {
+                info!(
+                    owner = %owner_hex,
+                    "resolve_nip_oa_owner: claimed owner is not a relay member; \
+                     refusing to record ownership on a closed relay"
+                );
+                None
+            }
+            Err(e) => {
+                // Fail closed: without a membership answer the owner cannot be
+                // trusted, and materializing it is not reversible.
+                tracing::error!(
+                    owner = %owner_hex,
+                    "resolve_nip_oa_owner: owner membership check failed: {e}"
+                );
                 None
             }
         }
@@ -273,6 +440,98 @@ pub mod relay_members {
             let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some("not valid json"));
 
             assert_eq!(result, None);
+        }
+
+        /// A caller the gate admitted on its own — a direct relay member on a
+        /// closed relay — still has its verified owner recovered from the tag,
+        /// instead of the attestation being dropped. This is the identification
+        /// half of the fix; whether that owner is *trusted* is decided by
+        /// `resolve_nip_oa_owner`, which needs a relay and is covered by the
+        /// Postgres-backed tests over the real HTTP and NIP-42 paths.
+        #[test]
+        fn extract_at_recovers_owner_for_a_direct_member() {
+            let owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let agent_pubkey = agent_keys.public_key();
+
+            let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = extract_nip_oa_owner_at(&agent_pubkey.to_bytes(), Some(&tag_json), 1_000);
+
+            assert_eq!(result, Some(owner_keys.public_key()));
+        }
+
+        /// A direct member that presents no tag stays ownerless — membership
+        /// alone never invents an owner.
+        #[test]
+        fn extract_at_without_a_tag_returns_none() {
+            let agent_keys = Keys::generate();
+
+            let result = extract_nip_oa_owner_at(&agent_keys.public_key().to_bytes(), None, 1_000);
+
+            assert_eq!(result, None);
+        }
+
+        /// A tag that attests a *different* agent is not evidence about this
+        /// one: `verify_auth_tag_at` binds the attestation to the signing
+        /// pubkey, so an intercepted tag can't be replayed onto another agent.
+        #[test]
+        fn extract_at_rejects_a_tag_minted_for_another_agent() {
+            let owner_keys = Keys::generate();
+            let attested_agent_keys = Keys::generate();
+            let impostor_keys = Keys::generate();
+
+            let tag_json = compute_auth_tag(&owner_keys, &attested_agent_keys.public_key(), "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = extract_nip_oa_owner_at(
+                &impostor_keys.public_key().to_bytes(),
+                Some(&tag_json),
+                1_000,
+            );
+
+            assert_eq!(result, None);
+        }
+
+        /// An expired or not-yet-valid attestation resolves to no owner, so it
+        /// cannot be materialized, seed an auth context, or lift the rate class.
+        /// The signature-only entry point still accepts both — that difference
+        /// is the whole reason the two functions exist.
+        #[test]
+        fn extract_at_refuses_credentials_outside_their_window() {
+            let owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let agent_pubkey = agent_keys.public_key();
+
+            let expired = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at<1000")
+                .expect("compute_auth_tag must succeed");
+            let not_yet = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at>9000")
+                .expect("compute_auth_tag must succeed");
+
+            let agent_bytes = agent_pubkey.to_bytes();
+            let owner = Some(owner_keys.public_key());
+
+            assert_eq!(
+                extract_nip_oa_owner_at(&agent_bytes, Some(&expired), 999),
+                owner
+            );
+            assert_eq!(
+                extract_nip_oa_owner_at(&agent_bytes, Some(&expired), 1000),
+                None
+            );
+            assert_eq!(
+                extract_nip_oa_owner_at(&agent_bytes, Some(&not_yet), 9001),
+                owner
+            );
+            assert_eq!(
+                extract_nip_oa_owner_at(&agent_bytes, Some(&not_yet), 9000),
+                None
+            );
+
+            // The identification-only path is deliberately unaffected: ban
+            // cascades must still recognise the owner of an expired tag.
+            assert_eq!(extract_nip_oa_owner(&agent_bytes, Some(&expired)), owner);
         }
     }
 }
