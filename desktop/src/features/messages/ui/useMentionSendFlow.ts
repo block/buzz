@@ -30,6 +30,7 @@ import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
+import { useEnsureManagedAgentMentionsReady } from "./useEnsureManagedAgentMentionsReady";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
@@ -37,8 +38,6 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   getErrorMessage,
-  isManagedAgentRunning,
-  isProviderBackedAgent,
   MENTION_REFERENCE_TAG,
   mergeOutgoingTagsWithReferenceMentions,
   type PendingNonMemberMentionSend,
@@ -171,72 +170,12 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
-  const ensureManagedAgentMentionsReady = React.useCallback(
-    async (
-      mentionPubkeys: string[],
-      capturedChannelId: string,
-      preparedParticipantPubkeys: string[] = [],
-      preparedManagedAgents: ManagedAgent[] = [],
-    ) => {
-      if (!capturedChannelId || mentionPubkeys.length === 0) {
-        return {
-          errors: [] as string[],
-          pubkeys: [] as string[],
-        };
-      }
-      const managedAgentsByPubkey = await getManagedAgentsByPubkey();
-      for (const agent of preparedManagedAgents) {
-        managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
-      }
-      const participantPubkeys = new Set([
-        ...mentions.memberPubkeys,
-        ...preparedParticipantPubkeys.map(normalizePubkey),
-      ]);
-      const errors: string[] = [];
-      const pubkeys: string[] = [];
-      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
-        const agent = managedAgentsByPubkey.get(pubkey);
-        if (!agent) {
-          continue;
-        }
-        try {
-          if (participantPubkeys.has(pubkey)) {
-            if (isProviderBackedAgent(agent)) {
-              if (agent.status !== "deployed") {
-                await startAgentMutation.mutateAsync(agent.pubkey);
-              }
-            } else if (!isManagedAgentRunning(agent)) {
-              await startAgentMutation.mutateAsync(agent.pubkey);
-            }
-          } else {
-            await attachAgentMutation.mutateAsync({
-              channelId: capturedChannelId,
-              agent,
-              role: "bot",
-            });
-          }
-          pubkeys.push(pubkey);
-        } catch (error) {
-          errors.push(
-            `${agent.name}: ${getErrorMessage(
-              error,
-              "Could not prepare agent.",
-            )}`,
-          );
-        }
-      }
-      return {
-        errors,
-        pubkeys: uniqueNormalizedPubkeys(pubkeys),
-      };
-    },
-    [
-      attachAgentMutation,
-      getManagedAgentsByPubkey,
-      mentions.memberPubkeys,
-      startAgentMutation,
-    ],
-  );
+  const ensureManagedAgentMentionsReady = useEnsureManagedAgentMentionsReady({
+    attachAgentMutation,
+    getManagedAgentsByPubkey,
+    memberPubkeys: mentions.memberPubkeys,
+    startAgentMutation,
+  });
   const createMentionedPersonaAgents = React.useCallback(
     async (trimmed: string, capturedChannelId: string) => {
       const personaMentions = mentions.extractMentionPersonas(trimmed);
@@ -444,8 +383,13 @@ export function useMentionSendFlow({
           }
         }
 
+        // Every mentioned *agent*, not just the ones this device holds a
+        // secret for. The ones it does not are exactly the twins minted on
+        // another computer for the same persona, and naming them is the
+        // whole point of the readiness notices — pre-filtering to the
+        // locally managed set is what made them fail in silence.
         const agentReadiness = await ensureManagedAgentMentionsReady(
-          managedMentionPubkeys.filter(
+          agentMentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
           sendChannelId ?? "",
@@ -456,6 +400,11 @@ export function useMentionSendFlow({
         if (!isMountedRef.current) {
           persistPreflightDraft();
           return;
+        }
+        if (agentReadiness.notices.length > 0) {
+          // A notice, not an error: the message still sends, it just cannot be
+          // answered from here.
+          toast.info(agentReadiness.notices.join(" "));
         }
         if (agentReadiness.errors.length > 0) {
           const message =

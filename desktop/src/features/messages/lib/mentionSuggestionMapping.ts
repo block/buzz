@@ -17,6 +17,8 @@ export type MentionSuggestionCandidate = {
   isMember: boolean;
   role?: ChannelRole | null;
   ownerPubkey?: string | null;
+  deviceLabel?: string | null;
+  isManagedAgent?: boolean;
 };
 
 export function mapMentionCandidateToSuggestion(opts: {
@@ -72,5 +74,7 @@ export function mapMentionCandidateToSuggestion(opts: {
       candidate.isMember === false,
     ownerLabel,
     role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
+    deviceLabel: candidate.deviceLabel ?? null,
+    isLocalAgent: candidate.isManagedAgent === true,
   };
 }

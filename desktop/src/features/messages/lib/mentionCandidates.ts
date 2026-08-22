@@ -48,7 +48,51 @@ export type MentionCandidate = {
   isAgent: boolean;
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
+  /** Device label from the agent's kind:30177 event; local agents leave it unset. */
+  deviceLabel?: string | null;
 };
+
+/**
+ * Fold a newly discovered candidate into the one already held for a pubkey.
+ *
+ * The same pubkey can surface from several sources (channel member, relay
+ * agent directory, local managed-agent store), each carrying a different
+ * slice of the truth, so every field takes the first non-nullish value —
+ * except the display name, where an agent-sourced name beats a person-sourced
+ * one because only the agent sources know an agent's configured name.
+ *
+ * `fallbackOwnerPubkey` is the profile-derived owner used when neither side
+ * declares one.
+ */
+export function mergeMentionCandidates(
+  current: MentionCandidate,
+  candidate: MentionCandidate,
+  fallbackOwnerPubkey: string | null | undefined,
+): MentionCandidate {
+  return {
+    ...current,
+    avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
+    displayName:
+      current.isAgent && !candidate.isAgent
+        ? current.displayName
+        : candidate.isAgent && !current.isAgent
+          ? (candidate.displayName ?? current.displayName)
+          : (current.displayName ?? candidate.displayName),
+    isAgent: current.isAgent || candidate.isAgent,
+    isMember: current.isMember || candidate.isMember,
+    personaId: current.personaId ?? candidate.personaId,
+    personaName: current.personaName ?? candidate.personaName ?? null,
+    role: current.role ?? candidate.role ?? null,
+    secondaryLabel: current.secondaryLabel ?? candidate.secondaryLabel ?? null,
+    ownerPubkey:
+      current.ownerPubkey ??
+      candidate.ownerPubkey ??
+      fallbackOwnerPubkey ??
+      null,
+    isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
+    deviceLabel: current.deviceLabel ?? candidate.deviceLabel ?? null,
+  };
+}
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (

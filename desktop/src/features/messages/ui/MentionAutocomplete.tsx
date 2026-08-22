@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Bot, Users } from "lucide-react";
+import { describeAgentDevice } from "@/features/agents/lib/agentDeviceLabel";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 
@@ -27,6 +28,10 @@ export type MentionSuggestion = {
   notInChannel?: boolean;
   ownerLabel?: string | null;
   role?: string | null;
+  /** Device label from the agent's kind:30177 event, when it is not this device's. */
+  deviceLabel?: string | null;
+  /** True when this agent has a record in the local managed-agent store. */
+  isLocalAgent?: boolean;
 };
 
 type MentionAutocompleteProps = {
@@ -123,6 +128,15 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)
               : null;
+          // Same account on several computers mints one keypair per computer,
+          // so identically named agents are usually different devices.
+          const deviceLine = suggestion.isAgent
+            ? describeAgentDevice({
+                isLocal: suggestion.isLocalAgent === true,
+                deviceLabel: suggestion.deviceLabel,
+                hasNameCollision,
+              })
+            : null;
 
           return (
             <button
@@ -214,6 +228,15 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           : ownerLabel
                             ? `managed by ${ownerLabel}`
                             : "not in channel"}
+                      </span>
+                    ) : null}
+                    {deviceLine ? (
+                      <span
+                        className="min-w-0 truncate"
+                        data-testid="mention-device-label"
+                        title={deviceLine}
+                      >
+                        {deviceLine}
                       </span>
                     ) : null}
                   </span>

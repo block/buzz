@@ -57,6 +57,7 @@ import {
   globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
+  mergeMentionCandidates,
 } from "./mentionCandidates";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
@@ -267,31 +268,16 @@ export function useMentions(
         candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
         return;
       }
-      candidatesByPubkey.set(pubkey, {
-        ...current,
-        avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
-        displayName:
-          current.isAgent && !candidate.isAgent
-            ? current.displayName
-            : candidate.isAgent && !current.isAgent
-              ? (candidate.displayName ?? current.displayName)
-              : (current.displayName ?? candidate.displayName),
-        isAgent: current.isAgent || candidate.isAgent,
-        isMember: current.isMember || candidate.isMember,
-        personaId: current.personaId ?? candidate.personaId,
-        personaName: current.personaName ?? candidate.personaName ?? null,
-        role: current.role ?? candidate.role ?? null,
-        secondaryLabel:
-          current.secondaryLabel ?? candidate.secondaryLabel ?? null,
-        ownerPubkey:
-          current.ownerPubkey ??
-          candidate.ownerPubkey ??
-          (candidate.isAgent && candidate.pubkey
+      candidatesByPubkey.set(
+        pubkey,
+        mergeMentionCandidates(
+          current,
+          candidate,
+          candidate.isAgent && candidate.pubkey
             ? profiles?.[pubkey]?.ownerPubkey
-            : null) ??
-          null,
-        isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
-      });
+            : null,
+        ),
+      );
     };
     for (const member of members ?? []) {
       const pubkey = normalizePubkey(member.pubkey);
@@ -343,6 +329,7 @@ export function useMentions(
           (activePersonaById.has(pubkey) ? pubkey : undefined),
         ownerPubkey: agent.ownerPubkey,
         isAgent: true,
+        deviceLabel: agent.deviceLabel,
       });
     }
     for (const agent of managedAgentsQuery.data ?? []) {

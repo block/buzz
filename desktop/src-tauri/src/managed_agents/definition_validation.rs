@@ -60,6 +60,32 @@ pub(crate) fn validate_managed_agent_definition_text(
     validate_agent_definition_text(name, executable_prompt)
 }
 
+/// Maximum length of a device label, in `char`s.
+pub(crate) const MAX_DEVICE_LABEL_CHARS: usize = 32;
+
+/// Validate a device label against the same visible-text policy as agent
+/// definition text.
+///
+/// A device label names the computer an agent lives on and is published in a
+/// world-readable kind:30177 event, then rendered beside an agent's name in
+/// other people's clients. That makes it the same class of input as a display
+/// name: `char::is_control` alone would pass zero-width characters (U+200B) and
+/// bidi overrides (U+202E), which are Unicode category `Cf` and can visually
+/// reorder the text around them.
+pub(crate) fn validate_device_label(label: &str) -> Result<(), String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return Err("Device name must not be empty".to_string());
+    }
+    let count = trimmed.chars().count();
+    if count > MAX_DEVICE_LABEL_CHARS {
+        return Err(format!(
+            "Device name is too long ({count} characters, max {MAX_DEVICE_LABEL_CHARS})"
+        ));
+    }
+    validate_visible_text(trimmed, "Device name", false)
+}
+
 fn validate_visible_text(
     value: &str,
     label: &str,
