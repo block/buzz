@@ -519,7 +519,7 @@ mod tests {
                 app_attest_key_id: vec![1],
                 app_attest_public_key: vec![2; 33],
                 assertion_counter: 0,
-                profile: AppProfile::BuzzIosProduction,
+                profile: AppProfile::BuzzIosDogfood,
                 token_ciphertext: vec![3],
                 token_fingerprint: [4; 32],
                 endpoint_epoch: 1,

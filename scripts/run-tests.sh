@@ -107,6 +107,9 @@ run_unit_tests() {
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
 
+  run_test_step "buzz-push-gateway dev App Attest bypass tests" \
+    cargo test -p buzz-push-gateway --features dev-app-attest-bypass -- --nocapture
+
   # Kubernetes backend provider: pure decision layers driven by a fake
   # substrate, no cluster. Mirrors the nextest path in `just test-unit` —
   # the two lists must stay in step or the fallback silently covers less.

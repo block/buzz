@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../animated_avatar.dart';
+import '../community/community_provider.dart';
+import '../push/push_presentation_cache.dart';
 import '../relay/relay.dart';
 
 /// A circular avatar that supports both remote URLs and inline image data.
@@ -50,7 +54,7 @@ class AvatarImage extends StatelessWidget {
 }
 
 /// Image content for avatar surfaces whose shape is supplied by their parent.
-class AvatarImageContent extends StatefulWidget {
+class AvatarImageContent extends ConsumerStatefulWidget {
   final String? imageUrl;
   final Widget fallback;
   final BoxFit fit;
@@ -63,10 +67,10 @@ class AvatarImageContent extends StatefulWidget {
   });
 
   @override
-  State<AvatarImageContent> createState() => _AvatarImageContentState();
+  ConsumerState<AvatarImageContent> createState() => _AvatarImageContentState();
 }
 
-class _AvatarImageContentState extends State<AvatarImageContent> {
+class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
   late _AvatarSource? _source = _AvatarSource.parse(widget.imageUrl);
 
   @override
@@ -80,6 +84,7 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
   @override
   Widget build(BuildContext context) {
     final centeredFallback = Center(child: widget.fallback);
+    final communityID = ref.watch(activeCommunityProvider).value?.id;
 
     return switch (_source) {
       _EmojiAvatarSource(:final emoji, :final color) => ColoredBox(
@@ -111,6 +116,11 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
       _NetworkAvatarSource(:final url) => MediaImage(
         url: url,
         fit: widget.fit,
+        onBytesLoaded: communityID == null
+            ? null
+            : (bytes) => unawaited(
+                cacheBuzzPushAvatarFromLoadedBytes(communityID, url, bytes),
+              ),
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       null => centeredFallback,

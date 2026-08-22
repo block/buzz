@@ -1,8 +1,11 @@
 //! Stateful, capability-gated APNs last hop for NIP-PL.
 pub mod apns;
 pub mod app_attest;
+pub mod app_attest_policy;
 pub mod authority;
 pub mod config;
+#[cfg(feature = "dev-app-attest-bypass")]
+pub mod dev_app_attest;
 pub mod grant;
 pub mod http;
 pub mod metrics;

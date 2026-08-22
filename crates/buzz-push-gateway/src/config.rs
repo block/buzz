@@ -1,3 +1,5 @@
+#[cfg(feature = "dev-app-attest-bypass")]
+use crate::app_attest_policy::DevelopmentAppAttestBypass;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::{
     collections::{HashMap, HashSet},
@@ -5,6 +7,21 @@ use std::{
     path::PathBuf,
 };
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApnsEnvironment {
+    Production,
+    Sandbox,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppProfileConfig {
+    pub enabled: bool,
+    pub app_attest_app_id: String,
+    pub apns_cert_path: Option<PathBuf>,
+    pub apns_topic: String,
+    pub apns_environment: ApnsEnvironment,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyConfig {
@@ -21,19 +38,19 @@ pub struct Config {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    pub enabled_profiles: HashSet<crate::model::AppProfile>,
+    /// Closed server-owned registry. Both known application identities are
+    /// present even when one is dormant; only enabled entries carry a required
+    /// APNs identity and can enroll or deliver.
+    pub profiles: HashMap<crate::model::AppProfile, AppProfileConfig>,
     pub database_url: String,
-    pub app_attest_app_id: String,
     pub app_attest_root_cert_path: PathBuf,
+    #[cfg(feature = "dev-app-attest-bypass")]
+    pub dev_app_attest_bypass: bool,
     /// Ordered current key first, followed by decrypt-only predecessors.
     pub grant_keys: Vec<KeyConfig>,
     /// Independent token-custody keyring. These keys MUST NOT be reused for
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
-    pub apns_key_path: PathBuf,
-    pub apns_key_id: String,
-    pub apns_team_id: String,
-    pub apns_topic: String,
 }
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -75,7 +92,66 @@ fn parse_keyring(
     }
     Ok(keys)
 }
+
+fn parse_profile(
+    e: &HashMap<String, String>,
+    prefix: &'static str,
+    enabled: bool,
+) -> Result<AppProfileConfig, ConfigError> {
+    let app_id_key = match prefix {
+        "DOGFOOD" => "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+        "APP_STORE" => "BUZZ_PUSH_APP_STORE_APP_ATTEST_APP_ID",
+        _ => unreachable!("closed profile prefix"),
+    };
+    let cert_key = match prefix {
+        "DOGFOOD" => "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
+        "APP_STORE" => "BUZZ_PUSH_APP_STORE_APNS_CERT_PATH",
+        _ => unreachable!("closed profile prefix"),
+    };
+    let topic_key = match prefix {
+        "DOGFOOD" => "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
+        "APP_STORE" => "BUZZ_PUSH_APP_STORE_APNS_TOPIC",
+        _ => unreachable!("closed profile prefix"),
+    };
+    let environment_key = match prefix {
+        "DOGFOOD" => "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT",
+        "APP_STORE" => "BUZZ_PUSH_APP_STORE_APNS_ENVIRONMENT",
+        _ => unreachable!("closed profile prefix"),
+    };
+    let required = |key: &'static str| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing(key))
+    };
+    let app_attest_app_id = required(app_id_key)?.to_owned();
+    let apns_topic = required(topic_key)?.to_owned();
+    let apns_cert_path = match e.get(cert_key).filter(|value| !value.is_empty()) {
+        Some(path) => Some(PathBuf::from(path)),
+        None if enabled => return Err(ConfigError::Missing(cert_key)),
+        None => None,
+    };
+    let apns_environment = match e.get(environment_key).map(String::as_str) {
+        None | Some("production") => ApnsEnvironment::Production,
+        Some("sandbox") => ApnsEnvironment::Sandbox,
+        Some(_) => return Err(ConfigError::Invalid(environment_key)),
+    };
+    Ok(AppProfileConfig {
+        enabled,
+        app_attest_app_id,
+        apns_cert_path,
+        apns_topic,
+        apns_environment,
+    })
+}
+
 impl Config {
+    #[cfg(feature = "dev-app-attest-bypass")]
+    pub fn dev_app_attest_bypass(&self) -> Option<DevelopmentAppAttestBypass> {
+        self.dev_app_attest_bypass
+            .then(DevelopmentAppAttestBypass::enabled)
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
     }
@@ -144,42 +220,86 @@ impl Config {
         let enabled_profiles = req(e, "BUZZ_PUSH_ENABLED_PROFILES")?
             .split(',')
             .map(|profile| match profile {
-                "buzz-ios-production" => Ok(crate::model::AppProfile::BuzzIosProduction),
-                "buzz-ios-sandbox" => Ok(crate::model::AppProfile::BuzzIosSandbox),
+                "buzz-ios-dogfood" => Ok(crate::model::AppProfile::BuzzIosDogfood),
+                "buzz-ios-app-store" => Ok(crate::model::AppProfile::BuzzIosAppStore),
                 _ => Err(ConfigError::Invalid("BUZZ_PUSH_ENABLED_PROFILES")),
             })
             .collect::<Result<HashSet<_>, _>>()?;
         if enabled_profiles.is_empty() {
             return Err(ConfigError::Invalid("BUZZ_PUSH_ENABLED_PROFILES"));
         }
+        let profiles = HashMap::from([
+            (
+                crate::model::AppProfile::BuzzIosDogfood,
+                parse_profile(
+                    e,
+                    "DOGFOOD",
+                    enabled_profiles.contains(&crate::model::AppProfile::BuzzIosDogfood),
+                )?,
+            ),
+            (
+                crate::model::AppProfile::BuzzIosAppStore,
+                parse_profile(
+                    e,
+                    "APP_STORE",
+                    enabled_profiles.contains(&crate::model::AppProfile::BuzzIosAppStore),
+                )?,
+            ),
+        ]);
+        let bind_addr = e
+            .get("BUZZ_PUSH_BIND_ADDR")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0:8080")
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_BIND_ADDR"))?;
+        let health_addr = e
+            .get("BUZZ_PUSH_HEALTH_ADDR")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0:8081")
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?;
+        let dev_app_attest_bypass_requested =
+            match e.get("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS").map(String::as_str) {
+                None | Some("0") => false,
+                Some("1") => true,
+                Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS")),
+            };
+        #[cfg(not(feature = "dev-app-attest-bypass"))]
+        if dev_app_attest_bypass_requested {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS"));
+        }
+        #[cfg(feature = "dev-app-attest-bypass")]
+        let dev_app_attest_bypass = dev_app_attest_bypass_requested;
+        #[cfg(feature = "dev-app-attest-bypass")]
+        if dev_app_attest_bypass
+            && (!bind_addr.ip().is_loopback() || !health_addr.ip().is_loopback())
+        {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS"));
+        }
+        #[cfg(feature = "dev-app-attest-bypass")]
+        if dev_app_attest_bypass
+            && (enabled_profiles.len() != 1
+                || !enabled_profiles.contains(&crate::model::AppProfile::BuzzIosDogfood)
+                || profiles[&crate::model::AppProfile::BuzzIosDogfood].apns_environment
+                    != ApnsEnvironment::Sandbox)
+        {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS"));
+        }
         Ok(Self {
-            bind_addr: e
-                .get("BUZZ_PUSH_BIND_ADDR")
-                .map(String::as_str)
-                .unwrap_or("0.0.0.0:8080")
-                .parse()
-                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_BIND_ADDR"))?,
-            health_addr: e
-                .get("BUZZ_PUSH_HEALTH_ADDR")
-                .map(String::as_str)
-                .unwrap_or("0.0.0.0:8081")
-                .parse()
-                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?,
+            bind_addr,
+            health_addr,
             public_delivery_url,
             max_grant_lifetime_seconds,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
-            enabled_profiles,
+            profiles,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
-            app_attest_app_id: req(e, "BUZZ_PUSH_APP_ATTEST_APP_ID")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
+            #[cfg(feature = "dev-app-attest-bypass")]
+            dev_app_attest_bypass,
             grant_keys,
             token_keys,
-            apns_key_path: req(e, "BUZZ_PUSH_APNS_KEY_PATH")?.into(),
-            apns_key_id: req(e, "BUZZ_PUSH_APNS_KEY_ID")?.to_owned(),
-            apns_team_id: req(e, "BUZZ_PUSH_APNS_TEAM_ID")?.to_owned(),
-            apns_topic: req(e, "BUZZ_PUSH_APNS_TOPIC")?.to_owned(),
         })
     }
 }
@@ -187,6 +307,10 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "dev-app-attest-bypass")]
+    use crate::app_attest_policy::AppAttestPolicy;
+    #[cfg(feature = "dev-app-attest-bypass")]
+    use sha2::Digest as _;
 
     fn base() -> HashMap<String, String> {
         HashMap::from([
@@ -216,22 +340,73 @@ mod tests {
             ),
             (
                 "BUZZ_PUSH_ENABLED_PROFILES".into(),
-                "buzz-ios-production".into(),
+                "buzz-ios-dogfood".into(),
             ),
             (
                 "DATABASE_URL".into(),
-                "postgres://buzz:test@localhost/buzz".into(),
+                "postgres://buzz:test@localhost/buzz".into(), // sadscan:disable np.postgres.1
             ),
-            ("BUZZ_PUSH_APP_ATTEST_APP_ID".into(), "TEAM.app".into()),
+            (
+                "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID".into(),
+                "TEAM.xyz.block.buzz.dogfood.mobile".into(),
+            ),
+            (
+                "BUZZ_PUSH_APP_STORE_APP_ATTEST_APP_ID".into(),
+                "TEAM.xyz.block.buzz.mobile".into(),
+            ),
             (
                 "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH".into(),
                 "/apple-root.pem".into(),
             ),
-            ("BUZZ_PUSH_APNS_KEY_PATH".into(), "/key.p8".into()),
-            ("BUZZ_PUSH_APNS_KEY_ID".into(), "key".into()),
-            ("BUZZ_PUSH_APNS_TEAM_ID".into(), "team".into()),
-            ("BUZZ_PUSH_APNS_TOPIC".into(), "app".into()),
+            (
+                "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH".into(),
+                "/dogfood-identity.pem".into(),
+            ),
+            (
+                "BUZZ_PUSH_DOGFOOD_APNS_TOPIC".into(),
+                "xyz.block.buzz.dogfood.mobile".into(),
+            ),
+            (
+                "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+                "production".into(),
+            ),
+            (
+                "BUZZ_PUSH_APP_STORE_APNS_TOPIC".into(),
+                "xyz.block.buzz.mobile".into(),
+            ),
+            ("BUZZ_PUSH_BIND_ADDR".into(), "127.0.0.1:8080".into()),
+            ("BUZZ_PUSH_HEALTH_ADDR".into(), "127.0.0.1:8081".into()),
         ])
+    }
+
+    #[test]
+    fn enabled_profile_requires_its_certificate_and_all_profiles_have_server_owned_identity() {
+        let config = Config::from_map(&base()).unwrap();
+        let dogfood = &config.profiles[&crate::model::AppProfile::BuzzIosDogfood];
+        assert!(dogfood.enabled);
+        assert_eq!(
+            dogfood.apns_cert_path,
+            Some(PathBuf::from("/dogfood-identity.pem"))
+        );
+        assert_eq!(dogfood.apns_topic, "xyz.block.buzz.dogfood.mobile");
+        let app_store = &config.profiles[&crate::model::AppProfile::BuzzIosAppStore];
+        assert!(!app_store.enabled);
+        assert_eq!(app_store.apns_cert_path, None);
+        assert_eq!(app_store.apns_topic, "xyz.block.buzz.mobile");
+
+        for variable in [
+            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
+            "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
+            "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+            "BUZZ_PUSH_APP_STORE_APNS_TOPIC",
+            "BUZZ_PUSH_APP_STORE_APP_ATTEST_APP_ID",
+        ] {
+            let mut env = base();
+            env.remove(variable);
+            assert!(
+                matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable)
+            );
+        }
     }
 
     #[test]
@@ -255,7 +430,8 @@ mod tests {
                 "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
                 "https://push.example/v1/deliveries/apns",
             ),
-            ("BUZZ_PUSH_APP_ATTEST_APP_ID", ""),
+            ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
+            ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_ENABLED_PROFILES", "unknown-profile"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
@@ -277,6 +453,218 @@ mod tests {
             env.insert("BUZZ_PUSH_TOKEN_KEYS".into(), token_keys);
             assert!(Config::from_map(&env).is_err());
         }
+    }
+
+    #[test]
+    fn listener_defaults_remain_public_when_addresses_are_absent() {
+        let mut env = base();
+        env.remove("BUZZ_PUSH_BIND_ADDR");
+        env.remove("BUZZ_PUSH_HEALTH_ADDR");
+
+        let config = Config::from_map(&env).unwrap();
+        assert_eq!(config.bind_addr, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(config.health_addr, "0.0.0.0:8081".parse().unwrap());
+    }
+
+    #[test]
+    fn dogfood_and_app_store_profiles_parse_together_without_bypass() {
+        let mut env = base();
+        env.insert(
+            "BUZZ_PUSH_ENABLED_PROFILES".into(),
+            "buzz-ios-dogfood,buzz-ios-app-store".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_STORE_APNS_CERT_PATH".into(),
+            "/app-store-identity.pem".into(),
+        );
+
+        let config = Config::from_map(&env).unwrap();
+        assert_eq!(config.profiles.len(), 2);
+        assert!(config.profiles[&crate::model::AppProfile::BuzzIosDogfood].enabled);
+        assert!(config.profiles[&crate::model::AppProfile::BuzzIosAppStore].enabled);
+    }
+
+    #[test]
+    fn dev_app_attest_bypass_flag_is_strict_and_feature_gated() {
+        let absent = Config::from_map(&base()).unwrap();
+        #[cfg(feature = "dev-app-attest-bypass")]
+        assert!(!absent.dev_app_attest_bypass);
+        #[cfg(not(feature = "dev-app-attest-bypass"))]
+        let _ = absent;
+
+        let mut disabled = base();
+        disabled.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "0".into());
+        let disabled = Config::from_map(&disabled).unwrap();
+        #[cfg(feature = "dev-app-attest-bypass")]
+        assert!(!disabled.dev_app_attest_bypass);
+        #[cfg(not(feature = "dev-app-attest-bypass"))]
+        let _ = disabled;
+
+        for value in ["", "false", "true", "TRUE", "yes", " 1"] {
+            let mut env = base();
+            env.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), value.into());
+            assert!(
+                matches!(
+                    Config::from_map(&env),
+                    Err(ConfigError::Invalid("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS"))
+                ),
+                "accepted non-canonical value {value:?}"
+            );
+        }
+
+        #[cfg(not(feature = "dev-app-attest-bypass"))]
+        {
+            let mut enabled = base();
+            enabled.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+            assert!(matches!(
+                Config::from_map(&enabled),
+                Err(ConfigError::Invalid("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS"))
+            ));
+        }
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn dev_app_attest_bypass_requires_both_loopback_listeners() {
+        for (key, value) in [
+            ("BUZZ_PUSH_BIND_ADDR", "0.0.0.0:8080"),
+            ("BUZZ_PUSH_HEALTH_ADDR", "[::]:8081"),
+        ] {
+            let mut env = base();
+            env.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+            env.insert(
+                "BUZZ_PUSH_ENABLED_PROFILES".into(),
+                "buzz-ios-dogfood".into(),
+            );
+            env.insert(
+                "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+                "sandbox".into(),
+            );
+            env.insert(key.into(), value.into());
+            assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn non_loopback_bind_is_rejected_before_loopback_equivalent_is_accepted() {
+        let mut non_loopback = base();
+        non_loopback.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+        non_loopback.insert(
+            "BUZZ_PUSH_ENABLED_PROFILES".into(),
+            "buzz-ios-dogfood".into(),
+        );
+        non_loopback.insert(
+            "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+            "sandbox".into(),
+        );
+        non_loopback.insert("BUZZ_PUSH_BIND_ADDR".into(), "0.0.0.0:8080".into());
+        assert!(Config::from_map(&non_loopback).is_err());
+
+        non_loopback.insert("BUZZ_PUSH_BIND_ADDR".into(), "127.0.0.1:8080".into());
+        assert!(
+            Config::from_map(&non_loopback)
+                .unwrap()
+                .dev_app_attest_bypass
+        );
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn dev_app_attest_bypass_requires_sandbox_dogfood_as_the_only_profile() {
+        for profiles in ["buzz-ios-app-store", "buzz-ios-dogfood,buzz-ios-app-store"] {
+            let mut env = base();
+            env.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+            env.insert("BUZZ_PUSH_ENABLED_PROFILES".into(), profiles.into());
+            assert!(
+                Config::from_map(&env).is_err(),
+                "accepted profiles {profiles}"
+            );
+        }
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn dev_app_attest_bypass_accepts_explicit_one_for_loopback_sandbox() {
+        let mut env = base();
+        env.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+        env.insert(
+            "BUZZ_PUSH_ENABLED_PROFILES".into(),
+            "buzz-ios-dogfood".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+            "sandbox".into(),
+        );
+        assert!(Config::from_map(&env).unwrap().dev_app_attest_bypass);
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn second_profile_is_rejected_before_sandbox_only_is_accepted() {
+        let mut env = base();
+        env.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+        env.insert(
+            "BUZZ_PUSH_ENABLED_PROFILES".into(),
+            "buzz-ios-dogfood,buzz-ios-app-store".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_STORE_APNS_CERT_PATH".into(),
+            "/app-store-identity.pem".into(),
+        );
+        assert!(Config::from_map(&env).is_err());
+
+        env.insert(
+            "BUZZ_PUSH_ENABLED_PROFILES".into(),
+            "buzz-ios-dogfood".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+            "sandbox".into(),
+        );
+        assert!(Config::from_map(&env).unwrap().dev_app_attest_bypass);
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn dev_app_attest_bypass_selects_development_policy_from_validated_config() {
+        let mut env = base();
+        env.insert("BUZZ_PUSH_DEV_APP_ATTEST_BYPASS".into(), "1".into());
+        env.insert(
+            "BUZZ_PUSH_ENABLED_PROFILES".into(),
+            "buzz-ios-dogfood".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+            "sandbox".into(),
+        );
+        let config = Config::from_map(&env).unwrap();
+        let apple = crate::app_attest::AppAttestVerifier::for_policy_test();
+
+        let policy = AppAttestPolicy::from_config(config.dev_app_attest_bypass(), apple);
+
+        assert!(matches!(policy, AppAttestPolicy::Development(_)));
+    }
+
+    #[cfg(feature = "dev-app-attest-bypass")]
+    #[test]
+    fn bypass_unset_keeps_sentinel_on_the_apple_verifier() {
+        let config = Config::from_map(&base()).unwrap();
+        let policy = AppAttestPolicy::from_config(
+            config.dev_app_attest_bypass(),
+            crate::app_attest::AppAttestVerifier::for_policy_test(),
+        );
+        let mut sentinel = b"buzz-dev-app-attest-v1:".to_vec();
+        sentinel.extend_from_slice(&[1; 32]);
+        let key_id = sha2::Sha256::digest(&sentinel);
+
+        assert!(policy
+            .verify_attestation(
+                &STANDARD.encode(sentinel),
+                &STANDARD.encode(key_id),
+                b"canonical enrollment transcript",
+            )
+            .is_err());
     }
 
     #[test]

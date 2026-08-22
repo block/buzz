@@ -1,8 +1,9 @@
 //! Embedded SQLx migrations for Buzz.
 //!
-//! Fresh deployments apply the checked-in SQL files under `migrations/`. The
-//! multi-tenant rewrite owns a clean consolidated `0001`; legacy single-tenant
-//! cutover/backfill is a separate operator script, not startup migration state.
+//! Fresh deployments apply the checked-in additive SQL files under
+//! `migrations/`. The multi-tenant rewrite begins from a clean consolidated
+//! `0001`; legacy single-tenant cutover/backfill is a separate operator script,
+//! not startup migration state.
 
 use std::future::Future;
 
@@ -640,7 +641,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1102,6 +1103,22 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+    }
+
+    #[test]
+    fn push_match_trigger_is_narrowed_to_message_kinds_additively() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        assert_eq!(migrations[32].version, 33);
+        let sql = migrations[32].sql.as_str();
+        assert!(sql.contains("CREATE OR REPLACE FUNCTION enqueue_push_match_job"));
+        assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
+        assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
+        assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
 
     #[test]

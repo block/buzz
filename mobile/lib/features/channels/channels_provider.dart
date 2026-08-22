@@ -5,6 +5,8 @@ import 'dart:math';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/community/community_provider.dart';
+import '../../shared/push/push_presentation_cache.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
@@ -139,6 +141,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) throw StateError('No signing identity available');
+    final communityID = ref.read(activeCommunityProvider).value?.id;
     _loadThreadInterestStores(myPk);
 
     final session = ref.read(relaySessionProvider.notifier);
@@ -190,11 +193,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final id = event.getTagValue('d');
       if (id == null) continue;
       final existing = latestMetaPerId[id];
-      if (existing == null || event.createdAt > existing.createdAt) {
+      if (existing == null ||
+          event.createdAt > existing.createdAt ||
+          (event.createdAt == existing.createdAt &&
+              event.id.compareTo(existing.id) < 0)) {
         latestMetaPerId[id] = event;
       }
     }
-    final dedupedMetas = latestMetaPerId.values;
+    final dedupedMetas = latestMetaPerId.values.toList();
 
     // Resolve DM participant display names. Relay stores DM channels with
     // literal name="DM"; pure-Nostr architecture pushes name resolution to
@@ -254,8 +260,31 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       ),
     );
     if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
+    final latestMembershipPerId = <String, NostrEvent>{};
+    for (final event in [...memberships, ...memberEvents]) {
+      if (event.kind != 39002) continue;
+      final id = event.getTagValue('d');
+      if (id == null) continue;
+      final existing = latestMembershipPerId[id];
+      if (existing == null ||
+          event.createdAt > existing.createdAt ||
+          (event.createdAt == existing.createdAt &&
+              event.id.compareTo(existing.id) < 0)) {
+        latestMembershipPerId[id] = event;
+      }
+    }
+    final dedupedMemberships = latestMembershipPerId.values.toList();
+    if (communityID != null) {
+      unawaited(
+        cacheBuzzPushChannelEvents(
+          communityID,
+          dedupedMetas,
+          dedupedMemberships,
+        ),
+      );
+    }
     final memberCounts = <String, int>{};
-    for (final event in memberEvents) {
+    for (final event in dedupedMemberships) {
       final chId = event.getTagValue('d');
       if (chId == null) continue;
       final pTags = <String>{};

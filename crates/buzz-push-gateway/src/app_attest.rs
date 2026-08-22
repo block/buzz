@@ -45,6 +45,14 @@ impl AppAttestVerifier {
             apple_root_cert_pem,
         })
     }
+    #[cfg(all(test, feature = "dev-app-attest-bypass"))]
+    pub(crate) fn for_policy_test() -> Self {
+        Self {
+            app_id: "policy-test".to_owned(),
+            apple_root_cert_pem: Vec::new(),
+        }
+    }
+
     /// `client_data` is the exact canonical enrollment transcript represented by
     /// the challenge string passed to `attestKey`; callers must include every
     /// authority-bearing enrollment field in it.
@@ -137,4 +145,331 @@ fn assertion_counter(cbor: &[u8]) -> Result<u32, AppAttestError> {
         .filter(|a| a.len() == 37)
         .ok_or(AppAttestError::Invalid)?;
     Ok(BigEndian::read_u32(&auth[33..37]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use appattest::error::AppAttestError as DependencyAppAttestError;
+    use chrono::{Duration, NaiveDateTime, Utc};
+    use serde::Deserialize;
+
+    const GOOD_FIXTURE_JSON: &str = include_str!("../tests/fixtures/app-attest-good.json");
+    const WRONG_AAGUID_FIXTURE_JSON: &str =
+        include_str!("../tests/fixtures/app-attest-wrong-aaguid.json");
+    const WRONG_ROOT_FIXTURE_JSON: &str =
+        include_str!("../tests/fixtures/app-attest-wrong-root.json");
+    const APPLE_ROOT_CERT_PEM: &[u8] =
+        include_bytes!("../tests/fixtures/apple-app-attestation-root.pem");
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        description: String,
+        generator: String,
+        generated_at: String,
+        regeneration_command: String,
+        app_id: String,
+        challenge: String,
+        aaguid: String,
+        leaf_not_after: String,
+        attestation_b64: String,
+        key_id_b64: String,
+        root_cert_pem: String,
+    }
+
+    fn fixture(json: &str) -> Fixture {
+        let fixture: Fixture = serde_json::from_str(json).expect("valid App Attest fixture JSON");
+        assert!(!fixture.description.is_empty());
+        assert_eq!(
+            fixture.generator,
+            "crates/buzz-push-gateway/tests/fixtures/app-attest-generator"
+        );
+        assert!(!fixture.generated_at.is_empty());
+        fixture
+    }
+
+    fn verifier(app_id: &str, root_cert_pem: &[u8]) -> AppAttestVerifier {
+        AppAttestVerifier {
+            app_id: app_id.to_owned(),
+            apple_root_cert_pem: root_cert_pem.to_vec(),
+        }
+    }
+
+    fn verify_dependency(
+        fixture: &Fixture,
+        app_id: &str,
+        challenge: &str,
+        key_id_b64: &str,
+        root_cert_pem: &[u8],
+    ) -> Result<(), DependencyAppAttestError> {
+        let cbor = STANDARD
+            .decode(&fixture.attestation_b64)
+            .expect("fixture attestation is base64");
+        let attestation = Attestation::from_cbor_bytes(&cbor)?;
+        let result = attestation
+            .verify(challenge, app_id, key_id_b64, root_cert_pem)
+            .map(|_| ());
+        result
+    }
+
+    #[test]
+    fn strict_verifier_accepts_good_fixture() {
+        let fixture = fixture(GOOD_FIXTURE_JSON);
+        assert_eq!(fixture.aaguid, "appattest");
+        verify_dependency(
+            &fixture,
+            &fixture.app_id,
+            &fixture.challenge,
+            &fixture.key_id_b64,
+            fixture.root_cert_pem.as_bytes(),
+        )
+        .expect("strict dependency verifier accepts the generated encoding");
+
+        let verified = verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes())
+            .verify_attestation(
+                &fixture.attestation_b64,
+                &fixture.key_id_b64,
+                fixture.challenge.as_bytes(),
+            )
+            .expect("shipped gateway wrapper accepts the generated encoding");
+        assert_eq!(verified.key_id.len(), 32);
+        assert_eq!(verified.public_key.len(), 65);
+    }
+
+    #[test]
+    fn wrong_root_is_rejected() {
+        let good = fixture(GOOD_FIXTURE_JSON);
+        let wrong_root = fixture(WRONG_ROOT_FIXTURE_JSON);
+        assert!(verify_dependency(
+            &wrong_root,
+            &wrong_root.app_id,
+            &wrong_root.challenge,
+            &wrong_root.key_id_b64,
+            good.root_cert_pem.as_bytes(),
+        )
+        .is_err());
+        assert!(verifier(&wrong_root.app_id, good.root_cert_pem.as_bytes())
+            .verify_attestation(
+                &wrong_root.attestation_b64,
+                &wrong_root.key_id_b64,
+                wrong_root.challenge.as_bytes(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn wrong_app_id_is_rejected() {
+        let fixture = fixture(GOOD_FIXTURE_JSON);
+        let wrong_app_id = "TEAMID.xyz.buzz.wrong";
+        assert_eq!(
+            verify_dependency(
+                &fixture,
+                wrong_app_id,
+                &fixture.challenge,
+                &fixture.key_id_b64,
+                fixture.root_cert_pem.as_bytes(),
+            ),
+            Err(DependencyAppAttestError::InvalidAppID)
+        );
+        assert!(verifier(wrong_app_id, fixture.root_cert_pem.as_bytes())
+            .verify_attestation(
+                &fixture.attestation_b64,
+                &fixture.key_id_b64,
+                fixture.challenge.as_bytes(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn wrong_challenge_is_rejected() {
+        let fixture = fixture(GOOD_FIXTURE_JSON);
+        let wrong_challenge = "wrong-challenge";
+        assert_eq!(
+            verify_dependency(
+                &fixture,
+                &fixture.app_id,
+                wrong_challenge,
+                &fixture.key_id_b64,
+                fixture.root_cert_pem.as_bytes(),
+            ),
+            Err(DependencyAppAttestError::InvalidNonce)
+        );
+        assert!(verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes())
+            .verify_attestation(
+                &fixture.attestation_b64,
+                &fixture.key_id_b64,
+                wrong_challenge.as_bytes(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn wrong_aaguid_is_rejected_as_invalid_aaguid() {
+        let fixture = fixture(WRONG_AAGUID_FIXTURE_JSON);
+        assert_eq!(fixture.aaguid, "appattestdevelop");
+        assert_eq!(
+            verify_dependency(
+                &fixture,
+                &fixture.app_id,
+                &fixture.challenge,
+                &fixture.key_id_b64,
+                fixture.root_cert_pem.as_bytes(),
+            ),
+            Err(DependencyAppAttestError::InvalidAAGUID)
+        );
+        assert!(verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes())
+            .verify_attestation(
+                &fixture.attestation_b64,
+                &fixture.key_id_b64,
+                fixture.challenge.as_bytes(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn short_and_oversize_key_ids_are_rejected() {
+        let fixture = fixture(GOOD_FIXTURE_JSON);
+        for key_id_b64 in [STANDARD.encode([0x11; 31]), STANDARD.encode([0x22; 33])] {
+            assert!(verify_dependency(
+                &fixture,
+                &fixture.app_id,
+                &fixture.challenge,
+                &key_id_b64,
+                fixture.root_cert_pem.as_bytes(),
+            )
+            .is_err());
+            assert!(verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes())
+                .verify_attestation(
+                    &fixture.attestation_b64,
+                    &key_id_b64,
+                    fixture.challenge.as_bytes(),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants, unexpected_cfgs)]
+    fn gateway_test_build_does_not_define_testing_feature() {
+        assert!(!cfg!(feature = "testing"));
+    }
+
+    #[test]
+    fn constructor_still_pins_the_apple_root() {
+        let fixture = fixture(GOOD_FIXTURE_JSON);
+        assert!(
+            AppAttestVerifier::new(fixture.app_id.clone(), APPLE_ROOT_CERT_PEM.to_vec()).is_ok()
+        );
+        assert!(
+            AppAttestVerifier::new(fixture.app_id, fixture.root_cert_pem.as_bytes().to_vec(),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fixture_leaf_certificate_is_valid_for_at_least_thirty_days() {
+        let fixture = fixture(GOOD_FIXTURE_JSON);
+        let leaf_certificate = fixture_leaf_certificate(&fixture);
+        let not_after = certificate_not_after(&leaf_certificate);
+        assert_eq!(
+            not_after.format("%b %e %H:%M:%S %Y GMT").to_string(),
+            fixture.leaf_not_after
+        );
+        assert!(
+            not_after > Utc::now() + Duration::days(30),
+            "App Attest fixture expires within 30 days; regenerate with: {}",
+            fixture.regeneration_command
+        );
+    }
+
+    fn fixture_leaf_certificate(fixture: &Fixture) -> Vec<u8> {
+        let cbor = STANDARD
+            .decode(&fixture.attestation_b64)
+            .expect("fixture attestation is base64");
+        let mut decoder = minicbor::Decoder::new(&cbor);
+        let root_entries = decoder
+            .map()
+            .expect("attestation root is a map")
+            .expect("attestation root map has a fixed length");
+        for _ in 0..root_entries {
+            let key = decoder.str().expect("attestation root key is text");
+            if key != "attStmt" {
+                decoder.skip().expect("skip non-attStmt value");
+                continue;
+            }
+            let statement_entries = decoder
+                .map()
+                .expect("attStmt is a map")
+                .expect("attStmt map has a fixed length");
+            for _ in 0..statement_entries {
+                let key = decoder.str().expect("attStmt key is text");
+                if key != "x5c" {
+                    decoder.skip().expect("skip non-x5c value");
+                    continue;
+                }
+                assert!(
+                    decoder
+                        .array()
+                        .expect("x5c is an array")
+                        .expect("x5c has a fixed length")
+                        >= 2
+                );
+                return decoder
+                    .bytes()
+                    .expect("x5c leaf certificate is bytes")
+                    .to_vec();
+            }
+        }
+        panic!("fixture attestation has no x5c leaf certificate");
+    }
+
+    fn certificate_not_after(certificate: &[u8]) -> chrono::DateTime<Utc> {
+        let (tag, certificate, _) = der_tlv(certificate);
+        assert_eq!(tag, 0x30, "certificate must be a DER sequence");
+        let (tag, tbs_certificate, _) = der_tlv(certificate);
+        assert_eq!(tag, 0x30, "TBSCertificate must be a DER sequence");
+
+        let mut fields = tbs_certificate;
+        if fields.first() == Some(&0xa0) {
+            fields = der_tlv(fields).2;
+        }
+        for _ in 0..3 {
+            fields = der_tlv(fields).2;
+        }
+        let (tag, validity, _) = der_tlv(fields);
+        assert_eq!(tag, 0x30, "certificate validity must be a DER sequence");
+        let (_, _, after_not_before) = der_tlv(validity);
+        let (time_tag, not_after, _) = der_tlv(after_not_before);
+        let not_after = std::str::from_utf8(not_after).expect("notAfter is ASCII");
+        let format = match time_tag {
+            0x17 => "%y%m%d%H%M%SZ",
+            0x18 => "%Y%m%d%H%M%SZ",
+            _ => panic!("unexpected DER time tag {time_tag:#x}"),
+        };
+        NaiveDateTime::parse_from_str(not_after, format)
+            .expect("valid DER notAfter timestamp")
+            .and_utc()
+    }
+
+    fn der_tlv(input: &[u8]) -> (u8, &[u8], &[u8]) {
+        let tag = *input.first().expect("DER TLV has a tag");
+        let first_length = *input.get(1).expect("DER TLV has a length");
+        let (length, length_bytes) = if first_length & 0x80 == 0 {
+            (first_length as usize, 1)
+        } else {
+            let byte_count = (first_length & 0x7f) as usize;
+            assert!(
+                byte_count > 0 && byte_count <= std::mem::size_of::<usize>(),
+                "supported DER long-form length"
+            );
+            let length = input[2..2 + byte_count]
+                .iter()
+                .fold(0_usize, |length, byte| (length << 8) | *byte as usize);
+            (length, 1 + byte_count)
+        };
+        let value_start = 1 + length_bytes;
+        let value_end = value_start + length;
+        assert!(value_end <= input.len(), "DER TLV length is in bounds");
+        (tag, &input[value_start..value_end], &input[value_end..])
+    }
 }

@@ -264,7 +264,17 @@ This section registers the public last-hop profile served at `https://push.buzz.
 
 ### Registered values and lease mapping
 
-The registered `app_profile` values are `buzz-ios-production` (Apple production APNs environment) and `buzz-ios-sandbox` (Apple sandbox APNs environment). A gateway deployment MUST enable only profiles for which its App Attest application identifier, APNs topic, credentials, and APNs environment are configured consistently. The APNs token registered with the gateway is called the **installation endpoint** and never leaves gateway custody after enrollment.
+The registered `app_profile` values are `buzz-ios-dogfood` and
+`buzz-ios-app-store`. They identify closed Buzz application identities, not APNs
+transport environments. The canonical gateway owns the mapping from each
+profile to one exact App Attest application identifier, APNs topic,
+certificate-backed connection pool, and APNs environment. A client profile
+selector chooses only a candidate entry; enrollment succeeds only when App
+Attest cryptographically verifies the configured application identifier. A
+gateway deployment MUST enable only profiles whose full mapping is configured
+consistently, and MUST NOT accept an APNs topic from a client. The APNs token
+registered with the gateway is called the **installation endpoint** and never
+leaves gateway custody after enrollment.
 
 The opaque string returned as `endpoint_grant` by `POST /v1/delegations` is the **delivery capability**. For this profile, the active lease plaintext's `endpoint` member MUST contain that `endpoint_grant`, not the raw APNs token. `transport` MUST be `apns`, and `app_profile` MUST equal the profile sealed into the grant. Base-protocol endpoint uniqueness, rotation, hashing, and coalescing operate on this opaque lease `endpoint` within an origin. A capability is scoped to one installation, relay signing pubkey, endpoint epoch, generation, and expiry; grants independently issued to different relays are intentionally distinct. The gateway separately enforces global installation-endpoint uniqueness using `(app_profile, SHA-256(token))`. A public-profile relay MUST treat `endpoint` as opaque and MUST NOT parse or transform it.
 
@@ -305,7 +315,7 @@ The challenge is single-use. Invalid input is `400 invalid_request`; storage/ran
 Request members, in any request order:
 
 ```json
-{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","key_id":"<standard-base64>","attestation":"<standard-base64 CBOR>","app_profile":"buzz-ios-production","endpoint":"<lowercase APNs-token hex>","endpoint_epoch":1,"expires_at":<unix-seconds>}
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","key_id":"<standard-base64>","attestation":"<standard-base64 CBOR>","app_profile":"buzz-ios-dogfood","endpoint":"<lowercase APNs-token hex>","endpoint_epoch":1,"expires_at":<unix-seconds>}
 ```
 
 `expires_at` MUST satisfy `now < expires_at <= now + configured_max_installation_lifetime`; the selected profile MUST be enabled. The exact transcript is domain `buzz.push.enroll.v1` followed by this ordered object:
@@ -407,7 +417,9 @@ Responses:
 - `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, expiry, or quota rejection.
 - `503 {"error":"temporarily_unavailable"}` — durable authority/custody/disposition failure.
 
-The gateway performs one APNs request, except that an APNs expired-provider-token response permits one credential refresh and one retry. The application body is always the exact constant registered in the APNs transport profile above; no request or grant field enters it.
+The gateway performs one APNs request per admitted delivery attempt. The
+application body is always the exact constant registered in the APNs transport
+profile above; no request or grant field enters it.
 
 ## Implementation Notes (Buzz, non-normative)
 
@@ -439,4 +451,4 @@ Zombie leases (e.g. `#h` after leaving a channel) are neutralized by match-time 
 - NIP-11 `supported_extensions`: contains `"nip-pl"` pre-numbering; descriptor object `push` as specified in Executor Discovery
 - Classes: `silent`, `default`, `time_sensitive`, `urgent`
 - `h_grammar` values: `"uuid-v4-lowercase"` (initial entry; origins may register additional grammars with this NIP)
-- Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profiles `buzz-ios-production`, `buzz-ios-sandbox`; wire version `1`
+- Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profiles `buzz-ios-dogfood`, `buzz-ios-app-store`; wire version `1`

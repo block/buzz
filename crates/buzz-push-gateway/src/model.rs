@@ -12,14 +12,14 @@ pub const WIRE_VERSION: u8 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppProfile {
-    BuzzIosProduction,
-    BuzzIosSandbox,
+    BuzzIosDogfood,
+    BuzzIosAppStore,
 }
 impl AppProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::BuzzIosProduction => "buzz-ios-production",
-            Self::BuzzIosSandbox => "buzz-ios-sandbox",
+            Self::BuzzIosDogfood => "buzz-ios-dogfood",
+            Self::BuzzIosAppStore => "buzz-ios-app-store",
         }
     }
 }

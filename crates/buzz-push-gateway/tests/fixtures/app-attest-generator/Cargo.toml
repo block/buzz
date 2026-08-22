@@ -1,0 +1,14 @@
+[package]
+name = "buzz-app-attest-fixture-generator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+base64 = "0.22"
+byteorder = "1.5"
+ciborium = "0.2"
+openssl = "0.10"
+sha2 = "0.10"

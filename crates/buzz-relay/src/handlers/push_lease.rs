@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::Digest as _;
 
-pub(crate) const PUSH_KINDS: &[u64] = &[7, 9, 1059, 40007, 46010];
+/// Message kinds that can produce a mobile Activity-inbox notification.
+/// Generic Nostr notes and non-message workflow/agent events are deliberately
+/// excluded from the dogfood MVP.
+pub(crate) const PUSH_KINDS: &[u64] = &[9, 40_002, 45_001, 45_003];
 pub(crate) const URGENT_KINDS: &[u64] = &[];
 
 /// NIP-PL addressable push-lease event kind.
@@ -477,7 +480,7 @@ pub async fn accept(
     const MAX_CONTENT: usize = 65_536;
     const MAX_PLAINTEXT: usize = 32_768;
     const MAX_ACTIVE_LEASES: i64 = 16;
-    if state.config.push_gateway_delivery_url.is_none() {
+    if !state.config.push_enabled {
         return Err(AcceptError::Validation("push not supported".to_string()));
     }
     let envelope = validate_envelope(event, now, ALLOWED_SKEW, MAX_LEASE_TTL, MAX_CONTENT)?;
@@ -498,11 +501,11 @@ pub async fn accept(
         author_hex: &author_hex,
         app_profiles: &[
             AppProfile {
-                id: "buzz-ios-production",
+                id: "buzz-ios-dogfood",
                 transport: "apns",
             },
             AppProfile {
-                id: "buzz-ios-sandbox",
+                id: "buzz-ios-app-store",
                 transport: "apns",
             },
         ],
@@ -531,25 +534,29 @@ pub async fn accept(
     let subscriptions;
     let capability;
     let active = if body.active {
-        let endpoint = body.endpoint.as_deref().expect("validated active endpoint");
-        endpoint_hash = sha2::Sha256::digest(endpoint.as_bytes()).to_vec();
-        let max_class = body
+        let endpoint = body
+            .endpoint
+            .as_deref()
+            .ok_or_else(|| "active lease is missing endpoint".to_string())?;
+        let body_subscriptions = body
             .subscriptions
             .as_ref()
-            .expect("validated subscriptions")
+            .ok_or_else(|| "active lease is missing subscriptions".to_string())?;
+        let app_profile = body
+            .app_profile
+            .as_deref()
+            .ok_or_else(|| "active lease is missing app profile".to_string())?;
+        endpoint_hash = sha2::Sha256::digest(endpoint.as_bytes()).to_vec();
+        let max_class = body_subscriptions
             .iter()
             .map(|sub| sub.class.as_str())
             .max_by_key(|class| class_rank(class))
-            .expect("non-empty subscriptions");
+            .ok_or_else(|| "active lease has no subscriptions".to_string())?;
         capability = endpoint.to_owned();
-        subscriptions = serde_json::to_value(
-            body.subscriptions
-                .as_ref()
-                .expect("validated subscriptions"),
-        )
-        .map_err(|_| "invalid subscriptions".to_string())?;
+        subscriptions = serde_json::to_value(body_subscriptions)
+            .map_err(|_| "invalid subscriptions".to_string())?;
         Some(buzz_db::push::ActiveLease {
-            app_profile: body.app_profile.as_deref().expect("validated profile"),
+            app_profile,
             endpoint_hash: &endpoint_hash,
             endpoint_grant: &capability,
             max_class,
@@ -702,7 +709,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let predicate = format!("NEW.kind IN ({kinds})");
-        let migration = include_str!("../../../../migrations/0018_push_match_queue.sql");
+        let migration = include_str!("../../../../migrations/0033_push_message_kinds.sql");
         assert!(
             migration.contains(&predicate),
             "migration trigger must use PUSH_KINDS exactly: {predicate}"

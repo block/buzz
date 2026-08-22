@@ -16,21 +16,31 @@
 | `BUZZ_PUSH_PUBLIC_DELIVERY_URL` | Exact externally signed URL, normally `https://push.buzz.xyz/v1/deliveries/apns`. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
-| `BUZZ_PUSH_ENABLED_PROFILES` | Comma-separated `buzz-ios-production` and/or `buzz-ios-sandbox`. |
-| `BUZZ_PUSH_APP_ATTEST_APP_ID` | Exact Apple App Attest application identifier (`TEAMID.bundle-id`). |
+| `BUZZ_PUSH_ENABLED_PROFILES` | Comma-separated closed application profiles: `buzz-ios-dogfood` and/or `buzz-ios-app-store`. Dogfood is the only enabled MVP profile. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
-| `BUZZ_PUSH_APNS_KEY_PATH` | Read-only mounted Apple APNs `.p8` provider key. |
-| `BUZZ_PUSH_APNS_KEY_ID` | APNs provider key id. |
-| `BUZZ_PUSH_APNS_TEAM_ID` | Apple developer team id. |
-| `BUZZ_PUSH_APNS_TOPIC` | Buzz iOS bundle id. |
+| `BUZZ_PUSH_{DOGFOOD,APP_STORE}_APP_ATTEST_APP_ID` | Exact server-owned Apple App Attest application identifier (`TEAMID.bundle-id`) for each closed profile. |
+| `BUZZ_PUSH_{DOGFOOD,APP_STORE}_APNS_TOPIC` | Server-owned APNs topic for each profile. Never accepted from a client. |
+| `BUZZ_PUSH_{DOGFOOD,APP_STORE}_APNS_ENVIRONMENT` | `production` or `sandbox`, selected per profile by deployment configuration. |
+| `BUZZ_PUSH_{DOGFOOD,APP_STORE}_APNS_CERT_PATH` | Read-only certificate/private-key PEM for an enabled profile. A dormant profile may omit it. |
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
+
+The single canonical `push.buzz.xyz` deployment owns a closed profile registry
+for both dogfood (`xyz.block.buzz.dogfood.mobile`) and App Store
+(`xyz.block.buzz.mobile`) application identities. Enrollment's profile selector
+only chooses a candidate entry: the corresponding App Attest verifier must
+cryptographically validate that entry's configured application ID before the
+profile is stored with the installation. Assertions and delivery subsequently
+select App Attest policy, APNs topic, certificate-backed connection pool, and
+environment from that stored profile. No client request or relay grant can
+supply or override an APNs topic. The MVP enables and credentials dogfood only;
+the App Store entry remains registered but dormant until a later rollout.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
 ## Secret and key rotation rules
 
-Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs key and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
+Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
 
 The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
@@ -44,13 +54,12 @@ The service reaps expired challenges and replay rows, idle quota rows, expired/r
 
 ## Metrics and alerting
 
-The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the six APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
+The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the five APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `refresh_credential` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
+| `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
-| `push_gateway_apns_credential_refreshes_total` | counter | — | Provider JWT refreshed after APNs reported expiry. |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
@@ -64,7 +73,7 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 | Alert | Fires when | Severity | Action |
 |---|---|---|---|
-| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | APNs provider token/topic is unhealthy. Check the `.p8` key, `BUZZ_PUSH_APNS_KEY_ID`, `..._TEAM_ID`, and `..._TOPIC`. No endpoints are being invalidated, but nothing is delivering. |
+| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The enabled profile's APNs certificate/topic/environment is unhealthy. Check the matching `BUZZ_PUSH_{DOGFOOD,APP_STORE}_APNS_*` configuration. No endpoints are being invalidated. |
 | `PushGatewayAdmissionUnavailable` | any admission `unavailable` for 5m | critical | PostgreSQL authority store is unreachable. Check DB connectivity and the pod's `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | readiness `authority` failures for 5m | warning | Replicas are being pulled from the Service on DB check failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | reaper failed ≥2 times within 30m (runs every 5m) | warning | Expired reservations aren't being swept, growing the bounded-until-expiry window. Check DB write availability. |
@@ -72,22 +81,100 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 ## Relay configuration
 
-Relays default `BUZZ_PUSH_GATEWAY_DELIVERY_URL` to the exact public delivery URL
-`https://push.buzz.xyz/v1/deliveries/apns`. Operators can override it with
-another exact HTTPS `/v1/deliveries/apns` URL, or explicitly disable NIP-PL push
-by setting the variable to an empty string. When enabled, the relay advertises
-its host-scoped NIP-PL descriptor in NIP-11 and starts the matcher and delivery
-worker. Relays retain lease matching, authorization, coalescing, durable
+Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
+the established strict boolean parser rejects unknown values and the default is
+false. When enabled, an absent `BUZZ_PUSH_GATEWAY_DELIVERY_URL` selects the exact
+canonical URL `https://push.buzz.xyz/v1/deliveries/apns`; operators can provide
+another exact HTTPS `/v1/deliveries/apns` URL as an advanced override. An
+explicitly empty URL while enabled is a startup error. Only an enabled relay
+advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
+matcher and delivery worker. Relays retain lease matching, authorization, durable
 jobs/retries, and generation checks; they receive only opaque capabilities and
 never APNs tokens or provider credentials.
+
+An enabled relay exports the following bounded-cardinality series on its
+existing Prometheus endpoint. None carries a community, account, relay key,
+installation, event, or request identifier as a label.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `buzz_push_enabled` | gauge | — | `1` only when the deployment opt-in is active. |
+| `buzz_push_match_jobs_total` | counter | `result` = `matched` \| `unmatched` \| `error` \| `context_error` | Accepted message events evaluated by the matcher. |
+| `buzz_push_match_queue_seconds` | histogram | — | Relay receipt to matcher evaluation latency. |
+| `buzz_push_wakes_total` | counter | `result` = `enqueued` \| `duplicate` \| `inactive_lease` | Durable wake-enqueue outcomes. |
+| `buzz_push_wake_enqueue_errors_total` | counter | — | Set-wise outbox transactions that failed. |
+| `buzz_push_wake_queue_seconds` | histogram | — | First-attempt outbox enqueue-to-worker latency. |
+| `buzz_push_gateway_requests_total` | counter | — | Relay requests that reached the gateway transport seam. |
+| `buzz_push_gateway_request_seconds` | histogram | — | Relay-observed gateway request latency. |
+| `buzz_push_deliveries_total` | counter | `outcome` (static closed set) | Accepted, retried, suppressed, exhausted, invalid, or failed relay delivery outcomes. |
 
 ## Relay integration status
 
 The operational relay integration is complete: per-origin event matching with
 read-authorization checks, durable enqueue, send-time revalidation, and NIP-98
-delivery run whenever the gateway URL is enabled. End-to-end use still requires
+delivery run only when `BUZZ_PUSH_ENABLED=true`. End-to-end use still requires
 the client App Attest enrollment/delegation flow to place a gateway-issued opaque
 capability—not a raw APNs token—into the encrypted relay lease.
+
+## Internal dogfood evaluation and rollback
+
+The MVP is ready to enable only when all of these are true: the internal iOS
+artifact was built with `mobile/ios/Flutter/PushEnabled.xcconfig`; the canonical
+gateway has the dogfood profile enabled with its server-owned App Attest app ID,
+APNs topic, production certificate identity, and production APNs environment;
+and only the selected internal relay deployments set `BUZZ_PUSH_ENABLED=true`.
+The App Store profile remains configured but dormant, and ordinary/App Store
+iOS builds continue to omit the push capability and notification extension.
+
+Local physical-device development may instead use the normal
+`xyz.block.buzz.mobile` development identity with the push overlay and sandbox
+entitlements. Its local gateway must enable only the closed App Store profile,
+configured with that profile's server-owned App Attest application ID, APNs
+topic, sandbox certificate, and sandbox environment. This is a development
+integration proof, not dogfood release validation, and does not authorize
+enabling the App Store profile on the canonical production deployment.
+
+Dogfood end-to-end release validation starts after this feature reaches `main`:
+publish the next immutable `mobile-vX.Y.Z-rc.N` candidate from the exact current
+`origin/main` commit, build that tag through the normal Block release pipeline,
+and wait for the signed `xyz.block.buzz.dogfood.mobile` artifact to appear in
+Mobile Releases/Comp Portal before installing it on a physical device. Verify
+APNs delivery, fetched and signature-verified notification content, and
+exact-message tap routing against the canonical gateway and a push-enabled
+internal relay before widening the internal evaluation.
+
+Before that first push-enabled candidate, the private dogfood builder must
+include `PushEnabled.xcconfig` from its generated `AppOverrides.xcconfig`. Its
+manual signing and export configuration must also map separate distribution
+profiles for both `xyz.block.buzz.dogfood.mobile` and
+`xyz.block.buzz.dogfood.mobile.NotificationService`; an app-only profile does
+not provision the extension. The App Store builder must continue omitting the
+overlay and extension profile until that rollout is separately approved.
+Before enabling rich message presentation, enable Apple's Communication
+Notifications capability on the parent dogfood App ID and regenerate its app
+provisioning profile. The extension profile does not need that capability.
+Apply the same parent-App-ID prerequisite to the eventual App Store rollout;
+updating Block Apple portal records is a separately authorized release step.
+
+For each evaluation cohort, measure relay receipt-to-match, wake queue, relay-to-
+gateway, and gateway-to-APNs latencies from the histograms above. Track the
+ratio of accepted or replay-terminal relay outcomes to newly enqueued wakes,
+gateway APNs accepted/retry/invalid/configuration outcomes, retry exhaustion,
+and NSE resolution fallback. APNs acceptance cannot prove device presentation:
+record a small manual physical-device sample with event-created, banner-visible,
+and notification-tap timestamps, and verify that the visible title/body came
+from fetched, signature-verified relay content and that the tap opened the exact
+triggering message. Keep fallback-to-channel and placeholder/failure cases as
+explicit counts in the manual sample until privacy-preserving client telemetry
+is designed.
+
+Rollback does not require deleting credentials or mutating existing leases.
+Set `BUZZ_PUSH_ENABLED=false` on the enabled relays to stop advertisement, lease
+acceptance, matching, workers, and new gateway traffic; disable the dogfood
+gateway profile if the gateway itself is unhealthy; and ship the next internal
+build without the push overlay if client behavior must be removed. Existing
+leases and gateway authorities then expire naturally. Do not enable the App
+Store build capability or profile as part of this internal evaluation.
 
 ## Helm production inputs
 
@@ -99,11 +186,11 @@ gh attestation verify \
   --owner block
 ```
 
-Only after that command succeeds, set the exact digest as `image.digest`; the chart then renders `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag. `values-production.yaml` is an intentionally invalid production-input contract: deployment CI must inject this verified `image.digest`, the provisioned Apple application identifier, an environment-owned Gateway parent reference, and the actual PostgreSQL network. Schema validation rejects the artifact when any remains empty; the render guard proves both rejection and a fully injected render.
+Only after that command succeeds, set the exact digest as `image.digest`; the chart then renders `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag. `values-production.yaml` is an intentionally invalid production-input contract: deployment CI must inject this verified `image.digest`, the provisioned dogfood Apple application identifier, an environment-owned Gateway parent reference, and the actual PostgreSQL network. Schema validation rejects the artifact when any remains empty; the render guard proves both rejection and a fully injected render.
 
 Network policy keeps APNs HTTPS and PostgreSQL egress in separate CIDR lists. APNs currently requires broad TCP/443 reachability; `networkPolicy.postgresEgressCidrs` must be narrowed to the production database network, and the DNS namespace/pod selectors must match the cluster DNS deployment. The sample private CIDR is not a claim about the production topology.
 
-Kubernetes does not restart pods when referenced Secret bytes change. AEAD or APNs credential rotation therefore requires an explicit rolling restart after the secret manager update (for example, `kubectl rollout restart deployment/<release>-buzz-push-gateway`) and readiness verification before removing predecessor keys. Service-account token automount is disabled.
+Kubernetes does not restart pods when referenced Secret bytes change. AEAD or APNs certificate rotation therefore requires an explicit rolling restart after the secret manager update (for example, `kubectl rollout restart deployment/<release>-buzz-push-gateway`) and readiness verification before removing predecessor keys. Service-account token automount is disabled.
 
 ## Gateway chart release
 

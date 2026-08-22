@@ -4,8 +4,16 @@
 // Defaults for the iOS Release build. Internal/custom builds (e.g. an
 // enterprise-signed distribution) override these without patching tracked
 // files by writing `mobile/ios/Flutter/AppOverrides.xcconfig` (gitignored).
-BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
 APP_DISPLAY_NAME = Buzz
 CODE_SIGN_STYLE = Automatic
 CODE_SIGN_IDENTITY = iPhone Developer
+BUZZ_DEVELOPMENT_TEAM = EYF346PHUG
+
+// App Store builds remain dormant until a later rollout. The internal build
+// pipeline explicitly includes PushEnabled.xcconfig from AppOverrides.xcconfig.
+BUZZ_PUSH_ENABLED = NO
+BUZZ_INFO_PLIST = Runner/Info.plist
+BUZZ_CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements
+EXCLUDED_SOURCE_FILE_NAMES = NotificationService.appex PushNativeState.swift PushEndpointGrantStore.swift PushPresentationCacheBridge.swift
 #include? "AppOverrides.xcconfig"

@@ -207,8 +207,8 @@ fn push_descriptor(
             "current": true
         }],
         "app_profiles": [
-            {"id": "buzz-ios-production", "transport": "apns"},
-            {"id": "buzz-ios-sandbox", "transport": "apns"}
+            {"id": "buzz-ios-dogfood", "transport": "apns"},
+            {"id": "buzz-ios-app-store", "transport": "apns"}
         ],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
         "urgent_kinds": crate::handlers::push_lease::URGENT_KINDS,
@@ -247,7 +247,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
     );
-    let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
+    let tenant_host = if state.config.push_enabled {
         crate::tenant::bind_community(&state.db, raw_host)
             .await
             .ok()
@@ -256,7 +256,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         None
     };
     if let Some(push) = push_descriptor(
-        state.config.push_gateway_delivery_url.is_some(),
+        state.config.push_enabled,
         &state.config.relay_url,
         &state.config.push_executor_key_id,
         &state.relay_keypair,

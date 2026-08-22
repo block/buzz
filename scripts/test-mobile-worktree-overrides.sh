@@ -64,7 +64,7 @@ out="$("$wt/scripts/mobile-worktree-overrides.sh")"
 ios="$wt/mobile/ios/Flutter/WorktreeOverrides.xcconfig"
 android="$wt/mobile/android/worktree.properties"
 [[ -f "$ios" && -f "$android" ]] || fail "worktree must write both override files"
-grep -q '^BUNDLE_IDENTIFIER = com\.buzz\.buzzMobile\.feature-work-1$' "$ios" \
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile\.feature-work-1$' "$ios" \
   && pass "iOS bundle identifier keys to the sanitized worktree directory name" \
   || fail "iOS bundle identifier must key to the worktree dir, got: $(cat "$ios")"
 grep -q '^APP_DISPLAY_NAME = Buzz (Fix_Thing-2)$' "$ios" \
@@ -83,7 +83,7 @@ printf '%s' "$out" | grep -q 'Worktree Feature_Work-1' \
 # ── Branch switch in the same worktree: identity stable, label follows ───────
 git -C "$wt" checkout -q -b "another/branch-name"
 "$wt/scripts/mobile-worktree-overrides.sh" > /dev/null
-grep -q '^BUNDLE_IDENTIFIER = com\.buzz\.buzzMobile\.feature-work-1$' "$ios" \
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile\.feature-work-1$' "$ios" \
   && grep -q '^applicationIdSuffix=\.feature_work_1$' "$android" \
   && pass "branch switch keeps the install identity stable (per worktree)" \
   || fail "install identity must not change on branch switch"
@@ -123,10 +123,17 @@ grep -q '^applicationIdSuffix=\.w_2fast$' "$wt2/mobile/android/worktree.properti
 # ── Tracked build files: overrides are debug-only, release stays production ──
 debug_xcconfig="$repo_root/mobile/ios/Flutter/Debug.xcconfig"
 release_xcconfig="$repo_root/mobile/ios/Flutter/Release.xcconfig"
+push_xcconfig="$repo_root/mobile/ios/Flutter/PushEnabled.xcconfig"
+pbxproj="$repo_root/mobile/ios/Runner.xcodeproj/project.pbxproj"
+runner_entitlements="$repo_root/mobile/ios/Runner/Runner.entitlements"
+runner_push_entitlements="$repo_root/mobile/ios/Runner/RunnerPush.entitlements"
 gradle="$repo_root/mobile/android/app/build.gradle.kts"
 manifest="$repo_root/mobile/android/app/src/main/AndroidManifest.xml"
 plist="$repo_root/mobile/ios/Runner/Info.plist"
 
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile$' "$debug_xcconfig" \
+  && pass "Debug.xcconfig defaults to the dogfood bundle identifier" \
+  || fail "Debug.xcconfig must default to xyz.block.buzz.dogfood.mobile"
 grep -q 'WorktreeOverrides.xcconfig' "$debug_xcconfig" \
   && pass "Debug.xcconfig includes WorktreeOverrides" \
   || fail "Debug.xcconfig must include WorktreeOverrides.xcconfig"
@@ -137,15 +144,377 @@ if [[ -n "$worktree_line" && -n "$app_line" && "$worktree_line" -lt "$app_line" 
 else
   fail "Debug.xcconfig must include AppOverrides.xcconfig after WorktreeOverrides.xcconfig"
 fi
+grep -q '^ios_prefix="xyz.block.buzz.dogfood.mobile\."$' "$clean_script" \
+  && pass "cleanup targets the iOS dogfood worktree prefix" \
+  || fail "cleanup must share the iOS dogfood prefix used by worktree overrides"
+
 grep -q 'WorktreeOverrides' "$release_xcconfig" \
   && fail "Release.xcconfig must not include WorktreeOverrides.xcconfig" \
   || pass "Release.xcconfig does not include WorktreeOverrides"
-grep -q '^BUNDLE_IDENTIFIER = com\.buzz\.buzzMobile$' "$release_xcconfig" \
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.mobile$' "$release_xcconfig" \
   && pass "Release.xcconfig keeps the production bundle identifier" \
-  || fail "Release.xcconfig must keep BUNDLE_IDENTIFIER = com.buzz.buzzMobile"
+  || fail "Release.xcconfig must keep BUNDLE_IDENTIFIER = xyz.block.buzz.mobile"
 grep -q '^APP_DISPLAY_NAME = Buzz$' "$release_xcconfig" \
   && pass "Release.xcconfig keeps the production display name" \
   || fail "Release.xcconfig must keep APP_DISPLAY_NAME = Buzz"
+
+# These checks assert declarations in the two tracked xcconfigs only. They do
+# not prove resolved build settings. The later gitignored includes
+# (WorktreeOverrides.xcconfig and AppOverrides.xcconfig) can override these
+# declarations and are explicitly outside this tracked-source assertion. The
+# value check and declaration census are complementary: xcconfig is last-wins,
+# while the census deliberately flags even a harmless duplicate declaration so
+# a human reviews the changed declaration surface.
+assert_xcconfig_value() {
+  # $1: file, $2: anchored value regex, $3: pass/failure description
+  if grep -qE "$2" "$1"; then
+    pass "$3"
+  else
+    fail "$3"
+  fi
+}
+
+assert_xcconfig_declaration_count() {
+  # $1: file, $2: key, $3: expected count, $4: configuration label
+  local file="$1" key="$2" expected="$3" label="$4" count
+  count=$(grep -cE "^[[:space:]]*$key([[:space:]]*\[[^]]*\])*[[:space:]]*=" "$file" || true)
+  if [[ "$count" -eq "$expected" ]]; then
+    if [[ "$expected" -eq 0 ]]; then
+      pass "$label $key has no tracked declaration sites"
+    elif [[ "$expected" -eq 1 ]]; then
+      pass "$label $key has one tracked declaration site"
+    else
+      pass "$label $key has $count tracked declaration sites"
+    fi
+  elif [[ "$expected" -eq 0 ]]; then
+    fail "$label $key has $count tracked declaration sites; expected zero"
+  elif [[ "$expected" -eq 1 ]]; then
+    fail "$label $key has $count tracked declaration sites; expected exactly one"
+  else
+    fail "$label $key has $count tracked declaration sites; expected $expected"
+  fi
+}
+
+assert_single_xcconfig_declaration() {
+  # $1: file, $2: key, $3: configuration label
+  assert_xcconfig_declaration_count "$1" "$2" 1 "$3"
+}
+
+for config in "$debug_xcconfig" "$release_xcconfig"; do
+  assert_xcconfig_value "$config" '^BUZZ_PUSH_ENABLED = NO$' \
+    "$(basename "$config") defaults push capability off"
+  assert_xcconfig_value "$config" \
+    '^BUZZ_CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements$' \
+    "$(basename "$config") uses the push-free Runner entitlements"
+  assert_xcconfig_value "$config" \
+    '^EXCLUDED_SOURCE_FILE_NAMES = NotificationService\.appex PushNativeState\.swift PushEndpointGrantStore\.swift PushPresentationCacheBridge\.swift$' \
+    "$(basename "$config") excludes native push sources and extension product"
+done
+
+assert_xcconfig_value "$push_xcconfig" '^BUZZ_PUSH_ENABLED = YES$' \
+  "PushEnabled explicitly enables the capability"
+assert_xcconfig_value "$push_xcconfig" \
+  '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile$' \
+  "PushEnabled selects the internal dogfood bundle"
+assert_xcconfig_value "$push_xcconfig" \
+  '^BUZZ_IOS_PUSH_ENVIRONMENT = production$' \
+  "PushEnabled uses production APNs transport for distribution"
+assert_xcconfig_value "$push_xcconfig" \
+  '^BUZZ_APP_ATTEST_ENVIRONMENT = production$' \
+  "PushEnabled uses production App Attest"
+assert_xcconfig_value "$push_xcconfig" \
+  '^BUZZ_APP_GROUP_IDENTIFIER = group\.\$\(BUNDLE_IDENTIFIER\)$' \
+  "PushEnabled derives the App Group from the dogfood bundle"
+assert_xcconfig_value "$push_xcconfig" \
+  '^BUZZ_KEYCHAIN_ACCESS_GROUP = \$\(BUNDLE_IDENTIFIER\)$' \
+  "PushEnabled derives the Keychain access group from the dogfood bundle"
+assert_xcconfig_value "$push_xcconfig" \
+  '^BUZZ_CODE_SIGN_ENTITLEMENTS = Runner/RunnerPush\.entitlements$' \
+  "PushEnabled selects push-capable Runner entitlements"
+assert_xcconfig_value "$push_xcconfig" \
+  '^SWIFT_ACTIVE_COMPILATION_CONDITIONS = \$\(inherited\) BUZZ_PUSH_ENABLED$' \
+  "PushEnabled compiles the native push bridge"
+assert_xcconfig_value "$push_xcconfig" '^EXCLUDED_SOURCE_FILE_NAMES =$' \
+  "PushEnabled restores the extension product and native push sources"
+assert_xcconfig_value "$push_xcconfig" \
+  '^DART_DEFINES = \$\(inherited\),QlVaWl9QVVNIX0VOQUJMRUQ9dHJ1ZQ==$' \
+  "PushEnabled compiles the Dart push bootstrap"
+assert_xcconfig_value "$release_xcconfig" \
+  '^CODE_SIGN_STYLE = Automatic$' \
+  "Release code signing style is declared as automatic"
+assert_xcconfig_value "$release_xcconfig" \
+  '^CODE_SIGN_IDENTITY = iPhone Developer$' \
+  "Release code signing identity is declared as iPhone Developer"
+
+for key in BUNDLE_IDENTIFIER BUZZ_PUSH_ENABLED BUZZ_CODE_SIGN_ENTITLEMENTS EXCLUDED_SOURCE_FILE_NAMES; do
+  assert_single_xcconfig_declaration "$debug_xcconfig" "$key" "Debug"
+  assert_single_xcconfig_declaration "$release_xcconfig" "$key" "Release"
+done
+
+for key in BUZZ_KEYCHAIN_ACCESS_GROUP BUZZ_IOS_PUSH_ENVIRONMENT BUZZ_APP_ATTEST_ENVIRONMENT BUZZ_APP_GROUP_IDENTIFIER; do
+  assert_xcconfig_declaration_count "$debug_xcconfig" "$key" 0 "Debug"
+  assert_xcconfig_declaration_count "$release_xcconfig" "$key" 0 "Release"
+  assert_single_xcconfig_declaration "$push_xcconfig" "$key" "PushEnabled"
+done
+
+for key in CODE_SIGN_STYLE CODE_SIGN_IDENTITY; do
+  assert_xcconfig_declaration_count "$debug_xcconfig" "$key" 0 "Debug"
+  assert_single_xcconfig_declaration "$release_xcconfig" "$key" "Release"
+done
+
+assert_xcconfig_declaration_count \
+  "$debug_xcconfig" PROVISIONING_PROFILE_SPECIFIER 0 "Debug"
+assert_xcconfig_declaration_count \
+  "$release_xcconfig" PROVISIONING_PROFILE_SPECIFIER 0 "Release"
+assert_single_xcconfig_declaration "$debug_xcconfig" APP_DISPLAY_NAME "Debug"
+assert_single_xcconfig_declaration "$release_xcconfig" APP_DISPLAY_NAME "Release"
+
+# SWIFT_ACTIVE_COMPILATION_CONDITIONS is checked separately from the closed
+# identity census above. This is a tracked-source assertion only; resolved Xcode
+# build settings are intentionally outside this Linux-compatible test.
+assert_xcconfig_value "$debug_xcconfig" \
+  '^SWIFT_ACTIVE_COMPILATION_CONDITIONS = \$\(inherited\) DEBUG$' \
+  "Debug Swift compilation conditions inherit DEBUG"
+
+debug_swift_condition_count=$(grep -cE \
+  '^[[:space:]]*SWIFT_ACTIVE_COMPILATION_CONDITIONS([[:space:]]*\[[^]]*\])*[[:space:]]*=' \
+  "$debug_xcconfig" || true)
+if [[ "$debug_swift_condition_count" -eq 1 ]]; then
+  pass "Debug SWIFT_ACTIVE_COMPILATION_CONDITIONS has one tracked declaration site"
+else
+  fail "Debug SWIFT_ACTIVE_COMPILATION_CONDITIONS has $debug_swift_condition_count tracked declaration sites; expected exactly one"
+fi
+
+release_swift_condition_count=$(grep -cE \
+  '^[[:space:]]*SWIFT_ACTIVE_COMPILATION_CONDITIONS([[:space:]]*\[[^]]*\])*[[:space:]]*=' \
+  "$release_xcconfig" || true)
+if [[ "$release_swift_condition_count" -eq 0 ]]; then
+  pass "Release SWIFT_ACTIVE_COMPILATION_CONDITIONS has no tracked declaration sites"
+else
+  fail "Release SWIFT_ACTIVE_COMPILATION_CONDITIONS has $release_swift_condition_count tracked declaration sites; expected zero"
+fi
+
+grep -q '<key>aps-environment</key>' "$runner_entitlements" \
+  && fail "push-free Runner entitlements must not contain aps-environment" \
+  || pass "push-free Runner entitlements omit aps-environment"
+
+# Split the retired identifiers so the regression test does not match itself.
+retired_bundle_id='com.buzz.buzz'"Mobile"
+if git -C "$repo_root" grep -q -F "$retired_bundle_id"; then
+  fail "tracked files must not retain the retired iOS bundle identifier"
+else
+  pass "tracked files do not retain the retired iOS bundle identifier"
+fi
+grep -q '<key>com.apple.developer.devicecheck.appattest-environment</key>' "$runner_push_entitlements" \
+  && pass "push-enabled Runner uses the App Attest entitlement key accepted by Apple" \
+  || fail "push-enabled Runner must use com.apple.developer.devicecheck.appattest-environment"
+retired_entitlement_key='com.apple.developer.app-attest.'"environment"
+if grep -q "$retired_entitlement_key" "$runner_push_entitlements"; then
+  fail "push-enabled Runner must not retain the invalid App Attest entitlement key"
+else
+  pass "push-enabled Runner omits the invalid App Attest entitlement key"
+fi
+
+duplicate_pbx_object_ids=$(awk '
+  # This bounded source-level smoke check recognizes the current two-tab
+  # object-key spellings. It is not a general OpenStep uniqueness check:
+  # measured exclusions include a comment before the key, a presentation
+  # comment spanning lines, and one-tab indentation (jb_b1/jb_b2/jb_b6).
+  # The macOS semantic check below owns their resolved build consequences.
+  function decomment(s,   head, tailpart) {
+    while (match(s, /\/\*/)) {
+      head = substr(s, 1, RSTART - 1)
+      tailpart = substr(s, RSTART + 2)
+      if (!match(tailpart, /\*\//)) return head " "
+      s = head " " substr(tailpart, RSTART + RLENGTH)
+    }
+    return s
+  }
+
+  /^\t\t/ {
+    line = decomment($0)
+    if (match(line, /^\t\t"?[[:alnum:]]+"?[[:space:]]*=/)) {
+      object_id = substr(line, RSTART, RLENGTH)
+      sub(/^\t\t"?/, "", object_id)
+      sub(/"?[[:space:]]*=$/, "", object_id)
+      if (++object_id_count[object_id] == 2) print object_id
+    }
+  }
+' "$pbxproj" | sort)
+if [[ -n "$duplicate_pbx_object_ids" ]]; then
+  fail "recognized iOS project object identifiers repeat: $(printf '%s\n' "$duplicate_pbx_object_ids" | paste -sd ' ' -)"
+else
+  pass "recognized iOS project object identifiers do not repeat"
+fi
+
+signing_map=$(awk '
+  # PBX comments are separators, not text: strip them before parsing any
+  # object so a comment cannot hide a duplicate key from the ambiguity count.
+  function decomment(s,   head, tailpart) {
+    while (match(s, /\/\*/)) {
+      head = substr(s, 1, RSTART - 1)
+      tailpart = substr(s, RSTART + 2)
+      if (!match(tailpart, /\*\//)) { return head " " }
+      s = head " " substr(tailpart, RSTART + RLENGTH)
+    }
+    return s
+  }
+
+  FNR == 1 { pass++ }
+
+  # Pass 1 indexes xcconfig paths and follows each PBXNativeTarget to its
+  # actual configuration-list object. Target names come from object fields,
+  # not presentation comments.
+  pass == 1 {
+    if (/isa[[:space:]]*=[[:space:]]*PBXFileReference/ && /\.xcconfig/) {
+      declaration = decomment($0)
+      if (match(declaration, /=[[:space:]]*\{[[:space:]]*isa[[:space:]]*=[[:space:]]*PBXFileReference[[:space:]]*;/)) {
+        declaration = substr(declaration, RSTART + RLENGTH)
+      } else {
+        declaration = ""
+      }
+      sub(/\}.*/, "", declaration)
+      xcconfig_path = "MISSING_PATH"
+      rest = declaration
+      path_matches = 0
+      while (match(rest, /(^|;)[[:space:]]*path[[:space:]]*=[[:space:]]*[^;]+/)) {
+        candidate = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        sub(/^;?[[:space:]]*path[[:space:]]*=[[:space:]]*/, "", candidate)
+        gsub(/"/, "", candidate)
+        sub(/[[:space:]]+$/, "", candidate)
+        path_matches++
+        xcconfig_path = candidate
+      }
+      # More than one `path =` in one object means a decoy (a quoted value or
+      # an embedded comment) is shadowing the real key. Never guess which one
+      # the build uses: fail the row loudly instead.
+      if (path_matches > 1) xcconfig_path = "AMBIGUOUS_PATH"
+      xcconfig_paths[$1] = xcconfig_path
+    }
+
+    if (/\/\* Begin PBXNativeTarget section \*\//) {
+      in_native_targets = 1
+      next
+    }
+    if (/\/\* End PBXNativeTarget section \*\//) {
+      in_native_targets = 0
+      next
+    }
+    if (!in_native_targets) next
+
+    if (/^\t\t[^[:space:]]+ .* = \{$/) {
+      native_target_id = $1
+      native_target_name = ""
+      native_target_list = ""
+      next
+    }
+    if (native_target_id != "" && /^\t\t\tname = /) {
+      native_target_name = $0
+      sub(/^.*= */, "", native_target_name)
+      sub(/;.*/, "", native_target_name)
+      gsub(/"/, "", native_target_name)
+      next
+    }
+    if (native_target_id != "" && /^\t\t\tbuildConfigurationList = /) {
+      native_target_list = $3
+      next
+    }
+    if (native_target_id != "" && /^\t\t\};/) {
+      if (native_target_list != "") {
+        if (native_target_name == "") native_target_name = "UNNAMED:" native_target_id
+        if (native_target_list in list_owners) {
+          list_owners[native_target_list] = "DUPLICATE:" list_owners[native_target_list] "+" native_target_name
+        } else {
+          list_owners[native_target_list] = native_target_name
+        }
+      }
+      native_target_id = ""
+    }
+    next
+  }
+
+  # Pass 2 maps build-configuration object IDs through only those lists that
+  # real native targets own. PBXProject and other unowned lists are ignored.
+  pass == 2 {
+    if (/\/\* Begin XCConfigurationList section \*\//) {
+      in_configuration_lists = 1
+      next
+    }
+    if (/\/\* End XCConfigurationList section \*\//) {
+      in_configuration_lists = 0
+      next
+    }
+    if (!in_configuration_lists) next
+
+    if (/^\t\t[^[:space:]]+ .* = \{$/) {
+      configuration_list_id = $1
+      configuration_list_owner = configuration_list_id in list_owners ? list_owners[configuration_list_id] : ""
+      next
+    }
+    if (/buildConfigurations = \(/) {
+      in_list_configurations = 1
+      next
+    }
+    if (in_list_configurations && /\);/) {
+      in_list_configurations = 0
+      next
+    }
+    if (in_list_configurations && $1 ~ /^[[:alnum:]]+$/ && configuration_list_owner != "") {
+      if ($1 in targets) targets[$1] = "DUPLICATE:" targets[$1] "+" configuration_list_owner
+      else targets[$1] = configuration_list_owner
+    }
+    next
+  }
+
+  # Pass 3 emits one row for each team-bearing build configuration.
+  !in_build_configuration && /\/\* (Debug|Release|Profile) \*\/ = \{/ {
+    in_build_configuration = 1
+    configuration_id = $1
+    configuration = $3
+    base_configuration = "NONE"
+    team = ""
+    entitlements = "NONE"
+    depth = 0
+  }
+
+  in_build_configuration {
+    if (/baseConfigurationReference =/) {
+      base_configuration = $3 in xcconfig_paths ? xcconfig_paths[$3] : "UNRESOLVED:" $3
+    }
+    if (/DEVELOPMENT_TEAM =/) {
+      team = $0
+      sub(/^.*= */, "", team)
+      sub(/;.*/, "", team)
+    }
+    if (/CODE_SIGN_ENTITLEMENTS =/) {
+      entitlements = $0
+      sub(/^.*= */, "", entitlements)
+      sub(/;.*/, "", entitlements)
+    }
+
+    depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+    if (depth == 0) {
+      if (team != "") {
+        target_name = configuration_id in targets ? targets[configuration_id] : "UNMAPPED:" configuration_id
+        print target_name, configuration, base_configuration, team, entitlements
+      }
+      in_build_configuration = 0
+    }
+  }
+' "$pbxproj" "$pbxproj" "$pbxproj" | sort)
+expected_signing_map=$(printf '%s\n' \
+  'NotificationService Debug Flutter/Debug.xcconfig "$(BUZZ_DEVELOPMENT_TEAM)" NotificationService/NotificationService.entitlements' \
+  'NotificationService Profile Flutter/Release.xcconfig "$(BUZZ_DEVELOPMENT_TEAM)" NotificationService/NotificationService.entitlements' \
+  'NotificationService Release Flutter/Release.xcconfig "$(BUZZ_DEVELOPMENT_TEAM)" NotificationService/NotificationService.entitlements' \
+  'Runner Debug Flutter/Debug.xcconfig "$(BUZZ_DEVELOPMENT_TEAM)" "$(BUZZ_CODE_SIGN_ENTITLEMENTS)"' \
+  'Runner Profile Flutter/Release.xcconfig "$(BUZZ_DEVELOPMENT_TEAM)" "$(BUZZ_CODE_SIGN_ENTITLEMENTS)"' \
+  'Runner Release Flutter/Release.xcconfig "$(BUZZ_DEVELOPMENT_TEAM)" "$(BUZZ_CODE_SIGN_ENTITLEMENTS)"')
+if [[ "$signing_map" == "$expected_signing_map" ]]; then
+  pass "Runner and NotificationService signing settings match each build configuration"
+else
+  fail "unexpected iOS signing map: $signing_map"
+fi
 grep -q '<string>$(APP_DISPLAY_NAME)</string>' "$plist" \
   && pass "Info.plist display name resolves from build settings" \
   || fail "Info.plist CFBundleDisplayName must be \$(APP_DISPLAY_NAME)"

@@ -1,12 +1,23 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "Generated.xcconfig"
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG
 
 // Default app bundle identifier. Internal/custom builds can override this
 // without patching tracked files by writing
 // `mobile/ios/Flutter/AppOverrides.xcconfig` containing
 // `BUNDLE_IDENTIFIER = your.app.id` (gitignored).
-BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+BUNDLE_IDENTIFIER = xyz.block.buzz.dogfood.mobile
 APP_DISPLAY_NAME = Buzz
+BUZZ_DEVELOPMENT_TEAM = JMTDPW9CG3
+
+// Push is a build capability, not a runtime rollout switch. Normal Debug
+// builds compile out the bridge and exclude the extension product. Internal
+// dogfood builds opt in by including PushEnabled.xcconfig from the ignored
+// AppOverrides.xcconfig file.
+BUZZ_PUSH_ENABLED = NO
+BUZZ_INFO_PLIST = Runner/Info.plist
+BUZZ_CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements
+EXCLUDED_SOURCE_FILE_NAMES = NotificationService.appex PushNativeState.swift PushEndpointGrantStore.swift PushPresentationCacheBridge.swift
 
 // Worktree-aware debug identity (gitignored, written by
 // scripts/mobile-worktree-overrides.sh): a per-worktree bundle identifier

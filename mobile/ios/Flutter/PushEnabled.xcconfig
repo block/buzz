@@ -1,0 +1,16 @@
+// Complete internal iOS push capability overlay. This file is inert unless an
+// ignored AppOverrides.xcconfig explicitly includes it.
+BUZZ_PUSH_ENABLED = YES
+BUZZ_INFO_PLIST = Runner/RunnerPush-Info.plist
+BUNDLE_IDENTIFIER = xyz.block.buzz.dogfood.mobile
+BUZZ_DEVELOPMENT_TEAM = JMTDPW9CG3
+BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
+BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_IOS_PUSH_ENVIRONMENT = production
+BUZZ_APP_ATTEST_ENVIRONMENT = production
+BUZZ_CODE_SIGN_ENTITLEMENTS = Runner/RunnerPush.entitlements
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) BUZZ_PUSH_ENABLED
+EXCLUDED_SOURCE_FILE_NAMES =
+
+// BUZZ_PUSH_ENABLED=true, base64-encoded for Flutter's DART_DEFINES setting.
+DART_DEFINES = $(inherited),QlVaWl9QVVNIX0VOQUJMRUQ9dHJ1ZQ==

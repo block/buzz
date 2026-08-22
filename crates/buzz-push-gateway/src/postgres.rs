@@ -63,8 +63,8 @@ fn ts(v: DateTime<Utc>) -> i64 {
 }
 fn profile(v: &str) -> Result<AppProfile, AuthorityError> {
     match v {
-        "buzz-ios-production" => Ok(AppProfile::BuzzIosProduction),
-        "buzz-ios-sandbox" => Ok(AppProfile::BuzzIosSandbox),
+        "buzz-ios-dogfood" => Ok(AppProfile::BuzzIosDogfood),
+        "buzz-ios-app-store" => Ok(AppProfile::BuzzIosAppStore),
         _ => Err(AuthorityError::Unavailable),
     }
 }
@@ -683,7 +683,7 @@ mod tests {
         let now = Utc::now();
         sqlx::query(
             "INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,app_profile,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at)
-             VALUES ($1,$2,$3,0,'buzz-ios-production',$4,$5,1,$6)",
+             VALUES ($1,$2,$3,0,'buzz-ios-dogfood',$4,$5,1,$6)",
         )
         .bind(Uuid::from_u128(1))
         .bind(vec![1u8])

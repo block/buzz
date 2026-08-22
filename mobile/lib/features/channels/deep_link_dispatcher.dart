@@ -3,6 +3,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
+import '../../shared/community/community.dart';
+import '../../shared/community/community_provider.dart';
 import '../invites/invite_join_provider.dart';
 import '../invites/invite_join_sheet.dart';
 import 'channel.dart';
@@ -37,6 +39,7 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _preparingInvite = false;
+  String? _switchingCommunityId;
 
   @override
   void initState() {
@@ -57,6 +60,12 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
         _maybeDispatch(ref.read(pendingDeepLinkProvider));
       });
+      ref.listen<AsyncValue<Community?>>(activeCommunityProvider, (_, _) {
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      });
+      ref.listen<AsyncValue<List<Community>>>(communityListProvider, (_, _) {
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      });
     }
 
     return widget.child;
@@ -72,6 +81,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         !widget.dispatchMessageLinks) {
       return;
     }
+    if (link is MessageDeepLink && !_prepareNotificationCommunity(link)) return;
 
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
@@ -113,6 +123,59 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       ),
     );
     ref.read(pendingDeepLinkProvider.notifier).consume();
+  }
+
+  bool _prepareNotificationCommunity(MessageDeepLink link) {
+    final communityId = link.communityId;
+    if (communityId == null) return true;
+
+    final communities = ref.read(communityListProvider).asData?.value;
+    if (communities == null) return false;
+    if (!communities.any((community) => community.id == communityId)) {
+      ref.read(pendingDeepLinkProvider.notifier).consume();
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('Notification community is no longer available'),
+        ),
+      );
+      return false;
+    }
+
+    final activeCommunity = ref.read(activeCommunityProvider).asData?.value;
+    if (activeCommunity?.id == communityId) return true;
+    _switchCommunity(communityId);
+    return false;
+  }
+
+  void _switchCommunity(String communityId) {
+    if (_switchingCommunityId != null) return;
+    _switchingCommunityId = communityId;
+    Future.microtask(() async {
+      var switched = false;
+      try {
+        await ref
+            .read(communityListProvider.notifier)
+            .switchCommunity(communityId);
+        switched = true;
+      } catch (error) {
+        debugPrint(
+          'notification-routing: failed to switch to community '
+          '$communityId: $error',
+        );
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(
+              content: Text('Could not open the notification community'),
+            ),
+          );
+        }
+      } finally {
+        _switchingCommunityId = null;
+        if (mounted && switched) {
+          _maybeDispatch(ref.read(pendingDeepLinkProvider));
+        }
+      }
+    });
   }
 
   void _maybeDispatchInvite(InviteDeepLink link) {

@@ -1,5 +1,7 @@
 import 'package:uuid/uuid.dart';
 
+import '../push/push_subscription.dart';
+
 const _uuid = Uuid();
 const _sentinel = Object();
 
@@ -12,6 +14,7 @@ class Community {
   final String? pubkey;
   final String? nsec;
   final SensitiveActionPolicy sensitiveActionPolicy;
+  final BuzzPushLeaseSubscriptionState pushSubscriptionState;
   final DateTime addedAt;
 
   const Community({
@@ -21,6 +24,7 @@ class Community {
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
+    this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     required this.addedAt,
   });
 
@@ -49,6 +53,7 @@ class Community {
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
+    BuzzPushLeaseSubscriptionState? pushSubscriptionState,
   }) {
     return Community(
       id: id,
@@ -58,6 +63,8 @@ class Community {
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
           sensitiveActionPolicy ?? this.sensitiveActionPolicy,
+      pushSubscriptionState:
+          pushSubscriptionState ?? this.pushSubscriptionState,
       addedAt: addedAt,
     );
   }
@@ -69,6 +76,7 @@ class Community {
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
+    'pushSubscriptionState': pushSubscriptionState.toJson(),
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -82,6 +90,11 @@ class Community {
       (value) => value.name == json['sensitiveActionPolicy'],
       orElse: () => SensitiveActionPolicy.disabledByUser,
     ),
+    pushSubscriptionState: json['pushSubscriptionState'] == null
+        ? const BuzzPushLeaseSubscriptionState.desired()
+        : BuzzPushLeaseSubscriptionState.fromJson(
+            Map<String, dynamic>.from(json['pushSubscriptionState'] as Map),
+          ),
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 
