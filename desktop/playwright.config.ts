@@ -88,6 +88,7 @@ export default defineConfig({
         "**/thread-unread.spec.ts",
         "**/thread-load-failure.spec.ts",
         "**/project-conversation-load-failure.spec.ts",
+        "**/huddle-thread-load-failure.spec.ts",
         "**/workspace-rail.spec.ts",
         "**/community-rail.spec.ts",
         "**/boot-splash.spec.ts",

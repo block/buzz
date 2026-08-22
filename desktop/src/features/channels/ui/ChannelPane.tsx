@@ -13,6 +13,7 @@ import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
 import { MessageThreadPanelSkeleton } from "@/features/messages/ui/MessageThreadPanelSkeleton";
+import { ThreadRepliesErrorCard } from "@/features/messages/ui/MessageThreadReplyState";
 import {
   MessageTimeline,
   type MessageTimelineHandle,
@@ -95,6 +96,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   welcomeKickoffSettingUp = false,
   messages,
   threadSummaries,
+  huddleThreadRepliesError = false,
+  onRetryHuddleThreadReplies,
   firstUnreadMessageId = null,
   unreadCount = 0,
   canResetThreadPanelWidth,
@@ -569,6 +572,11 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {isHuddleTranscript ? null : header}
+          {isHuddleTranscript && huddleThreadRepliesError ? (
+            <div className="px-5 pt-3">
+              <ThreadRepliesErrorCard onRetry={onRetryHuddleThreadReplies} />
+            </div>
+          ) : null}
           <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col">
             <MessageTimeline
               ref={messageTimelineRef}
