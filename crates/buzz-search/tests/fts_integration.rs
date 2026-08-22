@@ -1,6 +1,6 @@
 //! Integration tests for community-scoped Postgres FTS.
 //!
-//! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored`
+//! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored` // sadscan:disable np.postgres.1
 //!
 //! Each test creates a uniquely-named schema, applies every FTS-affecting
 //! migration in order, exercises a scenario, and drops it. Tests are
@@ -28,6 +28,8 @@ const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_r
 const MIGRATION_0008_SQL: &str =
     include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
+const MIGRATION_0033_SQL: &str =
+    include_str!("../../../migrations/0033_section_workspace_projection_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -81,6 +83,9 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0014_SQL)
         .await
         .expect("apply 0014 migration");
+    pool.execute(MIGRATION_0033_SQL)
+        .await
+        .expect("apply 0033 migration");
     (pool, schema)
 }
 
@@ -1425,6 +1430,20 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
 async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
     let (pool, schema) = setup().await;
 
+    let expression: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(d.adbin, d.adrelid) \
+         FROM pg_attrdef d JOIN pg_attribute a \
+           ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+         WHERE d.adrelid = 'events'::regclass AND a.attname = 'search_tsv'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read migration 0033 generated expression");
+    assert!(
+        expression.contains("9050") && expression.contains("30623"),
+        "{expression}"
+    );
+
     let c = mk_community(&pool, "p-gated-tripwire.example").await;
     let token = "pgated_tripwire_marker_qwerty";
 
@@ -1487,6 +1506,16 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
         kinds.contains(&9),
         "kind:9 control row MUST be searchable, got kinds={kinds:?}",
     );
+
+    for required in [
+        buzz_core::kind::KIND_SECTION_WORKSPACE_IMPORT,
+        buzz_core::kind::KIND_SECTION_WORKSPACE_PROJECTION,
+    ] {
+        assert!(
+            persistent.contains(&required),
+            "workspace kind:{required} must remain p-gated"
+        );
+    }
 
     for &kind in &persistent {
         assert!(

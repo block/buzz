@@ -73,6 +73,10 @@ pub const KIND_USER_STATUS: u32 = 30315;
 /// Stored globally (channel_id = NULL); user-owned personal data, not channel-scoped.
 /// Content is NIP-44 encrypted to the user's own keypair.
 pub const KIND_READ_STATE: u32 = 30078;
+/// NIP-SW: owner-signed revision-zero section workspace import command.
+pub const KIND_SECTION_WORKSPACE_IMPORT: u32 = 9050;
+/// NIP-SW: relay-signed, reader-specific current section workspace projection.
+pub const KIND_SECTION_WORKSPACE_PROJECTION: u32 = 30623;
 /// NIP-42 auth event — never stored (carries bearer tokens).
 pub const KIND_AUTH: u32 = 22242;
 /// BUD-01: Blossom upload auth (used in upload.rs, not stored).
@@ -139,7 +143,12 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_SECTION_WORKSPACE_IMPORT,
+    KIND_SECTION_WORKSPACE_PROJECTION,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -162,10 +171,18 @@ pub const P_GATED_KINDS: &[u32] = &[
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
     KIND_DM_VISIBILITY,
+    KIND_SECTION_WORKSPACE_IMPORT,
+    KIND_SECTION_WORKSPACE_PROJECTION,
     // NIP-AM: agent turn metrics are encrypted to the owner and must not be
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+];
+
+/// Immutable Stage 1 section-workspace migration records.
+pub const IMMUTABLE_SECTION_WORKSPACE_KINDS: &[u32] = &[
+    KIND_SECTION_WORKSPACE_IMPORT,
+    KIND_SECTION_WORKSPACE_PROJECTION,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -822,6 +839,7 @@ pub const fn is_command_kind(kind: u32) -> bool {
             | KIND_WORKFLOW_TRIGGER
             | KIND_APPROVAL_GRANT
             | KIND_APPROVAL_DENY
+            | KIND_SECTION_WORKSPACE_IMPORT
     )
 }
 
@@ -834,6 +852,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
+            | KIND_SECTION_WORKSPACE_PROJECTION
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
     )

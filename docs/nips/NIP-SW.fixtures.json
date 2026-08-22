@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "kinds": {"import": 9050, "projection": 30623},
+  "limits": {"sections": 100, "assignments": 1000, "encrypted_metadata_bytes": 65535, "key_envelope_bytes": 4096},
+  "owner": "1111111111111111111111111111111111111111111111111111111111111111",
+  "import": {
+    "version": 1,
+    "action_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "source_event_id": "2222222222222222222222222222222222222222222222222222222222222222",
+    "source_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "key_epoch": 1,
+    "owner_key_envelope": "nip44-owner-envelope",
+    "sections": [{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","rank":0,"encrypted_label":"ciphertext-label","encrypted_icon":null}],
+    "assignments": [{"channel_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","section_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}]
+  },
+  "projection": {
+    "coordinate": "1111111111111111111111111111111111111111111111111111111111111111:1111111111111111111111111111111111111111111111111111111111111111",
+    "tags": [
+      ["d", "1111111111111111111111111111111111111111111111111111111111111111:1111111111111111111111111111111111111111111111111111111111111111"],
+      ["p", "1111111111111111111111111111111111111111111111111111111111111111"]
+    ]
+  }
+}

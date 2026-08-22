@@ -70,6 +70,9 @@ pub async fn handle_command(
         KIND_WORKFLOW_TRIGGER => handle_workflow_trigger(tenant, state, &event, &auth).await,
         KIND_APPROVAL_GRANT => handle_approval_grant(tenant, state, &event, &auth).await,
         KIND_APPROVAL_DENY => handle_approval_deny(tenant, state, &event, &auth).await,
+        KIND_SECTION_WORKSPACE_IMPORT => {
+            super::section_workspace::handle_import(tenant, state, &event).await
+        }
         _ => Err(IngestError::Rejected(format!(
             "unknown command kind: {kind}"
         ))),
@@ -1446,7 +1449,7 @@ mod tests {
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
         let pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect workflow persistence test database");

@@ -231,6 +231,8 @@ pub struct Config {
     /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
     pub audit_enabled: bool,
+    /// Enable the staged NIP-SW owner import path. Defaults off.
+    pub section_workspace_import_enabled: bool,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -908,6 +910,8 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let section_workspace_import_enabled =
+            parse_optional_bool("BUZZ_SECTION_WORKSPACE_IMPORT_ENABLED")?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1024,6 +1028,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             audit_enabled,
+            section_workspace_import_enabled,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,

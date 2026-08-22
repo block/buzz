@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1061,6 +1061,11 @@ mod tests {
         assert!(roster_fence.contains("NEW.kind <> 39002"));
         assert!(roster_fence.contains("'buzz_channel_membership:'"));
         assert!(roster_fence.contains("cm.removed_at IS NULL"));
+
+        assert_eq!(migrations[32].version, 33);
+        let workspace_fts = migrations[32].sql.as_str();
+        assert!(workspace_fts.contains("kind IN (9050, 30623)"));
+        assert!(workspace_fts.contains("NULL::tsvector"));
         assert!(roster_fence.contains("cm.role::text"));
         assert!(roster_fence.contains("jsonb_array_length(roster_tag.tag_json) <> 4"));
         assert!(roster_fence.contains("roster_tag.tag_json->>3"));
