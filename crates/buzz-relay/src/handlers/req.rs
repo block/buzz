@@ -428,6 +428,12 @@ pub async fn handle_req(
             );
         }
 
+        // O(1) membership lookup for the hot inner scan. Built once per
+        // (filter, events) pair so the per-row `contains` stays constant-time
+        // even for subscribers with thousands of accessible channels.
+        let accessible_set: std::collections::HashSet<uuid::Uuid> =
+            accessible_channels.iter().copied().collect();
+
         for stored in &events {
             // Per-filter NIP-01 matching — use the current filter only, not the
             // full filter set. OR semantics across filters are handled by the outer
@@ -437,7 +443,7 @@ pub async fn handle_req(
             }
 
             if let Some(ch_id) = stored.channel_id {
-                if !accessible_channels.contains(&ch_id) {
+                if !accessible_set.contains(&ch_id) {
                     continue;
                 }
             }
@@ -684,6 +690,7 @@ async fn handle_search_req(
                 page,
                 per_page: SEARCH_PAGE_SIZE,
                 mode: buzz_search::SearchMode::FullText,
+                cursor: None,
             };
 
             let search_result = match state.search.search(&search_query).await {

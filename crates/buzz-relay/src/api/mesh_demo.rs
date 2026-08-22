@@ -166,8 +166,15 @@ mod tests {
             .expect("create redis pool")
     }
 
-    async fn redis_directory_if_available() -> Option<SessionDirectory> {
-        let pool = pool();
+    pub(crate) async fn redis_directory_if_available(
+        url_override: Option<&str>,
+    ) -> Option<SessionDirectory> {
+        let pool = match url_override {
+            Some(url) => deadpool_redis::Config::from_url(url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .ok()?,
+            None => pool(),
+        };
         let mut conn = pool.get().await.ok()?;
         redis::cmd("PING")
             .query_async::<String>(&mut *conn)
@@ -179,7 +186,7 @@ mod tests {
         ))
     }
 
-    struct NoopTransport;
+    pub(crate) struct NoopTransport;
 
     impl RelayPeerTransport for NoopTransport {
         fn send_datagram(&self, _to: RuntimeId, _dgram: MeshDatagram) -> Result<(), MeshError> {
@@ -199,13 +206,31 @@ mod tests {
         fn set_inbound(&self, _handler: Box<dyn InboundHandler>) {}
     }
 
-    struct DirectTransport {
+    /// Recording variant: `send_datagram` captures the destination runtime id
+    /// so tests can assert which peer the forwarded arm routed to. Opens
+    /// streams through the peer like the prior `DirectTransport`.
+    pub(crate) struct DirectTransport {
         peer: buzz_relay_mesh::peer::MeshPeer,
+        recorded_to: std::sync::Mutex<Option<RuntimeId>>,
+    }
+
+    impl DirectTransport {
+        pub(crate) fn new(peer: buzz_relay_mesh::peer::MeshPeer) -> Self {
+            Self {
+                peer,
+                recorded_to: std::sync::Mutex::new(None),
+            }
+        }
+
+        pub(crate) fn last_recorded_to(&self) -> Option<RuntimeId> {
+            *self.recorded_to.lock().unwrap()
+        }
     }
 
     impl RelayPeerTransport for DirectTransport {
-        fn send_datagram(&self, _to: RuntimeId, _dgram: MeshDatagram) -> Result<(), MeshError> {
-            unreachable!("demo forwarded-arm test never sends datagrams")
+        fn send_datagram(&self, to: RuntimeId, _dgram: MeshDatagram) -> Result<(), MeshError> {
+            *self.recorded_to.lock().unwrap() = Some(to);
+            Ok(())
         }
 
         fn open_session_stream(
@@ -215,8 +240,9 @@ mod tests {
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<MeshStream, MeshError>> + Send + '_>,
         > {
+            let peer = self.peer.clone();
             Box::pin(async move {
-                let mut stream = self.peer.open_bi().await?;
+                let mut stream = peer.open_bi().await?;
                 stream.send_frame(MeshStreamFrame::Hello(hello)).await?;
                 Ok(stream)
             })
@@ -225,15 +251,16 @@ mod tests {
         fn set_inbound(&self, _handler: Box<dyn InboundHandler>) {}
     }
 
-    async fn body_json(resp: Response) -> serde_json::Value {
+    pub(crate) async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
     /// First post for a session acquires the fenced lease and reports `owned`.
     #[tokio::test]
+    #[ignore = "requires reachable Redis with role 'buzz'"]
     async fn demo_join_owned_arm_reports_generation() {
-        let Some(directory) = redis_directory_if_available().await else {
+        let Some(directory) = redis_directory_if_available(None).await else {
             return;
         };
         let router = ReliableStreamRouter::new(
@@ -261,8 +288,9 @@ mod tests {
     /// through the owner-side echo consumer (`recv_validated` + `send_bytes`),
     /// end to end over a real mesh stream pair.
     #[tokio::test]
+    #[ignore = "requires reachable Redis with role 'buzz'"]
     async fn demo_join_forwarded_arm_round_trips_echo() {
-        let Some(directory) = redis_directory_if_available().await else {
+        let Some(directory) = redis_directory_if_available(None).await else {
             return;
         };
         let community_id = Uuid::new_v4();
@@ -323,7 +351,7 @@ mod tests {
         let local_peer = local_endpoint.connect(owner_addr).await.unwrap();
         let local_router = ReliableStreamRouter::new(
             directory.clone(),
-            std::sync::Arc::new(DirectTransport { peer: local_peer }),
+            std::sync::Arc::new(DirectTransport::new(local_peer)),
             local_endpoint.runtime_id(),
         );
         let resp = run_demo_join(
@@ -341,5 +369,57 @@ mod tests {
         assert_eq!(body["outcome"], "forwarded");
         assert_eq!(body["echoed_payload"], "mesh echo evidence");
         owner_task.abort();
+    }
+
+    /// No-Redis branch: point `redis_directory_if_available` at an unbound
+    /// local port so the helper's pool/PING path fails and returns `None`,
+    /// which is exactly what the `else { return; }` branches above consume.
+    /// Locks down the no-Redis behavior without needing a live Redis.
+    #[tokio::test]
+    async fn mesh_demo_no_redis_branch_returns_none() {
+        // Port 1 refuses on localhost (no live listener), so the pool
+        // cannot borrow a connection and the helper returns `None`.
+        let result = redis_directory_if_available(Some("redis://127.0.0.1:1")).await;
+        assert!(result.is_none(), "expected None for unreachable Redis URL");
+    }
+
+    /// Unit-level proof that the recording plumbing exists: `send_datagram`
+    /// captures its destination, and `last_recorded_to` reads it back. Uses
+    /// a real mesh endpoint pair to obtain a `MeshPeer` for `DirectTransport`,
+    /// but does not need Redis — the test never invokes `run_demo_join`.
+    #[tokio::test]
+    async fn transport_routes_to_owner_runtime() {
+        let bind = || "127.0.0.1:0".parse().unwrap();
+        let local_endpoint = MeshEndpoint::bind(bind()).await.unwrap();
+        let owner_endpoint = MeshEndpoint::bind(bind()).await.unwrap();
+        let owner_runtime = owner_endpoint.runtime_id();
+        let owner_addr = owner_endpoint.addr();
+
+        // Drop accept eagerly so the connect below completes.
+        let accept = tokio::spawn(async move {
+            let _ = owner_endpoint.accept().await;
+        });
+        let local_peer = local_endpoint.connect(owner_addr).await.unwrap();
+
+        let transport = DirectTransport::new(local_peer);
+        let payload = MeshDatagram {
+            fenced: buzz_relay_mesh::wire::FencedHeader {
+                session_id: Uuid::nil(),
+                generation: 0,
+                owner_runtime_id: owner_runtime,
+            },
+            seq: 1,
+            payload: b"hello-owner".to_vec(),
+        };
+        transport
+            .send_datagram(owner_runtime, payload)
+            .expect("send_datagram records but does not transmit");
+
+        assert_eq!(
+            transport.last_recorded_to(),
+            Some(owner_runtime),
+            "DirectTransport must record the destination runtime id"
+        );
+        accept.abort();
     }
 }

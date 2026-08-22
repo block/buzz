@@ -389,6 +389,10 @@ impl SubscriptionRegistry {
                 channel_id,
                 kind: event.event.kind,
             };
+            // Clone the candidate Vec and drop the index Ref BEFORE iterating.
+            // Holding the Ref across push_match (which itself touches self.subs
+            // and conn_subs) would block concurrent register writes on those
+            // shards, producing a two-shard circular wait with register_scoped.
             if let Some(candidates) = self
                 .channel_kind_index
                 .get(&(community_id, key))

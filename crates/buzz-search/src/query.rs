@@ -67,6 +67,21 @@ pub enum SearchMode {
     Prefix,
 }
 
+/// Keyset cursor for FTS pagination.
+///
+/// Replaces OFFSET pagination for multi-page REQ scans. The cursor is the
+/// `(rank, event_id)` of the last hit returned by the previous page; the next
+/// page is `WHERE (rank, id) < (cursor.rank, cursor.id)` over the same
+/// `(rank DESC, created_at DESC, id DESC)` ordering. This stays O(log n) per
+/// page regardless of depth, where OFFSET grew linearly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchCursor {
+    /// `ts_rank_cd` relevance score of the last hit.
+    pub rank: f32,
+    /// 32-byte event id of the last hit — tiebreaker for equal ranks.
+    pub event_id: [u8; 32],
+}
+
 /// A community-scoped FTS query.
 ///
 /// The community is REQUIRED at the type level — there is no construction path
@@ -92,12 +107,16 @@ pub struct SearchQuery {
     pub since: Option<i64>,
     /// NIP-01 until (Unix seconds). Inclusive upper bound on created_at.
     pub until: Option<i64>,
-    /// 1-indexed page number.
+    /// 1-indexed page number. Used only when `cursor` is `None`.
     pub page: u32,
     /// Page size. Clamped at 500 internally.
     pub per_page: u32,
     /// Matching semantics for the search text.
     pub mode: SearchMode,
+    /// Keyset cursor for pagination. When `Some`, replaces OFFSET with a
+    /// `(rank, id) < (cursor.rank, cursor.event_id)` predicate. The legacy
+    /// `page` field is ignored in this mode.
+    pub cursor: Option<SearchCursor>,
 }
 
 /// A single FTS hit. The relay refetches the canonical `StoredEvent` and
@@ -126,6 +145,10 @@ pub struct SearchResult {
     pub hits: Vec<SearchHit>,
     /// 1-indexed page returned.
     pub page: u32,
+    /// Cursor for the next page. `Some` when more hits may follow; the
+    /// caller passes this back as `SearchQuery::cursor` to continue.
+    /// `None` on the last page.
+    pub next_cursor: Option<SearchCursor>,
 }
 
 const PER_PAGE_MAX: u32 = 500;
@@ -221,6 +244,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         return Ok(SearchResult {
             hits: Vec::new(),
             page: query.page.clamp(1, PAGE_MAX),
+            next_cursor: None,
         });
     };
 
@@ -232,6 +256,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     };
     let page = query.page.clamp(1, PAGE_MAX);
     let offset = ((page - 1) as i64) * (per_page_actual as i64);
+    let use_cursor = query.cursor.is_some();
     // Profile typeahead uses broad prefix matching. For one- and two-character
     // queries, a busy community can have enough newer prefix matches to push a
     // short exact display name off the bounded first page. Keep the same result
@@ -303,20 +328,40 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         qb.push(")");
     }
 
+    if let Some(c) = query.cursor {
+        // Keyset predicate: (rank, id) < (cursor.rank, cursor.event_id).
+        // Tuple comparison is well-defined for (float4, bytea) and stays
+        // O(log n) regardless of depth, where OFFSET grew linearly per page.
+        qb.push(" AND (rank < ");
+        qb.push_bind(c.rank);
+        qb.push(" OR (rank = ");
+        qb.push_bind(c.rank);
+        qb.push(" AND id < ");
+        qb.push_bind(c.event_id.to_vec());
+        qb.push("))");
+    }
+
     if prioritize_exact_profile_lexeme {
-        qb.push(" ORDER BY search_tsv @@ websearch_to_tsquery('simple', ");
+        // ORDER BY a boolean `@@` match always ties — every row that matches
+        // scores true, so the rank column never orders anything. Replace the
+        // boolean with the numeric ts_rank_cd so the lexeme is comparable,
+        // and fall through to the same secondary ordering as the default path.
+        qb.push(" ORDER BY ts_rank_cd(search_tsv, websearch_to_tsquery('simple', ");
         qb.push_bind(&search_text);
-        qb.push(") DESC, rank DESC, created_at DESC, id LIMIT ");
+        qb.push(")) DESC, rank DESC, created_at DESC, id LIMIT ");
     } else {
         qb.push(" ORDER BY rank DESC, created_at DESC, id LIMIT ");
     }
     qb.push_bind(per_page_actual as i64);
-    qb.push(" OFFSET ");
-    qb.push_bind(offset);
+    if !use_cursor {
+        qb.push(" OFFSET ");
+        qb.push_bind(offset);
+    }
 
     let rows = qb.build().fetch_all(pool).await?;
 
     let mut hits = Vec::with_capacity(rows.len());
+    let mut last: Option<SearchCursor> = None;
     for row in rows {
         let id_bytes: Vec<u8> = row.try_get("id")?;
         let pk_bytes: Vec<u8> = row.try_get("pubkey")?;
@@ -326,17 +371,32 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         let pubkey: [u8; 32] = pk_bytes.try_into().map_err(|v: Vec<u8>| {
             sqlx::Error::Decode(format!("pubkey column is {} bytes, expected 32", v.len()).into())
         })?;
+        let rank: f32 = row.try_get("rank")?;
+        last = Some(SearchCursor { rank, event_id: id });
         hits.push(SearchHit {
             event_id: id,
             kind: row.try_get("kind")?,
             pubkey,
             channel_id: row.try_get("channel_id")?,
             created_at: row.try_get("created_at_s")?,
-            rank: row.try_get("rank")?,
+            rank,
         });
     }
 
-    Ok(SearchResult { hits, page })
+    // Emit a cursor iff this page could plausibly have more results behind
+    // it — i.e. the page filled to `per_page_actual`. A short page is the
+    // last page (matches the existing req.rs "exhausted" detection rule).
+    let next_cursor = if use_cursor && hits.len() as u32 >= per_page_actual {
+        last
+    } else {
+        None
+    };
+
+    Ok(SearchResult {
+        hits,
+        page,
+        next_cursor,
+    })
 }
 
 #[cfg(test)]

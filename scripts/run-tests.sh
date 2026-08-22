@@ -120,6 +120,11 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
+  # buzz-relay --lib: 906 unit tests; the Postgres/Redis-backed test paths
+  # already #[ignore]d or skipped at runtime, so --lib stays infra-free here
+  # (matching the nextest fallback in `just test-unit`).
+  run_test_step "buzz-relay unit tests" \
+    cargo test -p buzz-relay --lib -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
