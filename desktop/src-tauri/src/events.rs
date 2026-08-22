@@ -356,6 +356,18 @@ pub struct MessageEditTags<'a> {
 
 /// Kind 40003 — edit a message with full content, media, emoji, mentions,
 /// and optional monotonic link-preview suppression.
+///
+/// Carries the full new content AND a fresh imeta tag set; the receiver overlays
+/// the imeta tags onto the original event so the rendered message reflects exactly
+/// the edited state. NIP-30 custom-emoji tags ride along the same way so an edited
+/// body's `:shortcode:`s stay resolvable (the send path attaches these too).
+///
+/// `mentions` carries the pubkeys of mentions that are *newly added* by this
+/// edit (the caller diffs the edited body against the original). Only those get
+/// a `p` tag (wake/notify) **and** a matching `mention` reference tag (explicit
+/// @mention signal — same as the send path's `MENTION_REFERENCE_TAG`), while a
+/// typo-fix edit that leaves the mention set unchanged emits neither and never
+/// re-wakes anyone. The receiver overlays these onto the original event's audience.
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
@@ -368,13 +380,30 @@ pub fn build_message_edit(
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
-    tags.extend(mention_tags(edit_tags.mentions)?);
-    imeta_tags(edit_tags.media, &mut tags)?;
-    emoji_tags(edit_tags.custom_emoji, &mut tags)?;
+    let p_tags = mention_tags(edit_tags.mentions)?;
+    tags.extend(p_tags.clone());
+    // Parity with send: explicit `mention` refs so relay offline-notice (#1743)
+    // and desktop resolve-mention can treat edit-added @mentions like send.
+    // Prefer caller-supplied mention_refs (snapshot path); otherwise derive
+    // parallel `mention` tags from the p-tags we just emitted.
     if let Some(mention_refs) = edit_tags.mention_refs {
         mention_reference_tags(mention_refs, &mut tags)?;
         tags.push(tag(vec!["buzz:mention-snapshot"])?);
+    } else {
+        let derived_refs: Vec<Vec<String>> = p_tags
+            .iter()
+            .filter_map(|t| {
+                let s = t.as_slice();
+                let pk = s.get(1)?.clone();
+                Some(vec!["mention".to_string(), pk])
+            })
+            .collect();
+        if !derived_refs.is_empty() {
+            mention_reference_tags(&derived_refs, &mut tags)?;
+        }
     }
+    imeta_tags(edit_tags.media, &mut tags)?;
+    emoji_tags(edit_tags.custom_emoji, &mut tags)?;
     if suppress_link_previews {
         tags.push(tag(vec!["link-preview", "none"])?);
     }
@@ -893,6 +922,11 @@ mod tests {
         assert_eq!(tags[0][0], "h");
         assert_eq!(tags[1][0], "e");
         assert_eq!(tags[2], vec!["p".to_string(), ALICE_HEX.to_string()]);
+        // Send-path parity: explicit mention ref for newly added @mentions (#2540).
+        assert!(
+            tags.iter().any(|t| t.as_slice() == ["mention", ALICE_HEX]),
+            "edit-added mention must emit mention ref tag, got {tags:?}"
+        );
     }
 
     #[test]
