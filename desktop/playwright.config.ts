@@ -166,6 +166,7 @@ export default defineConfig({
         "**/stream.spec.ts",
         "**/integration.spec.ts",
         "**/dm-double-notification.spec.ts",
+        "**/inbox-windowing-screenshots.spec.ts",
         "**/profile.spec.ts",
         "**/sidebar.spec.ts",
         "**/sidebar-relay-card.spec.ts",

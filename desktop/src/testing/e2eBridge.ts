@@ -7863,9 +7863,16 @@ async function handleGetFeed(
 
   // Feed is composed of multiple queries: mentions (#p), activity, approvals.
   // For e2e, return a minimal feed structure with mentions.
+  //
+  // `feed_types` mirrors the native bridge (commands/messages.rs get_feed):
+  // it routes the filter through the relay's per-conversation-windowed feed
+  // path instead of the flat newest-N generic query. Keeping the e2e bridge
+  // faithful here is what lets the inbox windowing e2e exercise the same
+  // relay path the desktop app uses.
   const limit = args.limit ?? 50;
   const mentionEvents = await relayQuery(config, [
     {
+      feed_types: ["mentions"],
       kinds: [
         9,
         40002,
