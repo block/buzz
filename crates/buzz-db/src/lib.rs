@@ -47,6 +47,8 @@ pub mod relay_invite;
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
+/// Task and task-event persistence.
+pub mod task;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
@@ -4527,6 +4529,67 @@ impl Db {
         max_uses: Option<i32>,
     ) -> Result<relay_invite::MintedInvite> {
         relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+    }
+
+    /// Create a task and its opening `created` history entry atomically.
+    #[datastore_span(name = "create_task", system = "postgresql")]
+    pub async fn create_task(
+        &self,
+        community: CommunityId,
+        new_task: task::NewTask,
+    ) -> Result<task::TaskRecord> {
+        task::create_task(&self.pool, community, new_task).await
+    }
+
+    /// Read one task scoped to `community`.
+    #[datastore_span(name = "get_task", system = "postgresql")]
+    pub async fn get_task(&self, community: CommunityId, id: Uuid) -> Result<task::TaskRecord> {
+        task::get_task(&self.pool, community, id).await
+    }
+
+    /// List a community's tasks, newest-modified first.
+    #[datastore_span(name = "list_tasks", system = "postgresql")]
+    pub async fn list_tasks(
+        &self,
+        community: CommunityId,
+        filter: &task::TaskFilter,
+    ) -> Result<Vec<task::TaskRecord>> {
+        task::list_tasks(&self.pool, community, filter).await
+    }
+
+    /// Read one task's append-only history, oldest first.
+    #[datastore_span(name = "list_task_events", system = "postgresql")]
+    pub async fn list_task_events(
+        &self,
+        community: CommunityId,
+        task_id: Uuid,
+    ) -> Result<Vec<task::TaskEventRecord>> {
+        task::list_task_events(&self.pool, community, task_id).await
+    }
+
+    /// Apply a task patch, appending one history row per field that changed.
+    #[datastore_span(name = "update_task", system = "postgresql")]
+    pub async fn update_task(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        patch: &task::TaskPatch,
+        actor_pubkey: Option<&[u8]>,
+    ) -> Result<task::TaskRecord> {
+        task::update_task(&self.pool, community, id, patch, actor_pubkey).await
+    }
+
+    /// Append a comment or summary to a task's history.
+    #[datastore_span(name = "append_task_event", system = "postgresql")]
+    pub async fn append_task_event(
+        &self,
+        community: CommunityId,
+        task_id: Uuid,
+        actor_pubkey: Option<&[u8]>,
+        action: buzz_core::task::TaskAction,
+        body: Option<&str>,
+    ) -> Result<task::TaskEventRecord> {
+        task::append_task_event(&self.pool, community, task_id, actor_pubkey, action, body).await
     }
 
     /// Delete one bounded batch of invites expired before `cutoff`.

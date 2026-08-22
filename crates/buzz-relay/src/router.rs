@@ -118,6 +118,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(api::invites::accept_policy),
         )
         .route("/api/invites/claim", post(api::invites::claim_invite))
+        // Tasks: relay-owned work items (NIP-98 auth + relay membership).
+        // Host-derived tenant, like every other route here — the community is
+        // never a path segment.
+        .route(
+            "/api/tasks",
+            get(api::tasks::list_tasks).post(api::tasks::create_task),
+        )
+        .route(
+            "/api/tasks/{task_id}",
+            get(api::tasks::get_task).patch(api::tasks::update_task),
+        )
+        .route(
+            "/api/tasks/{task_id}/events",
+            post(api::tasks::append_task_event),
+        )
         // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
         .route("/moderation/reports", get(api::bridge::moderation_reports))
         .route("/moderation/audit", get(api::bridge::moderation_audit))

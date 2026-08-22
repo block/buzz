@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -17,6 +18,8 @@ import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
+import '../../shared/tasks/thread_summary.dart';
+import '../../shared/tasks/thread_summary_sheet.dart';
 import 'android_ime_lift.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
@@ -55,6 +58,7 @@ part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
+part 'thread_detail_page/summarize_action.dart';
 
 const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
@@ -853,6 +857,12 @@ class ThreadDetailPage extends HookConsumerWidget {
           child: const Text('Thread', key: ValueKey('thread-app-bar-title')),
         ),
         titleStyle: channelTitleTextStyle,
+        actions: [
+          _SummarizeThreadButton(
+            channelId: channelId,
+            messages: [liveHead, ...replies],
+          ),
+        ],
       ),
       body: Stack(
         fit: StackFit.expand,
