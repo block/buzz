@@ -143,11 +143,33 @@ pub(crate) fn represented_event_count(keys: Option<&Keys>, event: &Event) -> u64
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&plaintext) else {
         return 1;
     };
-    value
+    represented_value_count(&value)
+}
+
+fn represented_value_count(value: &serde_json::Value) -> u64 {
+    let Some(object) = value.as_object() else {
+        return 1;
+    };
+    if object.get("kind").and_then(serde_json::Value::as_str) == Some(OBSERVER_TELEMETRY_GAP_KIND) {
+        return object
+            .get("payload")
+            .and_then(|payload| payload.get("droppedEvents"))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|count| *count > 0)
+            .unwrap_or(1);
+    }
+    if let Some(events) = object
         .get("payload")
         .and_then(|payload| payload.get("events"))
         .and_then(serde_json::Value::as_array)
-        .map_or(1, |events| events.len().max(1) as u64)
+    {
+        return events
+            .iter()
+            .map(represented_value_count)
+            .sum::<u64>()
+            .max(1);
+    }
+    1
 }
 
 /// Build a replacement gap frame using the dropped frame's owner scope.
@@ -221,5 +243,53 @@ mod tests {
         assert_eq!(payload["kind"], OBSERVER_TELEMETRY_GAP_KIND);
         assert_eq!(payload["payload"]["droppedEvents"], 2);
         assert_eq!(payload["payload"]["reasonCounts"]["relayQueueEviction"], 2);
+    }
+
+    #[test]
+    fn represented_event_count_recursively_preserves_nested_gap_totals() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let nested = serde_json::json!({
+            "seq": 9,
+            "timestamp": "2026-08-22T12:00:00Z",
+            "kind": "batch",
+            "payload": {
+                "events": [
+                    {
+                        "seq": 7,
+                        "timestamp": "2026-08-22T11:59:58Z",
+                        "kind": OBSERVER_TELEMETRY_GAP_KIND,
+                        "payload": {
+                            "droppedEvents": 11,
+                            "reasonCounts": {
+                                "relayQueueEviction": 11
+                            }
+                        }
+                    },
+                    {
+                        "seq": 8,
+                        "timestamp": "2026-08-22T11:59:59Z",
+                        "kind": "tool_call",
+                        "payload": { "ok": true }
+                    }
+                ]
+            }
+        });
+        let encrypted = encrypt_observer_payload(&agent, &owner.public_key(), &nested).unwrap();
+        let template = buzz_sdk::build_agent_observer_frame(
+            &owner.public_key().to_hex(),
+            &agent.public_key().to_hex(),
+            OBSERVER_FRAME_TELEMETRY,
+            &encrypted,
+        )
+        .unwrap()
+        .sign_with_keys(&agent)
+        .unwrap();
+
+        assert_eq!(
+            represented_event_count(Some(&agent), &template),
+            12,
+            "batch accounting must preserve signed gap droppedEvents recursively"
+        );
     }
 }

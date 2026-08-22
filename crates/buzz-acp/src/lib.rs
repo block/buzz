@@ -6,6 +6,7 @@ mod engram_fetch;
 mod filter;
 mod observer;
 mod observer_gap;
+mod observer_publisher;
 mod pool;
 mod pool_lifecycle;
 mod queue;
@@ -38,6 +39,9 @@ use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use observer_gap::{ObserverGapCounts, ObserverGapReason, PendingObserverFrame};
+#[cfg(test)]
+use observer_publisher::run_relay_observer_publisher;
+use observer_publisher::spawn_relay_observer_publisher;
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -552,103 +556,6 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         payload: serde_json::json!({
             "events": serde_json::to_value(events).unwrap_or_default(),
         }),
-    }
-}
-
-fn spawn_relay_observer_publisher(
-    observer: observer::ObserverHandle,
-    publisher: RelayEventPublisher,
-    keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
-    owner_pubkey: PublicKey,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let subscription = observer.subscribe_with_snapshot();
-        run_relay_observer_publisher(
-            subscription,
-            publisher,
-            keys,
-            agent_pubkey_hex,
-            owner_pubkey_hex,
-            owner_pubkey,
-        )
-        .await;
-    })
-}
-
-async fn run_relay_observer_publisher(
-    subscription: (
-        Vec<observer::ObserverEvent>,
-        tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
-        u64,
-    ),
-    publisher: RelayEventPublisher,
-    keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
-    owner_pubkey: PublicKey,
-) {
-    let (snapshot, mut rx, replay_dropped) = subscription;
-    let mut queue = ObserverPublishQueue::default();
-    queue.note_gap(ObserverGapReason::ReplayBufferOverflow, replay_dropped);
-    let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
-    for event in snapshot {
-        queue.ingest(event);
-    }
-
-    // Global pacer: AT MOST ONE relay frame per tick, no matter how many
-    // channels are active or how large the backlog is. `interval_at` starts
-    // the first tick a full period out, so a pre-loaded snapshot (up to the
-    // 1,000-event replay buffer on reconnect) cannot burst at t=0 — the old
-    // pacer's explicit "no initial burst" property, restored.
-    let mut publish_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + OBSERVER_PUBLISH_TICK,
-        OBSERVER_PUBLISH_TICK,
-    );
-    publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut closed = false;
-    loop {
-        tokio::select! {
-            result = rx.recv(), if !closed => {
-                match result {
-                    Ok(event) => {
-                        // Skip live events already delivered via the snapshot
-                        // (the subscribe-before-snapshot overlap).
-                        if event.seq <= max_snapshot_seq {
-                            continue;
-                        }
-                        queue.ingest(event);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        queue.note_gap(ObserverGapReason::BroadcastLag, count);
-                        tracing::warn!(dropped = count, "relay observer publisher lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        // Producer gone: stop selecting on the receiver and let
-                        // the tick arm drain what remains — still one frame per
-                        // tick. An unpaced final drain would be a burst bypass
-                        // around everything the pacer exists to prevent.
-                        closed = true;
-                    }
-                }
-            }
-            _ = publish_tick.tick() => {
-                if let Some(frame) = queue.next_frame() {
-                    let result = publish_relay_observer_event(
-                        &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, frame.event,
-                    ).await;
-                    if result.is_err() {
-                        queue.restore_gaps(frame.reported_gaps);
-                        queue.note_gap(ObserverGapReason::PublishFailure, frame.source_events);
-                    }
-                }
-                if closed && queue.is_empty() {
-                    break;
-                }
-            }
-        }
     }
 }
 
@@ -3469,8 +3376,9 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    if let Some(handle) = relay_observer_publisher_task.take() {
-        handle.abort();
+    drop(observer);
+    if let Some(task) = relay_observer_publisher_task.take() {
+        task.shutdown().await.map_err(anyhow::Error::msg)?;
     }
 
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s

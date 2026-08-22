@@ -21,7 +21,7 @@
 //! `HarnessRelay` communicates with the background task via a `RelayCommand`
 //! channel. `next_event()` reads from the event receiver.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 /// Default capacity of the event channel from background task to harness.
@@ -117,7 +117,7 @@ use buzz_core::kind::{
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
@@ -543,6 +543,8 @@ enum RelayCommand {
     SubscribeObserverControls,
     /// Publish a signed event to the relay (for typing indicators, etc.).
     PublishEvent { event: Box<Event> },
+    /// Wait until every prior observer publish has been relay-accepted.
+    FlushObserver { tx: oneshot::Sender<()> },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
 }
@@ -594,6 +596,16 @@ impl RelayEventPublisher {
             .map_err(|_| RelayError::ConnectionClosed)
     }
 
+    /// Wait until every prior observer publish has been relay-accepted.
+    pub async fn flush_observer(&self) -> Result<(), RelayError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RelayCommand::FlushObserver { tx })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?;
+        rx.await.map_err(|_| RelayError::ConnectionClosed)
+    }
+
     /// Test-only publisher pair: published events are forwarded to the
     /// returned receiver instead of a live relay socket.
     #[cfg(test)]
@@ -602,15 +614,41 @@ impl RelayEventPublisher {
         let (event_tx, event_rx) = mpsc::channel(64);
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if let RelayCommand::PublishEvent { event } = cmd {
-                    if event_tx.send(*event).await.is_err() {
-                        break;
+                match cmd {
+                    RelayCommand::PublishEvent { event } => match event_tx.send(*event).await {
+                        Ok(()) => {}
+                        Err(_) => break,
+                    },
+                    RelayCommand::FlushObserver { tx } => {
+                        let _ = tx.send(());
                     }
+                    _ => {}
                 }
             }
         });
         (Self { cmd_tx }, event_rx)
     }
+}
+
+#[derive(Debug)]
+struct TrackedObserverFrame {
+    event: Box<Event>,
+    represented_flush_seqs: Vec<u64>,
+}
+
+impl TrackedObserverFrame {
+    fn new(event: Box<Event>, represented_flush_seqs: Vec<u64>) -> Self {
+        Self {
+            event,
+            represented_flush_seqs,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingObserverFlush {
+    target_seq: u64,
+    tx: oneshot::Sender<()>,
 }
 
 impl HarnessRelay {
@@ -1059,12 +1097,16 @@ struct BgState {
     /// even when `rate_limited_pending` is empty.
     observer_resub_needed: bool,
     /// Observer telemetry parked during rate limiting or disconnects.
-    gated_observer_pending: VecDeque<Box<Event>>,
+    gated_observer_pending: VecDeque<TrackedObserverFrame>,
     /// Written observer frames awaiting relay OK acknowledgment.
-    observer_in_flight: VecDeque<Box<Event>>,
+    observer_in_flight: VecDeque<TrackedObserverFrame>,
     /// Evicted represented events waiting for a signed gap frame.
     gated_observer_dropped: u64,
     gated_observer_gap_template: Option<Box<Event>>,
+    gated_observer_gap_flush_seqs: BTreeSet<u64>,
+    observer_next_flush_seq: u64,
+    observer_unsettled_flush_seqs: BTreeSet<u64>,
+    observer_flush_waiters: VecDeque<PendingObserverFlush>,
     observer_keys: Option<Keys>,
     /// Channels whose REQ failed during `resubscribe_after_reconnect`.
     ///
@@ -1102,6 +1144,10 @@ impl BgState {
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
             gated_observer_gap_template: None,
+            gated_observer_gap_flush_seqs: BTreeSet::new(),
+            observer_next_flush_seq: 0,
+            observer_unsettled_flush_seqs: BTreeSet::new(),
+            observer_flush_waiters: VecDeque::new(),
             observer_keys: None,
             resubscribe_retry: HashSet::new(),
             backoff_step: 0,
@@ -1202,8 +1248,43 @@ impl BgState {
         None
     }
 
+    fn issue_observer_frame(&mut self, event: Box<Event>) -> TrackedObserverFrame {
+        self.observer_next_flush_seq = self.observer_next_flush_seq.saturating_add(1);
+        let seq = self.observer_next_flush_seq;
+        self.observer_unsettled_flush_seqs.insert(seq);
+        TrackedObserverFrame::new(event, vec![seq])
+    }
+
+    fn queue_observer_flush(&mut self, tx: oneshot::Sender<()>) {
+        self.observer_flush_waiters.push_back(PendingObserverFlush {
+            target_seq: self.observer_next_flush_seq,
+            tx,
+        });
+        self.maybe_complete_observer_flushes();
+    }
+
+    fn observer_flush_complete(&self, target_seq: u64) -> bool {
+        match self.observer_unsettled_flush_seqs.first().copied() {
+            Some(seq) => seq > target_seq,
+            None => true,
+        }
+    }
+
+    fn maybe_complete_observer_flushes(&mut self) {
+        while let Some(waiter) = self.observer_flush_waiters.front() {
+            if !self.observer_flush_complete(waiter.target_seq) {
+                break;
+            }
+            let waiter = self
+                .observer_flush_waiters
+                .pop_front()
+                .expect("front waiter must exist");
+            let _ = waiter.tx.send(());
+        }
+    }
+
     /// Park telemetry, retaining bounded newest history plus signed gap state.
-    fn park_gated_observer_frame(&mut self, event: Box<Event>) {
+    fn park_gated_observer_frame(&mut self, event: TrackedObserverFrame) {
         if self.gated_observer_pending.len() >= GATED_OBSERVER_QUEUE_CAP {
             if let Some(dropped) = self.gated_observer_pending.pop_front() {
                 self.record_gated_observer_drop(dropped);
@@ -1228,7 +1309,7 @@ impl BgState {
         }
     }
 
-    fn track_observer_in_flight(&mut self, event: Box<Event>) {
+    fn track_observer_in_flight(&mut self, event: TrackedObserverFrame) {
         if self.observer_in_flight.len() >= GATED_OBSERVER_QUEUE_CAP {
             if let Some(dropped) = self.observer_in_flight.pop_front() {
                 self.record_gated_observer_drop(dropped);
@@ -1241,22 +1322,75 @@ impl BgState {
         self.observer_in_flight.push_back(event);
     }
 
-    fn record_gated_observer_drop(&mut self, event: Box<Event>) {
+    fn record_gated_observer_drop(&mut self, event: TrackedObserverFrame) {
         let represented =
-            crate::observer_gap::represented_event_count(self.observer_keys.as_ref(), &event);
+            crate::observer_gap::represented_event_count(self.observer_keys.as_ref(), &event.event);
         self.gated_observer_dropped = self.gated_observer_dropped.saturating_add(represented);
+        self.gated_observer_gap_flush_seqs
+            .extend(event.represented_flush_seqs.iter().copied());
         if self.gated_observer_gap_template.is_none() {
-            self.gated_observer_gap_template = Some(event);
+            self.gated_observer_gap_template = Some(event.event);
         }
+    }
+
+    fn requeue_rejected_observer_frame(&mut self, event: TrackedObserverFrame) {
+        if self.gated_observer_pending.len() >= GATED_OBSERVER_QUEUE_CAP {
+            if let Some(dropped) = self.gated_observer_pending.pop_back() {
+                self.record_gated_observer_drop(dropped);
+            }
+            warn!(
+                dropped_total = self.gated_observer_dropped,
+                "gated observer queue full — dropped newest frame to preserve rejected oldest frame"
+            );
+        }
+        self.gated_observer_pending.push_front(event);
+    }
+
+    fn handle_observer_rejection(&mut self, event_id: &str, message: &str) -> bool {
+        let Some(index) = self
+            .observer_in_flight
+            .iter()
+            .position(|event| event.event.id.to_hex() == event_id)
+        else {
+            return false;
+        };
+        let event = self
+            .observer_in_flight
+            .remove(index)
+            .expect("position yielded a valid observer frame");
+        if message.starts_with("rate-limited:") {
+            let secs = parse_rate_limit_retry_secs(message).unwrap_or(0);
+            let deadline = self.set_rate_limit_gate(secs);
+            self.requeue_rejected_observer_frame(event);
+            warn!(
+                "observer frame {event_id} rejected by relay rate limit — requeued until ~{:.1}s from now",
+                deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .unwrap_or_default()
+                    .as_secs_f64()
+            );
+        } else {
+            self.record_gated_observer_drop(event);
+            warn!(
+                dropped_total = self.gated_observer_dropped,
+                "observer frame {event_id} rejected by relay — converting to signed gap accounting"
+            );
+        }
+        true
     }
 
     fn acknowledge_observer_frame(&mut self, event_id: &str) {
         if let Some(index) = self
             .observer_in_flight
             .iter()
-            .position(|event| event.id.to_hex() == event_id)
+            .position(|event| event.event.id.to_hex() == event_id)
         {
-            self.observer_in_flight.remove(index);
+            if let Some(frame) = self.observer_in_flight.remove(index) {
+                for seq in frame.represented_flush_seqs {
+                    self.observer_unsettled_flush_seqs.remove(&seq);
+                }
+                self.maybe_complete_observer_flushes();
+            }
         }
     }
 }
@@ -1312,8 +1446,12 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         // disconnected and are dropped.
         RelayCommand::PublishEvent { event } => {
             if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME {
-                state.park_gated_observer_frame(event);
+                let tracked = state.issue_observer_frame(event);
+                state.park_gated_observer_frame(tracked);
             }
+        }
+        RelayCommand::FlushObserver { tx } => {
+            state.queue_observer_flush(tx);
         }
         // Already reconnecting — redundant.
         RelayCommand::Reconnect => {}
@@ -1338,7 +1476,8 @@ fn retain_failed_command_intent(state: &mut BgState, cmd: RelayCommand) {
         RelayCommand::PublishEvent { event }
             if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME =>
         {
-            state.park_gated_observer_frame(event);
+            let tracked = state.issue_observer_frame(event);
+            state.park_gated_observer_frame(tracked);
         }
         RelayCommand::PublishEvent { .. } => {}
         cmd => apply_command_to_state(state, cmd),
@@ -1507,7 +1646,8 @@ async fn execute_connected_command(
                     pending = state.gated_observer_pending.len(),
                     "rate-gated: parking observer frame for paced drain"
                 );
-                state.park_gated_observer_frame(event);
+                let tracked = state.issue_observer_frame(event);
+                state.park_gated_observer_frame(tracked);
                 return true;
             }
             // Drop remaining ephemeral publishes while rate-gated. Stale typing
@@ -1527,13 +1667,19 @@ async fn execute_connected_command(
             // next ping or read will detect the dead socket. A failed observer
             // frame is parked so the post-reconnect drain redelivers it.
             let is_observer = event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME;
-            if send_publish_event_frame(ws, &event).await {
-                if is_observer {
-                    state.track_observer_in_flight(event);
+            if is_observer {
+                let tracked = state.issue_observer_frame(event);
+                if send_publish_event_frame(ws, &tracked.event).await {
+                    state.track_observer_in_flight(tracked);
+                } else {
+                    state.park_gated_observer_frame(tracked);
                 }
-            } else if is_observer {
-                state.park_gated_observer_frame(event);
+            } else if send_publish_event_frame(ws, &event).await {
             }
+            true
+        }
+        RelayCommand::FlushObserver { tx } => {
+            state.queue_observer_flush(tx);
             true
         }
         RelayCommand::SetStartupWatermark { ts } => {
@@ -2393,7 +2539,11 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
-                    state.acknowledge_observer_frame(&event_id);
+                    if accepted {
+                        state.acknowledge_observer_frame(&event_id);
+                    } else {
+                        state.handle_observer_rejection(&event_id, &message);
+                    }
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
             }
@@ -2667,7 +2817,7 @@ async fn drain_gated_observer_pending(
         let Some(event) = state.gated_observer_pending.pop_front() else {
             break;
         };
-        if !send_publish_event_frame(ws, &event).await {
+        if !send_publish_event_frame(ws, &event.event).await {
             // Socket may be dead — re-park at the front so the frame survives
             // reconnect (the post-reconnect drain will retry it in order).
             state.gated_observer_pending.push_front(event);
@@ -2687,9 +2837,18 @@ async fn drain_gated_observer_pending(
             });
         match result {
             Ok(gap) if send_publish_event_frame(ws, &gap).await => {
+                let represented_flush_seqs = state
+                    .gated_observer_gap_flush_seqs
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
                 state.gated_observer_dropped = 0;
                 state.gated_observer_gap_template = None;
-                state.track_observer_in_flight(Box::new(gap));
+                state.gated_observer_gap_flush_seqs.clear();
+                state.track_observer_in_flight(TrackedObserverFrame::new(
+                    Box::new(gap),
+                    represented_flush_seqs,
+                ));
                 sent += 1;
             }
             Ok(_) => {}
@@ -5884,6 +6043,54 @@ mod tests {
         .expect("sign test observer frame")
     }
 
+    fn track_test_observer_frame(state: &mut BgState, event: Event) {
+        let tracked = state.issue_observer_frame(Box::new(event));
+        state.track_observer_in_flight(tracked);
+    }
+
+    fn park_test_observer_frame(state: &mut BgState, event: Event) {
+        let tracked = state.issue_observer_frame(Box::new(event));
+        state.park_gated_observer_frame(tracked);
+    }
+
+    #[tokio::test]
+    async fn relay_event_publisher_test_pair_flushes_prior_events() {
+        let (publisher, mut event_rx) = RelayEventPublisher::test_pair();
+        let keys = Keys::generate();
+        let first = make_observer_frame(&keys);
+        let second = make_observer_frame(&keys);
+
+        publisher
+            .publish_event(first.clone())
+            .await
+            .expect("publish first observer frame");
+        publisher
+            .publish_event(second.clone())
+            .await
+            .expect("publish second observer frame");
+        publisher
+            .flush_observer()
+            .await
+            .expect("flush prior observer frames");
+
+        assert_eq!(
+            event_rx
+                .recv()
+                .await
+                .expect("receive first forwarded event")
+                .id,
+            first.id
+        );
+        assert_eq!(
+            event_rx
+                .recv()
+                .await
+                .expect("receive second forwarded event")
+                .id,
+            second.id
+        );
+    }
+
     #[tokio::test]
     async fn gated_observer_frame_is_parked_then_drained_not_dropped() {
         let (mut client, mut server) = test_ws_pair().await;
@@ -6010,19 +6217,279 @@ mod tests {
         let rejected = make_observer_frame(&keys);
         let later = make_observer_frame(&keys);
 
-        state.track_observer_in_flight(Box::new(accepted.clone()));
-        state.track_observer_in_flight(Box::new(rejected.clone()));
+        track_test_observer_frame(&mut state, accepted.clone());
+        track_test_observer_frame(&mut state, rejected.clone());
         state.acknowledge_observer_frame(&accepted.id.to_hex());
-        state.park_gated_observer_frame(Box::new(later.clone()));
+        park_test_observer_frame(&mut state, later.clone());
         state.requeue_observer_in_flight();
 
         let ids: Vec<_> = state
             .gated_observer_pending
             .iter()
-            .map(|event| event.id)
+            .map(|event| event.event.id)
             .collect();
         assert_eq!(ids, [rejected.id, later.id]);
         assert!(state.observer_in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn observer_ok_false_rate_limited_requeues_the_frame_under_the_gate() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+        let observer = make_observer_frame(&keys);
+        track_test_observer_frame(&mut state, observer.clone());
+
+        let ok = handle_ws_message(
+            Message::Text(
+                serde_json::to_string(&json!([
+                    "OK",
+                    observer.id.to_hex(),
+                    false,
+                    "rate-limited: observer frame rate exceeded (100/sec per agent)",
+                ]))
+                .unwrap()
+                .into(),
+            ),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.example",
+            &keys.public_key().to_hex(),
+            None,
+        )
+        .await;
+
+        assert!(ok);
+        assert!(
+            state.rate_limit_gate.is_some(),
+            "rate-limited reject must arm the gate"
+        );
+        assert!(
+            state.observer_in_flight.is_empty(),
+            "rejected frame must leave the in-flight window"
+        );
+        assert_eq!(state.gated_observer_pending.len(), 1);
+        assert_eq!(
+            state
+                .gated_observer_pending
+                .front()
+                .map(|event| event.event.id),
+            Some(observer.id),
+            "rejected frame must be requeued for paced retry"
+        );
+        assert_eq!(
+            state.gated_observer_dropped, 0,
+            "retryable rejection must not mint loss"
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_ok_false_restricted_counts_gap_instead_of_requeueing() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+        state.observer_keys = Some(keys.clone());
+        let observer = make_observer_frame(&keys);
+        track_test_observer_frame(&mut state, observer.clone());
+
+        let ok = handle_ws_message(
+            Message::Text(
+                serde_json::to_string(&json!([
+                    "OK",
+                    observer.id.to_hex(),
+                    false,
+                    "restricted: observer frame is not authorized for this agent owner",
+                ]))
+                .unwrap()
+                .into(),
+            ),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.example",
+            &keys.public_key().to_hex(),
+            None,
+        )
+        .await;
+
+        assert!(ok);
+        assert!(state.observer_in_flight.is_empty());
+        assert!(
+            state.gated_observer_pending.is_empty(),
+            "terminal rejection must not hot-loop the same frame"
+        );
+        assert_eq!(
+            state.gated_observer_dropped, 1,
+            "terminal rejection must be converted into bounded loss"
+        );
+        assert!(state.gated_observer_gap_template.is_some());
+    }
+
+    #[tokio::test]
+    async fn observer_flush_waits_for_ok_true_before_completing() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+        let observer = make_observer_frame(&keys);
+        track_test_observer_frame(&mut state, observer.clone());
+        let (flush_tx, mut flush_rx) = oneshot::channel();
+        state.queue_observer_flush(flush_tx);
+
+        assert!(matches!(
+            flush_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let ok = handle_ws_message(
+            Message::Text(
+                serde_json::to_string(&json!(["OK", observer.id.to_hex(), true, "accepted"]))
+                    .unwrap()
+                    .into(),
+            ),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.example",
+            &keys.public_key().to_hex(),
+            None,
+        )
+        .await;
+
+        assert!(ok);
+        assert_eq!(flush_rx.await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn observer_flush_waits_for_gap_acceptance_after_terminal_reject() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+        state.observer_keys = Some(keys.clone());
+        let observer = make_observer_frame(&keys);
+        track_test_observer_frame(&mut state, observer.clone());
+        let (flush_tx, mut flush_rx) = oneshot::channel();
+        state.queue_observer_flush(flush_tx);
+
+        let ok = handle_ws_message(
+            Message::Text(
+                serde_json::to_string(&json!([
+                    "OK",
+                    observer.id.to_hex(),
+                    false,
+                    "restricted: observer frame is not authorized for this agent owner",
+                ]))
+                .unwrap()
+                .into(),
+            ),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.example",
+            &keys.public_key().to_hex(),
+            None,
+        )
+        .await;
+
+        assert!(ok);
+        assert!(matches!(
+            flush_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            drain_gated_observer_pending(&mut client, &mut state, &keys, 1).await,
+            1,
+            "signed gap should be published for terminal rejection"
+        );
+        let gap_id = state
+            .observer_in_flight
+            .front()
+            .map(|event| event.event.id.to_hex())
+            .expect("gap must be in flight");
+
+        let ok = handle_ws_message(
+            Message::Text(
+                serde_json::to_string(&json!(["OK", gap_id, true, "accepted"]))
+                    .unwrap()
+                    .into(),
+            ),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.example",
+            &keys.public_key().to_hex(),
+            None,
+        )
+        .await;
+
+        assert!(ok);
+        assert_eq!(flush_rx.await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn observer_flush_survives_disconnected_parking_until_reconnect_ack() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+        let observer = make_observer_frame(&keys);
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(observer.clone()),
+            },
+        );
+        let (flush_tx, mut flush_rx) = oneshot::channel();
+        apply_command_to_state(&mut state, RelayCommand::FlushObserver { tx: flush_tx });
+
+        assert_eq!(state.gated_observer_pending.len(), 1);
+        assert!(matches!(
+            flush_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            drain_gated_observer_pending(&mut client, &mut state, &keys, 1).await,
+            1
+        );
+
+        let ok = handle_ws_message(
+            Message::Text(
+                serde_json::to_string(&json!(["OK", observer.id.to_hex(), true, "accepted"]))
+                    .unwrap()
+                    .into(),
+            ),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.example",
+            &keys.public_key().to_hex(),
+            None,
+        )
+        .await;
+
+        assert!(ok);
+        assert_eq!(flush_rx.await, Ok(()));
     }
 
     #[tokio::test]
@@ -6030,15 +6497,15 @@ mod tests {
         let mut state = BgState::new();
         let keys = Keys::generate();
         let first = make_observer_frame(&keys);
-        state.park_gated_observer_frame(Box::new(first.clone()));
+        park_test_observer_frame(&mut state, first.clone());
         for _ in 1..GATED_OBSERVER_QUEUE_CAP {
-            state.park_gated_observer_frame(Box::new(make_observer_frame(&keys)));
+            park_test_observer_frame(&mut state, make_observer_frame(&keys));
         }
         assert_eq!(state.gated_observer_pending.len(), GATED_OBSERVER_QUEUE_CAP);
         assert_eq!(state.gated_observer_dropped, 0);
 
         let overflow = make_observer_frame(&keys);
-        state.park_gated_observer_frame(Box::new(overflow.clone()));
+        park_test_observer_frame(&mut state, overflow.clone());
         assert_eq!(
             state.gated_observer_pending.len(),
             GATED_OBSERVER_QUEUE_CAP,
@@ -6049,11 +6516,11 @@ mod tests {
             !state
                 .gated_observer_pending
                 .iter()
-                .any(|e| e.id == first.id),
+                .any(|e| e.event.id == first.id),
             "oldest frame must be the one evicted"
         );
         assert_eq!(
-            state.gated_observer_pending.back().map(|e| e.id),
+            state.gated_observer_pending.back().map(|e| e.event.id),
             Some(overflow.id),
             "newest frame must be retained"
         );
