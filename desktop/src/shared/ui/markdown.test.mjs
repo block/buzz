@@ -537,6 +537,10 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { isChannelLink } from "../../features/messages/lib/channelLink.ts";
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
 import { parseEntityLink } from "../lib/entityLink.ts";
+import {
+  buildReleaseRunLink,
+  parseReleaseRunLink,
+} from "../lib/releaseRunLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 const OWNER_HEX =
@@ -548,6 +552,7 @@ function buzzDeepLinkUrlTransform(value, key) {
   if (key !== "href") return defaultUrlTransform(value);
   if (isMessageLink(value) || isChannelLink(value)) return value;
   if (parseEntityLink(value).ok) return value;
+  if (parseReleaseRunLink(value)) return value;
   return defaultUrlTransform(value);
 }
 
@@ -623,6 +628,43 @@ test("messageLinkUrlTransform: leaves non-entity buzz:// schemes to default", ()
   // defaultUrlTransform (which strips it) since it's not clickable in-app.
   const html = renderMarkdown(
     "[connect](buzz://connect?relay=wss://relay.example)",
+  );
+  assert.match(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves a valid release-run payload", () => {
+  const releaseRunLink = buildReleaseRunLink({
+    version: 1,
+    runId: "deezer-2026-08-22",
+    runName: "Deezer release re-identification",
+    status: "completed",
+    checked: 40,
+    released: 1,
+    held: 39,
+    sourceHealth: "Deezer healthy",
+    finishedAt: "2026-08-22T06:00:33.651Z",
+    tracks: [
+      {
+        id: "track-1",
+        artist: "D Stone",
+        title: "Total Unison",
+        version: "Original Mix",
+        label: "Heist Recordings",
+        releaseDate: "2026-08-22",
+        artworkUrl: "https://cdn.example.com/total-unison.jpg",
+        source: "Deezer",
+        detailsUrl: "https://team.trakthat.app/releases?track=track-1",
+      },
+    ],
+  });
+  const html = renderMarkdown(`[Open 1 release](${releaseRunLink})`);
+  assert.match(html, /href="buzz:\/\/release-run\?data=/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: strips a malformed release-run payload", () => {
+  const html = renderMarkdown(
+    "[Open releases](buzz://release-run?data=not-valid-json)",
   );
   assert.match(html, /href=""/);
 });

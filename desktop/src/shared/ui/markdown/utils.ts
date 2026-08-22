@@ -4,6 +4,7 @@ import { defaultUrlTransform } from "react-markdown";
 import { isChannelLink } from "@/features/messages/lib/channelLink";
 import { isMessageLink } from "@/features/messages/lib/messageLink";
 import { parseEntityLink } from "@/shared/lib/entityLink";
+import { parseReleaseRunLink } from "@/shared/lib/releaseRunLink";
 
 export function useStableArray<T>(arr: T[]): T[] {
   const ref = React.useRef(arr);
@@ -179,12 +180,15 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
  *   message-link pill renderer).
  * - `buzz://pr|issue|repo` hrefs — preserved only when `parseEntityLink`
  *   succeeds, keeping the sanitizer active against arbitrary `buzz://` URIs.
+ * - `buzz://release-run` hrefs — preserved only when their bounded embedded
+ *   payload passes the release-run parser.
  * - Everything else delegates to `defaultUrlTransform`.
  */
 export function buzzDeepLinkUrlTransform(value: string, key: string): string {
   if (key !== "href") return defaultUrlTransform(value);
   if (isMessageLink(value) || isChannelLink(value)) return value;
   if (parseEntityLink(value).ok) return value;
+  if (parseReleaseRunLink(value)) return value;
   return defaultUrlTransform(value);
 }
 

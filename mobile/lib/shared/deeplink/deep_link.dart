@@ -7,6 +7,8 @@
 /// half-formed target.
 library;
 
+import 'dart:convert';
+
 import '../relay/relay_validation.dart';
 
 /// A parsed deep link supported by the app.
@@ -101,6 +103,206 @@ class MessageDeepLink extends BuzzDeepLink {
   String toString() =>
       'MessageDeepLink(channel: $channelId, id: $messageId, '
       'thread: $threadRootId)';
+}
+
+/// One released track embedded in a signed release-run message link.
+class ReleaseRunTrack {
+  final String id;
+  final String artist;
+  final String title;
+  final String? version;
+  final String? label;
+  final String releaseDate;
+  final String? artworkUrl;
+  final String source;
+  final String? sourceUrl;
+  final String? detailsUrl;
+
+  const ReleaseRunTrack({
+    required this.id,
+    required this.artist,
+    required this.title,
+    required this.releaseDate,
+    required this.source,
+    this.version,
+    this.label,
+    this.artworkUrl,
+    this.sourceUrl,
+    this.detailsUrl,
+  });
+}
+
+/// A bounded, self-contained release result carried by `buzz://release-run`.
+class ReleaseRunDeepLink extends BuzzDeepLink {
+  final String runId;
+  final String runName;
+  final String status;
+  final int checked;
+  final int released;
+  final int held;
+  final String sourceHealth;
+  final DateTime finishedAt;
+  final List<ReleaseRunTrack> tracks;
+
+  const ReleaseRunDeepLink({
+    required this.runId,
+    required this.runName,
+    required this.status,
+    required this.checked,
+    required this.released,
+    required this.held,
+    required this.sourceHealth,
+    required this.finishedAt,
+    required this.tracks,
+  });
+}
+
+const _releaseRunMaxEncodedLength = 48000;
+const _releaseRunMaxTracks = 50;
+
+String? _boundedString(Object? value, int maxLength) {
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  if (trimmed.isEmpty || trimmed.length > maxLength) return null;
+  return trimmed;
+}
+
+String? _optionalBoundedString(Object? value, int maxLength) {
+  if (value == null || value == '') return '';
+  return _boundedString(value, maxLength);
+}
+
+int? _boundedCount(Object? value) {
+  if (value is! int || value < 0 || value > 1000000) return null;
+  return value;
+}
+
+String? _optionalHttpsUrl(Object? value) {
+  final candidate = _optionalBoundedString(value, 2000);
+  if (candidate == null || candidate.isEmpty) return candidate;
+  final uri = Uri.tryParse(candidate);
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty) {
+    return null;
+  }
+  return uri.toString();
+}
+
+ReleaseRunTrack? _parseReleaseRunTrack(Object? value) {
+  if (value is! Map<String, dynamic>) return null;
+  final id = _boundedString(value['id'], 160);
+  final artist = _boundedString(value['artist'], 200);
+  final title = _boundedString(value['title'], 240);
+  final version = _optionalBoundedString(value['version'], 160);
+  final label = _optionalBoundedString(value['label'], 200);
+  final releaseDate = _boundedString(value['releaseDate'], 40);
+  final artworkUrl = _optionalHttpsUrl(value['artworkUrl']);
+  final source = _boundedString(value['source'], 100);
+  final sourceUrl = _optionalHttpsUrl(value['sourceUrl']);
+  final detailsUrl = _optionalHttpsUrl(value['detailsUrl']);
+  if (id == null ||
+      artist == null ||
+      title == null ||
+      version == null ||
+      label == null ||
+      releaseDate == null ||
+      artworkUrl == null ||
+      source == null ||
+      sourceUrl == null ||
+      detailsUrl == null) {
+    return null;
+  }
+  return ReleaseRunTrack(
+    id: id,
+    artist: artist,
+    title: title,
+    version: version.isEmpty ? null : version,
+    label: label.isEmpty ? null : label,
+    releaseDate: releaseDate,
+    artworkUrl: artworkUrl.isEmpty ? null : artworkUrl,
+    source: source,
+    sourceUrl: sourceUrl.isEmpty ? null : sourceUrl,
+    detailsUrl: detailsUrl.isEmpty ? null : detailsUrl,
+  );
+}
+
+/// Parse a strict, versioned `buzz://release-run?data=<base64url-json>` link.
+///
+/// The payload is bounded before decoding, accepts only HTTPS media/actions,
+/// and requires the released count to equal the embedded track list exactly.
+ReleaseRunDeepLink? parseReleaseRunDeepLink(Uri uri) {
+  if (uri.scheme != 'buzz' || uri.host != 'release-run') return null;
+  if ((uri.path.isNotEmpty && uri.path != '/') ||
+      uri.hasFragment ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort) {
+    return null;
+  }
+  if (uri.queryParametersAll.keys.any((key) => key != 'data') ||
+      uri.queryParametersAll['data']?.length != 1) {
+    return null;
+  }
+  final data = uri.queryParameters['data'];
+  if (data == null ||
+      data.isEmpty ||
+      data.length > _releaseRunMaxEncodedLength ||
+      !RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(data)) {
+    return null;
+  }
+
+  Object? decoded;
+  try {
+    decoded = jsonDecode(
+      utf8.decode(base64Url.decode(base64Url.normalize(data))),
+    );
+  } on FormatException {
+    return null;
+  }
+  if (decoded is! Map<String, dynamic> || decoded['version'] != 1) return null;
+
+  final runId = _boundedString(decoded['runId'], 120);
+  final runName = _boundedString(decoded['runName'], 200);
+  final status = _boundedString(decoded['status'], 80);
+  final checked = _boundedCount(decoded['checked']);
+  final released = _boundedCount(decoded['released']);
+  final held = _boundedCount(decoded['held']);
+  final sourceHealth = _boundedString(decoded['sourceHealth'], 500);
+  final finishedAtText = _boundedString(decoded['finishedAt'], 80);
+  final finishedAt = finishedAtText == null
+      ? null
+      : DateTime.tryParse(finishedAtText);
+  final rawTracks = decoded['tracks'];
+  if (runId == null ||
+      !RegExp(r'^[A-Za-z0-9._:-]{1,120}$').hasMatch(runId) ||
+      runName == null ||
+      status == null ||
+      checked == null ||
+      released == null ||
+      held == null ||
+      sourceHealth == null ||
+      finishedAt == null ||
+      rawTracks is! List<dynamic> ||
+      rawTracks.length > _releaseRunMaxTracks) {
+    return null;
+  }
+  final tracks = rawTracks.map(_parseReleaseRunTrack).toList();
+  if (tracks.any((track) => track == null) || released != tracks.length) {
+    return null;
+  }
+
+  return ReleaseRunDeepLink(
+    runId: runId,
+    runName: runName,
+    status: status,
+    checked: checked,
+    released: released,
+    held: held,
+    sourceHealth: sourceHealth,
+    finishedAt: finishedAt,
+    tracks: tracks.cast<ReleaseRunTrack>(),
+  );
 }
 
 /// Build a canonical `buzz://message` link for a channel message.
@@ -287,7 +489,8 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
     parseInviteDeepLink(uri) ??
     parseChannelDeepLink(uri) ??
-    parseMessageDeepLink(uri);
+    parseMessageDeepLink(uri) ??
+    parseReleaseRunDeepLink(uri);
 
 /// A validated Buzz repository, pull request, or issue permalink.
 class EntityDeepLink extends BuzzDeepLink {

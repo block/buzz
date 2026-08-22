@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -5,6 +7,7 @@ void main() {
   _inviteTests();
   _channelTests();
   _buildMessageLinkTests();
+  _releaseRunTests();
 
   group('parseMessageDeepLink', () {
     const channel = '580ca78b-9dae-46f3-8854-bd671853ba32';
@@ -47,6 +50,88 @@ void main() {
       ]) {
         expect(parseMessageDeepLink(Uri.parse(url)), isNull, reason: url);
       }
+    });
+  });
+}
+
+void _releaseRunTests() {
+  String link(Map<String, Object?> payload) {
+    final data = base64Url
+        .encode(utf8.encode(jsonEncode(payload)))
+        .replaceAll('=', '');
+    return 'buzz://release-run?data=$data';
+  }
+
+  final payload = <String, Object?>{
+    'version': 1,
+    'runId': 'deezer-2026-08-22T06:00:33.651Z',
+    'runName': 'Deezer release re-identification',
+    'status': 'completed',
+    'checked': 40,
+    'released': 1,
+    'held': 39,
+    'sourceHealth': 'Deezer healthy',
+    'finishedAt': '2026-08-22T06:00:33.651Z',
+    'tracks': [
+      {
+        'id': 'track-1',
+        'artist': 'D Stone',
+        'title': 'Total Unison',
+        'version': 'Original Mix',
+        'label': 'Heist Recordings',
+        'releaseDate': '2026-08-22',
+        'artworkUrl': 'https://cdn.example.com/total-unison.jpg',
+        'source': 'Deezer',
+        'detailsUrl': 'https://team.trakthat.app/releases?track=track-1',
+      },
+    ],
+  };
+
+  group('parseReleaseRunDeepLink', () {
+    test('parses an exact embedded release result', () {
+      final parsed = parseReleaseRunDeepLink(Uri.parse(link(payload)));
+      expect(parsed, isNotNull);
+      expect(parsed!.runId, 'deezer-2026-08-22T06:00:33.651Z');
+      expect(parsed.released, 1);
+      expect(parsed.tracks.single.artist, 'D Stone');
+      expect(parsed.tracks.single.version, 'Original Mix');
+      expect(
+        parseBuzzDeepLink(Uri.parse(link(payload))),
+        isA<ReleaseRunDeepLink>(),
+      );
+    });
+
+    test('rejects count mismatch, HTTP media, and ambiguous query params', () {
+      expect(
+        parseReleaseRunDeepLink(Uri.parse(link({...payload, 'released': 2}))),
+        isNull,
+      );
+      final tracks = List<Map<String, Object?>>.from(
+        payload['tracks']! as List,
+      );
+      expect(
+        parseReleaseRunDeepLink(
+          Uri.parse(
+            link({
+              ...payload,
+              'tracks': [
+                {
+                  ...tracks.single,
+                  'artworkUrl': 'http://cdn.example.com/x.jpg',
+                },
+              ],
+            }),
+          ),
+        ),
+        isNull,
+      );
+      final valid = link(payload);
+      final data = Uri.parse(valid).queryParameters['data'];
+      expect(parseReleaseRunDeepLink(Uri.parse('$valid&data=$data')), isNull);
+      expect(
+        parseReleaseRunDeepLink(Uri.parse('$valid&open=external')),
+        isNull,
+      );
     });
   });
 }

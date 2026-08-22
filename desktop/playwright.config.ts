@@ -65,6 +65,7 @@ export default defineConfig({
         "**/spoiler.spec.ts",
         "**/composer-link-shortcut.spec.ts",
         "**/entity-link-recipient-cards.spec.ts",
+        "**/release-run-preview.spec.ts",
         "**/composer-selection-formatting.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",

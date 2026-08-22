@@ -784,3 +784,36 @@
     }
   }
 }
+
+@layer components {
+  .buzz-release-run-surface {
+    background: hsl(var(--background) / 0.82);
+    border: 1px solid hsl(var(--border) / 0.58);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.22),
+      inset 0 -1px 0 rgb(0 0 0 / 0.08),
+      0 28px 72px -36px rgb(0 0 0 / 0.58),
+      0 10px 28px -20px rgb(0 0 0 / 0.28);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+    backdrop-filter: blur(28px) saturate(150%);
+  }
+
+  .dark .buzz-release-run-surface {
+    background: hsl(var(--background) / 0.72);
+    border-color: rgb(255 255 255 / 0.16);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.14),
+      inset 0 -1px 0 rgb(0 0 0 / 0.14),
+      0 30px 76px -34px rgb(0 0 0 / 0.78),
+      0 12px 30px -20px rgb(0 0 0 / 0.54);
+  }
+
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .buzz-release-run-surface,
+    .dark .buzz-release-run-surface {
+      background: hsl(var(--background));
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+  }
+}

@@ -20,6 +20,7 @@ import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/release_run_sheet.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -361,6 +362,7 @@ class MessageContent extends HookConsumerWidget {
     final isBuzzLink =
         buzzLink is ChannelDeepLink ||
         buzzLink is MessageDeepLink ||
+        buzzLink is ReleaseRunDeepLink ||
         buzzLink is EntityDeepLink;
     final isCanonicalBuzzLabel = isBuzzLink && text == url;
     final buzzPresentation = switch (buzzLink) {
@@ -379,6 +381,14 @@ class MessageContent extends HookConsumerWidget {
             '${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))} · ${messageId.substring(0, math.min(8, messageId.length))}',
         semanticLabel:
             'Open message ${messageId.substring(0, math.min(8, messageId.length))} in channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+        interactive: true,
+      ),
+      ReleaseRunDeepLink(:final released) => (
+        icon: LucideIcons.disc3,
+        label: released == 1 ? 'Open 1 release' : 'Open $released releases',
+        semanticLabel: released == 1
+            ? 'Open 1 released track'
+            : 'Open $released released tracks',
         interactive: true,
       ),
       EntityDeepLink(:final type, :final repository, :final eventId) => (
@@ -446,6 +456,8 @@ class MessageContent extends HookConsumerWidget {
           final deepLink = parseBuzzDeepLink(uri);
           if (deepLink case ChannelDeepLink(:final channelId)) {
             resolvedChannelTap(channelId);
+          } else if (deepLink case ReleaseRunDeepLink()) {
+            await showReleaseRunSheet(context, deepLink);
           } else if (deepLink is MessageDeepLink ||
               deepLink is InviteDeepLink) {
             ref.read(pendingDeepLinkProvider.notifier).open(uri);

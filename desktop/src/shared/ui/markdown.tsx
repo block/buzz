@@ -25,6 +25,7 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { cn } from "@/shared/lib/cn";
 import { parseEntityLink } from "@/shared/lib/entityLink";
 import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
+import { parseReleaseRunLink } from "@/shared/lib/releaseRunLink";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
@@ -120,6 +121,7 @@ import { MarkdownTable } from "./markdown/MarkdownTable";
 import { ProgressiveImage } from "./markdown/ProgressiveImage";
 import { BuzzInlineLink } from "./markdown/BuzzLinkChip";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
+import { ReleaseRunLink } from "./markdown/ReleaseRunLink";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
 import { useMessageLinkPreviews } from "./markdown/useMessageLinkPreviews";
 import {
@@ -1291,8 +1293,7 @@ export function createMarkdownComponents(
 
     const label = getReactNodeText(children);
 
-    // Snapshot attachment (agent or team): classify before generic FileCard.
-    // resolveSnapshotCard checks the filename suffix + SHA-256 field.
+    // Classify snapshots before generic files using the filename + SHA-256.
     const snapshotCard = resolveSnapshotCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1320,9 +1321,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Generic file attachment: a `[filename](url)` link whose href matches an
-    // imeta entry with a non-image, non-video MIME. Render a download card
-    // instead of a plain link. (Media uses the `img` renderer, not this path.)
+    // Non-media `[filename](url)` imeta entries render as download cards.
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1334,9 +1333,11 @@ export function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so
-    // clicks navigate in-app instead of opening the URL in the OS browser.
     if (href) {
+      const releaseRun = parseReleaseRunLink(href);
+      if (releaseRun) {
+        return <ReleaseRunLink payload={releaseRun}>{children}</ReleaseRunLink>;
+      }
       if (parseChannelLink(href).ok) {
         return (
           <ChannelDeepLinkAnchor
@@ -1378,8 +1379,7 @@ export function createMarkdownComponents(
       // anchor (renders as a normal external link).
     }
 
-    // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
-    // fall through to the default anchor.
+    // Valid entity links navigate in-app; malformed ones fall through.
     const entityAnchor = renderEntityLinkAnchor({
       children,
       href,
