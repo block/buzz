@@ -7,7 +7,15 @@ fn dev_keyring_service(configured: Option<String>) -> String {
 }
 
 pub(crate) fn keyring_service() -> &'static str {
-    if cfg!(debug_assertions) {
+    // Candidate builds get their own keyring service so an installed test build
+    // never reads or writes the released Buzz app's stored identity. Set at
+    // compile time by build.rs from BUZZ_BUILD_CANDIDATE_ID.
+    if let Some(candidate_id) = option_env!("BUZZ_DESKTOP_BUILD_CANDIDATE_ID") {
+        static CANDIDATE_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CANDIDATE_SERVICE
+            .get_or_init(|| format!("buzz-desktop-candidate.{candidate_id}"))
+            .as_str()
+    } else if cfg!(debug_assertions) {
         static DEV_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         DEV_SERVICE
             .get_or_init(|| dev_keyring_service(std::env::var("BUZZ_DEV_KEYRING_SERVICE").ok()))
@@ -54,6 +62,19 @@ mod tests {
         assert_eq!(
             migration_marker_name("buzz-desktop-dev.example", "identity.migrated"),
             "identity.buzz-desktop-dev.example.migrated"
+        );
+    }
+
+    #[test]
+    fn candidate_builds_never_share_the_release_identity() {
+        // A candidate build must not read or write the released app's stored
+        // identity: its keyring service and its migration marker both have to
+        // stay distinct from the plain "buzz-desktop" release pair.
+        let candidate = "buzz-desktop-candidate.test-release";
+        assert_ne!(candidate, "buzz-desktop");
+        assert_eq!(
+            migration_marker_name(candidate, "identity.migrated"),
+            "identity.buzz-desktop-candidate.test-release.migrated"
         );
     }
 }
