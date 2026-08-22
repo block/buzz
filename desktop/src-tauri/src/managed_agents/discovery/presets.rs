@@ -109,6 +109,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: None,
     },
     PresetHarness {
+        id: "pi",
+        label: "Pi",
+        command: "pi-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/svkozak/pi-acp",
+        install_hint: "Buzz talks to the standard Pi CLI through the pi-acp adapter. Follow the setup guide to install both pi and pi-acp so both commands are on your PATH.",
+        underlying_cli: Some("pi"),
+    },
+    PresetHarness {
         id: "omp",
         label: "Oh My Pi",
         command: "omp",
@@ -345,6 +354,34 @@ mod tests {
         assert_eq!(entry.default_args, vec!["acp"]);
         assert_eq!(entry.install_instructions_url, "https://docs.devin.ai/cli");
         assert_eq!(entry.source, HarnessSource::Preset);
+    }
+
+    #[test]
+    fn pi_preset_uses_standard_pi_acp_adapter() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "pi")
+            .expect("Pi preset should be present");
+
+        assert_eq!(preset.label, "Pi");
+        assert_eq!(preset.command, "pi-acp");
+        assert!(preset.args.is_empty());
+        assert_eq!(preset.underlying_cli, Some("pi"));
+        assert_eq!(
+            preset.install_instructions_url,
+            "https://github.com/svkozak/pi-acp"
+        );
+
+        let entry = preset_catalog_entry(preset, |command| {
+            (command == "pi").then(|| PathBuf::from("/usr/local/bin/pi"))
+        });
+        assert_eq!(entry.availability, AcpAvailabilityStatus::AdapterMissing);
+        assert!(entry.command.is_none());
+        assert_eq!(
+            entry.underlying_cli_path.as_deref(),
+            Some("/usr/local/bin/pi")
+        );
+        assert!(entry.install_hint.contains("standard Pi CLI"));
     }
 
     #[test]
