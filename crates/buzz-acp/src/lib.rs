@@ -227,20 +227,21 @@ async fn is_owner_or_sibling(
 /// message looks like a mention and would fire a turn. Combined with
 /// agent-initiated DMs (the agent can be asked to DM a third party), that
 /// turns `anyone`/`allowlist` modes into transitive access grants: whoever
-/// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
-/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// lands in a DM with the agent can prompt it. By default, when `is_dm` is
+/// true only the owner and cryptographically verified same-owner siblings may
+/// fire a turn. Operators can explicitly set `allow_external_dms` to apply the
+/// normal `respond_to` gate inside DMs. Callers must resolve `is_dm`
+/// fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
     is_dm: bool,
+    allow_external_dms: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
-    if is_dm {
+    if is_dm && !allow_external_dms {
         return match respond_to {
             RespondTo::Nobody => false,
             _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
@@ -2081,6 +2082,10 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let dm_channel_ids: HashSet<Uuid> = channel_info_map
+        .iter()
+        .filter_map(|(id, info)| (info.channel_type == "dm").then_some(*id))
+        .collect();
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
@@ -2119,7 +2124,8 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters =
+        config::resolve_channel_filters_with_dms(&config, &channel_ids, &rules, &dm_channel_ids);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2675,15 +2681,18 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
-                                        if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
-                                            tracing::warn!("failed to subscribe to new channel {ch}: {e}");
-                                        } else {
-                                            subscribed_channel_ids.insert(ch);
-                                        }
                                     } else {
-                                        tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        let is_dm = is_dm_channel(ch, &ctx.channel_info).await;
+                                        if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules, is_dm) {
+                                            tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
+                                            if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
+                                                tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                            } else {
+                                                subscribed_channel_ids.insert(ch);
+                                            }
+                                        } else {
+                                            tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        }
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
@@ -2863,6 +2872,7 @@ async fn tokio_main() -> Result<()> {
                                     &config.respond_to_allowlist,
                                     &author,
                                     is_dm,
+                                    config.allow_external_dms,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -5359,6 +5369,7 @@ mod author_gate_tests {
                 &allowlist,
                 SIBLING,
                 false,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5376,6 +5387,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
+                false,
                 false,
                 &cache,
                 &dummy_rest_client()
@@ -5395,6 +5407,7 @@ mod author_gate_tests {
                 &allowlist,
                 STRANGER,
                 false,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5412,6 +5425,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 OWNER,
+                false,
                 false,
                 &cache,
                 &dummy_rest_client()
@@ -5434,6 +5448,7 @@ mod author_gate_tests {
                 &HashSet::new(),
                 STRANGER,
                 false,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5451,6 +5466,7 @@ mod author_gate_tests {
                     &RespondTo::OwnerOnly,
                     &HashSet::new(),
                     who,
+                    false,
                     false,
                     &cache,
                     &dummy_rest_client()
@@ -5478,6 +5494,7 @@ mod author_gate_tests {
                 &allowlist,
                 EXTERNAL,
                 true,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5495,6 +5512,7 @@ mod author_gate_tests {
                 &HashSet::new(),
                 STRANGER,
                 true,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5518,6 +5536,7 @@ mod author_gate_tests {
                         &HashSet::new(),
                         who,
                         true,
+                        false,
                         &cache,
                         &dummy_rest_client()
                     )
@@ -5537,11 +5556,30 @@ mod author_gate_tests {
                 &HashSet::new(),
                 OWNER,
                 true,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
             .await,
             "respond_to=nobody must drop everything, DMs included"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_opt_in_applies_anyone_gate() {
+        let cache = cache_with_sibling();
+        assert!(
+            author_allowed(
+                &RespondTo::Anyone,
+                &HashSet::new(),
+                STRANGER,
+                true,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "an external DM participant must be admitted when the operator explicitly opts in"
         );
     }
 
@@ -5677,6 +5715,7 @@ mod author_gate_tests {
                 &allowlist,
                 EXTERNAL,
                 is_dm,
+                false,
                 &owner_cache,
                 &dummy_rest_client(),
             )
@@ -6776,6 +6815,7 @@ mod build_mcp_servers_tests {
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
+            allow_external_dms: false,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
@@ -7000,6 +7040,7 @@ mod error_outcome_emission_tests {
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
+            allow_external_dms: false,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
