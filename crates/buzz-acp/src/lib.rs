@@ -7,6 +7,7 @@ mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
+mod public_status;
 mod queue;
 mod relay;
 mod setup_mode;
@@ -1958,9 +1959,8 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
-    let observer = config
-        .relay_observer
-        .then(observer::ObserverHandle::in_process);
+    let observer =
+        (config.relay_observer || config.public_status).then(observer::ObserverHandle::in_process);
     if let Some(handle) = &observer {
         handle.emit(
             "harness_started",
@@ -2160,6 +2160,17 @@ async fn tokio_main() -> Result<()> {
             owner_pubkey,
             owner,
         ));
+    }
+
+    let mut public_status_task = None;
+    if config.public_status {
+        if let Some(observer) = observer.clone() {
+            public_status_task = Some(public_status::spawn_public_status_publisher(
+                observer,
+                relay.rest_client(),
+            ));
+            tracing::info!("public work status enabled");
+        }
     }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
@@ -3523,6 +3534,9 @@ async fn tokio_main() -> Result<()> {
     }
 
     if let Some(handle) = relay_observer_publisher_task.take() {
+        handle.abort();
+    }
+    if let Some(handle) = public_status_task.take() {
         handle.abort();
     }
 
@@ -6792,6 +6806,7 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            public_status: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -7016,6 +7031,7 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            public_status: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
