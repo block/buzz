@@ -1,22 +1,16 @@
 import * as React from "react";
 
-const ENABLED_STORAGE_KEY = "buzz:keep-addressed-agents-active";
-const AUDIENCES_STORAGE_KEY = "buzz:persistent-agent-audiences:v2";
-export const MAX_PERSISTENT_AGENT_AUDIENCES = 200;
+export const MAX_IN_MEMORY_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
 const revisions = new Map<string, number>();
 let revisionClock = 0;
 let defaultRevision = 0;
-let generation = 0;
-let enabled = readEnabled();
-let audiences = readAudiences();
+let audiences: Record<string, string[]> = {};
 let snapshot = buildSnapshot();
 
 export type PersistentAgentAudienceSnapshot = Readonly<{
-  enabled: boolean;
   audiences: Readonly<Record<string, readonly string[]>>;
-  generation: number;
 }>;
 
 type PersistentAgentAudienceScopeInput = {
@@ -31,49 +25,17 @@ function normalizePubkeys(pubkeys: Iterable<string>): string[] {
   ].filter((pubkey) => /^[0-9a-f]{64}$/.test(pubkey));
 }
 
-function readEnabled(): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    return window.localStorage.getItem(ENABLED_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
 function boundAudiences(
   value: Record<string, string[]>,
 ): Record<string, string[]> {
   const entries = Object.entries(value);
-  return entries.length <= MAX_PERSISTENT_AGENT_AUDIENCES
+  return entries.length <= MAX_IN_MEMORY_AGENT_AUDIENCES
     ? value
-    : Object.fromEntries(entries.slice(-MAX_PERSISTENT_AGENT_AUDIENCES));
-}
-
-function readAudiences(): Record<string, string[]> {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed: unknown = JSON.parse(
-      window.localStorage.getItem(AUDIENCES_STORAGE_KEY) ?? "{}",
-    );
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return {};
-
-    const result: Record<string, string[]> = {};
-    for (const [scope, value] of Object.entries(parsed)) {
-      if (scope && Array.isArray(value)) {
-        result[scope] = normalizePubkeys(
-          value.filter((entry): entry is string => typeof entry === "string"),
-        );
-      }
-    }
-    return boundAudiences(result);
-  } catch {
-    return {};
-  }
+    : Object.fromEntries(entries.slice(-MAX_IN_MEMORY_AGENT_AUDIENCES));
 }
 
 function buildSnapshot(): PersistentAgentAudienceSnapshot {
-  return { enabled, audiences, generation };
+  return { audiences };
 }
 
 function emit(): void {
@@ -81,69 +43,22 @@ function emit(): void {
   for (const listener of listeners) listener();
 }
 
-function persistAudiences(): void {
-  try {
-    window.localStorage.setItem(
-      AUDIENCES_STORAGE_KEY,
-      JSON.stringify(audiences),
-    );
-  } catch {
-    // Persistence is best-effort; the live session still uses in-memory state.
-  }
-}
-
-function advanceRevision(scope: string): void {
-  revisionClock += 1;
-  revisions.set(scope, revisionClock);
-}
-
-export function setPersistentAgentAudienceEnabled(nextEnabled: boolean): void {
-  if (enabled === nextEnabled) return;
-  enabled = nextEnabled;
-  if (!nextEnabled) {
-    generation += 1;
-    revisionClock += 1;
-    defaultRevision = revisionClock;
-    revisions.clear();
-    audiences = {};
-    persistAudiences();
-  }
-  try {
-    window.localStorage.setItem(ENABLED_STORAGE_KEY, nextEnabled ? "1" : "0");
-  } catch {
-    // Persistence is best-effort.
-  }
-  emit();
-}
-
 export function getPersistentAgentAudienceScope({
   ownerPubkey,
   channelId,
-  threadRootId = null,
 }: PersistentAgentAudienceScopeInput): string | null {
   const owner = ownerPubkey.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
-  if (!threadRootId) return null;
-  return `${owner}:${channelId}:thread:${threadRootId}`;
+  // Thread composers intentionally share their parent channel's audience.
+  return `${owner}:${channelId}:channel`;
 }
 
-export function getPersistentAgentAudienceGeneration(): number {
-  return generation;
-}
-
-export function getPersistentAgentAudienceRevision(scope: string): number {
-  return revisions.get(scope) ?? defaultRevision;
-}
-
-export function initializePersistentAgentAudience(
-  scope: string,
-  pubkeys: Iterable<string>,
-): void {
-  if (!enabled || !scope) return;
-  setPersistentAgentAudience(
-    scope,
-    Object.hasOwn(audiences, scope) ? audiences[scope] : pubkeys,
-  );
+export function resetPersistentAgentAudienceStore(): void {
+  revisionClock += 1;
+  defaultRevision = revisionClock;
+  revisions.clear();
+  audiences = {};
+  emit();
 }
 
 export function setPersistentAgentAudience(
@@ -162,7 +77,6 @@ export function setPersistentAgentAudience(
     const nextAudiences = { ...audiences };
     delete nextAudiences[scope];
     audiences = boundAudiences({ ...nextAudiences, [scope]: current });
-    persistAudiences();
     return;
   }
 
@@ -172,35 +86,64 @@ export function setPersistentAgentAudience(
   for (const revisedScope of revisions.keys()) {
     if (!Object.hasOwn(audiences, revisedScope)) revisions.delete(revisedScope);
   }
-  advanceRevision(scope);
-  persistAudiences();
+  revisionClock += 1;
+  revisions.set(scope, revisionClock);
   emit();
 }
 
-export function promotePersistentAgentAudience({
-  expectedGeneration,
+export function getPersistentAgentAudienceRevision(scope: string): number {
+  return revisions.get(scope) ?? defaultRevision;
+}
+
+export function promotePersistentAgentAudienceIfUnchanged({
   expectedRevision,
-  explicitAgentPubkeys,
+  pubkeys,
   scope,
 }: {
-  expectedGeneration: number;
-  expectedRevision: number | null;
-  explicitAgentPubkeys: string[];
-  scope: string | null;
-}): void {
-  if (
-    !enabled ||
-    expectedGeneration !== generation ||
-    !scope ||
-    (expectedRevision !== null &&
-      getPersistentAgentAudienceRevision(scope) !== expectedRevision)
-  ) {
-    return;
-  }
+  expectedRevision: number;
+  pubkeys: Iterable<string>;
+  scope: string;
+}): { promotedPubkeys: string[]; revision: number } | null {
+  if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
+    return null;
+  const promotedPubkeys = normalizePubkeys(pubkeys).filter(
+    (pubkey) => !(audiences[scope] ?? []).includes(pubkey),
+  );
+  if (promotedPubkeys.length === 0) return null;
   setPersistentAgentAudience(scope, [
-    ...explicitAgentPubkeys,
     ...(audiences[scope] ?? []),
+    ...promotedPubkeys,
   ]);
+  return {
+    promotedPubkeys,
+    revision: getPersistentAgentAudienceRevision(scope),
+  };
+}
+
+export function removePersistentAgentAudienceMembersIfUnchanged({
+  expectedRevision,
+  pubkeys,
+  scope,
+}: {
+  expectedRevision: number;
+  pubkeys: Iterable<string>;
+  scope: string;
+}): boolean {
+  if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
+    return false;
+  const removals = new Set(normalizePubkeys(pubkeys));
+  setPersistentAgentAudience(
+    scope,
+    (audiences[scope] ?? []).filter((pubkey) => !removals.has(pubkey)),
+  );
+  return true;
+}
+
+export function addPersistentAgentAudienceMember(
+  scope: string,
+  pubkey: string,
+): void {
+  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), pubkey]);
 }
 
 export function removePersistentAgentAudienceMember(
@@ -220,26 +163,23 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-function getSnapshot(): PersistentAgentAudienceSnapshot {
+export function getPersistentAgentAudienceSnapshot(): PersistentAgentAudienceSnapshot {
   return snapshot;
 }
 
+function getSnapshot(): PersistentAgentAudienceSnapshot {
+  return getPersistentAgentAudienceSnapshot();
+}
+
 const serverSnapshot: PersistentAgentAudienceSnapshot = {
-  enabled: false,
   audiences: {},
-  generation: 0,
 };
 
 export function usePersistentAgentAudience(scope: string | null): {
-  enabled: boolean;
   pubkeys: readonly string[];
-  generation: number;
-  revision: number;
-  setEnabled: (enabled: boolean) => void;
-  promotePubkeys: typeof promotePersistentAgentAudience;
+  addPubkey: (pubkey: string) => void;
   removePubkey: (pubkey: string) => void;
   clear: () => void;
-  initialize: (pubkeys: Iterable<string>) => void;
 } {
   const state = React.useSyncExternalStore(
     subscribe,
@@ -248,24 +188,17 @@ export function usePersistentAgentAudience(scope: string | null): {
   );
   const resolvedScope = scope ?? "";
   return {
-    enabled: state.enabled,
     pubkeys: resolvedScope ? (state.audiences[resolvedScope] ?? []) : [],
-    generation: state.generation,
-    revision: resolvedScope
-      ? getPersistentAgentAudienceRevision(resolvedScope)
-      : 0,
-    setEnabled: setPersistentAgentAudienceEnabled,
-    promotePubkeys: promotePersistentAgentAudience,
+    addPubkey: React.useCallback(
+      (pubkey) => addPersistentAgentAudienceMember(resolvedScope, pubkey),
+      [resolvedScope],
+    ),
     removePubkey: React.useCallback(
       (pubkey) => removePersistentAgentAudienceMember(resolvedScope, pubkey),
       [resolvedScope],
     ),
     clear: React.useCallback(
       () => setPersistentAgentAudience(resolvedScope, []),
-      [resolvedScope],
-    ),
-    initialize: React.useCallback(
-      (pubkeys) => initializePersistentAgentAudience(resolvedScope, pubkeys),
       [resolvedScope],
     ),
   };

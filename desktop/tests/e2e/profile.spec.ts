@@ -2672,9 +2672,8 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
 
   const agentsSecondaryColor = await agentsPage
-    .getByText(
-      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
-    )
+    .getByTestId("settings-automatic-agent-mentions")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   await page.getByTestId("settings-nav-appearance").click();
   const appearanceSecondaryColor = await page
