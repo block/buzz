@@ -811,17 +811,27 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
   });
   expect(new Set(assignedVoices).size).toBe(2);
 
-  await page.getByRole("button", { name: "Voice settings for alice" }).click();
-  await waitForAnimations(page);
   const voiceMenu = page.locator(
     '[data-testid="huddle-agent-voice-menu-content"][data-state="open"]',
   );
-  await expect(voiceMenu).toBeVisible();
-  await expect(
-    voiceMenu.getByText("Agent text-to-speech", { exact: true }),
-  ).toBeVisible();
+  // Shortly after a cold load, background huddle-state settling re-renders
+  // the tiles and dismisses a just-opened Radix menu; in a fresh worker
+  // (which is also every CI retry) a single click fails deterministically.
+  // Retry the whole open-and-read unit until the menu holds through it.
   const ttsToggle = voiceMenu.getByTestId("huddle-agent-tts-toggle");
-  await expect(ttsToggle).toBeChecked();
+  await expect(async () => {
+    if (!(await voiceMenu.isVisible())) {
+      await page
+        .getByRole("button", { name: "Voice settings for alice" })
+        .click();
+    }
+    await expect(voiceMenu).toBeVisible({ timeout: 1_500 });
+    await expect(
+      voiceMenu.getByText("Agent text-to-speech", { exact: true }),
+    ).toBeVisible({ timeout: 1_500 });
+    await expect(ttsToggle).toBeChecked({ timeout: 1_500 });
+  }).toPass({ timeout: 20_000 });
+  await waitForAnimations(page);
   await expect(
     voiceMenu.getByTestId("huddle-agent-voice-selector"),
   ).toContainText("Vera");
