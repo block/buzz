@@ -81,16 +81,22 @@ export function PullRequestMetaHeader({
             <span className="truncate text-foreground">{targetBranch}</span>
           </p>
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
-            {displayedDiffStats ? (
-              <>
-                <span className="text-green-500">
-                  +{displayedDiffStats.additions}
+            <span className="inline-flex min-w-20 justify-end gap-1.5 tabular-nums">
+              {displayedDiffStats ? (
+                <>
+                  <span className="text-green-500">
+                    +{displayedDiffStats.additions}
+                  </span>
+                  <span className="text-destructive">
+                    -{displayedDiffStats.deletions}
+                  </span>
+                </>
+              ) : (
+                <span aria-hidden className="invisible">
+                  +0 -0
                 </span>
-                <span className="text-destructive">
-                  -{displayedDiffStats.deletions}
-                </span>
-              </>
-            ) : null}
+              )}
+            </span>
             {pullRequest.commit ? (
               <span className="inline-flex min-w-0 items-center gap-0.5 text-muted-foreground">
                 <code

@@ -11,6 +11,7 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/tappable_flapping_bee.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -137,6 +138,36 @@ void main() {
       expect(find.byType(AppBar), findsOneWidget);
       expect(find.text('Add Community'), findsOneWidget);
       expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
+    });
+
+    testWidgets('uses the native glass back control on iOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(
+        WidgetHelpers.testable(child: const PairingPage(addingCommunity: true)),
+      );
+
+      final nativeBack = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(nativeBack.viewType, 'buzz/navigation_glass');
+      expect(nativeBack.creationParams, containsPair('icon', 'back'));
+      expect(
+        nativeBack.creationParams,
+        containsPair('buttonCenterX', iosGlassChannelHeaderButtonCenterX),
+      );
+      expect(
+        nativeBack.creationParams,
+        containsPair('hitTargetWidth', iosGlassChannelHeaderLeadingWidth),
+      );
+      final backRect = tester.getRect(
+        find.byKey(const ValueKey('pairing-ios-glass-back')),
+      );
+      expect(
+        backRect.left + iosGlassChannelHeaderButtonCenterX,
+        Grid.quarter + iosGlassChannelHeaderButtonCenterX,
+      );
+      expect(find.byTooltip('Back'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
     });
 
     testWidgets('reveals pairing code field and connect action', (

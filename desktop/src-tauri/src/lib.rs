@@ -293,13 +293,12 @@ pub fn run() {
             // present), all owner-keyed side effects (event sync, agent restore,
             // relay publish) are skipped. The frontend shows a recovery screen;
             // the user must relaunch after restoring the identity.
-            let identity_lost = state
+            let recovery_mode = state
                 .identity_lost
-                .load(std::sync::atomic::Ordering::Acquire);
-            let keyring_locked = state
-                .keyring_locked
-                .load(std::sync::atomic::Ordering::Acquire);
-            let recovery_mode = identity_lost || keyring_locked;
+                .load(std::sync::atomic::Ordering::Acquire)
+                || state
+                    .keyring_locked
+                    .load(std::sync::atomic::Ordering::Acquire);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -315,16 +314,14 @@ pub fn run() {
             // agent spawns can resolve custom/preset runtime ids without
             // waiting for the frontend's discover_acp_providers call.  This is
             // a pure directory scan — no PATH probing, no async work.
-            {
-                let custom_dir = app_handle
-                    .path()
-                    .app_data_dir()
-                    .ok()
-                    .map(|d| d.join("custom_harnesses"));
-                managed_agents::custom_harnesses::warm_harness_registry_from_dir(
-                    custom_dir.as_deref(),
-                );
-            }
+            let custom_harness_dir = app_handle
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|d| d.join("custom_harnesses"));
+            managed_agents::custom_harnesses::warm_harness_registry_from_dir(
+                custom_harness_dir.as_deref(),
+            );
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
@@ -354,10 +351,7 @@ pub fn run() {
                 // Route mesh-llm's download progress (model weights, runtime)
                 // onto Tauri events so the UI can render real progress.
                 crate::mesh_llm::install_progress_sink(&app_handle);
-                let mesh_app = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    crate::mesh_llm::start_coordinator(mesh_app).await;
-                });
+                tauri::async_runtime::spawn(crate::mesh_llm::start_coordinator(app_handle.clone()));
             }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
@@ -380,6 +374,7 @@ pub fn run() {
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
+            archive::spawn_warm_init(app_handle.clone());
 
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
             // agents are restored below, and decide whether restore is safe.
@@ -619,6 +614,7 @@ pub fn run() {
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
             get_channels,
+            get_open_channel_directory,
             create_channel,
             ensure_starter_channels,
             open_dm,
@@ -646,6 +642,7 @@ pub fn run() {
             get_forum_posts,
             get_forum_thread,
             get_thread_replies,
+            get_channel_reconnect_repair,
             get_channel_window,
             get_channel_messages_before,
             edit_message,
@@ -841,6 +838,9 @@ pub fn run() {
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             archive::get_agent_usage_series,
+            archive::get_observer_retention_days,
+            archive::set_observer_retention_days,
+            archive::archive_size_stats,
             archive::sync::announce_archive_sync_epoch,
             archive::sync::start_archive_sync,
             archive::sync::stop_archive_sync,
@@ -913,7 +913,6 @@ pub fn run() {
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);

@@ -66,10 +66,11 @@ artifacts) available for analysis.
 
 The local [`benchmarks/buzz-dataset`](../buzz-dataset) suite — a sibling
 directory of this harness, not a subdirectory of it — scores Buzz product
-behavior alongside task correctness. It currently covers direct thread replies, callback user
-mentions, targeted reads of user-named paths outside the workspace, and exact
-channel creation/membership. Run one task with the production base prompt from
-the checked-out source build:
+behavior alongside task correctness. It covers direct thread replies, callback
+user mentions, targeted reads of named paths, exact channel membership,
+multiline delivery, non-waking narrative names, batched reports, cross-thread
+isolation, and ambiguous identities. Run one task with the production base
+prompt from the checked-out source build:
 
 ```bash
 just benchmark \
@@ -107,6 +108,12 @@ artifact; relay credentials and database access are never exposed to the model
 or verifier. If the snapshot cannot be exported the trial **fails** rather than
 scoring 0 — a harness fault and a model fault stay distinguishable — and the
 cause is written to the trial's `buzz/buzz-evidence-error.txt`.
+
+Some tasks declare additional signed relay events. The provisioner creates
+their actors as normal channel identities and the runtime publishes the events
+through the production CLI immediately after the task message. Evidence exports
+only public actor metadata and event IDs; their signing credentials never enter
+the task container or verifier artifact.
 
 Each task ships its own `README.md` documenting its reward dimensions and, for
 the tasks whose graded Buzz behavior is deliberately absent from

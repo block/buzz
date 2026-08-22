@@ -15,9 +15,11 @@ const ACTION_CLASS =
 export function ProjectSelectionDiscussAction({
   items,
   onSelectChannel,
+  testIdPrefix = "projects-selection",
 }: {
   items: ProjectSelectionItem[];
   onSelectChannel: (channelId: string) => void;
+  testIdPrefix?: string;
 }) {
   const [expanded, setExpanded] = React.useState(false);
   const [browserOpen, setBrowserOpen] = React.useState(false);
@@ -32,7 +34,7 @@ export function ProjectSelectionDiscussAction({
       <Button
         aria-expanded={expanded}
         className={ACTION_CLASS}
-        data-testid="projects-selection-discuss"
+        data-testid={`${testIdPrefix}-discuss`}
         onClick={() => setExpanded((current) => !current)}
         size="sm"
         type="button"
@@ -50,7 +52,7 @@ export function ProjectSelectionDiscussAction({
       {expanded ? (
         <div
           className="ml-5 space-y-0.5 border-border/50 border-l pl-2"
-          data-testid="projects-selection-channel-choices"
+          data-testid={`${testIdPrefix}-channel-choices`}
         >
           {candidates.map(({ channelId, count }) => {
             const channel = channelsById.get(channelId);
@@ -58,7 +60,7 @@ export function ProjectSelectionDiscussAction({
             return (
               <Button
                 className="h-7 w-full justify-start gap-2 px-2 text-left text-xs font-normal"
-                data-testid="projects-selection-related-channel"
+                data-testid={`${testIdPrefix}-related-channel`}
                 key={channelId}
                 onClick={() => onSelectChannel(channelId)}
                 size="sm"
@@ -77,7 +79,7 @@ export function ProjectSelectionDiscussAction({
           })}
           <Button
             className="h-7 w-full justify-start gap-2 px-2 text-left text-xs font-normal"
-            data-testid="projects-selection-search-channels"
+            data-testid={`${testIdPrefix}-search-channels`}
             onClick={() => setBrowserOpen(true)}
             size="sm"
             type="button"

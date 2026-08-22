@@ -17,13 +17,13 @@ export function ProjectDetailRightPanel({
   context,
   detachedRepository = false,
   mode,
-  sharedHeaderBackdrop,
+  onClose,
   ...repositoryProps
 }: RepositoryPanelProps & {
   context: ProjectDetailAgentContext;
   detachedRepository?: boolean;
   mode: ProjectRightPanelMode;
-  sharedHeaderBackdrop?: boolean;
+  onClose: () => void;
 }) {
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
@@ -43,9 +43,9 @@ export function ProjectDetailRightPanel({
         constrainToAvailableSpace={false}
         context={context}
         key={`${relayScope}:${signerScope}:${context.repoAddress}`}
+        onClose={onClose}
         onResetWidth={repositoryProps.onResetWidth}
         onResizeStart={repositoryProps.onResizeStart}
-        sharedHeaderBackdrop={sharedHeaderBackdrop}
         widthPx={repositoryProps.widthPx}
       />
     );

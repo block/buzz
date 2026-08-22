@@ -12,6 +12,117 @@ use std::sync::{Arc, Mutex};
 #[path = "tts_tests/token_split.rs"]
 mod token_split;
 
+// ── Human-floor queue authorization ───────────────────────────────────────
+
+fn queued_text(route_id: u64, floor_epoch: u64) -> QueuedText {
+    QueuedText {
+        generation: 1,
+        floor_epoch,
+        route_id,
+        speaker_pubkey: None,
+        speaker_generation: 0,
+        voice_reference: None,
+        text: "queued while a human is speaking".to_string(),
+    }
+}
+
+#[test]
+fn production_worker_append_authorization_completes() {
+    let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let human_floor = HumanFloor::new();
+        let playback = human_floor.playback();
+        let channels = NonZero::new(1).expect("nonzero channels");
+        let rate = NonZero::new(SAMPLE_RATE).expect("nonzero rate");
+        let (mixer, _unpulled_source) = rodio::mixer::mixer(channels, rate);
+        playback.bind_mixer(&mixer);
+        let floor_epoch = human_floor.epoch();
+        let cancel = AtomicBool::new(false);
+        let voice_cancel = AtomicBool::new(false);
+        let shutdown = AtomicBool::new(false);
+        let tts_active = AtomicBool::new(false);
+        let speaker_generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(None));
+        let activity_frames = Mutex::new(VecDeque::new());
+        let context = TtsAppendContext {
+            playback: &playback,
+            human_floor: &human_floor,
+            cancel: &cancel,
+            voice_cancel: &voice_cancel,
+            shutdown: &shutdown,
+            tts_active: &tts_active,
+            speaker_generations: &speaker_generations,
+            active_speaker: &active_speaker,
+            activity_frames: &activity_frames,
+            broadcasters: &TtsBroadcasters::default(),
+            channels,
+            rate,
+        };
+
+        let accepted = append_worker_audio(
+            &context,
+            PreparedModelAudio {
+                buffer: vec![0.25; SAMPLE_RATE as usize],
+                sample_count: SAMPLE_RATE as usize,
+                chunk_index: 0,
+            },
+            40,
+            None,
+            0,
+            floor_epoch,
+            || {},
+        );
+        completed_tx
+            .send((accepted, tts_active.load(Ordering::Acquire)))
+            .expect("completion receiver");
+    });
+
+    assert_eq!(
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("production worker append authorization must not deadlock"),
+        (true, true)
+    );
+    worker.join().expect("append worker");
+}
+
+#[test]
+fn worker_queue_defers_text_while_floor_is_held_then_releases_it() {
+    let human_floor = HumanFloor::new();
+    assert!(human_floor.enter_local(true, false));
+    let floor_epoch = human_floor.epoch();
+    let mut deferred = VecDeque::new();
+
+    assert!(matches!(
+        authorize_or_defer_queued_text(&human_floor, &mut deferred, queued_text(41, floor_epoch),),
+        Err(HumanFloorAuthorization::Blocked)
+    ));
+    assert_eq!(deferred.len(), 1, "held-floor text must stay queued");
+
+    human_floor.leave_local();
+    let queued = deferred.pop_front().expect("deferred text");
+    let released = authorize_or_defer_queued_text(&human_floor, &mut deferred, queued)
+        .expect("the same queue item is eligible after floor release");
+
+    assert_eq!(released.route_id, 41);
+    assert!(deferred.is_empty());
+}
+
+#[test]
+fn worker_queue_drops_text_from_before_human_onset() {
+    let human_floor = HumanFloor::new();
+    let stale_epoch = human_floor.epoch();
+    assert!(human_floor.enter_local(true, false));
+    human_floor.leave_local();
+    let mut deferred = VecDeque::new();
+
+    assert!(matches!(
+        authorize_or_defer_queued_text(&human_floor, &mut deferred, queued_text(42, stale_epoch),),
+        Err(HumanFloorAuthorization::Stale)
+    ));
+    assert!(deferred.is_empty(), "pre-barge-in text must not replay");
+}
+
 // ── Remote interrupt tracker ──────────────────────────────────────────────
 //
 // Models the per-peer frame counting logic in the recv task of

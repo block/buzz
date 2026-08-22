@@ -14,13 +14,18 @@ class BuzzActionTile extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onTap,
+    this.iconWidget,
     this.isEnabled = true,
     this.isLoading = false,
     this.loadingSemanticLabel,
+    this.iconColor,
   });
 
   /// Icon shown when the tile is not loading.
   final IconData? icon;
+
+  /// Optional custom icon widget shown instead of [icon].
+  final Widget? iconWidget;
 
   /// Label shown below the icon.
   final String label;
@@ -36,6 +41,9 @@ class BuzzActionTile extends StatelessWidget {
 
   /// Accessibility label for the loading indicator.
   final String? loadingSemanticLabel;
+
+  /// Optional icon tint used to communicate a selected action state.
+  final Color? iconColor;
 
   @override
   Widget build(BuildContext context) {
@@ -75,7 +83,12 @@ class BuzzActionTile extends StatelessWidget {
                     semanticLabel: loadingSemanticLabel ?? label,
                   )
                 else
-                  Icon(icon, size: 22, color: context.colors.onSurface),
+                  iconWidget ??
+                      Icon(
+                        icon,
+                        size: 22,
+                        color: iconColor ?? context.colors.onSurface,
+                      ),
                 const SizedBox(height: Grid.xxs),
                 Text(
                   label,

@@ -23,6 +23,7 @@ import {
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { resetLinkPreviewPreparations } from "@/features/messages/lib/linkPreviewPreparationStore";
+import { resetPersistentAgentAudienceStore } from "@/features/messages/lib/persistentAgentAudience";
 import {
   resetActiveAgentTurnsStore,
   saveActiveAgentTurnsForCommunity,
@@ -34,6 +35,7 @@ import { resetAvatarPresentations } from "@/features/profile/avatarPresentationS
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
+import { resetMessageLinkMetadataCache } from "@/shared/ui/markdown/useMessageLinkMetadata";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import {
@@ -75,8 +77,10 @@ async function resetCommunityState({
   resetRenderScopedReactionHydration();
   resetBackgroundMediaUploads();
   resetLinkPreviewPreparations();
+  resetPersistentAgentAudienceStore();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetMessageLinkMetadataCache();
 }
 
 type CommunityInitResult =

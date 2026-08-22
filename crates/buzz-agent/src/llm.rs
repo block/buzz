@@ -226,6 +226,7 @@ impl Llm {
             tracing::info!(
                 model = effective_model,
                 provider = ?cfg.provider,
+                thinking_effort = ?cfg.thinking_effort,
                 duration_ms,
                 input_tokens = ?response.input_tokens,
                 cached_input_tokens = ?response.cached_input_tokens,

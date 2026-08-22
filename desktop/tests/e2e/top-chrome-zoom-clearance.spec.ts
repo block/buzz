@@ -90,24 +90,18 @@ async function seedTextScale(
   }, scale);
 }
 
-async function expectTextRemSize(
+// Cmd +/- scales the real root font-size so every rem in the app zooms. The
+// top chrome below must stay fixed *despite* that, which is what these tests
+// guard.
+async function expectRootFontSize(
   page: import("@playwright/test").Page,
   fontSize: string,
 ) {
   await expect
     .poll(() =>
-      page.evaluate(() =>
-        getComputedStyle(document.documentElement)
-          .getPropertyValue("--buzz-type-rem")
-          .trim(),
-      ),
-    )
-    .toBe(fontSize);
-  await expect
-    .poll(() =>
       page.evaluate(() => getComputedStyle(document.documentElement).fontSize),
     )
-    .toBe("16px");
+    .toBe(fontSize);
 }
 
 test.describe("top chrome macOS traffic-light clearance under text zoom", () => {
@@ -152,8 +146,8 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await installMockBridge(page);
     await page.goto("/");
 
-    // Confirm the zoomed-out text scale applied without changing the root.
-    await expectTextRemSize(page, "12px");
+    // Confirm the zoomed-out scale reached the root.
+    await expectRootFontSize(page, "12px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,
@@ -170,7 +164,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await installMockBridge(page);
     await page.goto("/");
 
-    await expectTextRemSize(page, "24px");
+    await expectRootFontSize(page, "24px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,
