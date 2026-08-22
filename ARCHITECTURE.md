@@ -531,11 +531,12 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **4 trigger types:** `message_posted`, `reaction_added`, `schedule`, `webhook`
 
-**7 action types:**
+**8 action types:**
 
 | Action | Description |
 |--------|-------------|
 | `send_message` | Post to the workflow's channel (or override channel) |
+| `assign_agent` | Dispatch a task to exactly one agent by hex pubkey (or a single template resolving to one); fails closed if the assignee is not a channel member |
 | `send_dm` | Direct message to a user (pubkey hex or `{{trigger.author}}`) |
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |

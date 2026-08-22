@@ -466,6 +466,17 @@ pub fn resolve_step_templates(
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
+        AssignAgent {
+            agent_pubkey,
+            text,
+            channel,
+            task_id,
+        } => Ok(AssignAgent {
+            agent_pubkey: t(agent_pubkey)?,
+            text: t(text)?,
+            channel: t_opt(channel)?,
+            task_id: t_opt(task_id)?,
+        }),
     }
 }
 
@@ -483,7 +494,8 @@ pub enum StepResult {
     Skipped,
 }
 
-fn resolve_send_message_channel(
+fn resolve_action_channel(
+    action: &str,
     explicit_channel: Option<&str>,
     trigger_channel: &str,
     workflow_channel_id: Option<Uuid>,
@@ -496,12 +508,12 @@ fn resolve_send_message_channel(
         if let Some(explicit_channel) = explicit_channel {
             let override_channel_id = explicit_channel.parse::<Uuid>().map_err(|e| {
                 WorkflowError::InvalidDefinition(format!(
-                    "SendMessage: invalid channel override UUID: {e}"
+                    "{action}: invalid channel override UUID: {e}"
                 ))
             })?;
             if override_channel_id != workflow_channel_id {
                 return Err(WorkflowError::InvalidDefinition(format!(
-                    "SendMessage: channel override must match the workflow channel ({workflow_channel_id})"
+                    "{action}: channel override must match the workflow channel ({workflow_channel_id})"
                 )));
             }
         }
@@ -511,17 +523,16 @@ fn resolve_send_message_channel(
     if let Some(explicit_channel) = explicit_channel {
         let override_channel_id = explicit_channel.parse::<Uuid>().map_err(|e| {
             WorkflowError::InvalidDefinition(format!(
-                "SendMessage: invalid channel override UUID: {e}"
+                "{action}: invalid channel override UUID: {e}"
             ))
         })?;
         return Ok(override_channel_id.to_string());
     }
 
     if trigger_channel.trim().is_empty() {
-        return Err(WorkflowError::InvalidDefinition(
-            "SendMessage: no channel_id available (trigger has no channel context and no channel override was specified)"
-                .into(),
-        ));
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "{action}: no channel_id available (trigger has no channel context and no channel override was specified)"
+        )));
     }
 
     Ok(trigger_channel.trim().to_string())
@@ -592,7 +603,8 @@ pub async fn dispatch_action(
                                 wf_run.workflow_id
                             ))
                         })?;
-                    let channel_id = resolve_send_message_channel(
+                    let channel_id = resolve_action_channel(
+                        "SendMessage",
                         channel.as_deref(),
                         &trigger_ctx.channel_id,
                         workflow.channel_id,
@@ -637,6 +649,103 @@ pub async fn dispatch_action(
                     Ok(StepResult::Completed(serde_json::json!({
                         "sent": true,
                         "event_id": event_id,
+                    })))
+                }
+
+                AssignAgent {
+                    agent_pubkey,
+                    text,
+                    channel,
+                    task_id,
+                } => {
+                    // Re-validate the *resolved* agent_pubkey. Schema
+                    // validation accepts either static 64-hex or a single
+                    // `{{...}}` template; only after template resolution do we
+                    // know what pubkey the run will actually wake. A resolved
+                    // non-hex string is a definition/data error surfaced as a
+                    // run failure — never a silent misroute or wrong-agent
+                    // wake (an unknown template also passes through unchanged,
+                    // so this catches both).
+                    if !crate::schema::is_lowercase_hex_pubkey(agent_pubkey) {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "AssignAgent: resolved agent_pubkey '{agent_pubkey}' is not a \
+                             64-char lowercase hex pubkey"
+                        )));
+                    }
+
+                    // Same contract for the correlation id. Definition-time
+                    // validation now accepts a `{{...}}` placeholder here, so
+                    // the UUID guarantee the action documents can only be
+                    // enforced after resolution. Without this a resolved
+                    // non-UUID reached the sink and went out on the `task`
+                    // tag, breaking correlation for every reader.
+                    if let Some(tid) = task_id.as_deref() {
+                        let tid = tid.trim();
+                        if tid.parse::<Uuid>().is_err() {
+                            return Err(WorkflowError::InvalidDefinition(format!(
+                                "AssignAgent: resolved task_id '{tid}' is not a valid UUID"
+                            )));
+                        }
+                    }
+
+                    let wf_run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "AssignAgent: failed to load workflow run {run_id}: {e}"
+                            ))
+                        })?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, wf_run.workflow_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "AssignAgent: failed to load workflow {}: {e}",
+                                wf_run.workflow_id
+                            ))
+                        })?;
+                    let channel_id = resolve_action_channel(
+                        "AssignAgent",
+                        channel.as_deref(),
+                        &trigger_ctx.channel_id,
+                        workflow.channel_id,
+                    )?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+                    // Routing metadata only. The task body can carry incident
+                    // or customer detail, and this log is not the place to
+                    // duplicate it — the message itself is already persisted
+                    // as an event.
+                    info!(
+                        run_id = %run_id,
+                        step = step_id,
+                        channel = %channel_id,
+                        agent = %agent_pubkey,
+                        text_len = text.len(),
+                        "AssignAgent → {channel_id}"
+                    );
+
+                    let event_id = engine
+                        .action_sink()?
+                        .assign_agent(
+                            community_id,
+                            &channel_id,
+                            text,
+                            &owner_pubkey_hex,
+                            agent_pubkey,
+                            task_id.as_deref(),
+                        )
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "assigned": true,
+                        "agent_pubkey": agent_pubkey,
+                        "event_id": event_id,
+                        "task_id": task_id,
                     })))
                 }
 
@@ -1936,7 +2045,7 @@ mod tests {
     #[test]
     fn send_message_uses_bound_workflow_channel_by_default() {
         let workflow_channel_id = Uuid::new_v4();
-        let resolved = resolve_send_message_channel(None, "", Some(workflow_channel_id))
+        let resolved = resolve_action_channel("SendMessage", None, "", Some(workflow_channel_id))
             .expect("bound channel should be used");
         assert_eq!(resolved, workflow_channel_id.to_string());
     }
@@ -1945,7 +2054,8 @@ mod tests {
     fn send_message_rejects_cross_channel_override_for_bound_workflow() {
         let workflow_channel_id = Uuid::new_v4();
         let other_channel_id = Uuid::new_v4();
-        let err = resolve_send_message_channel(
+        let err = resolve_action_channel(
+            "SendMessage",
             Some(&other_channel_id.to_string()),
             "",
             Some(workflow_channel_id),
@@ -1961,9 +2071,150 @@ mod tests {
     #[test]
     fn send_message_canonicalizes_valid_explicit_override_for_global_workflow() {
         let override_channel_id = Uuid::new_v4();
-        let resolved =
-            resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
-                .expect("override should be accepted");
+        let resolved = resolve_action_channel(
+            "SendMessage",
+            Some(&override_channel_id.to_string()),
+            "",
+            None,
+        )
+        .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    // --- assign_agent template resolution ----------------------------------
+
+    /// A 64-char lowercase hex pubkey fixture used across the assign_agent
+    /// executor tests.
+    const AGENT_HEX_FIXTURE: &str =
+        "dcd584bd8bbd49fd62caf3a8a0a43afd38b9a91dcbd3a1c9dba7d082ca024e66";
+
+    fn assign_step(agent_pubkey: &str, text: &str, task_id: Option<&str>) -> Step {
+        Step {
+            id: "assign".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::AssignAgent {
+                agent_pubkey: agent_pubkey.to_owned(),
+                text: text.to_owned(),
+                channel: None,
+                task_id: task_id.map(str::to_owned),
+            },
+        }
+    }
+
+    #[test]
+    fn assign_agent_resolves_text_and_task_id_templates() {
+        let mut ctx = make_trigger();
+        ctx.text = "P1 in prod".to_owned();
+        let outputs = HashMap::new();
+        let step = assign_step(
+            AGENT_HEX_FIXTURE,
+            "New incident: {{trigger.text}}",
+            Some("{{trigger.message_id}}"),
+        );
+        // A realistic trigger id: the action documents `task_id` as a
+        // correlation UUID and the executor now enforces that on the resolved
+        // value, so a fixture resolving to "event-id-hex" would assert a shape
+        // the run rejects — which is precisely what hid the validate/resolve
+        // mismatch before.
+        ctx.message_id = "11111111-2222-3333-4444-555555555555".to_owned();
+        let resolved = resolve_step_templates(&step, &ctx, &outputs).unwrap();
+        match resolved {
+            ActionDef::AssignAgent {
+                agent_pubkey,
+                text,
+                task_id,
+                ..
+            } => {
+                // Static agent_pubkey is preserved verbatim.
+                assert_eq!(agent_pubkey, AGENT_HEX_FIXTURE);
+                assert_eq!(text, "New incident: P1 in prod");
+                assert_eq!(
+                    task_id.as_deref(),
+                    Some("11111111-2222-3333-4444-555555555555")
+                );
+            }
+            other => panic!("unexpected resolved action: {other:?}"),
+        }
+    }
+
+    /// The step above must also be *saveable*. `parse_yaml` always calls
+    /// `validate()`, so a templated routing field that validation rejects can
+    /// never reach the executor that resolves it — the definition and the
+    /// runtime have to agree on the accepted shapes.
+    #[test]
+    fn assign_agent_templated_channel_and_task_id_pass_definition_validation() {
+        let step = Step {
+            id: "assign".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::AssignAgent {
+                agent_pubkey: AGENT_HEX_FIXTURE.to_owned(),
+                text: "New incident".to_owned(),
+                channel: Some("{{trigger.channel_id}}".to_owned()),
+                task_id: Some("{{trigger.message_id}}".to_owned()),
+            },
+        };
+        crate::schema::validate_action(&step.id, &step.action)
+            .expect("templated channel/task_id must be saveable");
+    }
+
+    /// A literal that is neither a UUID nor a template is still rejected —
+    /// widening the shape check must not turn it into a rubber stamp.
+    #[test]
+    fn assign_agent_rejects_a_literal_non_uuid_task_id() {
+        let step = Step {
+            id: "assign".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::AssignAgent {
+                agent_pubkey: AGENT_HEX_FIXTURE.to_owned(),
+                text: "New incident".to_owned(),
+                channel: None,
+                task_id: Some("not-a-uuid".to_owned()),
+            },
+        };
+        let err = crate::schema::validate_action(&step.id, &step.action)
+            .expect_err("a literal non-UUID task_id must not validate");
+        assert!(err.to_string().contains("task_id"), "got: {err}");
+    }
+
+    #[test]
+    fn assign_agent_resolves_agent_pubkey_template_through_trigger_author() {
+        // `{{trigger.author}}` is the "reply to the sender" pattern — the
+        // executor must template-resolve agent_pubkey so this works.
+        let mut ctx = make_trigger();
+        ctx.author = AGENT_HEX_FIXTURE.to_owned();
+        let outputs = HashMap::new();
+        let step = assign_step("{{trigger.author}}", "please respond", None);
+        let resolved = resolve_step_templates(&step, &ctx, &outputs).unwrap();
+        match resolved {
+            ActionDef::AssignAgent { agent_pubkey, .. } => {
+                assert_eq!(agent_pubkey, AGENT_HEX_FIXTURE);
+            }
+            other => panic!("unexpected resolved action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_lowercase_hex_pubkey_accepts_canonical_and_rejects_case_length_or_symbols() {
+        use crate::schema::is_lowercase_hex_pubkey;
+
+        assert!(is_lowercase_hex_pubkey(AGENT_HEX_FIXTURE));
+
+        // Uppercase, short, long, and non-hex all fail.
+        assert!(!is_lowercase_hex_pubkey(&AGENT_HEX_FIXTURE.to_uppercase()));
+        assert!(!is_lowercase_hex_pubkey(&AGENT_HEX_FIXTURE[..63]));
+        assert!(!is_lowercase_hex_pubkey(&format!("{AGENT_HEX_FIXTURE}0")));
+        let non_hex = format!("{}z", &AGENT_HEX_FIXTURE[..63]);
+        assert!(!is_lowercase_hex_pubkey(&non_hex));
+
+        // An unresolved template that passed through resolution unchanged must
+        // NOT pass as a hex pubkey — this is what protects against silent
+        // misroutes when a template variable name is misspelled.
+        assert!(!is_lowercase_hex_pubkey("{{trigger.author}}"));
     }
 }
