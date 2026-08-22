@@ -882,6 +882,15 @@ fn insert_owner_observer(
         upsert_observer_channel_index(conn, "owner", "wss://r", id, Some(channel), created_at)
             .unwrap();
     }
+    super::super::observer_time::upsert(
+        conn,
+        "owner",
+        "wss://r",
+        id,
+        Some(created_at),
+        Some(created_at),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -948,4 +957,24 @@ fn test_archived_observer_range_survives_close_and_reopen() {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].contains(r#""id":"persisted""#));
+}
+
+#[test]
+fn test_observer_range_uses_inner_time_after_unbounded_publication_delay() {
+    let conn = in_memory();
+    insert_owner_observer(&conn, "delayed", "agent-a", 10_000, Some("ch-1"));
+    conn.execute(
+        "UPDATE observer_time_index
+            SET observed_start_at = 1001, observed_end_at = 1001
+          WHERE identity_pubkey = 'owner' AND relay_url = 'wss://r' AND id = 'delayed'",
+        [],
+    )
+    .unwrap();
+
+    let rows = read_archived_observer_events_for_range(
+        &conn, "owner", "wss://r", 1000, 1002, None, None, None, None, 10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains(r#""id":"delayed""#));
 }

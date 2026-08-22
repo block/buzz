@@ -13,6 +13,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::time::{Duration, Instant};
 
+pub(super) use super::observer_time::read_archived_observer_events_for_range;
 use super::store_migrations::apply_schema_migrations;
 
 // ── Schema ─────────────────────────────────────────────────────────────────
@@ -71,6 +72,22 @@ CREATE TABLE IF NOT EXISTS observer_channel_index (
 );
 CREATE INDEX IF NOT EXISTS idx_observer_channel
     ON observer_channel_index (identity_pubkey, relay_url, channel_id, created_at DESC, id DESC);
+
+-- Rebuildable index of the authoritative decrypted observer timestamps inside
+-- each signed envelope. A row with NULL bounds is a durable processed marker
+-- for malformed/undecryptable payloads. Range reads use these bounds instead
+-- of the later outer signing time, so queued frames cannot miss a local day.
+CREATE TABLE IF NOT EXISTS observer_time_index (
+    identity_pubkey  TEXT NOT NULL,
+    relay_url        TEXT NOT NULL,
+    id               TEXT NOT NULL,
+    observed_start_at INTEGER,
+    observed_end_at   INTEGER,
+    PRIMARY KEY (identity_pubkey, relay_url, id)
+);
+CREATE INDEX IF NOT EXISTS idx_observer_time
+    ON observer_time_index
+       (identity_pubkey, relay_url, observed_start_at, observed_end_at, id);
 
 -- One-row migration state table: tracks which idempotent migrations have run.
 CREATE TABLE IF NOT EXISTS archive_migrations (
@@ -859,92 +876,6 @@ pub fn read_archived_observer_events_for_channel(
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("read read_archived_observer_events_for_channel row: {e}"))
-}
-
-/// Read owner-scoped observer events for a half-open time range.
-///
-/// The compound cursor mirrors the sort order, so same-second siblings are
-/// never skipped while the owner-facing Today surface pages through SQLite.
-#[allow(clippy::too_many_arguments)]
-pub fn read_archived_observer_events_for_range(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-    start_created_at: i64,
-    end_created_at: i64,
-    agent_pubkey: Option<&str>,
-    channel_id: Option<&str>,
-    before_created_at: Option<i64>,
-    before_id: Option<&str>,
-    limit: i64,
-) -> Result<Vec<String>, String> {
-    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(identity_pubkey.to_owned()),
-        Box::new(relay_url.to_owned()),
-        Box::new(identity_pubkey.to_owned()),
-        Box::new(start_created_at),
-        Box::new(end_created_at),
-    ];
-    let mut clauses = String::new();
-
-    if let Some(agent) = agent_pubkey {
-        params_vec.push(Box::new(agent.to_owned()));
-        clauses.push_str(&format!(" AND ae.pubkey = ?{}", params_vec.len()));
-    }
-    if let Some(channel) = channel_id {
-        params_vec.push(Box::new(channel.to_owned()));
-        clauses.push_str(&format!(
-            " AND EXISTS (
-                SELECT 1 FROM observer_channel_index oci
-                 WHERE oci.identity_pubkey = ae.identity_pubkey
-                   AND oci.relay_url = ae.relay_url
-                   AND oci.id = ae.id
-                   AND oci.channel_id = ?{}
-            )",
-            params_vec.len()
-        ));
-    }
-    if let (Some(created_at), Some(id)) = (before_created_at, before_id) {
-        params_vec.push(Box::new(created_at));
-        let created_at_slot = params_vec.len();
-        params_vec.push(Box::new(id.to_owned()));
-        let id_slot = params_vec.len();
-        clauses.push_str(&format!(
-            " AND (ae.created_at < ?{created_at_slot}
-               OR (ae.created_at = ?{created_at_slot} AND ae.id < ?{id_slot}))"
-        ));
-    }
-    params_vec.push(Box::new(limit));
-    let limit_slot = params_vec.len();
-
-    let sql = format!(
-        "SELECT ae.raw_json
-           FROM archived_events ae
-           INNER JOIN archived_event_scopes aes
-             ON aes.identity_pubkey = ae.identity_pubkey
-            AND aes.relay_url = ae.relay_url
-            AND aes.id = ae.id
-          WHERE ae.identity_pubkey = ?1
-            AND ae.relay_url = ?2
-            AND aes.scope_type = 'owner_p'
-            AND aes.scope_value = ?3
-            AND ae.kind = 24200
-            AND ae.created_at >= ?4
-            AND ae.created_at < ?5
-            {clauses}
-          ORDER BY ae.created_at DESC, ae.id DESC
-          LIMIT ?{limit_slot}"
-    );
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        params_vec.iter().map(|param| param.as_ref()).collect();
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("prepare read_archived_observer_events_for_range: {e}"))?;
-    let rows = stmt
-        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
-        .map_err(|e| format!("query read_archived_observer_events_for_range: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("read read_archived_observer_events_for_range row: {e}"))
 }
 
 /// GC: delete orphaned event rows whose last scope row was just removed, and

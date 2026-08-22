@@ -401,12 +401,11 @@ test("day range is half-open and rejects impossible dates", () => {
   assert.throws(() => activityLedgerDayRange("08/21/2026"));
 });
 
-test("Today archive query overlaps midnight but assigns by inner event time", async () => {
+test("Today archive query uses the authoritative inner-time day range", async () => {
   const day = "2026-08-21";
   const exact = activityLedgerDayRange(day);
   const query = activityLedgerArchiveQueryRange(day);
-  assert.equal(exact.startCreatedAt - query.startCreatedAt, 70);
-  assert.equal(query.endCreatedAt - exact.endCreatedAt, 70);
+  assert.deepEqual(query, exact);
 
   const innerTimestamp = new Date(
     (exact.endCreatedAt - 1) * 1_000,

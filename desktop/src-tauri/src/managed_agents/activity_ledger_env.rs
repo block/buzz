@@ -23,15 +23,12 @@ fn honey_today_env(
     {
         return None;
     }
-    let relay_url = relay_url?.trim();
-    if !(relay_url.starts_with("ws://") || relay_url.starts_with("wss://")) {
-        return None;
-    }
+    let relay_url = buzz_core_pkg::relay::normalize_relay_url(relay_url?).ok()?;
     Some((
-        crate::archive::today_snapshot::snapshot_path(nest?, owner, relay_url),
+        crate::archive::today_snapshot::snapshot_path(nest?, owner, &relay_url),
         TODAY_CAPABILITY,
         owner.to_owned(),
-        relay_url.to_owned(),
+        relay_url,
     ))
 }
 
@@ -93,5 +90,27 @@ mod tests {
         )
         .is_none());
         assert!(honey_today_env(Some("builtin:honey"), Some(&owner), Some(relay), None).is_none());
+    }
+
+    #[test]
+    fn today_env_canonicalizes_relay_before_path_and_contract() {
+        let owner = "a".repeat(64);
+        let nest = Path::new("/private/buzz-nest");
+        let raw = honey_today_env(
+            Some("builtin:honey"),
+            Some(&owner),
+            Some("ws://localhost:3000/"),
+            Some(nest),
+        )
+        .unwrap();
+        let canonical = honey_today_env(
+            Some("builtin:honey"),
+            Some(&owner),
+            Some("ws://127.0.0.1:3000"),
+            Some(nest),
+        )
+        .unwrap();
+        assert_eq!(raw, canonical);
+        assert_eq!(raw.3, "ws://127.0.0.1:3000");
     }
 }

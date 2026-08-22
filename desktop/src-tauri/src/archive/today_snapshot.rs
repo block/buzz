@@ -1,18 +1,12 @@
-//! Owner-scoped, read-only Activity Ledger snapshot for local consumers.
-//!
-//! The frontend already owns the canonical journal projection. This module is
-//! deliberately only the secure persistence seam: it validates the projection
-//! envelope against the active owner, writes it atomically with mode 0600 on
-//! Unix, and revalidates it on read. It never receives or serializes secret
-//! identity key material.
-
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 pub const TODAY_SNAPSHOT_SCHEMA: &str = "buzz.activity-ledger.today/v1";
 pub const TODAY_SNAPSHOT_CAPABILITY: &str = "buzz.activity-ledger.today.read/v1";
@@ -98,20 +92,8 @@ fn validate_hex(value: &str, label: &str, expected_len: usize) -> Result<(), Str
 }
 
 const REDACTED_IDENTITY_SECRET_TEXT: &str = "[REDACTED: identity secret material]";
-const EMBEDDED_SECRET_WORDS: &[&str] = &[
-    "secret",
-    "password",
-    "token",
-    "key",
-    "credential",
-    "passphrase",
-    "passwd",
-    "auth",
-    "nsec",
-    "apikey",
-    "privatekey",
-    "accesskey",
-];
+#[rustfmt::skip]
+const EMBEDDED_SECRET_WORDS: &[&str] = &["secret", "password", "token", "key", "credential", "passphrase", "passwd", "auth", "authorization", "nsec", "apikey", "privatekey", "accesskey"];
 
 fn split_secret_like_key(key: &str) -> Vec<String> {
     let mut words = Vec::new();
@@ -196,10 +178,52 @@ fn embedded_secret_colon_regex() -> Result<&'static Regex, String> {
     }
 }
 
+fn embedded_bearer_header_regex() -> Result<&'static Regex, String> {
+    static REGEX: OnceLock<Result<Regex, String>> = OnceLock::new();
+    match REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(authorization\s*:\s*bearer\s+)("[^"\r\n]*"|'[^'\r\n]*'|\[[^\]\r\n]*\]|[^\s"'`,;)\]}]+)"#,
+        )
+            .map_err(|error| format!("embedded bearer header regex is invalid: {error}"))
+    }) {
+        Ok(regex) => Ok(regex),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+fn embedded_secret_flag_regex() -> Result<&'static Regex, String> {
+    static REGEX: OnceLock<Result<Regex, String>> = OnceLock::new();
+    match REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(^|\s)(--[A-Za-z0-9][A-Za-z0-9_.-]*)(\s+)("[^"\r\n]*"|'[^'\r\n]*'|\[[^\]\r\n]*\]|[^\s,"';)\]}]+)"#,
+        )
+        .map_err(|error| format!("embedded secret flag regex is invalid: {error}"))
+    }) {
+        Ok(regex) => Ok(regex),
+        Err(error) => Err(error.clone()),
+    }
+}
+
 fn is_existing_redaction_marker(value: &str) -> bool {
     value == REDACTED_IDENTITY_SECRET_TEXT
         || value == format!("\"{REDACTED_IDENTITY_SECRET_TEXT}\"")
         || value == format!("'{REDACTED_IDENTITY_SECRET_TEXT}'")
+}
+
+fn matched_text(captures: &regex::Captures) -> String {
+    captures
+        .get(0)
+        .map_or_else(String::new, |matched| matched.as_str().to_string())
+}
+
+fn redacted_secret_value(value: &str) -> String {
+    if value.starts_with('"') && value.ends_with('"') {
+        format!("\"{REDACTED_IDENTITY_SECRET_TEXT}\"")
+    } else if value.starts_with('\'') && value.ends_with('\'') {
+        format!("'{REDACTED_IDENTITY_SECRET_TEXT}'")
+    } else {
+        REDACTED_IDENTITY_SECRET_TEXT.to_string()
+    }
 }
 
 fn redact_embedded_secret_assignments(text: &str) -> Result<(String, usize), String> {
@@ -211,19 +235,10 @@ fn redact_embedded_secret_assignments(text: &str) -> Result<(String, usize), Str
             let separator = captures.get(3).map_or("", |value| value.as_str());
             let value = captures.get(4).map_or("", |value| value.as_str());
             if !looks_like_embedded_secret_key(key) || is_existing_redaction_marker(value) {
-                return captures
-                    .get(0)
-                    .map_or_else(String::new, |matched| matched.as_str().to_string());
+                return matched_text(captures);
             }
             redactions += 1;
-            let replacement = if value.starts_with('"') && value.ends_with('"') {
-                format!("\"{REDACTED_IDENTITY_SECRET_TEXT}\"")
-            } else if value.starts_with('\'') && value.ends_with('\'') {
-                format!("'{REDACTED_IDENTITY_SECRET_TEXT}'")
-            } else {
-                REDACTED_IDENTITY_SECRET_TEXT.to_string()
-            };
-            format!("{prefix}{key}{separator}{replacement}")
+            format!("{prefix}{key}{separator}{}", redacted_secret_value(value))
         });
     Ok((redacted.into_owned(), redactions))
 }
@@ -238,20 +253,45 @@ fn redact_embedded_secret_colons(text: &str) -> Result<(String, usize), String> 
             let separator = captures.get(3).map_or("", |value| value.as_str());
             let value = captures.get(4).map_or("", |value| value.as_str());
             if !looks_like_embedded_secret_key(key) || is_existing_redaction_marker(value) {
-                return captures
-                    .get(0)
-                    .map_or_else(String::new, |matched| matched.as_str().to_string());
+                return matched_text(captures);
             }
             redactions += 1;
-            let replacement = if value.starts_with('"') && value.ends_with('"') {
-                format!("\"{REDACTED_IDENTITY_SECRET_TEXT}\"")
-            } else if value.starts_with('\'') && value.ends_with('\'') {
-                format!("'{REDACTED_IDENTITY_SECRET_TEXT}'")
-            } else {
-                REDACTED_IDENTITY_SECRET_TEXT.to_string()
-            };
-            format!("{prefix}{key_token}{separator}{replacement}")
+            format!(
+                "{prefix}{key_token}{separator}{}",
+                redacted_secret_value(value)
+            )
         });
+    Ok((redacted.into_owned(), redactions))
+}
+
+fn redact_embedded_bearer_headers(text: &str) -> Result<(String, usize), String> {
+    let mut redactions = 0;
+    let redacted =
+        embedded_bearer_header_regex()?.replace_all(text, |captures: &regex::Captures| {
+            let prefix = captures.get(1).map_or("", |value| value.as_str());
+            let value = captures.get(2).map_or("", |value| value.as_str());
+            if is_existing_redaction_marker(value) {
+                return matched_text(captures);
+            }
+            redactions += 1;
+            format!("{prefix}{}", redacted_secret_value(value))
+        });
+    Ok((redacted.into_owned(), redactions))
+}
+
+fn redact_embedded_secret_flags(text: &str) -> Result<(String, usize), String> {
+    let mut redactions = 0;
+    let redacted = embedded_secret_flag_regex()?.replace_all(text, |captures: &regex::Captures| {
+        let prefix = captures.get(1).map_or("", |value| value.as_str());
+        let key = captures.get(2).map_or("", |value| value.as_str());
+        let separator = captures.get(3).map_or("", |value| value.as_str());
+        let value = captures.get(4).map_or("", |value| value.as_str());
+        if !looks_like_embedded_secret_key(key) || is_existing_redaction_marker(value) {
+            return matched_text(captures);
+        }
+        redactions += 1;
+        format!("{prefix}{key}{separator}{}", redacted_secret_value(value))
+    });
     Ok((redacted.into_owned(), redactions))
 }
 
@@ -261,9 +301,7 @@ fn redact_embedded_nsec_tokens(text: &str) -> Result<(String, usize), String> {
         let prefix = captures.get(1).map_or("", |value| value.as_str());
         let secret = captures.get(2).map_or("", |value| value.as_str());
         if secret == REDACTED_IDENTITY_SECRET_TEXT {
-            return captures
-                .get(0)
-                .map_or_else(String::new, |matched| matched.as_str().to_string());
+            return matched_text(captures);
         }
         redactions += 1;
         format!("{prefix}{REDACTED_IDENTITY_SECRET_TEXT}")
@@ -287,6 +325,17 @@ fn redact_identity_secret_text(value: &mut serde_json::Value) -> Result<usize, S
                 ) {
                     return Err("Today snapshot cannot contain identity secret fields".into());
                 }
+                if matches!(
+                    normalized_key.as_str(),
+                    "authorization" | "proxyauthorization"
+                ) {
+                    if child.as_str() == Some(REDACTED_IDENTITY_SECRET_TEXT) {
+                        continue;
+                    }
+                    *child = serde_json::Value::String(REDACTED_IDENTITY_SECRET_TEXT.into());
+                    redactions += 1;
+                    continue;
+                }
                 redactions += redact_identity_secret_text(child)?;
             }
             Ok(redactions)
@@ -303,12 +352,26 @@ fn redact_identity_secret_text(value: &mut serde_json::Value) -> Result<usize, S
                 redact_embedded_secret_assignments(text)?;
             let (with_redacted_colons, colon_redactions) =
                 redact_embedded_secret_colons(&with_redacted_assignments)?;
+            let (with_redacted_bearer_headers, bearer_header_redactions) =
+                redact_embedded_bearer_headers(&with_redacted_colons)?;
+            let (with_redacted_flags, flag_redactions) =
+                redact_embedded_secret_flags(&with_redacted_bearer_headers)?;
             let (redacted_text, nsec_redactions) =
-                redact_embedded_nsec_tokens(&with_redacted_colons)?;
-            if assignment_redactions + colon_redactions + nsec_redactions > 0 {
+                redact_embedded_nsec_tokens(&with_redacted_flags)?;
+            if assignment_redactions
+                + colon_redactions
+                + bearer_header_redactions
+                + flag_redactions
+                + nsec_redactions
+                > 0
+            {
                 *text = redacted_text;
             }
-            Ok(assignment_redactions + colon_redactions + nsec_redactions)
+            Ok(assignment_redactions
+                + colon_redactions
+                + bearer_header_redactions
+                + flag_redactions
+                + nsec_redactions)
         }
         _ => Ok(0),
     }
@@ -595,10 +658,7 @@ pub fn write_owner_today_snapshot(
         expected_owner_pubkey,
         &signed_snapshot.payload.relay_url,
     );
-    // Keep the temporary file in the destination directory. Besides making
-    // replacement atomic, this rules out Windows' cross-volume copy/delete
-    // path; file contents are synced below before the safe replace-existing
-    // persist call publishes the new name.
+    // Same-directory persistence keeps replacement atomic on every platform.
     let mut temp_file = tempfile::Builder::new()
         .prefix(".activity-ledger-today-")
         .tempfile_in(&archive_dir)
@@ -866,11 +926,18 @@ mod tests {
             "summary": "Documentation example: NoStR_SeCrEt_KeY=test-value-1 while MODE=debug stays visible",
             "detail": "A generic secret-handling note is safe and keyboard=on stays visible"
         }]);
-        value["rawEvents"][0]["detail"] =
+        let raw_event = &mut value["rawEvents"][0];
+        raw_event["detail"] =
             "Tool failed with ANTHROPIC_API_KEY=test-value-2, BUZZ_AUTH_TAG='test-value-3', and APIKEY=test-value-4, but normal prose remains".into();
-        value["rawEvents"][0]["message"] =
+        raw_event["message"] =
             "Inline owner key nsec1mock000000000000000000000000000000000000000000000000000000 must not leave the owner boundary".into();
-        value["rawEvents"][0]["json"] = r#"{"OPENAI_API_KEY":"test-value-5","mode":"safe"}"#.into();
+        raw_event["json"] = r#"{"OPENAI_API_KEY":"test-value-5","mode":"safe"}"#.into();
+        raw_event["header"] =
+            "curl -H 'Authorization: Bearer test-value-6' keeps the surrounding prose".into();
+        raw_event["command"] = "tool --api-key test-value-7 --mode safe".into();
+        raw_event["stringifiedHeader"] =
+            r#"{"Authorization":"Bearer test-value-8","mode":"safe"}"#.into();
+        raw_event["Authorization"] = "Bearer test-value-9".into();
         let receipt = write_owner_today_snapshot(
             dir.path(),
             &keys,
@@ -881,38 +948,26 @@ mod tests {
         )
         .unwrap();
         let raw = read_owner_today_snapshot(dir.path(), &owner, TEST_RELAY, 1001).unwrap();
-        assert!(!raw.contains("do-not-export"));
-        assert!(!raw.contains("test-value-1"));
-        assert!(!raw.contains("test-value-2"));
-        assert!(!raw.contains("test-value-3"));
-        assert!(!raw.contains("test-value-4"));
-        assert!(!raw.contains("test-value-5"));
+        #[rustfmt::skip]
+        let leaked = ["do-not-export", "test-value-1", "test-value-2", "test-value-3", "test-value-4", "test-value-5", "test-value-6", "test-value-7", "test-value-8", "test-value-9"];
+        for secret in leaked {
+            assert!(!raw.contains(secret), "snapshot leaked {secret}");
+        }
         assert!(!raw.to_ascii_lowercase().contains("nsec1mock"));
         let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             stored["surface"]["snapshotProjection"]["identitySecretsRedacted"],
-            6
+            10
         );
-        assert_eq!(
-            stored["surface"]["journals"][0]["summary"],
-            "Documentation example: NoStR_SeCrEt_KeY=[REDACTED: identity secret material] while MODE=debug stays visible"
-        );
-        assert_eq!(
-            stored["surface"]["journals"][0]["detail"],
-            "A generic secret-handling note is safe and keyboard=on stays visible"
-        );
-        assert_eq!(
-            stored["rawEvents"][0]["detail"],
-            "Tool failed with ANTHROPIC_API_KEY=[REDACTED: identity secret material], BUZZ_AUTH_TAG='[REDACTED: identity secret material]', and APIKEY=[REDACTED: identity secret material], but normal prose remains"
-        );
-        assert_eq!(
-            stored["rawEvents"][0]["message"],
-            "Inline owner key [REDACTED: identity secret material] must not leave the owner boundary"
-        );
-        assert_eq!(
-            stored["rawEvents"][0]["json"],
-            r#"{"OPENAI_API_KEY":"[REDACTED: identity secret material]","mode":"safe"}"#
-        );
+        #[rustfmt::skip]
+        assert_eq!(stored["surface"]["journals"][0]["summary"], "Documentation example: NoStR_SeCrEt_KeY=[REDACTED: identity secret material] while MODE=debug stays visible");
+        #[rustfmt::skip]
+        assert_eq!(stored["surface"]["journals"][0]["detail"], "A generic secret-handling note is safe and keyboard=on stays visible");
+        #[rustfmt::skip]
+        let expected_fields = [("detail", "Tool failed with ANTHROPIC_API_KEY=[REDACTED: identity secret material], BUZZ_AUTH_TAG='[REDACTED: identity secret material]', and APIKEY=[REDACTED: identity secret material], but normal prose remains"), ("message", "Inline owner key [REDACTED: identity secret material] must not leave the owner boundary"), ("json", r#"{"OPENAI_API_KEY":"[REDACTED: identity secret material]","mode":"safe"}"#), ("header", "curl -H 'Authorization: Bearer [REDACTED: identity secret material]' keeps the surrounding prose"), ("command", "tool --api-key [REDACTED: identity secret material] --mode safe"), ("stringifiedHeader", r#"{"Authorization":"[REDACTED: identity secret material]","mode":"safe"}"#), ("Authorization", "[REDACTED: identity secret material]")];
+        for (field, expected) in expected_fields {
+            assert_eq!(stored["rawEvents"][0][field], expected);
+        }
         assert_eq!(receipt.owner_pubkey, owner);
     }
 

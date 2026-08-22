@@ -688,10 +688,40 @@ pub fn query_journal_authority_artifacts(
         .collect()
 }
 
+fn validate_archived_observer_frame(event: &Event, identity_pubkey: &str) -> Result<(), String> {
+    if event.kind.as_u16() != super::KIND_AGENT_OBSERVER_FRAME {
+        return Err("archived observer event kind does not match".into());
+    }
+    if !event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.len() >= 2 && values[0] == "p" && values[1] == identity_pubkey
+    }) {
+        return Err("observer frame #p does not match the archived owner".into());
+    }
+    let tag_value = |name: &str| {
+        event.tags.iter().find_map(|tag| {
+            let values = tag.as_slice();
+            (values.len() >= 2 && values[0] == name).then(|| values[1].clone())
+        })
+    };
+    let agent_pubkey =
+        tag_value("agent").ok_or_else(|| "observer frame missing `agent` tag".to_string())?;
+    if event.pubkey.to_hex() != agent_pubkey {
+        return Err("observer frame author does not match agent tag".into());
+    }
+    let frame =
+        tag_value("frame").ok_or_else(|| "observer frame missing `frame` tag".to_string())?;
+    if frame != super::OBSERVER_FRAME_TELEMETRY {
+        return Err(format!("expected frame=telemetry, got {frame:?}"));
+    }
+    Ok(())
+}
+
 /// Revalidate every source event referenced by a verification artifact against
-/// the current owner's archive. This prevents an otherwise well-signed owner
+/// the active owner's immutable archive. This prevents an otherwise well-signed owner
 /// artifact from yielding VERIFIED when it cites absent, cross-identity, or
-/// tampered observer evidence.
+/// tampered observer evidence. Current collection preferences are deliberately
+/// irrelevant after the event was accepted into an owner-scoped archive row.
 pub fn validate_archived_verification_sources(
     conn: &Connection,
     owner_keys: &Keys,
@@ -772,14 +802,7 @@ pub fn validate_archived_verification_sources(
                 validation_errors.push("observer source belongs to another managed agent".into());
                 continue;
             }
-            if let Err(error) = super::validate_ephemeral_frame(
-                &event,
-                &identity_pubkey,
-                &identity_pubkey,
-                conn,
-                &identity_pubkey,
-                &stored_relay_url,
-            ) {
+            if let Err(error) = validate_archived_observer_frame(&event, &identity_pubkey) {
                 validation_errors.push(format!("observer authorization failed: {error}"));
                 continue;
             }

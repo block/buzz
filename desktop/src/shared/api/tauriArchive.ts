@@ -467,7 +467,10 @@ export type ArchivedObserverRangePage = {
   nextBefore: ArchivedObserverRangeCursor | null;
 };
 
-/** Read one durable, owner-scoped observer page for a half-open time range. */
+/**
+ * Read one durable, owner-scoped observer page whose decrypted inner event
+ * timestamps overlap a half-open time range.
+ */
 export async function readArchivedObserverEventsForRange(opts: {
   startCreatedAt: number;
   endCreatedAt: number;

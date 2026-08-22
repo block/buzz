@@ -293,15 +293,6 @@ fn verification_sources_must_exist_and_remain_valid_in_owner_archive() {
 
     archive_observer(&conn, &owner_pk, relay_url, &event);
     scope_observer(&conn, &owner_pk, relay_url, &event);
-    assert!(
-        validate_archived_verification_sources(&conn, &owner, &artifact)
-            .unwrap_err()
-            .contains("no owner_p subscription")
-    );
-    store::upsert_save_subscription(
-        &conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]", 1,
-    )
-    .unwrap();
     validate_archived_verification_sources(&conn, &owner, &artifact).unwrap();
 
     let other_agent = Keys::generate().public_key().to_hex();
@@ -356,6 +347,49 @@ fn verification_finds_source_stored_under_equivalent_raw_relay_spelling() {
     let artifact =
         validate_signed_artifact(&raw, &owner_pk, "ws://127.0.0.1:3000", &agent_pk).unwrap();
     validate_archived_verification_sources(&conn, &owner, &artifact).unwrap();
+}
+
+#[test]
+fn archived_verification_survives_owner_collection_disable() {
+    let conn = in_memory();
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let owner_pk = owner.public_key().to_hex();
+    let agent_pk = agent.public_key().to_hex();
+    let event = observer_event(&owner, &agent, "agent:channel:turn-1", "tool-call-1");
+    archive_observer(&conn, &owner_pk, RELAY_A, &event);
+    scope_observer(&conn, &owner_pk, RELAY_A, &event);
+    store::upsert_save_subscription(
+        &conn, &owner_pk, RELAY_A, "owner_p", &owner_pk, "[24200]", 1,
+    )
+    .unwrap();
+
+    let input = JournalVerificationInput {
+        agent_pubkey: agent_pk.clone(),
+        source_event_ids: vec![event.id.to_hex()],
+        ..verification_input()
+    };
+    let raw = build_verification_event(&owner, RELAY_A, &input, 1).unwrap();
+    let artifact = validate_signed_artifact(&raw, &owner_pk, RELAY_A, &agent_pk).unwrap();
+    validate_archived_verification_sources(&conn, &owner, &artifact).unwrap();
+
+    assert!(
+        store::delete_save_subscription(&conn, &owner_pk, RELAY_A, "owner_p", &owner_pk).unwrap()
+    );
+    validate_archived_verification_sources(&conn, &owner, &artifact).unwrap();
+
+    conn.execute(
+        "DELETE FROM archived_event_scopes
+          WHERE identity_pubkey = ?1 AND relay_url = ?2 AND id = ?3
+            AND scope_type = 'owner_p' AND scope_value = ?1",
+        params![owner_pk, RELAY_A, event.id.to_hex()],
+    )
+    .unwrap();
+    assert!(
+        validate_archived_verification_sources(&conn, &owner, &artifact)
+            .unwrap_err()
+            .contains("is not archived")
+    );
 }
 
 #[test]

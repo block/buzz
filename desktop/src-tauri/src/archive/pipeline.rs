@@ -15,7 +15,10 @@ use rusqlite::Connection;
 use crate::app_state::AppState;
 use crate::relay::query_relay;
 
-use super::{store, validate_ephemeral_frame, ArchiveBatchResult, ArchiveCandidate, MatchedScope};
+use super::{
+    observer_time, store, validate_ephemeral_frame, ArchiveBatchResult, ArchiveCandidate,
+    MatchedScope,
+};
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -459,12 +462,13 @@ pub(super) fn commit_archive(
             // Write a status row regardless of outcome so backfill never
             // re-processes this frame (INSERT OR IGNORE on PK is a no-op if
             // the row is already present from a prior run).
-            let channel_id_for_index: Option<String> =
-                buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
-                    owner_keys, &p.event,
-                )
-                .ok()
-                .and_then(|v| v.get("channelId")?.as_str().map(|s| s.to_owned()));
+            let decoded = buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
+                owner_keys, &p.event,
+            )
+            .ok();
+            let channel_id_for_index: Option<String> = decoded
+                .as_ref()
+                .and_then(|value| value.get("channelId")?.as_str().map(str::to_owned));
             store::upsert_observer_channel_index(
                 &tx,
                 identity_pk,
@@ -472,6 +476,18 @@ pub(super) fn commit_archive(
                 eid,
                 channel_id_for_index.as_deref(),
                 p.event.created_at.as_secs() as i64,
+            )?;
+            let (observed_start_at, observed_end_at) = decoded
+                .as_ref()
+                .map(observer_time::bounds)
+                .unwrap_or((None, None));
+            observer_time::upsert(
+                &tx,
+                identity_pk,
+                relay_url,
+                eid,
+                observed_start_at,
+                observed_end_at,
             )?;
 
             persisted += 1;

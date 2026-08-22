@@ -22,6 +22,7 @@ mod archive_db;
 mod journal_authority;
 pub mod journal_authority_commands;
 mod metric_store;
+mod observer_time;
 mod pipeline;
 pub mod retention;
 pub mod store;
@@ -597,7 +598,9 @@ pub async fn read_archived_observer_events_for_channel(
         .await
 }
 
-/// Read a paginated owner-scoped observer page for a half-open time range.
+/// Read a paginated owner-scoped observer page whose decrypted inner observer
+/// timestamps overlap a half-open time range. Pagination still uses the signed
+/// envelope's stable `(created_at, id)` ordering.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchivedObserverRangeInput {
@@ -636,9 +639,15 @@ pub async fn read_archived_observer_events_for_range(
     }
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
+    let owner_keys = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
     state
         .archive_db
         .with_conn(move |conn| {
+            observer_time::backfill_missing(conn, &identity_pk, &relay_url, &owner_keys)?;
             store::read_archived_observer_events_for_range(
                 conn,
                 &identity_pk,
