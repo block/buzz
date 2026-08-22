@@ -8,6 +8,59 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test('refreshes the agent directory from live profile updates', () async {
+    final relaySession = _AgentDirectoryRelaySessionNotifier([
+      _agentProfileEvent(displayName: 'Old name'),
+      _agentProfileEvent(displayName: 'Johnny5'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      agentDirectoryProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(keepAlive.close);
+
+    expect(
+      (await container.read(agentDirectoryProvider.future)).single.displayName,
+      'Old name',
+    );
+    await relaySession.subscribed;
+    expect(relaySession.liveFilters.single.kinds, const [10100]);
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    expect(
+      relaySession.liveFilters.single.since,
+      inInclusiveRange(now - 6, now),
+    );
+
+    relaySession.emit(_agentProfileEvent(displayName: 'Johnny5'));
+    await _pumpEventQueue();
+
+    expect(
+      (await container.read(agentDirectoryProvider.future)).single.displayName,
+      'Johnny5',
+    );
+  });
+
+  test('disposes the live agent-directory subscription', () async {
+    final relaySession = _AgentDirectoryRelaySessionNotifier([
+      _agentProfileEvent(displayName: 'Johnny5'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    container.listen(agentDirectoryProvider, (_, _) {}, fireImmediately: true);
+
+    await container.read(agentDirectoryProvider.future);
+    await relaySession.subscribed;
+    container.dispose();
+
+    expect(relaySession.unsubscribeCount, 1);
+  });
+
   test('refreshes channel bot roles from live membership updates', () async {
     final relaySession = _MembershipRelaySessionNotifier([
       _membershipEvent(role: 'bot'),
@@ -155,6 +208,16 @@ NostrEvent _membershipEvent({required String role}) => NostrEvent(
   sig: 'sig',
 );
 
+NostrEvent _agentProfileEvent({required String displayName}) => NostrEvent(
+  id: 'agent-profile-$displayName',
+  pubkey: _agentPubkey,
+  createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+  kind: 10100,
+  tags: const [],
+  content: '{"display_name":"$displayName"}',
+  sig: 'sig',
+);
+
 Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
   await Future<void>.delayed(Duration.zero);
@@ -189,6 +252,54 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    liveFilters.add(filter);
+    final subscription = _LiveSubscription(filter, onEvent);
+    _subscriptions.add(subscription);
+    if (!_subscribed.isCompleted) _subscribed.complete();
+    return () {
+      unsubscribeCount++;
+      _subscriptions.remove(subscription);
+    };
+  }
+
+  void emit(NostrEvent event) {
+    for (final subscription in List.of(_subscriptions)) {
+      if (_matches(subscription.filter, event)) {
+        subscription.onEvent(event);
+      }
+    }
+  }
+}
+
+class _AgentDirectoryRelaySessionNotifier extends RelaySessionNotifier {
+  final List<NostrEvent> _profiles;
+  final List<NostrFilter> liveFilters = [];
+  final List<_LiveSubscription> _subscriptions = [];
+  final Completer<void> _subscribed = Completer<void>();
+  var _profileIndex = 0;
+  var unsubscribeCount = 0;
+
+  _AgentDirectoryRelaySessionNotifier(this._profiles);
+
+  Future<void> get subscribed => _subscribed.future;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    return [_profiles[_profileIndex++]];
+  }
+
+  @override
+  void Function() subscribeImmediately(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) {
     liveFilters.add(filter);
     final subscription = _LiveSubscription(filter, onEvent);
     _subscriptions.add(subscription);
