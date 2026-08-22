@@ -6,7 +6,7 @@
 //! pages from different archive states, and publishers can reject a projection
 //! if accepted evidence changed after reconstruction.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS observer_archive_revisions (
@@ -76,13 +76,52 @@ END;
 "#;
 
 pub(super) fn ensure_schema(conn: &Connection) -> Result<(), String> {
-    let tx = conn
-        .unchecked_transaction()
+    if schema_is_current(conn)? {
+        return Ok(());
+    }
+
+    // Serialise the migration across direct/cross-process opens, then recheck
+    // after winning the write lock. Normal connections take the read-only fast
+    // path above; they must not drop/recreate triggers on every open.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|error| format!("begin observer archive revision migration: {error}"))?;
-    tx.execute_batch(SCHEMA)
-        .map_err(|error| format!("initialize observer archive revision: {error}"))?;
+    if !schema_is_current(&tx)? {
+        tx.execute_batch(SCHEMA)
+            .map_err(|error| format!("initialize observer archive revision: {error}"))?;
+    }
     tx.commit()
         .map_err(|error| format!("commit observer archive revision migration: {error}"))
+}
+
+fn schema_is_current(conn: &Connection) -> Result<bool, String> {
+    let (table_count, trigger_count, insert_sql, delete_sql): (i64, i64, String, String) = conn
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'observer_archive_revisions'),
+               (SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'trigger' AND name IN (
+                   'observer_revision_event_insert',
+                   'observer_revision_event_delete',
+                   'observer_revision_scope_insert',
+                   'observer_revision_scope_delete',
+                   'observer_revision_time_insert',
+                   'observer_revision_time_update',
+                   'observer_revision_time_delete'
+                 )),
+               COALESCE((SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'observer_revision_scope_insert'), ''),
+               COALESCE((SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'observer_revision_scope_delete'), '')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|error| format!("inspect observer archive revision schema: {error}"))?;
+
+    Ok(table_count == 1
+        && trigger_count == 7
+        && insert_sql.contains("kind = 24200")
+        && delete_sql.contains("kind = 24200"))
 }
 
 pub(super) fn current(
