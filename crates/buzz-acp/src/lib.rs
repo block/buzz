@@ -3835,11 +3835,44 @@ fn dispatch_pending(
 /// False positives (misclassifying a transient error as non-retryable) silently
 /// drop a user message, which is worse than a false negative (extra retries on
 /// an auth error). Both patterns are therefore chosen for high precision.
+/// JSON-RPC code `buzz-agent` assigns to [`AgentError::LlmAuth`].
+///
+/// Defined in `buzz-agent/src/types.rs::json_rpc_code`. Duplicated rather than
+/// imported because `buzz-acp` drives *any* ACP agent and must not depend on
+/// `buzz-agent`. If that mapping ever changes, this must change with it — the
+/// test below pins the value so the break is loud.
+const ACP_LLM_AUTH_CODE: i64 = -32001;
+
+/// Is this error one that retrying cannot fix?
+///
+/// Classification is **structural first**: every `buzz-agent` provider reports
+/// an auth failure as `AgentError::LlmAuth`, which serialises to
+/// [`ACP_LLM_AUTH_CODE`]. That holds regardless of which LLM is behind it and
+/// regardless of how the provider words its message.
+///
+/// The prose checks are a fallback for external ACP agents (Claude Code,
+/// Codex) that do not use `buzz-agent`'s error type and identify themselves
+/// only in text.
+///
+/// This used to match on prose ALONE, and both patterns were Claude/Codex
+/// phrasings. On 2026-08-04 an expired xAI OAuth token surfaced as
+/// `llm auth: {"code":"unauthenticated:bad-credentials", ...}` — which matches
+/// neither — so the non-retryable fast path was skipped and the batch burned
+/// all 10 retries over ~26 minutes before being discarded. Three of the
+/// owner's messages were destroyed by an error the code already knew how to
+/// classify.
 fn is_auth_error(error: &acp::AcpError) -> bool {
-    let acp::AcpError::AgentError { message, .. } = error else {
+    let acp::AcpError::AgentError { code, message } = error else {
         return false;
     };
-    message.contains("Re-authenticate") || message.contains("API Error: 401")
+    if *code == ACP_LLM_AUTH_CODE {
+        return true;
+    }
+    message.contains("Re-authenticate")
+        || message.contains("API Error: 401")
+        // The Display prefix of AgentError::LlmAuth. Belt-and-braces for a
+        // transport that flattens the code to the generic -32000.
+        || message.contains("llm auth:")
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -3993,9 +4026,19 @@ fn handle_prompt_result(
                     events = batch.events.len(),
                     "dead-lettering batch immediately — non-retryable auth error"
                 );
-                let content = "⚠️ I couldn't process the last request: authentication failed. \
-                    Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
+                // Provider-agnostic wording. The old text named `claude /login`
+                // and `codex login` specifically, which is wrong advice for
+                // every other backend — an xAI/OpenAI-compat agent has no such
+                // command, and this is the one message a user sees when auth
+                // breaks, so naming the wrong remedy is worse than naming none.
+                //
+                // Says "re-send" rather than apologising for lost data: the
+                // events are Nostr messages that remain on the relay. What was
+                // dropped is this agent's queued intent to answer, not the
+                // message, and the notice should not imply otherwise.
+                let content = "⚠️ I couldn't process the last request: authentication with the \
+                    model provider failed. Your message is still in this channel — re-send it \
+                    (or mention me again) once the credentials have been renewed."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
@@ -8284,6 +8327,63 @@ mod error_outcome_emission_tests {
         assert!(
             !is_auth_error(&timeout),
             "WriteTimeout must not be classified as auth error"
+        );
+    }
+
+    /// The exact payload that went unclassified on 2026-08-04 and cost three
+    /// of the owner's messages. xAI OAuth via the openai-compat provider —
+    /// matches neither "Re-authenticate" nor "API Error: 401".
+    #[test]
+    fn is_auth_error_matches_xai_oauth_rejection() {
+        let e = acp::AcpError::AgentError {
+            code: ACP_LLM_AUTH_CODE,
+            message: r#"llm auth: {"code":"unauthenticated:bad-credentials","error":"The OAuth2 access token could not be validated."}"#
+                .to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "xAI OAuth rejection must be classified as auth error — this is the \
+             2026-08-04 regression, where it burned 10 retries and discarded the batch"
+        );
+    }
+
+    /// The code alone must be sufficient: a provider whose prose we have never
+    /// seen still classifies correctly.
+    #[test]
+    fn is_auth_error_matches_on_code_with_unknown_prose() {
+        let e = acp::AcpError::AgentError {
+            code: ACP_LLM_AUTH_CODE,
+            message: "clé API refusée par le fournisseur".to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "the structured LlmAuth code must classify regardless of message wording"
+        );
+    }
+
+    /// Pins the cross-crate contract. `buzz-acp` cannot depend on `buzz-agent`,
+    /// so this value is duplicated; if `json_rpc_code` ever remaps LlmAuth,
+    /// this test is the thing that notices.
+    #[test]
+    fn acp_llm_auth_code_matches_buzz_agent_mapping() {
+        assert_eq!(
+            ACP_LLM_AUTH_CODE, -32001,
+            "must match buzz-agent/src/types.rs AgentError::LlmAuth => -32001"
+        );
+    }
+
+    /// A non-auth agent error keeps the retry path — retrying IS the right
+    /// answer for a transient provider blip, and misclassifying it as auth
+    /// would discard events that would have succeeded.
+    #[test]
+    fn is_auth_error_rejects_generic_llm_failure() {
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "llm: upstream returned 503 Service Unavailable".to_string(),
+        };
+        assert!(
+            !is_auth_error(&e),
+            "a transient 503 must stay retryable — only auth is non-retryable"
         );
     }
 
