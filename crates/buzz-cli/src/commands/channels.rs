@@ -22,6 +22,7 @@ fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
@@ -40,10 +41,12 @@ pub async fn cmd_list_channels(
         let member_events = client
             .query_paginated(member_filter, effective_limit)
             .await?;
+        let mut seen_channel_ids = HashSet::new();
         let channel_ids: Vec<String> = member_events
             .iter()
             .map(extract_d_tag)
             .filter(|id| !id.is_empty())
+            .filter(|id| seen_channel_ids.insert(id.clone()))
             .collect();
         if channel_ids.is_empty() {
             println!("[]");
@@ -108,6 +111,52 @@ pub async fn cmd_list_channels(
         crate::OutputFormat::Json => serde_json::to_string(&channels).unwrap_or_default(),
     };
     println!("{output}");
+    Ok(())
+}
+
+async fn cmd_list_channels_reusable(
+    client: &buzz_client::BuzzClient,
+    visibility: Option<&str>,
+    member: bool,
+    limit: Option<u32>,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
+    let visibility = visibility.map(|value| match value {
+        "open" => buzz_client::ChannelVisibility::Open,
+        _ => buzz_client::ChannelVisibility::Private,
+    });
+    let channels = client
+        .list_channels(buzz_client::ListChannelsRequest {
+            scope: if member {
+                buzz_client::ChannelScope::Member
+            } else {
+                buzz_client::ChannelScope::Visible
+            },
+            visibility,
+            limit: limit.unwrap_or(500),
+        })
+        .await
+        .map_err(crate::client_adapter::map_client_error)?;
+    let output: Vec<serde_json::Value> = channels
+        .into_iter()
+        .map(|channel| match format {
+            crate::OutputFormat::Compact => serde_json::json!({
+                "channel_id": channel.channel_id,
+                "name": channel.name,
+            }),
+            crate::OutputFormat::Json => serde_json::json!({
+                "channel_id": channel.channel_id,
+                "name": channel.name,
+                "description": channel.description.unwrap_or_default(),
+                "created_at": channel.created_at,
+            }),
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string(&output)
+            .map_err(|error| CliError::Other(format!("channel serialization failed: {error}")))?
+    );
     Ok(())
 }
 
@@ -1080,9 +1129,9 @@ pub async fn cmd_set_canvas(
     Ok(())
 }
 
-pub async fn dispatch(
+pub async fn dispatch_reusable(
     cmd: crate::ChannelsCmd,
-    client: &BuzzClient,
+    client: &buzz_client::BuzzClient,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     use crate::ChannelsCmd;
@@ -1093,8 +1142,20 @@ pub async fn dispatch(
             limit,
         } => {
             let vis_str = visibility.as_ref().map(|v| v.to_string());
-            cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
+            cmd_list_channels_reusable(client, vis_str.as_deref(), member, limit, format).await
         }
+        _ => Err(CliError::Other(
+            "only channels list is routed through the reusable client".into(),
+        )),
+    }
+}
+
+pub async fn dispatch(cmd: crate::ChannelsCmd, client: &BuzzClient) -> Result<(), CliError> {
+    use crate::ChannelsCmd;
+    match cmd {
+        ChannelsCmd::List { .. } => Err(CliError::Other(
+            "channels list must be routed before legacy client construction".into(),
+        )),
         ChannelsCmd::Get { channel } => cmd_get_channel(client, &channel).await,
         ChannelsCmd::Search {
             query,
@@ -1196,7 +1257,7 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, build_template_report, cmd_set_add_policy,
+        apply_cardinality_rule, build_template_report, cmd_list_channels, cmd_set_add_policy,
         finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
         ResolvedAgent, RosterResolution, SkippedSlug,
@@ -1207,6 +1268,80 @@ mod tests {
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
+    }
+
+    #[tokio::test]
+    async fn list_member_channels_deduplicates_metadata_filter_ids() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        type Requests = Arc<Mutex<Vec<serde_json::Value>>>;
+
+        async fn query(
+            State(requests): State<Requests>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let request_index = requests.lock().expect("request lock").len();
+            requests.lock().expect("request lock").push(body);
+            let channel_id = "11111111-1111-1111-1111-111111111111";
+            let response = if request_index == 0 {
+                json!([
+                    {
+                        "id": "a".repeat(64),
+                        "created_at": 2,
+                        "tags": [["d", channel_id]],
+                    },
+                    {
+                        "id": "b".repeat(64),
+                        "created_at": 1,
+                        "tags": [["d", channel_id]],
+                    }
+                ])
+            } else {
+                json!([{
+                    "id": "c".repeat(64),
+                    "created_at": 3,
+                    "tags": [["d", channel_id], ["name", "general"], ["public"]],
+                }])
+            };
+            Json(response)
+        }
+
+        let requests: Requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/query", post(query))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+
+        let keys = nostr::Keys::generate();
+        let client =
+            BuzzClient::new(format!("http://{address}"), keys, None, None).expect("test client");
+        cmd_list_channels(
+            &client,
+            None,
+            Some(true),
+            Some(10),
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .expect("channel list");
+
+        let captured = requests.lock().expect("request lock");
+        assert_eq!(captured.len(), 2, "membership and metadata queries");
+        assert_eq!(
+            captured[1][0]["#d"],
+            json!(["11111111-1111-1111-1111-111111111111"]),
+            "the metadata query must preserve the stable contract without duplicate channel ids"
+        );
     }
 
     #[test]
