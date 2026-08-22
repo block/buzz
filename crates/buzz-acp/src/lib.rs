@@ -2097,6 +2097,12 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let implicitly_addressed_channels: HashSet<Uuid> = channel_info_map
+        .iter()
+        .filter_map(|(channel_id, info)| {
+            matches!(info.channel_type.as_str(), "dm" | "unknown").then_some(*channel_id)
+        })
+        .collect();
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
@@ -2135,7 +2141,12 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters = config::resolve_channel_filters_with_implicit_mentions(
+        &config,
+        &channel_ids,
+        &rules,
+        &implicitly_addressed_channels,
+    );
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2689,15 +2700,26 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
-                                        if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
-                                            tracing::warn!("failed to subscribe to new channel {ch}: {e}");
-                                        } else {
-                                            subscribed_channel_ids.insert(ch);
-                                        }
                                     } else {
-                                        tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        let mention_is_implicit = matches!(
+                                            config.subscribe_mode,
+                                            SubscribeMode::Mentions
+                                        ) && is_dm_channel(ch, &ctx.channel_info).await;
+                                        if let Some(filter) = config::resolve_dynamic_channel_filter_with_implicit_mention(
+                                            &config,
+                                            ch,
+                                            &rules,
+                                            mention_is_implicit,
+                                        ) {
+                                            tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
+                                            if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
+                                                tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                            } else {
+                                                subscribed_channel_ids.insert(ch);
+                                            }
+                                        } else {
+                                            tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        }
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
@@ -2865,13 +2887,13 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let is_dm =
+                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2893,8 +2915,18 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let mention_is_implicit =
+                                is_dm && matches!(config.subscribe_mode, SubscribeMode::Mentions);
+                            let matched = filter::match_event_with_implicit_mention(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                mention_is_implicit,
+                            )
+                            .await;
                             let prompt_tag = match matched {
+                                Some(_) if mention_is_implicit => "dm".to_string(),
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
