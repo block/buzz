@@ -13,6 +13,7 @@ import 'channel_management_provider.dart'
     show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'huddle_channel_filter.dart';
+import 'mentions/mention_ack_store.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
@@ -763,6 +764,17 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   void _handleLiveEvent(NostrEvent event) {
+    // NIP-MR: acks must resolve wherever they land. This handler spans every
+    // live channel, so an ack is consumed before any channel-visibility or
+    // unread work — mirroring desktop's ordering in useLiveChannelUpdates.ts.
+    // Applied idempotently, so double delivery is harmless. Returning here also
+    // guarantees 44102 never reaches the unread/last-message path below: an ack
+    // must never bump a badge, reorder channels, or change the preview.
+    if (event.kind == EventKind.agentMentionAck) {
+      ref.read(mentionAckStoreProvider.notifier).applyAck(event);
+      return;
+    }
+
     final channelId = event.channelId;
     if (channelId == null) return;
 
