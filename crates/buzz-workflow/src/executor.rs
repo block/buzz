@@ -843,15 +843,37 @@ async fn check_ssrf(host: &str, port: u16) -> Result<std::net::IpAddr, WorkflowE
 
     debug!("Resolved webhook host '{}' → {:?}", host, addrs);
 
-    for ip in &addrs {
-        if buzz_core::network::is_private_ip(ip) {
+    ssrf_verdict(
+        host,
+        &addrs,
+        &std::env::var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS").unwrap_or_default(),
+    )
+}
+
+#[cfg(feature = "reqwest")]
+fn ssrf_verdict(
+    host: &str,
+    addrs: &[std::net::IpAddr],
+    allowed_spec: &str,
+) -> Result<std::net::IpAddr, WorkflowError> {
+    let (allowed, dropped) = buzz_core::network::parse_allowed_cidrs(allowed_spec);
+    if !dropped.is_empty() {
+        tracing::warn!(
+            "BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS: dropping malformed entries {:?}",
+            dropped
+        );
+    }
+    for ip in addrs {
+        if buzz_core::network::is_blocked_ip(ip, &allowed) {
             return Err(WorkflowError::WebhookError(format!(
-                "SSRF blocked: '{host}' resolved to private/reserved address {ip}"
+                "SSRF blocked: '{host}' resolved to private/reserved address {ip} (allow it with BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS)"
             )));
         }
     }
-
-    Ok(addrs[0])
+    addrs
+        .first()
+        .copied()
+        .ok_or_else(|| WorkflowError::WebhookError("DNS resolution returned no addresses".into()))
 }
 
 /// Maximum response body size for webhook calls (1 MiB).
@@ -1956,6 +1978,57 @@ mod tests {
             err.to_string().contains("channel override must match"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "reqwest")]
+    fn ssrf_verdict_empty_blocks_cgnat() {
+        let ip: std::net::IpAddr = "100.64.1.5".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "").is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "reqwest")]
+    fn ssrf_verdict_allows_cgnat_with_spec() {
+        let ip: std::net::IpAddr = "100.64.1.5".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "reqwest")]
+    fn ssrf_verdict_still_blocks_other_private() {
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "reqwest")]
+    fn ssrf_verdict_public_passes() {
+        let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(ssrf_verdict("example.com", &[ip], "").is_ok());
+        assert!(ssrf_verdict("example.com", &[ip], "100.64.0.0/10").is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "reqwest")]
+    fn ssrf_verdict_empty_addrs_is_err() {
+        assert!(ssrf_verdict("example.com", &[], "").is_err());
+    }
+
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn check_ssrf_reads_allowlist_env_var() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        std::env::remove_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS");
+        assert!(rt.block_on(check_ssrf("127.0.0.1", 80)).is_err());
+        std::env::set_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS", "127.0.0.0/8");
+        assert!(rt.block_on(check_ssrf("127.0.0.1", 80)).is_ok());
+        std::env::remove_var("BUZZ_WORKFLOW_WEBHOOK_ALLOWED_CIDRS");
     }
 
     #[test]
