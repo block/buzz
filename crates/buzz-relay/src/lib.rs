@@ -44,6 +44,9 @@ pub mod subscription;
 pub mod telemetry;
 /// Row-zero host binding: resolve the request community from the connection host.
 pub mod tenant;
+/// Crate-wide env lock + restore guard for tests that touch process env.
+#[cfg(test)]
+pub(crate) mod test_env;
 /// Relay-side tunnel session directory and routing.
 pub mod tunnel;
 /// Webhook secret generation and constant-time comparison.

@@ -660,7 +660,10 @@ mod tests {
     /// Build a closed-relay (`require_relay_membership = true`) test state with
     /// a fresh community on `host`; returns `None` when Postgres is unavailable.
     async fn invite_test_state(host: &str) -> Option<Arc<AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = {
+            let _env = crate::test_env::EnvGuard::new();
+            crate::config::Config::from_env().ok()?
+        };
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());

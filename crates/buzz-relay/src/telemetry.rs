@@ -278,10 +278,6 @@ mod tests {
     };
     use tracing_subscriber::prelude::*;
 
-    // Env vars are process-global — serialize tests that mutate them to prevent
-    // cross-test races when the suite runs with multiple threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     // Helper: read service.name from the Resource's schema_url-independent KV list.
     fn service_name_from(resource: &Resource) -> Option<String> {
         resource
@@ -495,9 +491,9 @@ mod tests {
 
     #[test]
     fn test_service_resource_default_when_env_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OTEL_SERVICE_NAME");
-        std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove_now("OTEL_SERVICE_NAME");
+        env.remove_now("OTEL_RESOURCE_ATTRIBUTES");
 
         let r = service_resource();
         assert_eq!(
@@ -509,12 +505,11 @@ mod tests {
 
     #[test]
     fn test_service_resource_honors_otel_service_name() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("OTEL_SERVICE_NAME", "my-custom-relay");
-        std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("OTEL_SERVICE_NAME", "my-custom-relay");
+        env.remove_now("OTEL_RESOURCE_ATTRIBUTES");
 
         let r = service_resource();
-        std::env::remove_var("OTEL_SERVICE_NAME");
 
         assert_eq!(
             service_name_from(&r).as_deref(),
@@ -525,12 +520,11 @@ mod tests {
 
     #[test]
     fn test_service_resource_empty_string_falls_back_to_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("OTEL_SERVICE_NAME", "");
-        std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("OTEL_SERVICE_NAME", "");
+        env.remove_now("OTEL_RESOURCE_ATTRIBUTES");
 
         let r = service_resource();
-        std::env::remove_var("OTEL_SERVICE_NAME");
 
         assert_eq!(
             service_name_from(&r).as_deref(),
@@ -541,8 +535,8 @@ mod tests {
 
     #[test]
     fn test_try_init_tracer_disabled_when_endpoint_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove_now("OTEL_EXPORTER_OTLP_ENDPOINT");
 
         let resource = Resource::builder_empty()
             .with_attribute(KeyValue::new("service.name", "test"))
