@@ -159,15 +159,9 @@ export function AgentDefinitionDialog({
   // The seed the draft is diffed against at submit: an untouched quad
   // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
-  // Tracks when the runtime was auto-seeded by the default-runtime effect in
-  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
-  // the seeded runtime from the submit payload for builtin definitions whose
-  // canonical runtime is null — the sync would revert it anyway.
+  // Tracks when the runtime was auto-seeded (not an explicit user choice).
   const isRuntimeAutoSeededRef = React.useRef(false);
   // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -509,7 +503,7 @@ export function AgentDefinitionDialog({
     !isAvatarUploadPending;
 
   // Merge global env as the base layer so credential keys satisfied via global
-  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
+  // config are available to model discovery — same rationale as in AgentEditMergedDialog.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...envVars }),
     [globalConfig.env_vars, envVars],

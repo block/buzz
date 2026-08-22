@@ -5,7 +5,6 @@ import {
   canSubmitPersonaDialog,
   createPersonaDialogState,
   duplicatePersonaDialogState,
-  editPersonaDialogState,
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
 } from "./personaDialogState.ts";
@@ -123,99 +122,6 @@ test("duplicatePersonaDialogState carries envVars and namePool into the duplicat
   assert.deepEqual(state.initialValues.namePool, ["alice", "bob"]);
 });
 
-test("editPersonaDialogState preserves the persona id for updates", () => {
-  const state = editPersonaDialogState({
-    id: "persona-2",
-    displayName: "Kit",
-    avatarUrl: null,
-    systemPrompt: "Keep it weird.",
-    runtime: null,
-    model: null,
-    provider: null,
-    isBuiltIn: true,
-    isActive: true,
-    createdAt: "2025-01-01T00:00:00Z",
-    updatedAt: "2025-01-02T00:00:00Z",
-  });
-
-  assert.equal(state.title, "Edit agent");
-  assert.equal(state.description, "");
-  assert.equal(state.submitLabel, "Save changes");
-  assert.deepEqual(state.initialValues, {
-    id: "persona-2",
-    displayName: "Kit",
-    avatarUrl: "",
-    systemPrompt: "Keep it weird.",
-    runtime: undefined,
-    model: undefined,
-    provider: undefined,
-    namePool: [],
-    envVars: {},
-  });
-});
-
-test("editPersonaDialogState seeds envVars and namePool from the persona", () => {
-  const state = editPersonaDialogState({
-    id: "persona-3",
-    displayName: "Coder",
-    avatarUrl: null,
-    systemPrompt: "Write code.",
-    runtime: null,
-    model: null,
-    isBuiltIn: false,
-    isActive: true,
-    namePool: ["alice", "bob"],
-    envVars: { ANTHROPIC_API_KEY: "sk-test" },
-    createdAt: "2025-01-01T00:00:00Z",
-    updatedAt: "2025-01-02T00:00:00Z",
-  });
-
-  assert.deepEqual(state.initialValues.envVars, {
-    ANTHROPIC_API_KEY: "sk-test",
-  });
-  assert.deepEqual(state.initialValues.namePool, ["alice", "bob"]);
-});
-
-test("editPersonaDialogState preserves provider=databricks", () => {
-  const state = editPersonaDialogState({
-    id: "persona-provider",
-    displayName: "DB Agent",
-    avatarUrl: null,
-    systemPrompt: "Use databricks.",
-    runtime: "goose",
-    model: "dbrx",
-    provider: "databricks",
-    isBuiltIn: false,
-    isActive: true,
-    namePool: [],
-    envVars: {},
-    createdAt: "2025-01-01T00:00:00Z",
-    updatedAt: "2025-01-02T00:00:00Z",
-  });
-
-  assert.equal(state.initialValues.provider, "databricks");
-});
-
-test("editPersonaDialogState maps provider=null to undefined", () => {
-  const state = editPersonaDialogState({
-    id: "persona-no-provider",
-    displayName: "Plain",
-    avatarUrl: null,
-    systemPrompt: "No provider.",
-    runtime: null,
-    model: null,
-    provider: null,
-    isBuiltIn: false,
-    isActive: true,
-    namePool: [],
-    envVars: {},
-    createdAt: "2025-01-01T00:00:00Z",
-    updatedAt: "2025-01-02T00:00:00Z",
-  });
-
-  assert.equal(state.initialValues.provider, undefined);
-});
-
 test("duplicatePersonaDialogState preserves provider=databricks", () => {
   const state = duplicatePersonaDialogState({
     id: "persona-dup-provider",
@@ -236,7 +142,7 @@ test("duplicatePersonaDialogState preserves provider=databricks", () => {
   assert.equal(state.initialValues.provider, "databricks");
 });
 
-test("edit and duplicate seed the behavior group from a quad-bearing persona", () => {
+test("duplicate seeds the behavior group from a quad-bearing persona", () => {
   const persona = {
     id: "persona-quad",
     displayName: "Gated",
@@ -260,47 +166,13 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     parallelism: 4,
   };
   assert.deepEqual(
-    editPersonaDialogState(persona).initialValues.behavior,
-    expected,
-  );
-  assert.deepEqual(
     duplicatePersonaDialogState(persona).initialValues.behavior,
     expected,
   );
 });
 
-test("a linked instance overrides stale definition access in the edit dialog", () => {
-  const persona = {
-    id: "persona-instance-access",
-    displayName: "Shared",
-    avatarUrl: null,
-    systemPrompt: "Shared.",
-    runtime: null,
-    model: null,
-    provider: null,
-    isBuiltIn: false,
-    isActive: true,
-    respondTo: "owner-only",
-    respondToAllowlist: [],
-    parallelism: 2,
-    createdAt: "2025-01-01T00:00:00Z",
-    updatedAt: "2025-01-02T00:00:00Z",
-  };
-
-  const state = editPersonaDialogState(persona, {
-    respondTo: "allowlist",
-    respondToAllowlist: ["c".repeat(64)],
-  });
-
-  assert.deepEqual(state.initialValues.behavior, {
-    respondTo: "allowlist",
-    respondToAllowlist: ["c".repeat(64)],
-    parallelism: 2,
-  });
-});
-
-test("a non-allowlist mode does not seed a stale allowlist into the dialog", () => {
-  const state = editPersonaDialogState({
+test("duplicate non-allowlist mode does not seed a stale allowlist into the dialog", () => {
+  const state = duplicatePersonaDialogState({
     id: "persona-mode-flip",
     displayName: "Open",
     avatarUrl: null,

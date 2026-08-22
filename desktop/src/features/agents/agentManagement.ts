@@ -148,3 +148,35 @@ export function createInputFromRequest(
     systemPrompt: request.request.systemPrompt,
   };
 }
+
+/** Definition-field pre-fill (R6 review mode) carried into the merged edit dialog. */
+export type AgentReviewOverrides = Partial<{
+  displayName: string;
+  systemPrompt: string;
+  runtime: string | undefined;
+  provider: string | undefined;
+  model: string | undefined;
+  respondTo: string | undefined;
+}>;
+
+/**
+ * Maps an agent-origin update request to the definition-field overrides the
+ * merged edit dialog pre-fills in R6 owner-review mode. Only fields the agent
+ * actually requested are carried; an empty result yields `undefined` so the
+ * dialog seeds purely from the definition.
+ */
+export function reviewOverridesForUpdate(
+  request: Extract<AgentManagementRequest, { action: "update" }>["request"],
+): AgentReviewOverrides | undefined {
+  const overrides: AgentReviewOverrides = {};
+  if (request.displayName != null) overrides.displayName = request.displayName;
+  if (request.systemPrompt != null)
+    overrides.systemPrompt = request.systemPrompt;
+  if (request.runtime != null) overrides.runtime = request.runtime;
+  if (request.provider != null) overrides.provider = request.provider;
+  if (request.model != null) overrides.model = request.model;
+  // Carry agent-requested respondTo into definition-only review mode so the
+  // owner sees and can modify the very access change under review.
+  if (request.respondTo != null) overrides.respondTo = request.respondTo;
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
+}

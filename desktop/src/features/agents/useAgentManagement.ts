@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   createInputFromRequest,
   requestTargetsEditablePersona,
+  reviewOverridesForUpdate,
   type AgentManagementRequest,
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
@@ -27,35 +28,10 @@ import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
-import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-
-function updateInputFromRequest(
-  request: Extract<AgentManagementRequest, { action: "update" }>,
-  current: UpdatePersonaInput,
-): UpdatePersonaInput {
-  const changes = request.request;
-  return {
-    ...current,
-    displayName: changes.displayName ?? current.displayName,
-    systemPrompt: changes.systemPrompt ?? current.systemPrompt,
-    runtime: changes.runtime ?? current.runtime,
-    provider: changes.provider ?? current.provider,
-    model: changes.model ?? current.model,
-    ...(changes.respondTo
-      ? {
-          behavior: {
-            respondTo: changes.respondTo,
-            respondToAllowlist: [],
-            parallelism: current.behavior?.parallelism,
-          },
-        }
-      : {}),
-  };
-}
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -237,28 +213,6 @@ export function useAgentManagement() {
     }
   }
 
-  async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
-    if (request?.action !== "update" || !("id" in input)) {
-      return false;
-    }
-    setError(null);
-    try {
-      assertAgentCanActFromOrigin(request.request.channelId);
-      await updatePersonaMutation.mutateAsync(input);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: personasQueryKey }),
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-      ]);
-      dismiss();
-      return true;
-    } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "Could not save this agent.",
-      );
-      return false;
-    }
-  }
-
   function dismiss() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
@@ -270,15 +224,6 @@ export function useAgentManagement() {
       request?.action === "create" ? createInputFromRequest(request) : null,
     [request],
   );
-
-  const editInitialValues = React.useMemo(() => {
-    if (request?.action !== "update" || !currentPersona) return null;
-    return updateInputFromRequest(
-      request,
-      editPersonaDialogState(currentPersona)
-        .initialValues as UpdatePersonaInput,
-    );
-  }, [currentPersona, request]);
 
   const editError = React.useMemo(() => {
     if (request?.action !== "update") return error;
@@ -294,8 +239,8 @@ export function useAgentManagement() {
 
   return {
     request,
+    currentPersona,
     createInitialValues,
-    editInitialValues,
     editError,
     error,
     ...createdAgentAttachment,
@@ -307,7 +252,23 @@ export function useAgentManagement() {
         ? ("error" as const)
         : ("ready" as const),
     submitCreate,
-    submitUpdate,
     dismiss,
+    /** Returns an error string if the requesting agent lacks origin permission, null if OK. */
+    verifyOriginPermission(): string | null {
+      if (request?.action !== "update") return null;
+      try {
+        assertAgentCanActFromOrigin(request.request.channelId);
+        return null;
+      } catch (cause) {
+        return cause instanceof Error
+          ? cause.message
+          : "Origin permission check failed.";
+      }
+    },
+    /** Returns agent-requested field changes for R6 review mode pre-fill (overrides for the merged dialog). */
+    get reviewOverrides() {
+      if (request?.action !== "update" || !currentPersona) return undefined;
+      return reviewOverridesForUpdate(request.request);
+    },
   };
 }

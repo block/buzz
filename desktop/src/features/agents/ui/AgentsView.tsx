@@ -8,6 +8,7 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
+import { AgentEditDialog } from "./AgentEditDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -311,6 +312,54 @@ export function AgentsView() {
             }
           }}
           open={agents.agentToAddToChannel !== null}
+        />
+      ) : null}
+      {/* R5: edit route collapses to merged surface (definition-only context) */}
+      {personas.personaToEdit ? (
+        <AgentEditDialog
+          ctx={{ kind: "definition-only", definition: personas.personaToEdit }}
+          isIdentityArchived={false}
+          linkedInstanceCount={
+            (agents.managedAgents ?? []).filter(
+              (a) => a.personaId === personas.personaToEdit?.id,
+            ).length
+          }
+          onDeleteDefinition={
+            !personas.personaToEdit.isBuiltIn
+              ? () => {
+                  const p = personas.personaToEdit;
+                  if (p) personas.openDelete(p);
+                }
+              : undefined
+          }
+          onOpenChange={(open) => {
+            if (!open) personas.setPersonaToEdit(null);
+          }}
+          onRemoveFromMyAgents={
+            personas.personaToEdit.isBuiltIn
+              ? () => {
+                  const p = personas.personaToEdit;
+                  if (p) {
+                    void personas.handleDelete(p);
+                    personas.setPersonaToEdit(null);
+                  }
+                }
+              : undefined
+          }
+          onShare={
+            !personas.personaToEdit.isBuiltIn
+              ? () => {
+                  const p = personas.personaToEdit;
+                  if (!p) return;
+                  const linked = (agents.managedAgents ?? []).find(
+                    (a) => a.personaId === p.id,
+                  );
+                  personas.openShare(p, linked, p.avatarUrl ?? null);
+                  personas.setPersonaToEdit(null);
+                }
+              : undefined
+          }
+          open={personas.personaToEdit !== null}
         />
       ) : null}
       {personas.personaDialogState ? (

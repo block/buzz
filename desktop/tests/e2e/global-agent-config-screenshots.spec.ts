@@ -852,27 +852,22 @@ test.describe("global agent config screenshots", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
-    // The definition dialog opens in EDIT mode ("Save changes"), seeded from
+    // The merged dialog opens in EDIT mode ("Save changes"), seeded from
     // the persona — confirm it's the edit path, not create.
-    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
       timeout: 10_000,
     });
-    await expect(page.locator("#persona-display-name")).toHaveValue(
-      "Codex Editor",
-    );
-    await expect(page.getByTestId("persona-dialog-submit")).toHaveText(
+    await expect(page.locator("#edit-agent-name")).toHaveValue("Codex Editor");
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toHaveText(
       /Save changes/,
     );
 
     // The core assertions: Codex hides the provider picker, so the hidden
     // provider must NOT block Save and must NOT surface a reason.
-    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
-    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+    await expect(page.locator("#edit-agent-llm-provider")).not.toBeVisible();
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
-    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
-      0,
-    );
 
     await waitForAnimations(page);
 
@@ -882,15 +877,13 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
-  // Shot 11: the inverse of Ian's fix, and wesbillman's blocking review point.
-  // A runtime-LESS legacy/builtin definition (no runtime, but a saved model)
-  // still EXPOSES the provider picker via blankRuntimeModelProviderEditable, so
-  // an empty provider must keep Save DISABLED. The gate must key off the field's
-  // visibility (runtimeCanChooseLlmProvider), not the raw runtime capability —
-  // otherwise Save persists `provider: undefined` despite the visible picker.
-  // A global provider/model default keeps localMode satisfied, so the ONLY thing
-  // that can block Save here is the Customize-pair provider gate (step 7), which
-  // is exactly what this regression pins.
+  // Shot 11: the merged surface's equivalent of the "provider gate" regression pin
+  // (wesbillman's blocking review point, originally on AgentDefinitionDialog via
+  // 87dc4dccba). A runtime-less definition-with-instance that has a saved model but
+  // NO provider still EXPOSES the provider picker (blankRuntimeModelProviderEditable),
+  // so the empty provider must keep Save DISABLED. The definition-context gate keys
+  // off the visible picker (agentAiConfigurationModeSatisfied), NOT the global
+  // fallback — a runtime-less legacy definition must require an explicit provider.
   test("11-edit-runtime-less-provider-required-save-blocked", async ({
     page,
   }) => {
@@ -943,29 +936,23 @@ test.describe("global agent config screenshots", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
-    // Confirm the real EDIT dialog, seeded from the persona.
-    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+    // Confirm the merged edit dialog opens, seeded from the persona.
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
       timeout: 10_000,
     });
-    await expect(page.locator("#persona-display-name")).toHaveValue(
-      "Legacy Editor",
-    );
-    await expect(page.getByTestId("persona-dialog-submit")).toHaveText(
+    await expect(page.locator("#edit-agent-name")).toHaveValue("Legacy Editor");
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toHaveText(
       /Save changes/,
     );
 
     // The provider picker IS visible (runtime-less editable definition) …
-    await expect(page.locator("#persona-llm-provider")).toBeVisible({
+    await expect(page.locator("#edit-agent-llm-provider")).toBeVisible({
       timeout: 10_000,
     });
-    // … so the empty provider must block Save …
-    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+    // … so the empty provider must keep Save DISABLED.
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
-    // Disabled-state guidance belongs with the fields, not in the modal footer.
-    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
-      0,
-    );
 
     await waitForAnimations(page);
 

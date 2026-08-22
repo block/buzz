@@ -3,18 +3,12 @@ import * as React from "react";
 import type {
   AcpRuntimeCatalogEntry,
   CreatePersonaInput,
-  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import {
-  runLocationForBackend,
-  runLocationForRunOn,
-} from "../lib/agentAccessWarning";
+import { runLocationForRunOn } from "../lib/agentAccessWarning";
 import { AgentRunLocationProvider } from "./AgentRunLocationContext";
 import type { BackendIntent } from "../lib/instanceInputForDefinition";
 import type { AgentCreateIntent } from "./agentCreateIntent";
-import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
-import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import {
   AgentDefinitionDialog,
@@ -45,22 +39,6 @@ type AgentDialogCreateProps = {
   ) => Promise<boolean>;
 };
 
-type AgentDialogInstanceEditProps = {
-  mode: "instance-edit";
-  agent: ManagedAgent;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onUpdated?: (agent: ManagedAgent) => void;
-  initialFocus?: EditAgentFocusTarget;
-  /**
-   * Called when the user clicks "Edit avatar" inside the instance-edit dialog.
-   * Caller (UserProfilePanel) is responsible for closing this dialog and
-   * opening the definition-edit dialog. Only passed when the linked definition
-   * is editable (non-built-in, resolved).
-   */
-  onEditLinkedPersona?: () => void;
-};
-
 type AgentDialogDefinitionEditProps = {
   mode: "definition-edit";
   open: boolean;
@@ -80,39 +58,17 @@ type AgentDialogDefinitionEditProps = {
   publishCatalogUpdatesOnSave?: boolean;
 };
 
-type AgentDialogProps =
-  | AgentDialogCreateProps
-  | AgentDialogInstanceEditProps
-  | AgentDialogDefinitionEditProps;
+type AgentDialogProps = AgentDialogCreateProps | AgentDialogDefinitionEditProps;
 
 /**
  * Unified entry point (Phase 1B.2/1B.3b/1B.3c): routes an intent to the form
  * that owns it. The definition family renders AgentDefinitionDialog — create
  * mode always starts the agent and includes a WhereToRunSection;
  * definition-edit passes the caller's PersonaDialogState-derived props
- * through unchanged (edit/duplicate/import). instance-edit renders
- * AgentInstanceEditDialog (persistent mount + `open` toggle — its reset
- * lifecycle is keyed on [open, agent.pubkey]).
+ * through unchanged (duplicate/import). Edit routes use AgentEditDialog
+ * → AgentEditMergedDialog (one merged surface for all R1–R7 contexts).
  */
 export function AgentDialog(props: AgentDialogProps) {
-  if (props.mode === "instance-edit") {
-    return (
-      // A running instance knows its own backend, so the respond-to warning can
-      // name the machine it will actually run on.
-      <AgentRunLocationProvider
-        runLocation={runLocationForBackend(props.agent.backend)}
-      >
-        <AgentInstanceEditDialog
-          agent={props.agent}
-          onEditLinkedPersona={props.onEditLinkedPersona}
-          onOpenChange={props.onOpenChange}
-          onUpdated={props.onUpdated}
-          open={props.open}
-          initialFocus={props.initialFocus}
-        />
-      </AgentRunLocationProvider>
-    );
-  }
   if (props.mode === "definition-edit") {
     // A definition has no instance and no run draft, so the run location stays
     // unknown and the warning uses its local-wording fallback.

@@ -153,7 +153,7 @@ with a TypeScript lookup table or an id comparison in a component.
    place that resolves it for dialog surfaces and publishes it through
    `ui/AgentRunLocationContext.tsx`; the field reads that context and lets an
    explicit `runLocation` prop win. Do **not** thread the value as a prop
-   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — both are
+   through `AgentDefinitionDialog` / `AgentEditMergedDialog` — both are
    already over the 1000-line ceiling, and neither uses the value itself.
    Surfaces rendered outside `AgentDialog` (e.g. `EditRespondToDialog`) pass the
    prop directly. Local names "your

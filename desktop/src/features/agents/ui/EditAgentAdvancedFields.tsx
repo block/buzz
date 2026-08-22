@@ -33,6 +33,7 @@ export function EditAgentAdvancedFields({
   acpCommand,
   agentArgs,
   autoRestartOnConfigChange,
+  startOnAppLaunch = false,
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
@@ -55,11 +56,13 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange,
   onParallelismChange,
   onAutoRestartChange,
+  onStartOnAppLaunchChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
   autoRestartOnConfigChange: boolean;
+  startOnAppLaunch?: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
@@ -106,6 +109,7 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
+  onStartOnAppLaunchChange?: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
   // Numeric tuning descriptors — gate on catalog status so that loading/error
@@ -194,6 +198,31 @@ export function EditAgentAdvancedFields({
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
       </div>
+
+      {/* Start on app launch (L-field) */}
+      {onStartOnAppLaunchChange ? (
+        <div className="space-y-1.5">
+          <label
+            className="flex items-center gap-2 text-sm font-medium"
+            htmlFor="edit-agent-start-on-launch"
+          >
+            <input
+              checked={startOnAppLaunch}
+              id="edit-agent-start-on-launch"
+              onChange={(event) =>
+                onStartOnAppLaunchChange(event.target.checked)
+              }
+              type="checkbox"
+            />
+            Start on app launch
+          </label>
+          <p className="text-xs text-muted-foreground">
+            {startOnAppLaunch
+              ? "This agent starts automatically when you open Buzz."
+              : "Start this agent manually from the profile panel."}
+          </p>
+        </div>
+      ) : null}
 
       {/* Agent runtime args */}
       <div className="space-y-1.5">

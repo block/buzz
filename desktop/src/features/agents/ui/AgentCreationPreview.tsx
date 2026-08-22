@@ -65,7 +65,7 @@ export function AgentCreationPreview({
   disabled?: boolean;
   /** When true, omit all upload/edit controls and render the avatar as a
    *  plain display element. Use in contexts where avatar editing is
-   *  handled by an external affordance (e.g. AgentInstanceEditDialog). */
+   *  handled externally (e.g. definition-only via AgentDefinitionDialog). */
   hideEditControl?: boolean;
   label: string;
   onClearAvatar?: () => void;
