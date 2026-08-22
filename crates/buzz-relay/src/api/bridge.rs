@@ -3446,7 +3446,14 @@ mod tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+        bridge_handler_test_state_with_usage_analytics(None).await
+    }
+
+    async fn bridge_handler_test_state_with_usage_analytics(
+        endpoint: Option<url::Url>,
+    ) -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
+        config.usage_analytics_endpoint = endpoint;
         config.database_url = TEST_DB_URL.to_string();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
@@ -3840,6 +3847,140 @@ mod tests {
         assert!(
             log.contains(&pubkey_hex[..16]),
             "attribution line must carry the pubkey;\nlog:\n{log}"
+        );
+    }
+
+    /// Proves the usage hook runs only after a new kind:9 event is persisted.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires Postgres + Redis"]
+    async fn usage_analytics_emits_new_kind_nine_once() {
+        use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Router};
+        use tokio::sync::mpsc;
+
+        async fn capture(State(tx): State<mpsc::Sender<Vec<u8>>>, body: Bytes) -> StatusCode {
+            let _ = tx.send(body.to_vec()).await;
+            StatusCode::NO_CONTENT
+        }
+
+        let (event_tx, mut event_rx) = mpsc::channel::<Vec<u8>>(8);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture server");
+        let endpoint = format!(
+            "http://{}/events",
+            listener.local_addr().expect("capture address")
+        )
+        .parse()
+        .expect("capture URL");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/events", post(capture))
+                    .with_state(event_tx),
+            )
+            .await
+            .expect("capture server")
+        });
+
+        let state = bridge_handler_test_state_with_usage_analytics(Some(endpoint))
+            .await
+            .expect("local Postgres and Redis must be running");
+        let host = format!("bridge-usage-{}.local", uuid::Uuid::new_v4().simple());
+        let community_id = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id
+            .to_string();
+
+        let submit = |event: nostr::Event, keys: &Keys, description: &'static str| {
+            let (state, host, pubkey) = (state.clone(), host.clone(), keys.public_key().to_hex());
+            async move {
+                let body = serde_json::to_vec(&event).expect("serialize event");
+                assert_eq!(
+                    post_events(state, &host, &pubkey, &body).await,
+                    axum::http::StatusCode::OK,
+                    "{description} must be accepted"
+                );
+            }
+        };
+
+        let channel = uuid::Uuid::new_v4().to_string();
+        let author_a = Keys::generate();
+        let author_b = Keys::generate();
+        let create_channel = EventBuilder::new(Kind::Custom(9007), "")
+            .tags([
+                Tag::parse(["h", &channel]).expect("h tag"),
+                Tag::parse(["name", "usage-proof"]).expect("name tag"),
+                Tag::parse(["channel_type", "stream"]).expect("channel type tag"),
+                Tag::parse(["visibility", "open"]).expect("visibility tag"),
+            ])
+            .sign_with_keys(&author_a)
+            .expect("sign channel creation");
+        submit(create_channel, &author_a, "channel creation").await;
+
+        let message = |keys: &Keys, content: &str| {
+            EventBuilder::new(Kind::Custom(9), content)
+                .tag(Tag::parse(["h", &channel]).expect("h tag"))
+                .sign_with_keys(keys)
+                .expect("sign message")
+        };
+        let first = message(&author_a, "private-a");
+        submit(first.clone(), &author_a, "first message").await;
+        submit(first, &author_a, "duplicate message").await;
+        submit(
+            message(&author_a, "private-a-follow-up"),
+            &author_a,
+            "second message from first author",
+        )
+        .await;
+        submit(
+            message(&author_b, "private-b"),
+            &author_b,
+            "message from second author",
+        )
+        .await;
+
+        let mut captured = Vec::new();
+        loop {
+            let body = tokio::time::timeout(std::time::Duration::from_secs(20), event_rx.recv())
+                .await
+                .expect("timed out waiting for usage event")
+                .expect("capture channel closed");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("usage event JSON");
+            let accepted_at_ms = payload["accepted_at_ms"]
+                .as_i64()
+                .expect("acceptance timestamp");
+            let actor_id = payload["actor_id"].as_str().expect("actor id").to_owned();
+            assert_eq!(
+                payload,
+                serde_json::json!({
+                    "schema_version": 1,
+                    "type": "message_sent",
+                    "accepted_at_ms": accepted_at_ms,
+                    "actor_id": actor_id,
+                    "community_id": community_id,
+                })
+            );
+
+            let reached_barrier = actor_id == author_b.public_key().to_hex();
+            captured.push(actor_id);
+            if reached_barrier {
+                break;
+            }
+        }
+
+        assert_eq!(
+            captured,
+            vec![
+                author_a.public_key().to_hex(),
+                author_a.public_key().to_hex(),
+                author_b.public_key().to_hex()
+            ],
+            "only the three new kind:9 messages should emit"
         );
     }
 }

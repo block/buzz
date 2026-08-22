@@ -277,6 +277,9 @@ pub struct Config {
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
 
+    /// Optional endpoint for privacy-minimal usage events.
+    pub(crate) usage_analytics_endpoint: Option<url::Url>,
+
     /// Optional relay-hosted policy shown on join surfaces. Disabled when no
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
@@ -389,6 +392,36 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         ));
     }
     Ok(url)
+}
+
+fn parse_usage_analytics_endpoint(raw: Option<&str>) -> Result<Option<url::Url>, ConfigError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let url = url::Url::parse(raw).map_err(|_| {
+        ConfigError::InvalidValue(
+            "BUZZ_USAGE_ANALYTICS_ENDPOINT must be a valid absolute URL".to_string(),
+        )
+    })?;
+    let is_loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    if !(url.scheme() == "https" || (url.scheme() == "http" && is_loopback))
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_USAGE_ANALYTICS_ENDPOINT must be an absolute HTTPS URL, or an HTTP loopback URL for local testing, without credentials, query, or fragment"
+                .to_string(),
+        ));
+    }
+    Ok(Some(url))
 }
 
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
@@ -887,6 +920,15 @@ impl Config {
             Err(_) => 2_000,
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
+        let usage_analytics_endpoint = match std::env::var("BUZZ_USAGE_ANALYTICS_ENDPOINT") {
+            Ok(raw) => parse_usage_analytics_endpoint(Some(&raw))?,
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_USAGE_ANALYTICS_ENDPOINT must be valid Unicode".to_string(),
+                ));
+            }
+        };
 
         const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
         let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
@@ -1037,6 +1079,7 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            usage_analytics_endpoint,
             join_policy,
             admin,
             web_dir,
@@ -1615,6 +1658,67 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn usage_analytics_endpoint_is_optional_and_accepts_secure_or_loopback_urls() {
+        assert!(parse_usage_analytics_endpoint(None)
+            .expect("unset endpoint")
+            .is_none());
+        assert!(parse_usage_analytics_endpoint(Some("   "))
+            .expect("blank endpoint")
+            .is_none());
+
+        for endpoint in [
+            "https://analytics.example.com/events",
+            "http://localhost:8080/events",
+            "http://127.0.0.1:8080/events",
+            "http://[::1]:8080/events",
+        ] {
+            assert_eq!(
+                parse_usage_analytics_endpoint(Some(endpoint))
+                    .expect("valid endpoint")
+                    .as_ref()
+                    .map(url::Url::as_str),
+                Some(endpoint)
+            );
+        }
+    }
+
+    #[test]
+    fn usage_analytics_endpoint_rejects_unsafe_or_ambiguous_urls() {
+        for endpoint in [
+            "http://analytics.example.com/events",
+            "ftp://analytics.example.com/events",
+            "analytics.example.com/events",
+            "/events",
+            "https://analytics.example.com/events?source=relay",
+            "https://analytics.example.com/events#fragment",
+        ] {
+            assert!(
+                parse_usage_analytics_endpoint(Some(endpoint)).is_err(),
+                "endpoint must be rejected: {endpoint}"
+            );
+        }
+
+        let username = "user";
+        let password = "secret";
+        let host = "analytics.example.com";
+        let mut username_endpoint = url::Url::parse("https://analytics.example.com/events")
+            .expect("base credential test URL");
+        username_endpoint
+            .set_username(username)
+            .expect("set test username");
+        assert!(parse_usage_analytics_endpoint(Some(username_endpoint.as_str())).is_err());
+
+        let mut credential_endpoint = username_endpoint;
+        credential_endpoint
+            .set_password(Some(password))
+            .expect("set test password");
+        let error = parse_usage_analytics_endpoint(Some(credential_endpoint.as_str()))
+            .expect_err("credentials must be rejected")
+            .to_string();
+        assert!(!error.contains(password) && !error.contains(host));
     }
 
     #[test]
