@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -10,13 +12,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 
 void main() {
   test('profile updates preserve existing kind:0 metadata', () async {
     final keys = nostr.Keys.generate();
-    const profileTags = [
-      ['auth', 'agent-pubkey', 'ownership-proof'],
-      ['custom', 'preserve-tag'],
+    final owner = nostr.Keys.generate();
+    final profileTags = [
+      _authTag(owner, keys.public),
+      const ['custom', 'preserve-tag'],
     ];
     final relaySession = _ProfileRelaySession(
       NostrEvent(
@@ -62,6 +66,14 @@ void main() {
     expect(
       container.read(profileProvider).requireValue?.displayName,
       'Alice L',
+    );
+    expect(
+      container.read(profileProvider).requireValue?.ownerPubkey,
+      owner.public.toLowerCase(),
+    );
+    expect(
+      container.read(userCacheProvider)[keys.public]?.ownerPubkey,
+      owner.public.toLowerCase(),
     );
   });
 
@@ -533,6 +545,19 @@ void main() {
       expect(prefs.getString('buzz_presence_preference_aabb'), 'auto');
     },
   );
+}
+
+List<String> _authTag(nostr.Keys owner, String agentPubkey) {
+  final digest = SHA256Digest().process(
+    Uint8List.fromList(utf8.encode('nostr:agent-auth:$agentPubkey:')),
+  );
+  final message = digest.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return [
+    'auth',
+    owner.public,
+    '',
+    nostr.Schnorr.sign(secretKey: owner.secret, message: message),
+  ];
 }
 
 class _FixedRelayConfigNotifier extends RelayConfigNotifier {

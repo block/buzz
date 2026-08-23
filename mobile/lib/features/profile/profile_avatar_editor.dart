@@ -112,10 +112,16 @@ class ProfileAvatarEditor extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final selectedEmoji = useState('😊');
+    final currentEmojiAvatar = useMemoized(
+      () => parseEmojiAvatarDataUrl(currentAvatarUrl),
+      [currentAvatarUrl],
+    );
+    final selectedEmoji = useState(currentEmojiAvatar?.emoji ?? '😊');
     final initialColor = useMemoized(
-      () => emojiAvatarColors[Random().nextInt(18)],
-      const [],
+      () =>
+          currentEmojiAvatar?.colorValue ??
+          emojiAvatarColors[Random().nextInt(18)],
+      [currentEmojiAvatar],
     );
     final selectedColor = useState(initialColor);
     final emojiSection = useState(_EmojiEditorSection.emoji);

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../../shared/relay/relay.dart';
@@ -67,6 +68,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: data.avatarUrl,
       about: data.about,
       nip05Handle: data.nip05,
+      ownerPubkey: verifiedOaOwnerPubkey(latest.tags, data.pubkey),
     );
     _requireCurrentWriteContext(context);
     _metadata = metadata;
@@ -183,6 +185,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: _metadata['picture'] as String?,
       about: _metadata['about'] as String?,
       nip05Handle: _metadata['nip05'] as String?,
+      ownerPubkey: verifiedOaOwnerPubkey(submittedEvent.tags, pubkey),
     );
     state = AsyncData(profile);
     ref.read(userCacheProvider.notifier).put(profile);
