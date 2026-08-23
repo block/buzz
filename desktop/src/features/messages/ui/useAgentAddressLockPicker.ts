@@ -140,7 +140,6 @@ export function useAgentAddressLockPicker({
         );
       } else {
         unpinnedAgentPubkeysRef.current.delete(pubkey);
-        audience.addPubkey(pubkey);
         mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
           isAgent: true,
         });
@@ -152,11 +151,12 @@ export function useAgentAddressLockPicker({
             insertText: `@${suggestion.displayName} `,
           });
         }
+        audience.addPubkey(pubkey);
         onPulseAddressLock(pubkey);
         setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
       }
 
-      if (mentions.isMentionOpen) {
+      if (mentions.isMentionOpen && mentions.isInlineMentionSelection()) {
         const { text, cursor } = richText.getPlainTextAndCursor();
         const activeMention = detectPrefixQuery("@", text, cursor, [
           suggestion.displayName.toLowerCase(),
@@ -181,6 +181,7 @@ export function useAgentAddressLockPicker({
       audience.addPubkey,
       audienceScope,
       lockedAgentPubkeys,
+      mentions.isInlineMentionSelection,
       mentions.isMentionOpen,
       mentions.mentionStartIndex,
       mentions.openMentionPicker,

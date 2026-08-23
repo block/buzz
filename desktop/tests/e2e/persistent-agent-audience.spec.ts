@@ -28,6 +28,9 @@ async function automaticallyMention(
     .getByTestId("mention-autocomplete")
     .getByRole("button", { name: `Automatically mention ${displayName}` })
     .click();
+  await expect(composer.getByTestId("message-input")).toContainText(
+    `@${displayName}`,
+  );
   await composer.locator("[data-mention-picker-trigger]").click();
 }
 
@@ -204,8 +207,6 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
 
   await expect(input).toHaveText("@alice draft text");
   await expect(input.locator(".agent-mention-highlight")).toHaveText("alice");
-  await input.fill("draft text");
-  await expect(input).toHaveText("draft text");
   await pressPrimaryShift(page, "M");
   await expect(input).toHaveText("draft text");
   await pressPrimaryShift(page, "M");
@@ -270,7 +271,7 @@ test("the mention button opens settings and can undo an address", async ({
   await ingress.click();
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
-  await expect(input).toHaveText("draft text");
+  await expect(input).toHaveText("@Morgarita draft text");
   await page.getByTestId("mention-options-trigger").click();
   await expect(
     page.getByTestId("mention-keep-agents-pinned-toggle"),
@@ -286,7 +287,7 @@ test("the mention button opens settings and can undo an address", async ({
   if (!layerBox || !optionsBox) throw new Error("Mention tray is not laid out");
   await page.mouse.click(layerBox.x + 4, optionsBox.y + optionsBox.height / 2);
   await expect(menu).toHaveCount(0);
-  await expect(input).toHaveText("draft text");
+  await expect(input).toHaveText("@Morgarita draft text");
   await ingress.click();
   await expect(menu).toBeVisible();
   await expect(page.getByTestId("mention-options-trigger")).toHaveAttribute(
@@ -298,7 +299,7 @@ test("the mention button opens settings and can undo an address", async ({
   ).toHaveCount(0);
   await ingress.click();
   await expect(menu).toHaveCount(0);
-  await expect(input).toHaveText("draft text");
+  await expect(input).toHaveText("@Morgarita draft text");
   await ingress.click();
   await expect(menu).toBeVisible();
   await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);

@@ -23,7 +23,7 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-test("always addressing an agent keeps autocomplete open, adds the lock, and pulses", async () => {
+test("always addressing an agent keeps autocomplete open, inserts the chip, adds the lock, and pulses", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
@@ -32,7 +32,7 @@ test("always addressing an agent keeps autocomplete open, adds the lock, and pul
   const addedPubkeys = [];
   const pulsedPubkeys = [];
   let cancelCount = 0;
-  const text = "Ask @Agent Ada later @";
+  const text = "@";
   const mentions = {
     cancelMentionAutocomplete: () => {
       cancelCount += 1;
@@ -45,6 +45,8 @@ test("always addressing an agent keeps autocomplete open, adds the lock, and pul
       },
     ],
     getMentionDisplayName: () => "Agent Ada",
+    isInlineMentionSelection: () => false,
+    isMentionOpen: true,
     registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
@@ -74,7 +76,13 @@ test("always addressing an agent keeps autocomplete open, adds the lock, and pul
     });
   });
 
-  assert.deepEqual(appliedEdits, []);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@Agent Ada ",
+    },
+  ]);
   assert.equal(cancelCount, 0);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
