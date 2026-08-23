@@ -409,6 +409,18 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   );
   await expect(addressPrefix).toBeVisible();
   await expect(addressPrefix).toHaveText("Morgarita");
+
+  await input.type("follow up");
+  await input.press("Enter");
+  const inlineMentionRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "follow up" })
+    .last();
+  await expect(
+    inlineMentionRow.locator("[data-mention].agent-mention-highlight", {
+      hasText: "Morgarita",
+    }),
+  ).toHaveCount(1);
 });
 
 test("a failed always-mentioned send shakes the composer avatar", async ({

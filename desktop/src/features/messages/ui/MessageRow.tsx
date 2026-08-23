@@ -59,6 +59,7 @@ import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { getAgentAddressMentionPubkeys } from "@/features/messages/lib/agentAddressMention.mjs";
+import { getVisibleAgentAddressPubkeys } from "@/features/messages/lib/getVisibleAgentAddressPubkeys";
 import { MessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
@@ -280,10 +281,15 @@ export const MessageRow = React.memo(
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
     const addressedAgentPubkeys = React.useMemo(() => {
-      return getAgentAddressMentionPubkeys(message.tags).filter(
+      const taggedPubkeys = getAgentAddressMentionPubkeys(message.tags).filter(
         isKnownAgentPubkey,
       );
-    }, [isKnownAgentPubkey, message.tags]);
+      return getVisibleAgentAddressPubkeys(
+        message.body,
+        taggedPubkeys,
+        mentionPubkeysByName,
+      );
+    }, [isKnownAgentPubkey, mentionPubkeysByName, message.body, message.tags]);
     const agentAddressPrefix =
       addressedAgentPubkeys.length > 0 ? (
         <MessageAgentAddressPrefix
