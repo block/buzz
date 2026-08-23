@@ -454,7 +454,7 @@ export function UserProfilePanel({
   const { handleAgentPrimaryAction, handleAgentRestart } =
     useAgentLifecycleActions({
       channels: channelsQuery.data,
-      managedAgent,
+      managedAgent, presenceStatus,
       relayAgents: relayAgentsQuery.data,
       startManagedAgent: startAgentMutation.mutateAsync,
       stopManagedAgent: stopAgentMutation.mutateAsync,

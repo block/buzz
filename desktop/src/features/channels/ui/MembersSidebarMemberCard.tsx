@@ -17,6 +17,7 @@ import {
 import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
+  isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -292,6 +293,7 @@ export function MembersSidebarMemberCard({
           onUntimeout={onUntimeout}
           onViewActivity={onViewActivity}
           pairAction={pairAction}
+          presenceStatus={presenceStatus}
         />
       ) : null}
     </div>
@@ -320,6 +322,7 @@ function MemberActionsMenu({
   onUntimeout,
   onViewActivity,
   pairAction,
+  presenceStatus,
 }: {
   canChangeRole: boolean;
   canModerateMember: boolean;
@@ -340,6 +343,7 @@ function MemberActionsMenu({
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
   pairAction?: ManagedAgentPairAction;
+  presenceStatus?: PresenceStatus | null;
 }) {
   const showChangeRole =
     canChangeRole && !memberIsBot && member.role !== "owner";
@@ -380,10 +384,13 @@ function MemberActionsMenu({
             >
               {pairAction
                 ? getPairActionIcon(pairAction)
-                : getManagedAgentActionIcon(managedAgent)}
+                : getManagedAgentActionIcon(managedAgent, presenceStatus)}
               {pairAction
                 ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
-                : getManagedAgentPrimaryActionLabel(managedAgent)}
+                : getManagedAgentPrimaryActionLabel(
+                    managedAgent,
+                    presenceStatus,
+                  )}
             </DropdownMenuItem>
             {onEditRespondTo ? (
               <DropdownMenuItem
@@ -514,8 +521,11 @@ function getPairActionIcon(action: ManagedAgentPairAction) {
   return <Play className="h-4 w-4" />;
 }
 
-function getManagedAgentActionIcon(agent: ManagedAgent) {
-  if (isManagedAgentActive(agent)) {
+function getManagedAgentActionIcon(
+  agent: ManagedAgent,
+  presence?: PresenceStatus | null,
+) {
+  if (isManagedAgentLive(agent, presence)) {
     return <Square className="h-4 w-4" />;
   }
 
