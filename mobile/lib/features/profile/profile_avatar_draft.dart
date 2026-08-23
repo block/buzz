@@ -22,10 +22,15 @@ final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
   ProfileImageAvatarDraft(this.bytes);
 
   final Uint8List bytes;
+  MediaUploadService? _uploadService;
   Future<String>? _uploadedUrl;
 
   @override
   Future<String> upload(MediaUploadService service) async {
+    if (!identical(_uploadService, service)) {
+      _uploadService = service;
+      _uploadedUrl = null;
+    }
     final existing = _uploadedUrl;
     if (existing != null) return existing;
     final upload = service
@@ -46,6 +51,7 @@ final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
 
   final Uint8List animation;
   final Uint8List poster;
+  MediaUploadService? _uploadService;
   Future<String>? _uploadedUrl;
   Future<BlobDescriptor>? _posterUpload;
   Future<BlobDescriptor>? _animationUpload;
@@ -82,6 +88,12 @@ final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
 
   @override
   Future<String> upload(MediaUploadService service) async {
+    if (!identical(_uploadService, service)) {
+      _uploadService = service;
+      _uploadedUrl = null;
+      _posterUpload = null;
+      _animationUpload = null;
+    }
     final existing = _uploadedUrl;
     if (existing != null) return existing;
     // Cache each content-addressed part independently. If one request fails,

@@ -156,6 +156,20 @@ class ProfileEditPage extends HookConsumerWidget {
 
     Future<void> saveAvatar() async {
       if (isSavingAvatar.value) return;
+      final saveConfig = ref.read(relayConfigProvider);
+      final uploadService = ref.read(mediaUploadServiceProvider);
+
+      void requireCurrentCommunity() {
+        final currentConfig = ref.read(relayConfigProvider);
+        if (currentConfig.storedOrigin != saveConfig.storedOrigin ||
+            currentConfig.nsec != saveConfig.nsec ||
+            !identical(ref.read(mediaUploadServiceProvider), uploadService)) {
+          throw StateError(
+            'Profile photo save cancelled because the active community changed.',
+          );
+        }
+      }
+
       isSavingAvatar.value = true;
       avatarSaveError.value = null;
       try {
@@ -165,16 +179,18 @@ class ProfileEditPage extends HookConsumerWidget {
         if (avatarMode.value == ProfileAvatarMode.animated &&
             nextDraft == null) {
           nextDraft = await prepareAnimatedAvatar.value?.call();
+          requireCurrentCommunity();
           if (nextDraft != null) {
             avatarDraft.value = nextDraft;
             avatarDraftMode.value = ProfileAvatarMode.animated;
           }
         }
         if (nextDraft == null) return;
-        final nextAvatar = await nextDraft.upload(
-          ref.read(mediaUploadServiceProvider),
-        );
+        requireCurrentCommunity();
+        final nextAvatar = await nextDraft.upload(uploadService);
+        requireCurrentCommunity();
         await ref.read(profileProvider.notifier).updateAvatarUrl(nextAvatar);
+        requireCurrentCommunity();
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
       } catch (_) {
         avatarSaveError.value =

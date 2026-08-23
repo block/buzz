@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/features/profile/profile_edit_page.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -103,6 +105,88 @@ void main() {
     expect(notifier.savedAvatarUrls, ['https://relay.example/avatar.jpg']);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('avatar retry reuploads after a community switch', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final notifier = _RetryProfileNotifier();
+    final config = _MutableRelayConfigNotifier();
+    final firstUpload = _RetryMediaUploadService(
+      baseUrl: 'https://first.example',
+      delayUpload: true,
+    );
+    final secondUpload = _RetryMediaUploadService(
+      baseUrl: 'https://second.example',
+    );
+    addTearDown(firstUpload.dispose);
+    addTearDown(secondUpload.dispose);
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          relayConfigProvider.overrideWith(() => config),
+          mediaUploadServiceProvider.overrideWith((ref) {
+            final current = ref.watch(relayConfigProvider);
+            return current.baseUrl == 'https://first.example'
+                ? firstUpload
+                : secondUpload;
+          }),
+        ],
+        child: ProfileEditPage(
+          startInPhotoEditor: true,
+          animatedAvatarCaptureBuilder:
+              ({required height, required onPrepareChanged}) => HookBuilder(
+                builder: (context) {
+                  useEffect(() {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      onPrepareChanged(
+                        () async => ProfileImageAvatarDraft(
+                          Uint8List.fromList([1, 2, 3]),
+                        ),
+                      );
+                    });
+                    return null;
+                  }, const []);
+                  return SizedBox(height: height);
+                },
+              ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Animated'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pump();
+    expect(firstUpload.uploadCount, 1);
+    config.update(baseUrl: 'https://second.example', nsec: 'second-identity');
+    firstUpload.completeUpload();
+    await tester.pumpAndSettle();
+
+    expect(notifier.savedAvatarUrls, isEmpty);
+    expect(
+      find.text("We couldn't save your profile photo. Try again."),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+    expect(secondUpload.uploadCount, 1);
+    expect(notifier.savedAvatarUrls, ['https://second.example/avatar.jpg']);
+    debugDefaultTargetPlatformOverride = null;
+  });
+}
+
+class _MutableRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(
+    baseUrl: 'https://first.example',
+    nsec: 'first-identity',
+  );
 }
 
 class _RetryProfileNotifier extends ProfileNotifier {
@@ -140,15 +224,24 @@ class _RetryProfileNotifier extends ProfileNotifier {
 }
 
 class _RetryMediaUploadService extends MediaUploadService {
-  _RetryMediaUploadService()
-    : super(
-        baseUrl: 'https://relay.example',
-        nsec: null,
-        pickGalleryImage: () async => null,
-        pickGalleryVideo: () async => null,
-      );
+  _RetryMediaUploadService({
+    this.baseUrl = 'https://relay.example',
+    this.delayUpload = false,
+  }) : super(
+         baseUrl: baseUrl,
+         nsec: null,
+         pickGalleryImage: () async => null,
+         pickGalleryVideo: () async => null,
+       );
 
+  final String baseUrl;
+  final bool delayUpload;
+  final _pendingUpload = Completer<void>();
   int uploadCount = 0;
+
+  void completeUpload() {
+    if (!_pendingUpload.isCompleted) _pendingUpload.complete();
+  }
 
   @override
   Future<BlobDescriptor> uploadBytes(
@@ -158,8 +251,9 @@ class _RetryMediaUploadService extends MediaUploadService {
     UploadCancellationToken? cancellationToken,
   }) async {
     uploadCount++;
+    if (delayUpload) await _pendingUpload.future;
     return BlobDescriptor(
-      url: 'https://relay.example/avatar.jpg',
+      url: '$baseUrl/avatar.jpg',
       sha256: 'avatar-hash',
       size: bytes.length,
       type: mimeType,

@@ -40,11 +40,14 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     super.key,
     required this.height,
     required this.onPrepareChanged,
+    this.initialFrames = const [],
   });
-
   final double height;
   final ValueChanged<Future<ProfileAvatarDraft?> Function()?> onPrepareChanged;
 
+  /// Seeds processed frames in lifecycle-focused widget tests.
+  @visibleForTesting
+  final List<Uint8List> initialFrames;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
@@ -54,7 +57,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     final isPreparingFrames = useState(false);
     final isProcessing = useState(false);
     final progress = useState(0.0);
-    final frames = useState<List<Uint8List>>(const []);
+    final frames = useState<List<Uint8List>>(initialFrames);
     final posterIndex = useState(0);
     final previewFrameIndex = useState(0);
     final scale = useState(_mobileDefaultPersonScale);
@@ -69,7 +72,6 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     final encodedCache = useRef<_EncodedAvatarCache?>(null);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final lifecycle = ref.watch(appLifecycleProvider);
-
     final encodeKey = frames.value.isEmpty
         ? null
         : _EncodeKey(
@@ -84,7 +86,6 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
             shapeOffsetX: shapeOffset.value.dx,
             shapeOffsetY: shapeOffset.value.dy,
           );
-
     useEffect(() {
       encodedCache.value = null;
       final key = encodeKey;
@@ -113,10 +114,10 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       if (lifecycle != AppLifecycleState.resumed) {
         isInitializing.value = false;
         controller.value = null;
-        frames.value = const [];
-        onPrepareChanged(null);
         return null;
       }
+
+      isInitializing.value = true;
 
       Future<void> initialize() async {
         try {
@@ -151,7 +152,6 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       unawaited(initialize());
       return () {
         disposed = true;
-        onPrepareChanged(null);
         final active = controllerRef.value;
         controllerRef.value = null;
         unawaited(active?.dispose() ?? Future<void>.value());
