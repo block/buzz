@@ -5,9 +5,10 @@ use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, is_login_shell_path_uninit, is_safe_nvm_tag,
-    managed_agent_avatar_url, normalize_agent_args, parse_semver_tag, probe_codex_acp_version,
-    record_agent_command, refresh_login_shell_path, try_record_agent_command,
-    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    managed_agent_avatar_url, normalize_agent_args, normalize_command_identity, parse_semver_tag,
+    probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
+    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -1160,6 +1161,32 @@ fn test_command_basenames_dotted_name_no_extra_candidates() {
         candidates.len(),
         1,
         "dotted name must produce exactly one candidate"
+    );
+}
+
+#[test]
+fn command_basenames_keeps_par_suffix() {
+    let candidates = super::command_basenames("agy_acp_server.par");
+    assert_eq!(
+        candidates,
+        vec!["agy_acp_server.par"],
+        "Google's ACP server ships as a .par; do not append .exe/.cmd/.bat"
+    );
+}
+
+#[test]
+fn normalize_command_identity_strips_par_suffix() {
+    assert_eq!(
+        normalize_command_identity("agy_acp_server.par"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        normalize_command_identity("/usr/local/bin/agy_acp_server.par"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        normalize_command_identity("agy_acp_server"),
+        "agy-acp-server"
     );
 }
 

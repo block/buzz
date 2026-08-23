@@ -237,7 +237,7 @@ fn command_looks_like_path(command: &str) -> bool {
 
 fn executable_basename(command: &str) -> String {
     let suffix = std::env::consts::EXE_SUFFIX;
-    if suffix.is_empty() || command.ends_with(suffix) {
+    if suffix.is_empty() || command.ends_with(suffix) || command.ends_with(".par") {
         command.to_string()
     } else {
         format!("{command}{suffix}")
@@ -255,6 +255,10 @@ pub(crate) fn normalize_command_identity(command: &str) -> String {
         })
         .collect::<String>();
     let lower = lower.strip_suffix(".exe").unwrap_or(&lower).to_string();
+    // Google's Antigravity ACP server ships as `agy_acp_server.par` on
+    // macOS/Linux. Strip the suffix so a path pin and the bare command
+    // classify as the same harness.
+    let lower = lower.strip_suffix(".par").unwrap_or(&lower).to_string();
 
     if let Some(suffix) = std::env::consts::EXE_SUFFIX.strip_prefix('.') {
         return lower

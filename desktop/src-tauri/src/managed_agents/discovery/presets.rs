@@ -178,6 +178,18 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "antigravity",
+        label: "Google Antigravity",
+        // Official ACP server from the Agent Client Protocol registry
+        // (agentclientprotocol/registry id `antigravity-acp`). The `agy` CLI
+        // has no ACP mode — do not spawn `agy` or `agy --acp`.
+        command: "agy_acp_server.par",
+        args: &[],
+        install_instructions_url: "https://antigravity.google/docs/ide/extensions",
+        install_hint: "Buzz talks to Google Antigravity through Google's official ACP server (`agy_acp_server.par`), not the `agy` CLI. The CLI has no ACP mode. Download the Google Antigravity agent zip from the ACP registry, keep `agy_acp_server.par` and `localharness_external` in the same directory on your PATH, then sign in with Google (oauth-personal), a Gemini API key (`GEMINI_API_KEY`), or Gemini Enterprise.",
+        underlying_cli: Some("agy"),
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
@@ -325,6 +337,84 @@ mod tests {
         );
         assert!(missing_entry.command.is_none());
         assert_eq!(missing_entry.default_args, vec!["acp"]);
+    }
+
+    #[test]
+    fn antigravity_preset_uses_official_acp_server_not_agy_cli() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "antigravity")
+            .expect("Antigravity preset should be present");
+
+        assert_eq!(preset.label, "Google Antigravity");
+        assert_eq!(preset.command, "agy_acp_server.par");
+        assert!(preset.args.is_empty());
+        assert_eq!(preset.underlying_cli, Some("agy"));
+        assert_eq!(
+            preset.install_instructions_url,
+            "https://antigravity.google/docs/ide/extensions"
+        );
+        assert!(
+            !preset.install_hint.contains("agy --acp"),
+            "hint must not claim the CLI speaks ACP"
+        );
+        assert!(
+            preset.install_hint.contains("agy_acp_server.par"),
+            "hint must name the official ACP server"
+        );
+
+        let available = preset_catalog_entry(preset, |command| {
+            (command == "agy_acp_server.par")
+                .then(|| PathBuf::from("/usr/local/bin/agy_acp_server.par"))
+        });
+        assert_eq!(available.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(available.command.as_deref(), Some("agy_acp_server.par"));
+        assert!(available.default_args.is_empty());
+        assert_eq!(
+            available.binary_path.as_deref(),
+            Some("/usr/local/bin/agy_acp_server.par")
+        );
+        assert_eq!(available.auth_status, AuthStatus::NotApplicable);
+        assert_eq!(available.source, HarnessSource::Preset);
+
+        let adapter_missing = preset_catalog_entry(preset, |command| {
+            (command == "agy").then(|| PathBuf::from("/usr/local/bin/agy"))
+        });
+        assert_eq!(
+            adapter_missing.availability,
+            AcpAvailabilityStatus::AdapterMissing
+        );
+        assert!(adapter_missing.command.is_none());
+        assert_eq!(
+            adapter_missing.underlying_cli_path.as_deref(),
+            Some("/usr/local/bin/agy")
+        );
+
+        let missing = preset_catalog_entry(preset, |_| None);
+        assert_eq!(missing.availability, AcpAvailabilityStatus::NotInstalled);
+        assert!(missing.command.is_none());
+        assert!(missing.default_args.is_empty());
+    }
+
+    #[test]
+    fn antigravity_preset_is_exposed_in_the_runtime_catalog() {
+        use crate::managed_agents::custom_harnesses::registry_test_lock;
+
+        let _path_guard = crate::managed_agents::lock_path_mutex();
+        let _registry_guard = registry_test_lock();
+
+        let entry = super::super::discover_acp_runtimes_from(None, true)
+            .into_iter()
+            .find(|entry| entry.id == "antigravity")
+            .expect("Antigravity preset should appear in the runtime catalog");
+
+        assert_eq!(entry.label, "Google Antigravity");
+        assert!(entry.default_args.is_empty());
+        assert_eq!(
+            entry.install_instructions_url,
+            "https://antigravity.google/docs/ide/extensions"
+        );
+        assert_eq!(entry.source, HarnessSource::Preset);
     }
 
     #[test]

@@ -26,6 +26,7 @@ Monochrome marks inlined as `currentColor` paths in
 |---|---|---|---|---|---|
 | Goose | [block/goose](https://github.com/block/goose) | `305849b71709b95b86ed9f11bd3bc939899c0aab` | Apache-2.0 © Block, Inc. | `documentation/static/img/goose.svg` | `fill="#101010"` → `currentColor`; dropped the redundant clipPath wrapper |
 | Cursor | [simple-icons](https://github.com/simple-icons/simple-icons) | `16.27.1` (slug `cursor`) | CC0-1.0 (path data); nominative use of the Cursor mark to identify Cursor's harness | `icons/cursor.svg` | `fill` → `currentColor` |
+| Google Antigravity | [agentclientprotocol/registry](https://github.com/agentclientprotocol/registry) (`antigravity-acp`) | Registry icon served 2026-08-23 (`antigravity-acp.svg`); submitted by Google LLC in [PR #542](https://github.com/agentclientprotocol/registry/pull/542) | Google trademark; nominative use of the mark Google published for ACP clients to identify the Antigravity harness | `https://cdn.agentclientprotocol.com/registry/v1/latest/antigravity-acp.svg` | Inlined the `currentColor` path; dropped the 16×16 width/height attributes (viewBox retained) |
 
 Codex deliberately has **no** bundled mark: the OpenAI blossom was removed
 from simple-icons in v16 at the vendor's request, so we do not ship it —
