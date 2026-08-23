@@ -28,6 +28,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../helpers/widget_helpers.dart';
 
 part 'profile_edit_page_test/motion_and_accessibility_tests.dart';
+part 'profile_edit_page_test/image_selection_tests.dart';
 
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
@@ -839,6 +840,7 @@ void main() {
   });
 
   runProfileEditMotionAndAccessibilityTests();
+  runProfileEditImageSelectionTests();
 }
 
 Future<void> _waitForAvatarCropToClose(WidgetTester tester) async {

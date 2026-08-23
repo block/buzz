@@ -121,6 +121,8 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final emojiSection = useState(_EmojiEditorSection.emoji);
     final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
+    final imageSelectionGeneration = useRef(0);
+    final currentMode = useRef(mode)..value = mode;
     final error = useState<String?>(null);
     final dataset = ref.watch(emojiDatasetOrEmptyProvider);
     final modeTransitionDirection = useRef(1.0);
@@ -138,6 +140,10 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       modeTransitionDirection.value = nextMode.index > mode.index ? 1 : -1;
       unawaited(HapticFeedback.selectionClick());
       onAnimatedPrepareChanged(null);
+      if (mode == ProfileAvatarMode.image) {
+        imageSelectionGeneration.value++;
+        isPickingImage.value = false;
+      }
       if (!reduceMotion) modeTransitionController.value = 0;
       onModeChanged(nextMode);
       if (nextMode == ProfileAvatarMode.emoji) {
@@ -165,6 +171,11 @@ class ProfileAvatarEditor extends HookConsumerWidget {
 
     Future<void> selectImage({required bool camera}) async {
       if (isPickingImage.value) return;
+      final operation = ++imageSelectionGeneration.value;
+      bool isCurrentOperation() =>
+          context.mounted &&
+          currentMode.value == ProfileAvatarMode.image &&
+          imageSelectionGeneration.value == operation;
       isPickingImage.value = true;
       error.value = null;
       try {
@@ -173,9 +184,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         final picked = camera
             ? await service.captureImage()
             : await service.pickGalleryImage();
-        if (picked == null || !context.mounted) return;
+        if (picked == null || !isCurrentOperation()) return;
         final preparedPhoto = await service.prepareImageBytes(picked);
-        if (!context.mounted) return;
+        if (!context.mounted || !isCurrentOperation()) return;
         final cropped = await Navigator.of(context).push<Uint8List>(
           MaterialPageRoute(
             builder: (_) => ProfileAvatarCropPage(
@@ -183,12 +194,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             ),
           ),
         );
-        if (cropped == null) return;
-        if (context.mounted) onDraftChanged(ProfileImageAvatarDraft(cropped));
+        if (cropped == null || !isCurrentOperation()) return;
+        onDraftChanged(ProfileImageAvatarDraft(cropped));
       } catch (_) {
-        error.value = "We couldn't prepare that photo. Try again.";
+        if (isCurrentOperation()) {
+          error.value = "We couldn't prepare that photo. Try again.";
+        }
       } finally {
-        if (context.mounted) isPickingImage.value = false;
+        if (isCurrentOperation()) isPickingImage.value = false;
       }
     }
 
