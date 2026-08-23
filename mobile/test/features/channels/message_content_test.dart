@@ -2105,6 +2105,28 @@ Photos
         expect(_allRichText(tester), isNot(contains('**')));
       });
 
+      testWidgets('renders inline code in the app mono face', (tester) async {
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: 'Run `just test` now')),
+        );
+
+        // gpt_markdown renders inline code through BidiRichText, a RichText
+        // subclass, so find.byType(RichText) would miss it.
+        final families = <String?>[];
+        for (final rich in tester.widgetList<RichText>(
+          find.byWidgetPredicate((widget) => widget is RichText),
+        )) {
+          rich.text.visitChildren((span) {
+            if (span is TextSpan && span.toPlainText().contains('just test')) {
+              families.add(span.style?.fontFamily);
+            }
+            return true;
+          });
+        }
+
+        expect(families, contains('GeistMono'));
+      });
+
       testWidgets('renders code block between paragraphs', (tester) async {
         await tester.pumpWidget(
           _testable(

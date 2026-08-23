@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
@@ -265,6 +264,9 @@ class MessageContent extends HookConsumerWidget {
         finalContent,
         style: style,
         followLinkColor: false,
+        // normalizeBareLinks() already turns bare URLs into Markdown links;
+        // gpt_markdown 1.2.0 autolinks by default, so both would run.
+        autolink: false,
         codeBuilder: (context, name, code, closed) =>
             _MessageCodeBlock(name: name, code: code),
         linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
@@ -277,7 +279,7 @@ class MessageContent extends HookConsumerWidget {
           resolvedChannelTap,
           resolvedChannelNames,
         ),
-        imageBuilder: (context, imageUrl) =>
+        imageBuilder: (context, imageUrl, _, _) =>
             _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
         textAlign: textAlign,
         maxLines: maxLines,

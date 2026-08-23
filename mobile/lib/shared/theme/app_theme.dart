@@ -5,6 +5,7 @@ import 'app_colors.dart';
 import 'color_scheme.dart';
 import 'grid.dart';
 import 'text_theme.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 
 /// Border radius constants matching desktop shadcn "New York" style.
 /// Desktop uses --radius: 0.625rem (10px) as base:
@@ -89,7 +90,16 @@ class AppTheme {
       colorScheme: scheme,
       splashFactory: NoSplash.splashFactory,
       scaffoldBackgroundColor: scheme.surface,
-      extensions: [appColors],
+      extensions: [
+        appColors,
+        // Inline code is rendered by gpt_markdown, which defaults to its
+        // bundled JetBrains Mono. Declared here so every Markdown surface
+        // picks up the app's own mono face.
+        GptMarkdownThemeData(
+          brightness: brightness,
+          inlineCode: const InlineCodeStyle(fontFamily: 'GeistMono'),
+        ),
+      ],
       fontFamily: 'Inter',
       textTheme: textTheme,
       appBarTheme: AppBarTheme(
