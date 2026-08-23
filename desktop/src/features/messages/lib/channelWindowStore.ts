@@ -25,6 +25,8 @@ export type ChannelWindowPage = {
 };
 export type ChannelWindowStore = {
   pages: ChannelWindowPage[];
+  /** One fetched successor held outside the rendered page chain. */
+  stagedPage: ChannelWindowPage | null;
   /** Top-level live events not represented in an authoritative relay page. */
   liveOverlay: RelayEvent[];
   /** Live structural events retained independently from frozen page closure. */
@@ -38,12 +40,13 @@ export type ChannelWindowStore = {
 
 export const emptyChannelWindowStore = (): ChannelWindowStore => ({
   pages: [],
+  stagedPage: null,
   liveOverlay: [],
   liveAux: [],
   liveSummaries: {},
 });
 
-function cursorsEqual(
+export function cursorsEqual(
   left: ChannelWindowCursor | null,
   right: ChannelWindowCursor | null,
 ) {
@@ -112,6 +115,7 @@ export function replaceNewestChannelWindow(
   const auxIds = new Set(page.aux.map((event) => event.id));
   return {
     pages: [page],
+    stagedPage: null,
     liveOverlay: current.liveOverlay.filter((event) => !ids.has(event.id)),
     liveAux: current.liveAux.filter((event) => !auxIds.has(event.id)),
     // A head refetch is the authoritative resync moment (subscribe/reconnect
@@ -151,8 +155,21 @@ export function appendOlderChannelWindow(
   return {
     ...current,
     pages: [...current.pages, page],
+    stagedPage: null,
     liveOverlay: current.liveOverlay.filter((event) => !pageIds.has(event.id)),
   };
+}
+
+/** Hold one cursor-matched successor outside the rendered page chain. */
+export function stageOlderChannelWindow(
+  current: ChannelWindowStore,
+  page: ChannelWindowPage,
+): ChannelWindowStore {
+  assertValidPage(page);
+  const tail = current.pages[current.pages.length - 1];
+  if (!tail?.hasMore || !tail.nextCursor) return current;
+  if (!cursorsEqual(page.startCursor, tail.nextCursor)) return current;
+  return { ...current, stagedPage: page };
 }
 
 /**

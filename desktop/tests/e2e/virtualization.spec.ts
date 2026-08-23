@@ -251,9 +251,9 @@ test.describe("list virtualization", () => {
     // reproduce Chromium/WebKit's native wheel → scroll callback ordering. The
     // old boundary rollback moved the viewport back down before the fetch
     // committed; keep that pre-prepend reversal below the same 5px frame bar.
-    // A 300ms relay delay leaves the input boundary and prepend commit as two
-    // distinct phases so this assertion cannot accidentally measure only the
-    // later anchor correction.
+    // Start outside the history lookahead and let native wheel input cross it.
+    // This preserves the pre-prepend rollback measurement whether the page is
+    // already staged locally or still incurs the configured relay delay.
     await installMockBridge(page, {
       deepHistoryMessageCount: 1_800,
       channelWindowDelayMs: 300,
@@ -284,6 +284,7 @@ test.describe("list virtualization", () => {
               id: row.dataset.messageId ?? "",
               top: row.getBoundingClientRect().top - scrollerTop,
               scrollHeight: s.scrollHeight,
+              clientHeight: s.clientHeight,
               bottomDistance: s.scrollHeight - s.clientHeight - s.scrollTop,
             };
           }
@@ -306,7 +307,7 @@ test.describe("list virtualization", () => {
       });
       await page.waitForTimeout(300);
       await timeline.evaluate((element) => {
-        element.scrollTop = 180;
+        element.scrollTop = element.clientHeight * 2;
       });
       await page.waitForTimeout(150);
       const before = await sampleVisibleAnchor();
@@ -353,12 +354,14 @@ test.describe("list virtualization", () => {
       const box = await timeline.boundingBox();
       if (!box) throw new Error("timeline has no bounding box");
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      for (const deltaY of [-60, -30, -20, -15]) {
+      for (const deltaY of [-before.clientHeight * 0.75]) {
         await page.mouse.wheel(0, deltaY);
         await page.waitForTimeout(12);
       }
       const wheelTrace = await wheelTracePromise;
-      expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(350);
+      expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(
+        before.clientHeight * 1.5,
+      );
       expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
       // Linux Chromium delivers CDP wheel input with more latency than macOS,
       // so the burst's final delta can land AFTER the anchor baseline sample
@@ -483,19 +486,19 @@ test.describe("list virtualization", () => {
     }
   });
 
-  test("09 — older-page render commit waits for scroller rest under continued wheel input", async ({
+  test("09 — older-page render commit is bounded under continued wheel input, and holds the anchor", async ({
     page,
   }) => {
     test.setTimeout(60_000);
-    // Production shape for the WKWebView dropped-write hazard: heavy
-    // variable-height rows, a slow older-page fetch, and wheel input that
-    // KEEPS ARRIVING through fetch resolution. Every prepend-compensation
-    // mechanism is a scrollTop write, and macOS WebKit can drop those writes
-    // while trackpad momentum owns the offset — so the contract under test is
-    // that the fetched page's RENDER COMMIT (the scrollHeight jump) is
-    // deferred until input quiesces, and that the at-rest commit then holds
-    // the anchored row. Chromium cannot reproduce the dropped write itself;
-    // it CAN prove the commit-at-rest scheduling that makes it unreachable.
+    // Production shape: heavy variable-height rows, a slow older-page fetch,
+    // and wheel input that KEEPS ARRIVING through fetch resolution. #1698 held
+    // the landed page until input stopped entirely; under a sustained trackpad
+    // gesture that turned a ~450ms page into a multi-second wait behind the
+    // spinner. The contract now is a bounded hold: the page's RENDER COMMIT
+    // (the scrollHeight jump) lands within SETTLE_HOLD_DEADLINE_MS of the
+    // fetch resolving even though input never quiesces, and that commit still
+    // holds the reader's anchored row. Chromium cannot reproduce WebKit's
+    // dropped-write hazard; it CAN prove the scheduling bound and the anchor.
     await installMockBridge(page, {
       deepHistoryMessageCount: 1_800,
       channelWindowDelayMs: 300,
@@ -505,119 +508,143 @@ test.describe("list virtualization", () => {
     await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
     await page.waitForTimeout(1_000);
 
-    // Mount mid-history rows clear of the load-older sentinel, then trip it.
+    // Mount mid-history rows clear of the load-older trigger, then trip it.
     await timeline.evaluate((element) => {
       element.scrollTop = 4000;
     });
     await page.waitForTimeout(300);
 
-    // In-page observer: tracks the last wheel-input timestamp, captures the
-    // first at-rest anchor after input stops, and records when the prepend
-    // commit (scrollHeight jump) lands relative to the last input.
-    const tracePromise = timeline.evaluate(async (scroller) => {
+    // In-page observer: records when the spinner first appears (the fetch is
+    // in flight), when the prepend commit (scrollHeight jump) lands, how long
+    // input had been quiet at that moment, and the anchored row's drift
+    // across the commit. The anchor is re-captured on every frame before the
+    // commit so it reflects the reader's CURRENT position under live input.
+    const WHEEL_TICK_PX = 30;
+    const tracePromise = timeline.evaluate(async (scroller, WHEEL_TICK_PX) => {
       const s = scroller as HTMLElement;
       const baseHeight = s.scrollHeight;
       let lastInputTs = 0;
-      let sawInput = false;
-      let restAnchor: { id: string; top: number } | null = null;
+      let wheelEvents = 0;
+      // Wheel ticks since the last anchor sample. The commit frame is heavy
+      // (~100ms of prepend render), so ticks land inside it, and each tick's
+      // main-thread event and compositor scroll apply on independent
+      // schedules. The reader's own motion at the commit frame is therefore
+      // some whole number of ticks — up to one more than the events seen.
+      // Only displacement that is NOT a whole number of ticks is drift.
+      let wheelTicksSinceSample = 0;
       const onWheel = () => {
         lastInputTs = performance.now();
-        sawInput = true;
-        // Input after a lull invalidates any anchor captured during it —
-        // the commit must be measured against the FINAL at-rest position.
-        restAnchor = null;
+        wheelEvents += 1;
+        wheelTicksSinceSample += 1;
       };
       s.addEventListener("wheel", onWheel, { passive: true });
-      let commit: { ts: number; gapSinceInput: number } | null = null;
-      let sawSpinnerDuringHold = false;
-      let anchorDriftAfterCommit: number | null = null;
+      const topRow = () => {
+        const scrollerTop = s.getBoundingClientRect().top;
+        const row = Array.from(
+          s.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ).find(
+          (candidate) =>
+            candidate.getBoundingClientRect().top - scrollerTop >= 0,
+        );
+        return row?.dataset.messageId
+          ? {
+              id: row.dataset.messageId,
+              top: row.getBoundingClientRect().top - scrollerTop,
+            }
+          : null;
+      };
+      let spinnerAt: number | null = null;
+      let anchor: { id: string; top: number } | null = null;
+      let commit: {
+        ts: number;
+        sinceSpinner: number;
+        gapSinceInput: number;
+        wheelEventsBefore: number;
+      } | null = null;
+      let anchorDriftAtCommit: number | null = null;
       const deadline = performance.now() + 8_000;
       while (performance.now() < deadline) {
         const now = performance.now();
-        if (commit === null) {
-          if (
-            document.querySelector(
-              '[data-testid="message-timeline-fetching-older"]',
-            ) !== null
-          ) {
-            sawSpinnerDuringHold = true;
-          }
-          // First frame at rest (input quiet for 60ms — shorter than the
-          // gate's own window, so this reading always precedes admission):
-          // capture the row the at-rest commit must hold.
-          if (restAnchor === null && sawInput && now - lastInputTs >= 60) {
-            const scrollerTop = s.getBoundingClientRect().top;
+        if (
+          spinnerAt === null &&
+          document.querySelector(
+            '[data-testid="message-timeline-fetching-older"]',
+          ) !== null
+        ) {
+          spinnerAt = now;
+        }
+        if (s.scrollHeight > baseHeight + 800) {
+          commit = {
+            ts: now,
+            sinceSpinner: spinnerAt === null ? -1 : now - spinnerAt,
+            gapSinceInput: now - lastInputTs,
+            wheelEventsBefore: wheelEvents,
+          };
+          if (anchor !== null) {
             const row = Array.from(
               s.querySelectorAll<HTMLElement>("[data-message-id]"),
-            ).find(
-              (candidate) =>
-                candidate.getBoundingClientRect().top - scrollerTop >= 0,
-            );
-            if (row?.dataset.messageId) {
-              restAnchor = {
-                id: row.dataset.messageId,
-                top: row.getBoundingClientRect().top - scrollerTop,
-              };
+            ).find((candidate) => candidate.dataset.messageId === anchor?.id);
+            if (row) {
+              const top =
+                row.getBoundingClientRect().top - s.getBoundingClientRect().top;
+              anchorDriftAtCommit = Number.POSITIVE_INFINITY;
+              for (let ticks = 0; ticks <= wheelTicksSinceSample + 1; ticks++) {
+                anchorDriftAtCommit = Math.min(
+                  anchorDriftAtCommit,
+                  Math.abs(top - (anchor.top - ticks * WHEEL_TICK_PX)),
+                );
+              }
+            } else {
+              anchorDriftAtCommit = Number.POSITIVE_INFINITY;
             }
           }
-          if (s.scrollHeight > baseHeight + 800) {
-            commit = { ts: now, gapSinceInput: now - lastInputTs };
-          }
-        } else if (restAnchor !== null) {
-          const anchor = restAnchor;
-          const scrollerTop = s.getBoundingClientRect().top;
-          const row = Array.from(
-            s.querySelectorAll<HTMLElement>("[data-message-id]"),
-          ).find((candidate) => candidate.dataset.messageId === anchor.id);
-          if (row) {
-            anchorDriftAfterCommit = Math.max(
-              anchorDriftAfterCommit ?? 0,
-              Math.abs(
-                row.getBoundingClientRect().top - scrollerTop - anchor.top,
-              ),
-            );
-          }
-          // Watch a settle window after the commit, then finish.
-          if (now - commit.ts > 700) break;
+          break;
+        }
+        const sampled = topRow();
+        if (sampled) {
+          anchor = sampled;
+          wheelTicksSinceSample = 0;
         }
         await new Promise((resolve) => requestAnimationFrame(resolve));
       }
       s.removeEventListener("wheel", onWheel);
-      return {
-        commit,
-        capturedRestAnchor: restAnchor !== null,
-        sawSpinnerDuringHold,
-        anchorDriftAfterCommit,
-      };
-    });
+      return { commit, anchorDriftAtCommit, wheelEvents };
+    }, WHEEL_TICK_PX);
 
     // Trip the boundary, then keep real wheel input flowing DOWN (away from
     // the boundary) through and well past the 300ms fetch resolution — the
-    // mid-gesture window in which the ungated build commits the page.
+    // sustained-gesture window in which #1698 withheld the page.
     await timeline.evaluate((element) => {
       element.scrollTop = 150;
     });
     const box = await timeline.boundingBox();
     if (!box) throw new Error("timeline has no bounding box");
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    for (let burst = 0; burst < 30; burst += 1) {
-      await page.mouse.wheel(0, 30);
+    for (let burst = 0; burst < 60; burst += 1) {
+      await page.mouse.wheel(0, WHEEL_TICK_PX);
       await page.waitForTimeout(40);
     }
 
     const trace = await tracePromise;
-    // The page must eventually commit — the gate defers, never strands.
+    // The page committed — and while input was still flowing (the gesture
+    // above outlasts the fetch by ~2s), not after the reader gave up.
     expect(trace.commit).not.toBeNull();
-    // The commit landed only after input quiesced. On the ungated build the
-    // deferred snapshot flushes as soon as the fetch resolves — between wheel
-    // bursts, a gap far below the quiet window — so this line is the red/green
-    // signal for the settle gate.
-    expect(trace.commit?.gapSinceInput ?? 0).toBeGreaterThanOrEqual(80);
-    // The reader saw the fetching affordance while the page was held.
-    expect(trace.sawSpinnerDuringHold).toBe(true);
-    // The at-rest commit held the anchored row (writes land at rest).
-    expect(trace.capturedRestAnchor).toBe(true);
-    expect(trace.anchorDriftAfterCommit ?? 0).toBeLessThan(5);
+    expect(
+      trace.commit?.gapSinceInput ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThan(80);
+    // Bounded hold: the commit landed within the gate's deadline of the fetch
+    // going in flight (spinner) — 300ms network + SETTLE_HOLD_DEADLINE_MS, with
+    // slack for the rAF watcher. #1698's unbounded hold lands ~2.4s here.
+    expect(trace.commit?.sinceSpinner ?? Number.POSITIVE_INFINITY).toBeLessThan(
+      300 + 1_500 + 250,
+    );
+    // The commit held the reader's anchored row within the 5px contract even
+    // though it landed under live input (modulo the reader's own whole wheel
+    // ticks — see the trace). #2855's lost correction read 452px here.
+    expect(trace.anchorDriftAtCommit).not.toBeNull();
+    expect(trace.anchorDriftAtCommit ?? Number.POSITIVE_INFINITY).toBeLessThan(
+      5,
+    );
   });
 });
 

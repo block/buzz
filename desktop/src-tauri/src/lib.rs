@@ -8,6 +8,7 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+mod http_client;
 mod huddle;
 mod identity_storage;
 mod initial_window;
@@ -354,10 +355,9 @@ pub fn run() {
                 tauri::async_runtime::spawn(crate::mesh_llm::start_coordinator(app_handle.clone()));
             }
 
-            // Start the localhost media streaming proxy. Uses the shared HTTP
-            // client so VPN tunnelling applies. The port is stored in AppState
-            // and exposed to the frontend via the `get_media_proxy_port` command.
-            let proxy_client = state.http_client.clone();
+            // Use the no-redirect, no-transparent-decompression media client:
+            // the proxy forwards range metadata verbatim for video seeking.
+            let proxy_client = state.media_fetch_client.clone();
             let proxy_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 let port = media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await;

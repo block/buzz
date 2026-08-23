@@ -166,15 +166,6 @@ fn identity_from_env() -> Option<Keys> {
 /// Returned as a `Result` so the fail-closed invariant is testable — callers
 /// must never substitute a redirect-following client on build failure. Shares
 /// the localhost `resolve`/pool config with the app-wide `http_client`.
-pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .pool_idle_timeout(std::time::Duration::from_secs(10))
-        .pool_max_idle_per_host(1)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-}
-
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
@@ -192,13 +183,8 @@ pub fn build_app_state() -> AppState {
     AppState {
         keys: Mutex::new(keys),
         identity_storage: AtomicU8::new(identity_storage as u8),
-        http_client: reqwest::Client::builder()
-            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(1)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new()),
-        media_fetch_client: build_media_fetch_client().expect(
+        http_client: crate::http_client::build().unwrap_or_else(|_| reqwest::Client::new()),
+        media_fetch_client: crate::http_client::build_media().expect(
             "media_fetch_client must build with redirect::Policy::none(); a \
              redirect-following fallback would forward the minted media auth \
              header across origins (redirect-hop SSRF)",

@@ -209,7 +209,9 @@ test("timeline does not recompute row estimates during ordinary scroll", async (
   await page.goto("/");
   await waitForMockTimelineBridge(page);
   await page.evaluate(() => {
-    for (let index = 0; index < 120; index += 1) {
+    // Keep the seed within one channel-window page. This test isolates estimate
+    // stability during ordinary scrolling; pagination has separate coverage.
+    for (let index = 0; index < 40; index += 1) {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `estimate memo row ${index}\nsecond line ${index}`,
@@ -221,7 +223,7 @@ test("timeline does not recompute row estimates during ordinary scroll", async (
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   const timeline = page.getByTestId("message-timeline");
-  await expect(timeline).toContainText("estimate memo row 119");
+  await expect(timeline).toContainText("estimate memo row 39");
   await page.waitForFunction(() => {
     const element = document.querySelector<HTMLDivElement>(
       '[data-testid="message-timeline"]',

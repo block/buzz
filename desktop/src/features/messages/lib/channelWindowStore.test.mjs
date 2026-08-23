@@ -11,6 +11,7 @@ import {
   mergeLiveChannelWindowEvent,
   mergeLiveThreadSummary,
   replaceNewestChannelWindow,
+  stageOlderChannelWindow,
 } from "./channelWindowStore.ts";
 
 function event(id, createdAt, kind = 9) {
@@ -113,20 +114,54 @@ test("rejects inconsistent exhaustion and cursor facts", () => {
   );
 });
 
-test("newest refresh drops a stale tail when its boundary moves", () => {
+test("newest refresh drops a stale tail and its staged successor", () => {
   const first = page(null, [event("a", 100)]);
-  const loaded = appendOlderChannelWindow(
+  const staged = page(first.nextCursor, [event("z", 90)], { hasMore: false });
+  const loaded = stageOlderChannelWindow(
     replaceNewestChannelWindow(emptyChannelWindowStore(), first),
-    page(first.nextCursor, [event("z", 90)], { hasMore: false }),
+    staged,
   );
   const refreshed = replaceNewestChannelWindow(
     loaded,
     page(null, [event("n", 110), event("a", 100)]),
   );
   assert.equal(refreshed.pages.length, 1);
+  assert.equal(refreshed.stagedPage, null);
   assert.deepEqual(
     flattenChannelWindowEvents(refreshed).map((item) => item.content),
     ["a", "n"],
+  );
+});
+
+test("staging replaces at most one matching successor without rendering it", () => {
+  const first = page(null, [event("a", 100)]);
+  const store = replaceNewestChannelWindow(emptyChannelWindowStore(), first);
+  const staged = page(first.nextCursor, [event("b", 90)]);
+  const replacement = page(first.nextCursor, [event("c", 80)], {
+    hasMore: false,
+  });
+
+  const once = stageOlderChannelWindow(store, staged);
+  const twice = stageOlderChannelWindow(once, replacement);
+
+  assert.equal(twice.stagedPage, replacement);
+  assert.equal(twice.pages.length, 1);
+  assert.deepEqual(
+    flattenChannelWindowEvents(twice).map((item) => item.content),
+    ["a"],
+  );
+});
+
+test("staging discards a page outside the retained tail cursor", () => {
+  const first = page(null, [event("a", 100)]);
+  const store = replaceNewestChannelWindow(emptyChannelWindowStore(), first);
+
+  assert.equal(
+    stageOlderChannelWindow(
+      store,
+      page(cursor(event("wrong", 70)), [event("older", 60)]),
+    ),
+    store,
   );
 });
 

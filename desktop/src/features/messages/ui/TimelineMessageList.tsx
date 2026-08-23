@@ -718,8 +718,10 @@ function VirtualizedTimelineRows({
       // touch, and key listeners are the authoritative user-interaction gate.
       onAtBottomStateChange?.(distanceFromBottom <= 32);
       updatePinnedDayLabel(offset);
-      if (offset <= 200) {
-        // Layout scrolls near the top must not poison the reader's next input.
+      if (offset <= list.viewportSize * 1.5) {
+        // Begin loading before momentum reaches the retained history boundary.
+        // Arming here also prevents layout-only near-top scrolls from poisoning
+        // the reader's next upward wheel input.
         armUpwardMomentum(onStartReached?.() ?? false);
       }
     },

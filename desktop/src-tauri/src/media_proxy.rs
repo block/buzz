@@ -181,7 +181,7 @@ pub async fn handle_buzz_media(
 
     // Forward Range header if present — enables video seeking through the proxy.
     let mut upstream = state
-        .http_client
+        .media_fetch_client
         .get(&upstream_url)
         .timeout(std::time::Duration::from_secs(60));
 

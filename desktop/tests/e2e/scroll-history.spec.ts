@@ -1338,7 +1338,15 @@ test("fast middle-page scroll settles with continuous mounted coverage", async (
   // Simulate a fast trackpad pass through several middle-page ranges, then
   // stop. The final evaluate emits the last scroll event; all coverage samples
   // after it are passive observations.
+  //
+  // A real trackpad pass starts with a wheel event, and that is what retires
+  // the virtualizer's bottom intent. Programmatic `scrollTop` writes are not
+  // reader input, so without it the prepend's extent resize can legitimately
+  // re-pin the floor mid-burst and the coverage read measures the wrong place.
   await timeline.evaluate((element) => {
+    element.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: -1, bubbles: true }),
+    );
     const maxOffset = element.scrollHeight - element.clientHeight;
     for (const fraction of [0.72, 0.28, 0.64, 0.36, 0.58, 0.44, 0.52]) {
       element.scrollTop = maxOffset * fraction;
@@ -1976,18 +1984,51 @@ test("one scroll-up gesture pages older history once, not to the channel top", a
   // Let any cascade run unimpeded for a generous window. With the bug, the
   // observer re-arms after each page and digs through all ~1200 older roots in
   // this window; with the fix it pages once and waits for the next gesture.
-  await page.waitForTimeout(2_500);
+  //
+  // WKWebView keeps emitting `scroll` events while the reader rubber-bands at
+  // the boundary; each one re-enters the load-older trigger. Chromium emits
+  // none at rest, which hid the resolve→commit re-fire gap from this test.
+  // Emulate WebKit: nudge the offset 0↔1 every frame while parked in the
+  // trigger band, until the prepend commit carries the reader out of it.
+  await timeline.evaluate(async (element) => {
+    const deadline = performance.now() + 2_500;
+    while (performance.now() < deadline) {
+      if (element.scrollTop <= 200) {
+        element.scrollTop = element.scrollTop === 0 ? 1 : 0;
+      }
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  });
 
   const pagesFetched = await fetchCount();
   const deepest = await oldestRenderedIndex();
 
-  // One gesture should yield a small, bounded number of pages — not dozens.
-  // pageOlderMessagesUntilRowFloor may fetch up to MAX_BATCHES_PER_FETCH (3)
-  // relay pages to satisfy one visible row floor, so allow that ceiling plus a
-  // little slack; a cascade blows far past it.
-  expect(pagesFetched).toBeLessThanOrEqual(4);
-  // And it must NOT have reached the oldest seeded root on its own.
+  // One gesture commits one page and starts exactly one successor fetch for the
+  // staged slot. The successor remains outside projection, so a second request
+  // is expected but a third would still be a resolve→commit cascade.
+  expect(pagesFetched).toBeLessThanOrEqual(2);
+  // The staged successor must NOT have rendered on its own.
   expect(deepest ?? Number.POSITIVE_INFINITY).toBeGreaterThan(50);
+
+  // Once staging is complete, the next gesture consumes that page locally.
+  // Make any accidental network request visibly too slow, then require the next
+  // page to paint within 500ms without incrementing the request counter.
+  await expect.poll(fetchCount).toBe(2);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, channelWindowDelayMs: 2_000 },
+    };
+  });
+  await page.mouse.wheel(0, 1_000);
+  await page.waitForTimeout(50);
+  await page.mouse.wheel(0, -4_000);
+  await expect
+    .poll(oldestRenderedIndex, { timeout: 500 })
+    .toBeLessThan(deepest ?? Number.POSITIVE_INFINITY);
+  // The only new request is the background successor stage; rendering did not
+  // wait for its 2s delay.
+  expect(await fetchCount()).toBe(3);
 });
 
 // Regression for Wes's "after a page loads I'm yanked to the oldest of the new

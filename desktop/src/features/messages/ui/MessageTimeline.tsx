@@ -23,7 +23,6 @@ import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
-import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useBufferedTimelineMessages } from "./useBufferedTimelineMessages";
 import {
   DirectMessageIntroAvatarStack,
@@ -215,7 +214,6 @@ const MessageTimelineBase = React.forwardRef<
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const contentRef = React.useRef<HTMLDivElement>(null);
-  const topSentinelRef = React.useRef<HTMLDivElement>(null);
   const [virtualizerScrollParent, setVirtualizerScrollParent] =
     React.useState<HTMLDivElement | null>(null);
   const [virtualizerRenderVersion, bumpVirtualizerRenderVersion] =
@@ -570,12 +568,17 @@ const MessageTimelineBase = React.forwardRef<
     // Indexed find navigation can legitimately land near the current history
     // boundary. Do not mistake that programmatic jump for scrollback intent and
     // prepend underneath the active match.
-    // A settle-gate hold means the reader is still parked at the OLD
-    // boundary — don't stack more page fetches behind the held commit.
+    // A landed page that has not painted yet — deferred snapshot still behind
+    // the live cache, or held by the settle gate — means the reader is still
+    // parked at the OLD boundary. The scroll events WebKit keeps emitting
+    // there would otherwise start the next page in the gap between
+    // `isFetchingOlder` clearing and the prepend committing, cascading one
+    // gesture into several pages. Same predicate the spinner uses below.
     if (
       searchActiveMessageId ||
       !fetchOlder ||
       isFetchingOlder ||
+      isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ||
       isHoldingPrepend ||
       showTimelineSkeleton ||
       !hasOlderMessages
@@ -585,21 +588,15 @@ const MessageTimelineBase = React.forwardRef<
     void fetchOlder();
     return true;
   }, [
+    deferredMessages,
     fetchOlder,
     hasOlderMessages,
     isFetchingOlder,
     isHoldingPrepend,
+    messages,
     searchActiveMessageId,
     showTimelineSkeleton,
   ]);
-
-  useLoadOlderOnScroll({
-    fetchOlder: useTimelineVirtualizer ? undefined : fetchOlder,
-    hasOlderMessages,
-    isLoading: showTimelineSkeleton,
-    scrollContainerRef: activeScrollContainerRef,
-    sentinelRef: topSentinelRef,
-  });
 
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
@@ -770,9 +767,7 @@ const MessageTimelineBase = React.forwardRef<
               )}
               ref={contentRef}
             >
-              {omitHistoryLeadIn ? null : (
-                <div ref={topSentinelRef} aria-hidden className="h-px" />
-              )}
+              {omitHistoryLeadIn ? null : <div aria-hidden className="h-px" />}
 
               {/* Fixed-height history slot keeps the virtual spacer's offset
                   stable across load-older fetches. The intro-only state has no

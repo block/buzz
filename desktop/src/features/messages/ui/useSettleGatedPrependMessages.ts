@@ -27,13 +27,15 @@ import * as React from "react";
 export const SETTLE_MOTION_WINDOW_MS = 100;
 export const SETTLE_FRAME_COUNT = 3;
 /**
- * Upper bound on how long a fetched page may be withheld. Trackpad momentum
- * decays in well under a second; a reader actively driving the scroller for
- * this long has moved on, and admitting under continuous REAL input is safe —
- * the dropped-write hazard is specific to the inertial momentum phase, which
- * cannot outlive this deadline.
+ * Upper bound on how long a fetched page may be withheld. The dropped-write
+ * hazard is specific to the inertial momentum phase, and trackpad momentum
+ * decays in well under a second — so a scroller still reporting motion past
+ * this deadline is under continuous REAL input, where admitting is safe.
+ * Every millisecond above the momentum bound is pure wait for a reader who
+ * keeps two fingers on the pad while history loads (#1698 used 4s; a 450ms
+ * page then painted seconds after it arrived).
  */
-export const SETTLE_HOLD_DEADLINE_MS = 4_000;
+export const SETTLE_HOLD_DEADLINE_MS = 1_500;
 
 export type SettleGateDecision<T> =
   | { kind: "pass" }
@@ -126,6 +128,28 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
   const latestMetaRef = React.useRef(meta);
   latestMetaRef.current = meta;
 
+  // Track motion for the scroller's whole life, not just while holding, so a
+  // hold that begins on a scroller at rest knows it is at rest. #1698 assumed
+  // motion at hold start instead, which charged every page a full quiet
+  // window (~100ms) even when the reader had stopped long before it landed.
+  // A live fling keeps this fresh on its own: its scroll events precede the
+  // hold, so a hold opened mid-fling still waits out the quiet window even if
+  // WebKit starves the first events after it opens.
+  const lastMotionTsRef = React.useRef(Number.NEGATIVE_INFINITY);
+  React.useEffect(() => {
+    const scroller = scrollElementRef.current;
+    if (!scroller) return;
+    const markMotion = () => {
+      lastMotionTsRef.current = performance.now();
+    };
+    scroller.addEventListener("scroll", markMotion, { passive: true });
+    scroller.addEventListener("wheel", markMotion, { passive: true });
+    return () => {
+      scroller.removeEventListener("scroll", markMotion);
+      scroller.removeEventListener("wheel", markMotion);
+    };
+  }, [scrollElementRef]);
+
   React.useEffect(() => {
     if (!isHoldingPrepend) return;
     const scroller = scrollElementRef.current;
@@ -138,24 +162,15 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
     }
     let frame: number | null = null;
     const deadline = performance.now() + SETTLE_HOLD_DEADLINE_MS;
-    // Assume motion at hold start: worst case this costs one quiet window
-    // (~100ms) behind the fetching-older spinner when the reader was already
-    // at rest; the alternative admits mid-fling if WebKit starves the first
-    // scroll events.
-    let lastMotionTs = performance.now();
     let previousScrollTop = scroller.scrollTop;
     let settledFrames = 0;
-    const markMotion = () => {
-      lastMotionTs = performance.now();
-    };
-    scroller.addEventListener("scroll", markMotion, { passive: true });
-    scroller.addEventListener("wheel", markMotion, { passive: true });
     const watch = () => {
       const scrollTop = scroller.scrollTop;
       settledFrames =
         Math.abs(scrollTop - previousScrollTop) < 0.5 ? settledFrames + 1 : 0;
       previousScrollTop = scrollTop;
-      const quiet = performance.now() - lastMotionTs >= SETTLE_MOTION_WINDOW_MS;
+      const quiet =
+        performance.now() - lastMotionTsRef.current >= SETTLE_MOTION_WINDOW_MS;
       if (
         (quiet && settledFrames >= SETTLE_FRAME_COUNT) ||
         performance.now() >= deadline
@@ -170,8 +185,6 @@ export function useSettleGatedPrependMessages<T extends { id: string }, M>({
     };
     frame = requestAnimationFrame(watch);
     return () => {
-      scroller.removeEventListener("scroll", markMotion);
-      scroller.removeEventListener("wheel", markMotion);
       if (frame !== null) cancelAnimationFrame(frame);
     };
   }, [isHoldingPrepend, scrollElementRef]);

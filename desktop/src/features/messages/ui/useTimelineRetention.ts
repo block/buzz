@@ -70,12 +70,16 @@ export function useTimelineRetention(
     [keys, retainedKeys],
   );
   const onScrollEnd = React.useCallback(() => {
+    const list = listRef.current;
+    if (list && list.scrollOffset <= list.viewportSize * 1.5) {
+      evictionNotBeforeRef.current = performance.now() + 3_000;
+    }
     if (refreshTimerRef.current !== null) {
       clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = null;
     }
     refreshRetainedKeys();
-  }, [refreshRetainedKeys]);
+  }, [listRef, refreshRetainedKeys]);
 
   return { retainedIndices, onScrollEnd };
 }
