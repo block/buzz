@@ -2,6 +2,20 @@ export const MENTION_CHIP_BASE_CLASSES = "mention-chip";
 
 export const MENTION_CHIP_HOVER_CLASSES = "mention-chip-hover";
 
+const INLINE_CHIP_LABEL_MAX_CHARACTERS = 48;
+
+/** Caps a fragmentable chip label without changing its underlying metadata. */
+export function truncateInlineChipLabel(label: string): string {
+  const characters = Array.from(label);
+  if (characters.length <= INLINE_CHIP_LABEL_MAX_CHARACTERS) return label;
+  return `${characters
+    .slice(0, INLINE_CHIP_LABEL_MAX_CHARACTERS - 1)
+    .join("")}…`;
+}
+
+/** Allows a long chip to fragment into separately decorated line boxes. */
+export const WRAPPING_INLINE_CHIP_CLASSES = "wrapping-inline-chip";
+
 export type InlineChipIconKind =
   | "agent"
   | "human"

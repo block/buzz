@@ -7,8 +7,8 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import '../profile/user_status.dart';
 import '../profile/user_status_cache_provider.dart';
 import 'agent_activity/agent_activity_sheet.dart';
@@ -184,6 +184,7 @@ class _SectionLabel extends StatelessWidget {
 const _changeableRoles = ['admin', 'member', 'guest'];
 
 String _roleLabel(String role) {
+  if (role == 'bot') return 'Agent';
   if (role.isEmpty) return 'Member';
   return '${role[0].toUpperCase()}${role.substring(1)}';
 }

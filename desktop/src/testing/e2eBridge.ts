@@ -10,6 +10,11 @@ import {
   handleDeleteCustomHarness,
 } from "./e2eBridgeCustomHarnesses.ts";
 
+import type {
+  ObservedUnreadProjection,
+  ObservedUnreadResponse,
+} from "@/shared/api/tauriObservedUnread";
+import type { UnreadCatchUpChannelResult } from "@/shared/api/tauriUnreadCatchUp";
 import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
@@ -113,6 +118,7 @@ type MockManagedAgentRuntimeSeed = {
 
 type MockRelayAgentSeed = {
   pubkey: string;
+  ownerPubkey?: string | null;
   name: string;
   agentType?: string;
   capabilities?: string[];
@@ -188,6 +194,12 @@ type E2eConfig = {
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Override the repository access channel for project authorization states. */
+    projectAccessChannelId?: string;
+    /** Make remote project snapshots fail with this git-facing message. */
+    projectRepoSnapshotError?: string;
+    /** Delay remote repository snapshots so project loading UI is observable. */
+    projectRepoSnapshotDelayMs?: number;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -238,6 +250,10 @@ type E2eConfig = {
     acpAuthMethodsError?: string;
     /** When set, workflow updates fail with this message. */
     workflowUpdateError?: string;
+    /** When set, workflow deletion fails with this message. */
+    workflowDeleteError?: string;
+    /** Reject workflow run creation with this message. */
+    workflowTriggerError?: string;
     /** When set, the `delete_custom_harness` mock command throws with this message. */
     deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -297,6 +313,8 @@ type E2eConfig = {
     relayAgents?: MockRelayAgentSeed[];
     /** Reject successive relay-agent directory reads, then resume. */
     relayAgentListErrors?: (string | null)[];
+    /** Pubkeys omitted only from targeted send-time authorization checks. */
+    relayAgentRevalidationRevokedPubkeys?: string[];
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
@@ -332,6 +350,9 @@ type E2eConfig = {
     clearPendingNavigationDeepLinksError?: string;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
+     *  community mid-startup and observe the fail-closed scope check. */
+    startManagedAgentDelayMs?: number;
     /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
     mediaProxyInitiallyUnavailable?: boolean;
     /** Hold mock send live echoes until the E2E release seam is invoked. */
@@ -408,6 +429,10 @@ type E2eConfig = {
     nostrBindSignDelayMs?: number;
     /** Reject successive mock WebSocket connect attempts, then resume. */
     websocketConnectErrors?: string[];
+    /** Deliver AUTH synchronously, before the mock connect command resolves. */
+    websocketAuthBeforeConnectResolves?: boolean;
+    /** Stall the first AUTH signing command forever; later attempts complete. */
+    stallFirstAuthSigning?: boolean;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -851,6 +876,7 @@ type RawSendChannelMessageResponse = {
 
 type RawRelayAgent = {
   pubkey: string;
+  owner_pubkey?: string | null;
   name: string;
   agent_type: string;
   channels: string[];
@@ -1258,6 +1284,10 @@ declare global {
     __BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__?: number[];
     /** Captured aggregate project-history filters for request-count assertions. */
     __BUZZ_E2E_PROJECT_QUERY_FILTERS__?: MockFilter[];
+    /** Optional local repository snapshot returned for project branch tests. */
+    __BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__?: unknown;
+    /** Optional bounded file contents returned by repository content reads. */
+    __BUZZ_E2E_PROJECT_REPO_FILE_CONTENTS__?: Record<string, string | null>;
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
@@ -1809,6 +1839,12 @@ function buildMockConfigSurface(pubkey: string): {
   sources: Record<string, unknown>;
 } {
   // Goose running — mixed origins, override on model
+  // The `writeVia` payloads below are camelCase because that is what the
+  // backend emits — pinned by `wire_format_matches_typescript_contract` in
+  // `desktop/src-tauri/src/managed_agents/config_bridge/types.rs`. This mock
+  // agreed with `api/types.ts` while the real serializer emitted `env_key` /
+  // `config_id` / `config_key`, so a test against it certified a contract
+  // nothing produced. Change these only alongside that Rust test.
   const gooseSurface = {
     runtimeId: "goose",
     runtimeLabel: "Goose",
@@ -2324,6 +2360,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
     });
     mockRelayAgents.push({
       pubkey: seed.pubkey,
+      owner_pubkey: seed.ownerPubkey ?? null,
       name: seed.name,
       agent_type: seed.agentType ?? "goose",
       channels: channels.map((channel) => channel.name),
@@ -2825,7 +2862,9 @@ const mockChannels: MockChannel[] = [
     description: "Casual forum for async discussions",
     topic: null,
     purpose: null,
-    last_message_at: null,
+    // Authoritative forum-post recency returned by get_channels. This must come
+    // from the native 45001/45003 query, not the stream-only 9/40002 query.
+    last_message_at: isoMinutesAgo(10),
     archived_at: null,
     created_by: ALICE_PUBKEY,
     topic_set_by: null,
@@ -2836,7 +2875,7 @@ const mockChannels: MockChannel[] = [
     max_members: null,
     nip29_group_id: null,
     created_minutes_ago: 900,
-    updated_minutes_ago: 900,
+    updated_minutes_ago: 10,
     members: [
       createMockMember(ALICE_PUBKEY, "owner", 900),
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 750),
@@ -3057,6 +3096,7 @@ const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
 const mockChannelHistoryCloses: string[] = [];
 let mockWebsocketUnavailable = false;
 const relayWebsocketConnectAttemptStarts: number[] = [];
+let mockAuthSigningAttempts = 0;
 let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
@@ -3079,6 +3119,111 @@ type MockSaveSubscriptionRow = {
 };
 let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
 
+type MockObservedUnreadScope = {
+  generation: string;
+  revision: number;
+  lastSequence: number;
+  migrationComplete: boolean;
+  events: Map<
+    string,
+    {
+      channelId: string;
+      id: string;
+      createdAt: number;
+      rootId: string | null;
+      highPriority: boolean;
+      countsTowardBadge: boolean;
+      countsTowardAppBadge: boolean;
+    }
+  >;
+  channelLatest: Map<string, number>;
+  markers: Map<string, number>;
+};
+
+const mockObservedUnreadScopes = new Map<string, MockObservedUnreadScope>();
+
+function mockObservedUnreadScopeKey(scope: {
+  pubkey: string;
+  relayUrl: string;
+}) {
+  return `${scope.pubkey.trim().toLowerCase()}:${scope.relayUrl
+    .trim()
+    .replace(/\/+$/, "")}`;
+}
+
+function getMockObservedUnreadScope(scope: {
+  pubkey: string;
+  relayUrl: string;
+}) {
+  const key = mockObservedUnreadScopeKey(scope);
+  const existing = mockObservedUnreadScopes.get(key);
+  if (existing) return existing;
+  const created: MockObservedUnreadScope = {
+    generation: "e2e",
+    revision: 0,
+    lastSequence: 0,
+    migrationComplete: false,
+    events: new Map(),
+    channelLatest: new Map(),
+    markers: new Map(),
+  };
+  mockObservedUnreadScopes.set(key, created);
+  return created;
+}
+
+function mockObservedUnreadProjections(
+  scope: MockObservedUnreadScope,
+): ObservedUnreadProjection[] {
+  const channels = new Map<string, ObservedUnreadProjection>();
+  for (const [channelId, latest] of scope.channelLatest) {
+    channels.set(channelId, {
+      channelId,
+      latest,
+      count: 0,
+      badgeCount: 0,
+      appBadgeCount: 0,
+      topLevelUnread: false,
+      highPriorityUnread: false,
+    });
+  }
+  for (const event of scope.events.values()) {
+    let readAt = Math.max(
+      scope.markers.get(event.channelId) ?? 0,
+      scope.markers.get(`msg:${event.id}`) ?? 0,
+    );
+    if (event.rootId) {
+      readAt = Math.max(
+        readAt,
+        scope.markers.get(`thread:${event.rootId}`) ?? 0,
+      );
+    }
+    if (event.createdAt <= readAt) continue;
+    const projection = channels.get(event.channelId) ?? {
+      channelId: event.channelId,
+      latest: 0,
+      count: 0,
+      badgeCount: 0,
+      appBadgeCount: 0,
+      topLevelUnread: false,
+      highPriorityUnread: false,
+    };
+    projection.latest = Math.max(projection.latest, event.createdAt);
+    projection.count += 1;
+    projection.badgeCount += event.countsTowardBadge ? 1 : 0;
+    projection.appBadgeCount += event.countsTowardAppBadge ? 1 : 0;
+    projection.topLevelUnread ||= event.rootId === null;
+    projection.highPriorityUnread ||= event.highPriority;
+    channels.set(event.channelId, projection);
+  }
+  return [...channels.values()].sort((left, right) =>
+    left.channelId.localeCompare(right.channelId),
+  );
+}
+
+function resetMockObservedUnread() {
+  mockObservedUnreadScopes.clear();
+}
+
 function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
     ...s,
@@ -3093,6 +3238,123 @@ function resetMockPersonaCatalogEvents(config: E2eConfig | undefined) {
       tags: event.tags.map((tag) => [...tag]),
     });
   }
+}
+
+function mockPersonaCatalogPublications() {
+  const publications = [];
+  const claimed = new Set<string>();
+  for (const event of [...mockPersonaEvents].sort(
+    (a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id),
+  )) {
+    const dTags = event.tags.filter((tag) => tag[0] === "d");
+    if (dTags.length !== 1 || !dTags[0]?.[1]) continue;
+    const sourcePersonaId = dTags[0][1];
+    const ownerPubkey = event.pubkey.toLowerCase();
+    const coordinate = `${ownerPubkey}:${sourcePersonaId}`;
+    if (claimed.has(coordinate)) continue;
+    claimed.add(coordinate);
+    if (!personaHasExactSharedTag(event)) continue;
+    let content: Record<string, unknown>;
+    try {
+      content = JSON.parse(event.content) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const displayName = content.display_name;
+    const systemPrompt = content.system_prompt ?? "";
+    const optionalString = (value: unknown) =>
+      typeof value === "string" && value.trim() ? value : null;
+    const isExtendedPictographic = (value: string) =>
+      /^\p{Extended_Pictographic}$/u.test(value);
+    const hasValidVisibleText = (value: string, allowLayout: boolean) => {
+      const characters = [...value];
+      return characters.every((character, index) => {
+        if (allowLayout && (character === "\n" || character === "\t"))
+          return true;
+        if (/\p{Control}/u.test(character)) return false;
+        const codepoint = character.codePointAt(0) ?? 0;
+        const defaultIgnorable =
+          codepoint === 0x00ad ||
+          codepoint === 0x034f ||
+          codepoint === 0x061c ||
+          (codepoint >= 0x115f && codepoint <= 0x1160) ||
+          (codepoint >= 0x17b4 && codepoint <= 0x17b5) ||
+          (codepoint >= 0x180b && codepoint <= 0x180f) ||
+          (codepoint >= 0x200b && codepoint <= 0x200f) ||
+          (codepoint >= 0x202a && codepoint <= 0x202e) ||
+          (codepoint >= 0x2060 && codepoint <= 0x206f) ||
+          codepoint === 0x3164 ||
+          (codepoint >= 0xfe00 && codepoint <= 0xfe0f) ||
+          codepoint === 0xfeff ||
+          codepoint === 0xffa0 ||
+          (codepoint >= 0xfff0 && codepoint <= 0xfff8) ||
+          (codepoint >= 0x1bca0 && codepoint <= 0x1bca3) ||
+          (codepoint >= 0x1d173 && codepoint <= 0x1d17a) ||
+          (codepoint >= 0xe0000 && codepoint <= 0xe0fff);
+        if (!defaultIgnorable) return true;
+        if (character === "\ufe0f") {
+          const previous = characters[index - 1];
+          return (
+            previous !== undefined &&
+            (/^[#*0-9]$/u.test(previous) || isExtendedPictographic(previous))
+          );
+        }
+        if (character !== "\u200d") return false;
+        let previousIndex = index - 1;
+        while (
+          previousIndex >= 0 &&
+          (characters[previousIndex] === "\ufe0f" ||
+            /[\u{1f3fb}-\u{1f3ff}]/u.test(characters[previousIndex] ?? ""))
+        ) {
+          previousIndex -= 1;
+        }
+        return (
+          previousIndex >= 0 &&
+          isExtendedPictographic(characters[previousIndex] ?? "") &&
+          isExtendedPictographic(characters[index + 1] ?? "")
+        );
+      });
+    };
+    if (
+      typeof displayName !== "string" ||
+      !displayName.trim() ||
+      [...displayName].length > 128 ||
+      typeof systemPrompt !== "string" ||
+      new TextEncoder().encode(systemPrompt).length > 64 * 1024 ||
+      !hasValidVisibleText(displayName, false) ||
+      !hasValidVisibleText(systemPrompt, true)
+    )
+      continue;
+    publications.push({
+      eventId: event.id,
+      ownerPubkey,
+      sourcePersonaId,
+      createdAt: event.created_at,
+      agent: {
+        displayName,
+        avatarUrl: optionalString(content.avatar_url),
+        systemPrompt,
+        runtime: optionalString(content.runtime),
+        model: optionalString(content.model),
+        provider: optionalString(content.provider),
+        namePool: Array.isArray(content.name_pool)
+          ? content.name_pool.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [],
+        respondTo:
+          content.respond_to === "allowlist"
+            ? "owner-only"
+            : content.respond_to === "owner-only" ||
+                content.respond_to === "anyone"
+              ? content.respond_to
+              : null,
+        parallelism:
+          typeof content.parallelism === "number" ? content.parallelism : null,
+      },
+    });
+  }
+  return publications;
 }
 
 // Mesh-compute mock state — TEST-ONLY.
@@ -3498,6 +3760,8 @@ function handleUpdateWorkflow(args: {
 }
 
 function handleDeleteWorkflow(args: { workflowId: string }) {
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowDeleteError;
+  if (configuredError) throw new Error(configuredError);
   const index = mockWorkflows.findIndex((w) => w.id === args.workflowId);
   if (index === -1) throw new Error(`Workflow ${args.workflowId} not found`);
   mockWorkflows.splice(index, 1);
@@ -3570,6 +3834,8 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
 function handleTriggerWorkflow(args: { workflowId: string }) {
   const workflow = mockWorkflows.find((w) => w.id === args.workflowId);
   if (!workflow) throw new Error(`Workflow ${args.workflowId} not found`);
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowTriggerError;
+  if (configuredError) throw new Error(configuredError);
   const run = buildMockWorkflowRun(workflow);
   mockWorkflowRuns = [run, ...mockWorkflowRuns];
   return {
@@ -3791,6 +4057,71 @@ function getRelayWsUrl(config: E2eConfig | undefined): string {
   return config?.relayWsUrl ?? DEFAULT_RELAY_WS_URL;
 }
 
+/**
+ * Mirror of the backend's `assert_expected_relay_scope`: a caller-captured
+ * tenant scope must still match the active community when the command runs.
+ * The mock's "active relay" is the active community's relayUrl in
+ * localStorage (specs switch communities by rewriting it), falling back to
+ * the configured mock relay. Lets specs drive the mid-flight community
+ * switch with `openDmDelayMs` / `sendMessageDelayMs` and prove the send
+ * fails closed.
+ */
+function assertExpectedRelayScope(
+  expectedRelayUrl: string | null | undefined,
+  config: E2eConfig | undefined,
+): void {
+  const expected = expectedRelayUrl?.trim();
+  if (!expected) return;
+  let active: string | null = null;
+  try {
+    const activeId = window.localStorage.getItem("buzz-active-community-id");
+    const communities = JSON.parse(
+      window.localStorage.getItem("buzz-communities") ?? "[]",
+    ) as { id: string; relayUrl: string }[];
+    active =
+      communities.find((community) => community.id === activeId)?.relayUrl ??
+      null;
+  } catch {
+    active = null;
+  }
+  if (
+    normalizeMockRelayUrl(active ?? getRelayWsUrl(config)) !==
+    normalizeMockRelayUrl(expected)
+  ) {
+    throw new Error(
+      "active community changed before the message was submitted; not sent",
+    );
+  }
+}
+
+/** Same ws(s) normalization the app applies to community relay URLs. */
+function normalizeMockRelayUrl(url: string): string {
+  if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
+    return `wss://${url}`;
+  }
+  return url;
+}
+
+/**
+ * Mirror of the backend's `assert_expected_signer`: a caller-captured signer
+ * identity must still match the active identity when the command runs. The
+ * real backend reads relay and keys under separate locks, so the signer scope
+ * is asserted independently of the relay scope.
+ */
+function assertExpectedSigner(
+  expectedSignerPubkey: string | null | undefined,
+  config: E2eConfig | undefined,
+): void {
+  const expected = expectedSignerPubkey?.trim();
+  if (!expected) return;
+  const active = getMockMemberPubkey(config);
+  if (expected.toLowerCase() !== active.toLowerCase()) {
+    throw new Error(
+      "active identity changed before the message was submitted; not sent",
+    );
+  }
+}
+
 function getIdentity(config: E2eConfig | undefined): TestIdentity | undefined {
   if (!isRelayMode(config)) {
     return undefined;
@@ -3853,6 +4184,14 @@ function setMockPresenceStatus(pubkey: string, status: PresenceStatus) {
 }
 
 function resolveHandler(handler: unknown): WsHandler {
+  const deliver = resolveRawHandler(handler);
+  // The native plugin coalesces inbound frames and always delivers an array
+  // (native_websocket.rs `FrameBatch::flush`). Emitting bare frames here would
+  // green the e2e suites against a transport shape production no longer sends.
+  return (message) => deliver([message]);
+}
+
+function resolveRawHandler(handler: unknown): WsHandler {
   if (typeof handler === "function") {
     return handler as WsHandler;
   }
@@ -5082,6 +5421,47 @@ function buildMockChannelWindowBounds(
  * This is the window read-model surface the overhaul introduced; without it the
  * relay-mode bridge has no handler and the timeline renders empty.
  */
+async function handleGetChannelReconnectRepair(
+  args: {
+    channelId: string;
+    since: number;
+    limit: number;
+    until?: number | null;
+    beforeId?: string | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<RelayEvent[]> {
+  const kinds = new Set([
+    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100,
+    48101, 48102, 48103,
+  ]);
+  const filter: Record<string, unknown> = {
+    "#h": [args.channelId],
+    kinds: [...kinds],
+    since: args.since,
+    limit: args.limit,
+  };
+  if (args.until != null) filter.until = args.until;
+  if (args.beforeId != null) filter.before_id = args.beforeId;
+
+  if (getIdentity(config)) return relayQuery(config, [filter]);
+  return getMockMessageStore(args.channelId)
+    .filter(
+      (event) =>
+        kinds.has(event.kind) &&
+        event.created_at >= args.since &&
+        (args.until == null ||
+          event.created_at < args.until ||
+          (event.created_at === args.until &&
+            (args.beforeId == null || event.id > args.beforeId))),
+    )
+    .sort(
+      (left, right) =>
+        right.created_at - left.created_at || left.id.localeCompare(right.id),
+    )
+    .slice(0, args.limit);
+}
+
 async function handleGetChannelWindow(
   args: {
     channelId: string;
@@ -5373,6 +5753,7 @@ const MOCK_PROJECT_SEEDS = [
     description:
       "Relay, desktop, and mobile clients for the Buzz community platform.",
     cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${MOCK_IDENTITY_PUBKEY}/buzz`,
+    webUrl: null,
     owner: MOCK_IDENTITY_PUBKEY,
     contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
     activityLevel: 4,
@@ -5382,6 +5763,7 @@ const MOCK_PROJECT_SEEDS = [
     name: "relay-tools",
     description: "Operator tooling and admin CLI for relay deployments.",
     cloneUrl: "https://github.com/block/relay-tools.git",
+    webUrl: "https://github.com/block/relay-tools",
     owner: ALICE_PUBKEY,
     contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
     activityLevel: 2,
@@ -5391,6 +5773,7 @@ const MOCK_PROJECT_SEEDS = [
     name: "design-system",
     description: "Shared UI tokens, typography ramps, and component library.",
     cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${BOB_PUBKEY}/design-system`,
+    webUrl: null,
     owner: BOB_PUBKEY,
     contributors: [ALICE_PUBKEY],
     activityLevel: 1,
@@ -5488,8 +5871,13 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+          [
+            "buzz-channel",
+            getConfig()?.mock?.projectAccessChannelId ??
+              "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+          ],
           ["clone", seed.cloneUrl],
+          ...(seed.webUrl ? [["web", seed.webUrl]] : []),
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
         owner,
@@ -5801,9 +6189,25 @@ function buildLastMessages(
   return map;
 }
 
+/**
+ * Mirrors the real backend split: `get_channels` (member-only) drops
+ * non-member open channels, while `get_open_channel_directory` keeps the
+ * discovery superset. Filtering on `is_member` lets specs assert the poll no
+ * longer leaks the whole relay's open channels into the member list.
+ */
+function scopeChannelsForMembership<T extends { is_member: boolean }>(
+  channels: T[],
+  scope: "member-only" | "open-directory",
+): T[] {
+  return scope === "open-directory"
+    ? channels
+    : channels.filter((channel) => channel.is_member);
+}
+
 async function handleGetChannels(
   payload: unknown,
   config: E2eConfig | undefined,
+  scope: "member-only" | "open-directory" = "member-only",
 ) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
@@ -5824,7 +6228,10 @@ async function handleGetChannels(
     // The hash is constant ("mock-hash") and full lists remain the default:
     // mock channel data mutates during tests while the hash does not. Focused
     // snapshot specs can opt into the not-modified branch explicitly.
-    const channels = listMockChannels(config);
+    const channels = scopeChannelsForMembership(
+      listMockChannels(config),
+      scope,
+    );
     const hash = "mock-hash";
     const knownHash = (payload as { knownHash?: unknown } | null)?.knownHash;
     const forcedNotModified =
@@ -5931,10 +6338,12 @@ async function handleGetChannels(
     })
     .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
 
+  const scopedChannels = scopeChannelsForMembership(channels, scope);
+
   return {
     hash: "mock-hash",
-    channels,
-    last_messages: buildLastMessages(channels),
+    channels: scopedChannels,
+    last_messages: buildLastMessages(scopedChannels),
   };
 }
 
@@ -6489,6 +6898,8 @@ async function handleCreateChannel(
 async function handleOpenDm(
   args: {
     pubkeys: string[];
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ) {
@@ -6496,6 +6907,11 @@ async function handleOpenDm(
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
   }
+  // After the injected delay, like the real command's post-await check: a
+  // caller-captured tenant scope and signer identity must still match the
+  // active community/identity.
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
 
   const normalizedPubkeys = normalizeParticipantPubkeys(args.pubkeys);
   if (normalizedPubkeys.length === 0) {
@@ -8698,9 +9114,21 @@ function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
 async function handleStartManagedAgent(
   args: {
     pubkey: string;
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config?: E2eConfig,
 ): Promise<RawManagedAgent> {
+  const delayMs = config?.mock?.startManagedAgentDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  // After the injected delay, like the real command's checks before any
+  // spawn/deploy side effect: a caller-captured tenant scope and signer
+  // identity must still match the active community/identity.
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
+
   const startError = config?.mock?.startManagedAgentErrors?.shift();
   if (startError) {
     throw new Error(startError);
@@ -9157,6 +9585,8 @@ async function handleSendChannelMessage(
     linkPreviewTags?: string[][] | null;
     sentFromThreadTag?: string[] | null;
     suppressLinkPreviews?: boolean;
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -9167,6 +9597,11 @@ async function handleSendChannelMessage(
       window.setTimeout(resolve, sendMessageDelayMs),
     );
   }
+  // After the injected delay, like the real command's post-await check: a
+  // caller-captured tenant scope and signer identity must still match the
+  // active community/identity.
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
 
   // Mirror the WebSocket send path's failure injection so specs that route
   // the first message through the acknowledged HTTP transport still exercise
@@ -9631,12 +10066,12 @@ async function resolveGetEvent(
   },
   config: E2eConfig | undefined,
 ) {
+  // Allow test specs to mark specific event IDs as definitively deleted.
+  if (config?.mock?.deletedEventIds?.includes(args.eventId)) {
+    throw new Error("event not found");
+  }
   const identity = getIdentity(config);
   if (!identity) {
-    // Allow test specs to mark specific event IDs as definitively deleted.
-    if (config?.mock?.deletedEventIds?.includes(args.eventId)) {
-      throw new Error("event not found");
-    }
     const knownEvents: RelayEvent[] = [
       ...Array.from(mockMessages.values()).flat(),
       {
@@ -9752,9 +10187,14 @@ async function connectMockSocket(args: { onMessage: unknown }) {
     subscriptions: new Map(),
   });
 
-  window.setTimeout(() => {
+  if (getConfig()?.mock?.websocketAuthBeforeConnectResolves) {
     sendWsText(handler, ["AUTH", `mock-challenge-${wsId}`]);
-  }, 0);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+  } else {
+    window.setTimeout(() => {
+      sendWsText(handler, ["AUTH", `mock-challenge-${wsId}`]);
+    }, 0);
+  }
 
   return wsId;
 }
@@ -10243,6 +10683,7 @@ export function maybeInstallE2eTauriMocks() {
   mockAuthResponses.length = 0;
   mockChannelHistoryCloses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
+  mockAuthSigningAttempts = 0;
   deferredSendMessageLiveEchoes.length = 0;
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
@@ -10271,6 +10712,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockMesh();
   resetMockUserStatuses();
   resetMockPersonaCatalogEvents(config);
+  resetMockObservedUnread();
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
   resetMockPendingNavigationDeepLinks(config);
@@ -11548,6 +11990,17 @@ export function maybeInstallE2eTauriMocks() {
         // viewer-identity avatar attribution is exercised in e2e.
         return { name: "Thomas P", email: "thomasp@example.com" };
       case "get_project_repo_snapshot":
+        if (activeConfig?.mock?.projectRepoSnapshotDelayMs) {
+          await new Promise((resolve) =>
+            window.setTimeout(
+              resolve,
+              activeConfig.mock?.projectRepoSnapshotDelayMs,
+            ),
+          );
+        }
+        if (activeConfig?.mock?.projectRepoSnapshotError) {
+          throw new Error(activeConfig.mock.projectRepoSnapshotError);
+        }
         return {
           latest_commit: {
             hash: "0123456789abcdef0123456789abcdef01234567",
@@ -11643,7 +12096,14 @@ export function maybeInstallE2eTauriMocks() {
           ],
         };
       case "get_project_local_repo_snapshot":
-        return null;
+        return window.__BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__ ?? null;
+      case "get_project_repo_file_content":
+      case "get_project_local_repo_file_content": {
+        const path = (payload as { path?: string } | undefined)?.path;
+        return path
+          ? (window.__BUZZ_E2E_PROJECT_REPO_FILE_CONTENTS__?.[path] ?? null)
+          : null;
+      }
       case "get_project_repo_diff":
         return {
           additions: 27,
@@ -11718,6 +12178,8 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_project_local_repositories":
         return [];
+      case "open_project_repository_folder":
+        return null;
       case "push_project_local_repository": {
         const input = payload as { branchName?: string | null };
         const status = window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__;
@@ -11747,7 +12209,8 @@ export function maybeInstallE2eTauriMocks() {
           message: "Pulled main from remote.",
         };
       case "clone_project_repository": {
-        const path = "/tmp/buzz/REPOS/mock-project";
+        // Clones land in reposDir/<repo-name>, matching the terminal mocks.
+        const path = "/tmp/buzz/REPOS/buzz";
         const commit = "0123456789abcdef0123456789abcdef01234567";
         window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ = {
           local_path: path,
@@ -12203,6 +12666,16 @@ export function maybeInstallE2eTauriMocks() {
         }
         return channels;
       }
+      case "get_open_channel_directory": {
+        // The real command returns a bare Channel[] (the discovery superset),
+        // not the hash-wrapped payload `get_channels` uses.
+        const directory = await handleGetChannels(
+          payload,
+          activeConfig,
+          "open-directory",
+        );
+        return directory.channels ?? [];
+      }
       case "get_feed":
         return handleGetFeed(
           (payload as Parameters<typeof handleGetFeed>[0]) ?? {},
@@ -12210,6 +12683,27 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_relay_agents":
         return handleListRelayAgents(activeConfig);
+      case "revalidate_relay_agents": {
+        const agents = await handleListRelayAgents(activeConfig);
+        const { pubkeys, channelId } = payload as {
+          pubkeys: string[];
+          channelId?: string;
+        };
+        const requested = new Set(
+          pubkeys.map((pubkey) => pubkey.toLowerCase()),
+        );
+        const revoked = new Set(
+          (activeConfig?.mock?.relayAgentRevalidationRevokedPubkeys ?? []).map(
+            (pubkey) => pubkey.toLowerCase(),
+          ),
+        );
+        return agents.filter(
+          (agent) =>
+            requested.has(agent.pubkey.toLowerCase()) &&
+            !revoked.has(agent.pubkey.toLowerCase()) &&
+            (!channelId || agent.channel_ids.includes(channelId)),
+        );
+      }
       case "list_personas":
         return handleListPersonas();
       case "create_persona":
@@ -12916,6 +13410,11 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetChannelMessagesBefore>[0],
           activeConfig,
         );
+      case "get_channel_reconnect_repair":
+        return handleGetChannelReconnectRepair(
+          payload as Parameters<typeof handleGetChannelReconnectRepair>[0],
+          activeConfig,
+        );
       case "get_channel_window":
         return handleGetChannelWindow(
           payload as Parameters<typeof handleGetChannelWindow>[0],
@@ -13105,6 +13604,13 @@ export function maybeInstallE2eTauriMocks() {
       case "nip44_decrypt_from_self":
         return (payload as { ciphertext: string }).ciphertext;
       case "create_auth_event":
+        mockAuthSigningAttempts++;
+        if (
+          getConfig()?.mock?.stallFirstAuthSigning &&
+          mockAuthSigningAttempts === 1
+        ) {
+          return new Promise<string>(() => {});
+        }
         if (identity) {
           return JSON.stringify(
             await signWithIdentity(identity, {
@@ -13363,6 +13869,187 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
+      // Archive sync runs natively; the bridge has no relay-backed backend to
+      // drive, so these are accepted no-ops. Without them every AppShell mount
+      // logs an unknown-command warning once the gate opens.
+      //
+      // The epoch must return a number rather than null, because it stands in
+      // for a value production guarantees is numeric. Nothing here validates
+      // it at runtime — the typed wrapper is erased — so a null would not
+      // fail loudly; it would flow into `start_archive_sync` as
+      // `{ epoch: null }` and this no-op would accept it, leaving the suite
+      // exercising a wire shape the real backend never sends. Returning a
+      // number keeps the production contract, and the reconciliation-gate
+      // spec asserts it: announce precedes start, and start carries a numeric
+      // epoch. Mutating this to null fails that spec.
+      case "announce_archive_sync_epoch":
+        return 1;
+      case "start_archive_sync":
+      case "stop_archive_sync":
+        return null;
+      case "fetch_persona_catalog":
+        return mockPersonaCatalogPublications();
+      case "observed_unread_open_scope": {
+        const request = payload as {
+          request: {
+            scope: { pubkey: string; relayUrl: string };
+            legacyPayload?: {
+              eventsByChannel?: Record<
+                string,
+                Array<{
+                  id: string;
+                  createdAt: number;
+                  rootId?: string | null;
+                  highPriority: boolean;
+                  countsTowardBadge: boolean;
+                  countsTowardAppBadge: boolean;
+                }>
+              >;
+            };
+          };
+        };
+        const scope = getMockObservedUnreadScope(request.request.scope);
+        if (!scope.migrationComplete) {
+          for (const [channelId, events] of Object.entries(
+            request.request.legacyPayload?.eventsByChannel ?? {},
+          )) {
+            for (const event of events) {
+              if (!scope.events.has(event.id)) {
+                scope.events.set(event.id, {
+                  channelId,
+                  ...event,
+                  rootId: event.rootId ?? null,
+                });
+              }
+            }
+          }
+          scope.migrationComplete = true;
+        }
+        return {
+          kind: "snapshot",
+          scope: request.request.scope,
+          generation: scope.generation,
+          revision: scope.revision,
+          lastAckedSequence: scope.lastSequence,
+          migrationComplete: scope.migrationComplete,
+          membershipSeeded: true,
+          channels: mockObservedUnreadProjections(scope),
+        } satisfies ObservedUnreadResponse;
+      }
+      case "observed_unread_ingest": {
+        const { request } = payload as {
+          request: {
+            scope: { pubkey: string; relayUrl: string };
+            sequence: number;
+            baseRevision: number;
+            events: Array<{
+              channelId: string;
+              id: string;
+              createdAt: number;
+              rootId: string | null;
+              highPriority: boolean;
+              countsTowardBadge: boolean;
+              countsTowardAppBadge: boolean;
+            }>;
+            channelLatest: Array<{ channelId: string; createdAt: number }>;
+            markers: Array<{ contextId: string; readAt: number | null }>;
+            membership: Array<{
+              kind: string;
+              value: string;
+              present: boolean;
+            }>;
+            clearChannels: string[];
+            clearAll: boolean;
+          };
+        };
+        const scope = getMockObservedUnreadScope(request.scope);
+        const before = new Map(
+          mockObservedUnreadProjections(scope).map((item) => [
+            item.channelId,
+            item,
+          ]),
+        );
+        if (request.clearAll) {
+          scope.events.clear();
+          scope.channelLatest.clear();
+        }
+        for (const channelId of request.clearChannels) {
+          scope.channelLatest.delete(channelId);
+          for (const [id, event] of scope.events) {
+            if (event.channelId === channelId) scope.events.delete(id);
+          }
+        }
+        for (const latest of request.channelLatest ?? []) {
+          scope.channelLatest.set(
+            latest.channelId,
+            Math.max(
+              scope.channelLatest.get(latest.channelId) ?? 0,
+              latest.createdAt,
+            ),
+          );
+        }
+        for (const event of request.events ?? []) {
+          if (!scope.events.has(event.id)) scope.events.set(event.id, event);
+        }
+        for (const marker of request.markers ?? []) {
+          if (marker.readAt === null) scope.markers.delete(marker.contextId);
+          else
+            scope.markers.set(
+              marker.contextId,
+              Math.max(scope.markers.get(marker.contextId) ?? 0, marker.readAt),
+            );
+        }
+        const after = mockObservedUnreadProjections(scope);
+        const afterIds = new Set(after.map((item) => item.channelId));
+        const baseRevision = scope.revision;
+        scope.revision += 1;
+        scope.lastSequence = request.sequence;
+        return {
+          kind: "delta",
+          scope: request.scope,
+          generation: scope.generation,
+          baseRevision,
+          revision: scope.revision,
+          ackedSequence: request.sequence,
+          upserts: after.filter(
+            (item) =>
+              JSON.stringify(before.get(item.channelId)) !==
+              JSON.stringify(item),
+          ),
+          removed: [...before.keys()].filter((id) => !afterIds.has(id)),
+        } satisfies ObservedUnreadResponse;
+      }
+      case "unread_catch_up": {
+        const request = payload as {
+          request: {
+            channels: Array<{ id: string }>;
+            selfPubkey: string;
+          };
+        };
+        const results: UnreadCatchUpChannelResult[] =
+          request.request.channels.map((channel) => ({
+            status: "success",
+            channelId: channel.id,
+            observedEvents: [],
+            maxTrigger: 0,
+            activityRows: [],
+            discovered: {
+              participated: [],
+              authored: getMockMessageStore(channel.id)
+                .filter(
+                  (event) =>
+                    event.pubkey === request.request.selfPubkey &&
+                    getThreadReferenceFromTags(event.tags).parentEventId ===
+                      null,
+                )
+                .map((event) => event.id),
+              mentioned: [],
+            },
+          }));
+        // Keep this mock aligned with the complete Rust serde shape pinned by
+        // `serialized_response_matches_the_typescript_contract`.
+        return { channels: results };
+      }
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":

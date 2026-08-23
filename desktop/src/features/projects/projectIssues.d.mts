@@ -8,6 +8,8 @@ export type ProjectIssueStatus =
   | "Done"
   | "Closed";
 
+export type ProjectTaskCategory = "issue" | "change-request" | "improvement";
+
 export type ProjectIssueComment = {
   id: string;
   content: string;
@@ -27,6 +29,7 @@ export type ProjectIssue = {
   channelId: string | null;
   originAgentName: string | null;
   labels: string[];
+  category: ProjectTaskCategory;
   recipients: string[];
   assignees: string[];
   assigneeOperationHeads: Record<string, string>;

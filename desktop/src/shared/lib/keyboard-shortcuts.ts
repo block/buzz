@@ -164,6 +164,14 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Messages",
   },
   {
+    id: "always-address-agent",
+    label: "Always address agent",
+    description: "Open the agent picker, or toggle the highlighted agent",
+    keys: "⇧⌘↵",
+    keysWindows: "Ctrl+Shift+Enter",
+    category: "Messages",
+  },
+  {
     id: "publish-note",
     label: "Publish note",
     description: "Publish a Pulse note",

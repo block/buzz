@@ -558,7 +558,7 @@
   .buzz-onboarding-runtime-pill {
     animation: buzz-onboarding-runtime-pill-in 180ms
       cubic-bezier(0.22, 1, 0.36, 1) both;
-    font-size: 0.625rem;
+    font-size: calc(var(--buzz-type-rem) * 0.625);
     letter-spacing: 0;
     line-height: 1;
     text-transform: uppercase;
@@ -783,4 +783,30 @@
       animation: none;
     }
   }
+}
+
+/*
+ * Project context (repository detail and the projects overview rail) is a
+ * sibling pod, not a column inside the app's standard content card. This
+ * deliberately sits outside the cascade layers so it can unframe the
+ * utility-styled content surface. Closing the panel or opening chat removes
+ * the marker and restores the normal framed surface.
+ */
+[data-buzz-content-surface]:has([data-project-detail-screen]),
+:root[data-buzz-sidebar]:not(.dark)
+  [data-buzz-content-surface]:has([data-project-detail-screen]),
+:root[data-buzz-sidebar].dark
+  [data-buzz-content-surface]:has([data-project-detail-screen]) {
+  box-shadow: none;
+}
+
+[data-buzz-content-surface]:has([data-project-context-detached="true"]),
+:root[data-buzz-sidebar]:not(.dark)
+  [data-buzz-content-surface]:has([data-project-context-detached="true"]),
+:root[data-buzz-sidebar].dark
+  [data-buzz-content-surface]:has([data-project-context-detached="true"]) {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  margin: 0;
 }

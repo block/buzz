@@ -124,6 +124,8 @@ pub async fn reconcile_inbound_persona_event(
                 &config,
                 agent_json,
                 cached_binary_path.as_deref(),
+                None,
+                None,
             )
             .await
             .map_err(|error| {
@@ -585,6 +587,7 @@ fn apply_inbound_managed_agent(
             &previous_allowlist,
             local.respond_to,
             &local.respond_to_allowlist,
+            crate::managed_agents::owner_only_access_build(),
         );
     }
     false

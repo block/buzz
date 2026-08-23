@@ -871,7 +871,7 @@ export function processTranscriptEvent(
       }
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
-      // the harness as [Base]/[System]/[Agent Memory — core]/[Channel Canvas].
+      // the harness as [Base]/[Agent Instructions]/[Agent Memory — core]/[Channel Canvas].
       // claude-agent-acp uses _meta.systemPrompt.append instead; both paths
       // produce the same standalone card (turnId: null, acpSource "session/new");
       // the bare field takes precedence when both are present.

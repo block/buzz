@@ -1,5 +1,8 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[path = "cli_tests.rs"]
+mod cli_tests;
+
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]
@@ -580,36 +583,6 @@ fn name_matches_interpreter_rejects_node_prefix() {
     assert!(!super::name_matches_interpreter("node_modules"));
     assert!(!super::name_matches_interpreter("nodejs"));
     assert!(!super::name_matches_interpreter("node-gyp"));
-}
-
-#[test]
-fn claude_spawn_uses_the_probed_cli_executable() {
-    let _guard = crate::managed_agents::lock_path_mutex();
-    let temp = tempfile::tempdir().expect("temp dir");
-    let cli = temp
-        .path()
-        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
-    std::fs::write(&cli, "").expect("write fake cli");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake cli executable");
-    }
-    let original_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", temp.path());
-
-    let mut command = std::process::Command::new("buzz-acp");
-    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
-
-    if let Some(path) = original_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-    assert!(command
-        .get_envs()
-        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
 }
 
 #[test]
@@ -1206,7 +1179,7 @@ fn receipt_invalid_when_process_not_running() {
     );
 }
 
-// ── Test helpers ────────────────────────────────────────────────────────────
+// ── Test helpers (spawn-key regressions: see `runtime/spawn_key.rs`) ───────
 
 fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
     serde_json::from_str(&format!(
@@ -1239,7 +1212,6 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     use std::process::{Command, Stdio};
     // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
     // `true` exits immediately with 0 — just a handle we need for type purposes.
-    //
     // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
     // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
     // bare `true` lookup during that window fails with NotFound (observed
@@ -1256,13 +1228,14 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         .expect("spawn true for placeholder");
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
-        log_path: std::path::PathBuf::new(),
+        log_path: Default::default(),
         spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
             &minimal_record(&"cc".repeat(32)),
             &[],
             &[],
             "wss://relay.example",
             &Default::default(),
+            false,
         ),
         setup_mode: false,
         adapter_availability: None,
