@@ -738,6 +738,9 @@ pub fn build_contact_list(
 ///
 /// Each pubkey is added as a `p` tag. The relay derives the canonical
 /// channel id and replies via OK message with `response:{channel_id}`.
+///
+/// `.allow_self_tagging()` preserves a `p` tag matching the signer's
+/// pubkey, for the same reason as the SDK's `build_dm_open`.
 pub fn build_dm_open(pubkeys: &[String]) -> Result<EventBuilder, String> {
     if pubkeys.is_empty() {
         return Err("dm_open requires at least one pubkey".into());
@@ -747,7 +750,7 @@ pub fn build_dm_open(pubkeys: &[String]) -> Result<EventBuilder, String> {
         check_pubkey(pk)?;
         tags.push(tag(vec!["p", &pk.to_ascii_lowercase()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(41010), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(41010), "").tags(tags).allow_self_tagging())
 }
 
 /// Kind 41012 — hide a DM channel from the user's listing.
