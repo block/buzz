@@ -107,6 +107,18 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
+fn claude_has_mcp_command() {
+    let p = known_acp_runtime("claude-agent-acp").expect("should resolve");
+    assert!(!p.mcp_hooks, "claude does not handle MCP_HOOK_SERVERS");
+    assert_eq!(
+        p.mcp_command,
+        Some("buzz-dev-mcp"),
+        "Claude Code needs the MCP server wired through session/new \
+         because it does not support native config"
+    );
+}
+
+#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);

@@ -125,7 +125,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["claude-agent-acp", "claude-code-acp"],
         aliases: &["claude-code", "claudecode"],
         avatar_url: CLAUDE_CODE_AVATAR_URL,
-        mcp_command: None,
+        mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: false,
         underlying_cli: Some("claude"),
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
