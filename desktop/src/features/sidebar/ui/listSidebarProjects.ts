@@ -79,6 +79,17 @@ export function selectedProjectRouteId(pathname: string): string | undefined {
   }
 }
 
+export function selectedChannelRouteId(pathname: string): string | undefined {
+  if (!pathname.startsWith("/channels/")) return undefined;
+  const raw = pathname.slice("/channels/".length).split("/")[0];
+  if (!raw) return undefined;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export function readSidebarProjectsFilter(
   relayOrigin: string | null,
   currentPubkey?: string,

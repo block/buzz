@@ -767,6 +767,7 @@ export function ProjectsView() {
               }
               handleRepositoryScopeChange("all");
               handleFilterChange("projects");
+              await goProject(result.project.id);
             }}
             onOpenChange={setCreateProjectOpen}
             open={createProjectOpen}

@@ -17,6 +17,7 @@ type ChannelKind = "stream" | "forum";
 type CreateChannelDialogProps = {
   /** Which kind of channel to create, or null when closed. */
   channelKind: ChannelKind | null;
+  description?: string;
   isCreating: boolean;
   onOpenChange: (open: boolean) => void;
   onCreate: (input: {
@@ -26,13 +27,18 @@ type CreateChannelDialogProps = {
     ttlSeconds?: number;
     templateId?: string;
   }) => Promise<void>;
+  testId?: string;
+  title?: string;
 };
 
 export function CreateChannelDialog({
   channelKind,
+  description,
   isCreating,
   onOpenChange,
   onCreate,
+  testId = "create-channel-dialog",
+  title,
 }: CreateChannelDialogProps) {
   const open = channelKind !== null;
 
@@ -57,14 +63,15 @@ export function CreateChannelDialog({
       <ChooserDialogContent
         className="max-w-lg"
         contentClassName="pt-3"
-        data-testid="create-channel-dialog"
+        data-testid={testId}
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        title={`Create a new ${kindLabel}`}
+        title={title ?? `Create a new ${kindLabel}`}
         description={
-          channelKind === "forum"
+          description ??
+          (channelKind === "forum"
             ? "Forums organize threaded discussions around a topic."
-            : "Channels are real-time streams for team conversation."
+            : "Channels are real-time streams for team conversation.")
         }
         footer={<CreateChannelFormFooter form={form} />}
       >

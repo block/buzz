@@ -61,6 +61,7 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 }
 
 test("projects activity overview screenshot", async ({ page }) => {
@@ -152,6 +153,11 @@ test("sidebar project add flow browses before creating", async ({ page }) => {
   await expect(page.getByTestId("create-project-name")).toHaveValue(
     "new workspace",
   );
+  await expect(
+    page.getByTestId("create-project-channel-permissions"),
+  ).toBeVisible();
+  await expect(page.getByTestId("create-project-listing")).toHaveText("Listed");
+  await expect(page.getByTestId("create-project-agent")).toHaveText("None");
   await page.getByRole("button", { name: "Back to projects" }).click();
   await expect(browser).toBeVisible();
 
@@ -272,7 +278,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
 
   // Borderless workspace: repository controls live in the persistent,
   // resizable auxiliary panel instead of a header row.
-  const overviewTab = page.getByRole("tab", { name: "Overview" });
+  const backButton = page.getByTestId("project-workspace-back");
   const filesTab = page.getByRole("tab", { name: "Files" });
   const channelsTab = page.getByRole("tab", { name: "Channels" });
   const contributorsTab = page.getByRole("tab", { name: "Contributors" });
@@ -306,8 +312,11 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     );
   };
   await expect(filesTab).toBeVisible();
+  await expect(backButton).toBeVisible();
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
   await expect(projectDetailScroll).toHaveCSS("overscroll-behavior-y", "none");
-  await expect(overviewTab).toHaveAttribute("data-state", "active");
+  await filesTab.click();
+  await expect(filesTab).toHaveAttribute("data-state", "active");
   const [projectDetailScrollBounds, initialTabMenuBounds] = await Promise.all([
     projectDetailScroll.boundingBox(),
     tabMenu.boundingBox(),
@@ -640,7 +649,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(agentChatPanel.getByTestId("message-composer")).toBeVisible();
   const agentContext = agentChatPanel.getByTestId("project-agent-context");
   await expect(agentContext).toBeVisible();
-  await expect(agentContext).toContainText("Overview");
+  await expect(agentContext).toContainText("Files");
   await expect(agentContext).not.toContainText("Buzz /");
   // The context rail reveals the chat panel with a width transition; measure
   // only after it settles or the panel's unclipped box overhangs the rail.
@@ -785,20 +794,20 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(
     workspacePanel.getByTestId("project-workspace-tab-menu"),
   ).toHaveCount(0);
-  const overviewBounds = await overviewTab.boundingBox();
+  const backBounds = await backButton.boundingBox();
   const channelsBounds = await channelsTab.boundingBox();
   const contributorsBounds = await contributorsTab.boundingBox();
   const tabMenuBounds = await tabMenu.boundingBox();
   const workspaceBounds = await workspacePanel.boundingBox();
   const repositoryActionsBounds = await repositoryActionsPanel.boundingBox();
-  expect(overviewBounds).not.toBeNull();
+  expect(backBounds).not.toBeNull();
   expect(channelsBounds).not.toBeNull();
   expect(contributorsBounds).not.toBeNull();
   expect(tabMenuBounds).not.toBeNull();
   expect(workspaceBounds).not.toBeNull();
   expect(repositoryActionsBounds).not.toBeNull();
   expect(channelsBounds?.x).toBeLessThan(contributorsBounds?.x ?? 0);
-  expect(overviewBounds?.x).toBeGreaterThan(workspaceBounds?.x ?? 0);
+  expect(backBounds?.x).toBeGreaterThan(workspaceBounds?.x ?? 0);
   expect(tabMenuBounds?.y).toBeLessThan(workspaceBounds?.y ?? 0);
   expect(repositoryActionsBounds?.x).toBeGreaterThan(workspaceBounds?.x ?? 0);
   await expect(
@@ -806,7 +815,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ).toHaveCount(0);
   await expect(
     workspacePanel.getByTestId("project-section-header-icon"),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/01-workspace-overview.png` });
 
@@ -1237,7 +1246,7 @@ test("projects v3 work-item list metadata", async ({ page }) => {
   const channelRow = page.getByTestId("project-channel-row").first();
   await expect(channelRow).toBeVisible();
   await expectSinglePrimaryTextColumn(channelRow);
-  await expect(channelRow).toContainText("#general");
+  await expect(channelRow).toContainText("#buzz");
   await expect(
     page.getByTestId("project-channel-project").first(),
   ).toBeVisible();

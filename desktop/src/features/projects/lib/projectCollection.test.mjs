@@ -75,9 +75,9 @@ function standaloneRepo(overrides = {}) {
   };
 }
 
-test("absorbStandaloneProjectRepositories folds a home-channel repo into the project", () => {
+test("absorbStandaloneProjectRepositories folds an authorized home-channel repo into the project", () => {
   const project = explicitProject();
-  const repoCard = standaloneRepo();
+  const repoCard = standaloneRepo({ repository: { maintainers: [OWNER] } });
   const folded = absorbStandaloneProjectRepositories([project, repoCard]);
 
   assert.equal(folded.length, 1);
@@ -85,6 +85,16 @@ test("absorbStandaloneProjectRepositories folds a home-channel repo into the pro
   assert.equal(folded[0].repositories.length, 1);
   assert.equal(folded[0].repositories[0].repoAddress, repoCard.projectAddress);
   assert.equal(folded[0].repositoryAddresses[0], repoCard.projectAddress);
+});
+
+test("absorbStandaloneProjectRepositories rejects a hostile home-channel claim", () => {
+  const project = explicitProject();
+  const repoCard = standaloneRepo();
+  const folded = absorbStandaloneProjectRepositories([project, repoCard]);
+
+  assert.equal(folded.length, 2);
+  assert.deepEqual(folded[0].repositories, []);
+  assert.equal(folded[1].projectAddress, repoCard.projectAddress);
 });
 
 test("absorbStandaloneProjectRepositories folds the owner's same-slug repo", () => {
@@ -115,14 +125,25 @@ test("absorbStandaloneProjectRepositories keeps an unrelated standalone repo", (
   );
 });
 
-test("homeRepositoriesToBind lists absorbed channel repos missing from the signed project", () => {
+test("homeRepositoriesToBind lists authorized absorbed channel repos missing from the signed project", () => {
+  const repo = standaloneRepo({ repository: { maintainers: [OWNER] } });
   const project = explicitProject({
-    repositories: [standaloneRepo().repositories[0]],
-    repositoryAddresses: [standaloneRepo().projectAddress],
+    repositories: [repo.repositories[0]],
+    repositoryAddresses: [repo.projectAddress],
   });
   const pending = homeRepositoriesToBind(project, []);
   assert.equal(pending.length, 1);
-  assert.equal(pending[0].repoAddress, standaloneRepo().projectAddress);
+  assert.equal(pending[0].repoAddress, repo.projectAddress);
+});
+
+test("homeRepositoriesToBind rejects a hostile absorbed channel repo", () => {
+  const repo = standaloneRepo();
+  const project = explicitProject({
+    repositories: [repo.repositories[0]],
+    repositoryAddresses: [repo.projectAddress],
+  });
+
+  assert.deepEqual(homeRepositoriesToBind(project, []), []);
 });
 
 test("homeRepositoriesToBind ignores repos already on the signed project", () => {

@@ -19,13 +19,28 @@ function withAbsorbedRepository(
   };
 }
 
+function repositoryAuthorizesProjectOwner(
+  project: Project,
+  repository: Repository,
+): boolean {
+  const projectOwner = project.owner.toLowerCase();
+  if (repository.owner.toLowerCase() === projectOwner) return true;
+  return Boolean(
+    repository.maintainers?.some(
+      (maintainer) => maintainer.toLowerCase() === projectOwner,
+    ),
+  );
+}
+
 function hostForStandaloneRepository(
   explicitProjects: Project[],
   repository: Repository,
 ): Project | undefined {
   const channelHost = repository.channelId
     ? explicitProjects.find(
-        (project) => project.projectChannelId === repository.channelId,
+        (project) =>
+          project.projectChannelId === repository.channelId &&
+          repositoryAuthorizesProjectOwner(project, repository),
       )
     : undefined;
   if (channelHost) return channelHost;
@@ -41,8 +56,10 @@ function repositoryBelongsOnProjectHome(
 ): boolean {
   return Boolean(
     (repository.channelId &&
-      repository.channelId === project.projectChannelId) ||
-      (repository.owner === project.owner && repository.dtag === project.dtag),
+      repository.channelId === project.projectChannelId &&
+      repositoryAuthorizesProjectOwner(project, repository)) ||
+      (repository.owner.toLowerCase() === project.owner.toLowerCase() &&
+        repository.dtag === project.dtag),
   );
 }
 

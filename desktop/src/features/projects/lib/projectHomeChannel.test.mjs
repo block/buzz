@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isProjectHomeChannel } from "./projectHomeChannel.ts";
+import {
+  hasAuthoritativeHomeBinding,
+  isProjectHomeChannel,
+} from "./projectHomeChannel.ts";
 
 const OWNER = "a".repeat(64);
 const MAINTAINER = "b".repeat(64);
@@ -39,6 +42,13 @@ test("isProjectHomeChannel accepts a repository that authorizes the project owne
       }),
     ]),
     true,
+  );
+});
+
+test("hasAuthoritativeHomeBinding rejects a bare project route assertion", () => {
+  assert.equal(
+    hasAuthoritativeHomeBinding(project({ repositories: [] })),
+    false,
   );
 });
 

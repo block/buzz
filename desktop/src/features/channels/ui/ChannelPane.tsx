@@ -45,7 +45,10 @@ import {
   WelcomeComposerGuidanceLayer,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
-import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import {
+  mentionsKnownAgent,
+  shouldUseFocusIdleDrawer,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
@@ -464,10 +467,25 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
     (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
-  const useFocusIdleDrawer =
-    useSplitAuxiliaryPane &&
-    Boolean(idleAuxiliaryPanel) &&
-    Boolean(onCloseIdleAuxiliaryPanel);
+  const selectedAgent = React.useMemo(
+    () =>
+      agentSessionSelection.resolveSelectedAgentSession({
+        agentSessionAgents,
+        openAgentSessionPubkey,
+        profilePanelPubkey,
+        profiles,
+      }),
+    [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
+  );
+  const useFocusIdleDrawer = shouldUseFocusIdleDrawer({
+    channelManagementOpen,
+    hasAgentSession: Boolean(activeChannel && selectedAgent),
+    hasIdleAuxiliaryPanel: Boolean(idleAuxiliaryPanel),
+    hasIdlePanelCloseHandler: Boolean(onCloseIdleAuxiliaryPanel),
+    hasProfilePanel: Boolean(profilePanelPubkey),
+    hasThreadSurface: Boolean(threadHeadMessage) || shouldShowThreadSkeleton,
+    useSplitAuxiliaryPane,
+  });
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
     useFocusThreadDrawer || useFocusIdleDrawer,
     useFocusThreadDrawer
@@ -481,16 +499,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
     });
-  const selectedAgent = React.useMemo(
-    () =>
-      agentSessionSelection.resolveSelectedAgentSession({
-        agentSessionAgents,
-        openAgentSessionPubkey,
-        profilePanelPubkey,
-        profiles,
-      }),
-    [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
-  );
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||

@@ -148,6 +148,53 @@ test("pointers to unknown channels or agents are not restorable", () => {
   );
 });
 
+test("a stored project-channel pointer restores when it matches the home channel", () => {
+  const home = {
+    id: "project-channel-1",
+    channelType: "stream",
+    isMember: true,
+    memberPubkeys: [SELF_PUBKEY, AGENT_PUBKEY],
+    participantPubkeys: [],
+  };
+  const restored = restoreProjectsAgentConversation({
+    stored: {
+      agentPubkey: AGENT_PUBKEY,
+      channelId: home.id,
+      opener: OPENER,
+    },
+    channels: [home],
+    candidates: [AGENT],
+    currentPubkey: SELF_PUBKEY,
+    homeChannelId: home.id,
+  });
+  assert.equal(restored?.channel, home);
+  assert.equal(restored?.agent, AGENT);
+});
+
+test("a stored project-channel pointer does not restore a different home", () => {
+  const home = {
+    id: "project-channel-1",
+    channelType: "stream",
+    isMember: true,
+    memberPubkeys: [SELF_PUBKEY],
+    participantPubkeys: [],
+  };
+  assert.equal(
+    restoreProjectsAgentConversation({
+      stored: {
+        agentPubkey: AGENT_PUBKEY,
+        channelId: home.id,
+        opener: OPENER,
+      },
+      channels: [home],
+      candidates: [AGENT],
+      currentPubkey: SELF_PUBKEY,
+      homeChannelId: "other-project-channel",
+    }),
+    null,
+  );
+});
+
 test("a pointer naming a non-DM or foreign-participant channel is not restorable", () => {
   const stored = {
     agentPubkey: AGENT_PUBKEY,
@@ -530,6 +577,29 @@ test("the captured scope rides every relay side effect of a first send", async (
   // The opener is a thread root: no parent reference.
   assert.equal(backend.state.sends[0].request.parentEventId, undefined);
   assert.equal(result.channel.id, "dm-on-wss://tenant-a.example");
+});
+
+test("a home channel first send does not open a DM", async () => {
+  const backend = makeScopedBackend("wss://tenant-a.example");
+  const home = { id: "project-channel-1" };
+  const result = await submitProjectAgentMessage({
+    agent: { pubkey: AGENT_PUBKEY, isManaged: false, isActive: true },
+    conversation: null,
+    content: "build this project",
+    mentionPubkeys: [AGENT_PUBKEY],
+    relayScope: "wss://tenant-a.example",
+    signerScope: SELF_PUBKEY,
+    homeChannel: home,
+    startAgent: backend.startAgent,
+    openDm: () => {
+      throw new Error("project home chat must use the project channel");
+    },
+    send: backend.send,
+  });
+
+  assert.deepEqual(backend.state.dmOpens, []);
+  assert.equal(result.channel.id, home.id);
+  assert.equal(backend.state.sends[0].request.channelId, home.id);
 });
 
 test("follow-ups reply to the opener so same-second id ordering cannot hide them", async () => {

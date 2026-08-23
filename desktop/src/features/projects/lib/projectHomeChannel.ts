@@ -10,7 +10,9 @@ export type ProjectHomeCandidate = {
   }>;
 };
 
-function hasAuthoritativeHomeBinding(project: ProjectHomeCandidate): boolean {
+export function hasAuthoritativeHomeBinding(
+  project: ProjectHomeCandidate,
+): boolean {
   const channelId = project.projectChannelId;
   if (!channelId) return false;
 

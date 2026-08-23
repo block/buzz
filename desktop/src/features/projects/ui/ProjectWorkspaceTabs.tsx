@@ -119,6 +119,7 @@ export function WorkspaceTabs({
   onSelectedIssueIdChange,
   onSelectedPullRequestIdChange,
   onSelectedTabChange,
+  onBack,
   onOpenMergeRecoveryTerminal,
   snapshot,
   snapshotError,
@@ -170,6 +171,7 @@ export function WorkspaceTabs({
   onSelectedPullRequestIdChange: (id: string | null) => void;
   /** Reports the active tab so the screen breadcrumb can mirror it. */
   onSelectedTabChange?: (tab: string) => void;
+  onBack: () => void;
   onOpenMergeRecoveryTerminal?: OpenMergeRecoveryTerminal;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
@@ -412,7 +414,7 @@ export function WorkspaceTabs({
           }`}
           data-testid="project-workspace-tab-menu"
         >
-          <ProjectTabsList prsActive={isPullRequestSelected} />
+          <ProjectTabsList onBack={onBack} prsActive={isPullRequestSelected} />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             {updatePullRequestAction ? (
               <Button

@@ -23,20 +23,29 @@ import { AttachProjectRepositoryDialog } from "./AttachProjectRepositoryDialog";
 
 export function ProjectRepositoryManagement({
   compact = false,
+  createOpen: createOpenProp,
+  hideTriggers = false,
   identityPubkey,
   onChange,
+  onCreateOpenChange,
   project,
   projects,
   repository,
 }: {
   compact?: boolean;
+  createOpen?: boolean;
+  hideTriggers?: boolean;
   identityPubkey?: string;
   onChange: (repositoryId: string) => void;
+  onCreateOpenChange?: (open: boolean) => void;
   project: Project;
   projects: Project[];
-  repository: Repository;
+  repository?: Repository | null;
 }) {
-  const [createOpen, setCreateOpen] = React.useState(false);
+  const [uncontrolledCreateOpen, setUncontrolledCreateOpen] =
+    React.useState(false);
+  const createOpen = createOpenProp ?? uncontrolledCreateOpen;
+  const setCreateOpen = onCreateOpenChange ?? setUncontrolledCreateOpen;
   const [attachOpen, setAttachOpen] = React.useState(false);
   const channelsQuery = useChannelsQuery();
   const createMutation = useAddProjectRepositoryMutation();
@@ -71,18 +80,19 @@ export function ProjectRepositoryManagement({
     [channelsQuery.data],
   );
   const inheritedChannelId = [
-    repository.channelId,
+    repository?.channelId,
     project.projectChannelId,
     project.repositories.find(
-      (candidate) => candidate.id !== repository.id && candidate.channelId,
+      (candidate) => candidate.id !== repository?.id && candidate.channelId,
     )?.channelId,
   ].find(
     (candidate) =>
       candidate && accessChannels.some((channel) => channel.id === candidate),
   );
   const canManageAccess =
+    Boolean(repository) &&
     accessChannels.length > 0 &&
-    identityPubkey?.toLowerCase() === repository.owner.toLowerCase();
+    identityPubkey?.toLowerCase() === repository?.owner.toLowerCase();
   const attachCandidates = React.useMemo(() => {
     const currentAddresses = new Set(project.repositoryAddresses);
     const candidates = new Map<string, Repository>();
@@ -132,7 +142,7 @@ export function ProjectRepositoryManagement({
         project={project}
         repositories={attachCandidates}
       />
-      {canEdit ? (
+      {canEdit && !hideTriggers ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -199,7 +209,8 @@ export function ProjectRepositoryManagement({
                 className="justify-between gap-4"
                 key={channel.id}
                 onSelect={() => {
-                  if (channel.id === repository.channelId) return;
+                  if (channel.id === repository?.channelId) return;
+                  if (!repository) return;
                   void repairMutation
                     .mutateAsync({
                       channelId: channel.id,
@@ -220,7 +231,7 @@ export function ProjectRepositoryManagement({
                 }}
               >
                 <span className="min-w-0 truncate">#{channel.name}</span>
-                {channel.id === repository.channelId ? (
+                {channel.id === repository?.channelId ? (
                   <Check className="h-4 w-4 shrink-0" />
                 ) : null}
               </DropdownMenuItem>

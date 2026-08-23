@@ -61,6 +61,7 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 }
 
 async function addProjectToSidebar(
@@ -72,6 +73,21 @@ async function addProjectToSidebar(
   const browser = page.getByTestId("project-browser-dialog");
   await browser.getByRole("searchbox", { name: "Search projects" }).fill(dtag);
   await browser.getByTestId(`project-browser-result-${dtag}`).click();
+  await expect(browser).toBeHidden();
+  await expect(page.getByTestId(`sidebar-project-${dtag}`)).toBeVisible();
+}
+
+async function openProjectRepository(
+  page: import("@playwright/test").Page,
+  repositoryId: string,
+) {
+  await expect(page).toHaveURL(/\/projects\//);
+  const target = await page.evaluate((id) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("repositoryId", id);
+    return `${url.pathname}${url.search}`;
+  }, repositoryId);
+  await page.goto(target, { waitUntil: "domcontentloaded" });
 }
 
 function pullRequestRowByAuthor(
@@ -1150,19 +1166,14 @@ test("sidebar distinguishes the Projects overview from an open project", async (
   await projectsOverview.click();
   await expect(projectsOverview).toHaveAttribute("data-active", "true");
   await expect(sidebarProject).toHaveAttribute("data-active", "false");
-  await expect(sidebarProject.locator("svg").first()).toHaveCSS(
-    "opacity",
-    "0.8",
-  );
   await expect(sidebarProject.locator('[data-sidebar="menu-label"]')).toHaveCSS(
     "opacity",
     "0.8",
   );
 
   await sidebarProject.click();
-  await expect(projectsOverview).toHaveAttribute("data-active", "true");
-  await expect(sidebarProject).toHaveAttribute("data-active", "false");
-  await expect(sidebarProject).toHaveAttribute("aria-expanded", "false");
+  await expect(projectsOverview).toHaveAttribute("data-active", "false");
+  await expect(sidebarProject).toHaveAttribute("data-active", "true");
 });
 
 test("collapsed sidebar leaves a balanced Projects surface gutter", async ({
@@ -1518,6 +1529,7 @@ test("channels tab opens the latest matching conversation without leaving the pr
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
   await page.getByRole("tab", { name: "Channels", exact: true }).click();
   const channelRow = page.getByTestId("project-channel-row").first();
   await expect(channelRow).toBeVisible({ timeout: 10_000 });
@@ -1834,7 +1846,7 @@ test("project overview presents collapsible context beside grouped activity", as
   );
   const channelRows = page.getByTestId("project-channel-row");
   expect(await channelRows.count()).toBeGreaterThan(0);
-  await expect(channelRows.first()).toContainText("#general");
+  await expect(channelRows.first()).toContainText("#buzz");
   const channelsList = page.getByTestId("projects-channels-list");
   await expect(channelsList).toContainText("buzz");
   await expect(channelsList).toContainText("relay-tools");
@@ -2222,7 +2234,7 @@ test("repository changes discard captured selection context before agent sends",
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addProjectToSidebar(page, "buzz");
-  await page.getByTestId("sidebar-project-repository-buzz").click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
   await page.getByRole("tab", { name: "Tasks", exact: true }).click();
 
   const selectedRow = page.getByTestId("project-issue-row").first();
@@ -2241,8 +2253,10 @@ test("repository changes discard captured selection context before agent sends",
     agentPanel.getByText(selectedTitle, { exact: true }),
   ).toBeVisible();
 
-  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await page.getByTestId("project-workspace-back").click();
+  await page.getByTestId("project-home-context-repo-relay-tools").click();
   await expect(page).toHaveURL(/repositoryId=.*relay-tools/);
+  await page.getByTestId("project-right-panel-chat-tab").click();
   await expect(agentPanel).toBeVisible();
   await expect(
     agentPanel.getByTestId("projects-agent-selection-toggle"),
@@ -2251,7 +2265,7 @@ test("repository changes discard captured selection context before agent sends",
   const prompt = "Explain the current repository.";
   const composer = agentPanel.getByTestId("message-composer");
   await composer.locator('[contenteditable="true"]').fill(prompt);
-  await composer.getByRole("button", { name: "Send message" }).click();
+  await composer.locator('[contenteditable="true"]').press("Enter");
   await expect
     .poll(() =>
       page.evaluate((prefix) => {
@@ -2478,6 +2492,7 @@ test("selecting repository workspace rows switches the context pod to the cluste
     )
     .first()
     .click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 
   await page.getByRole("tab", { name: "Commits" }).click();
   const commitRows = page.getByTestId("project-activity-feed-item");
@@ -2810,14 +2825,7 @@ test("project detail content areas do not paint background fills", async ({
     }
   };
 
-  for (const tab of [
-    "Overview",
-    "Files",
-    "Commits",
-    "Tasks",
-    "Review",
-    "Contributors",
-  ]) {
+  for (const tab of ["Files", "Commits", "Tasks", "Review", "Contributors"]) {
     await page.getByRole("tab", { name: tab, exact: true }).click();
     await expectVisiblePanelsToBeTransparent();
   }
@@ -3070,7 +3078,9 @@ test("external repositories stay on local source after a branch round trip", asy
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addProjectToSidebar(page, "buzz");
-  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await page.getByTestId("project-home-context-repo-relay-tools").click();
+  await page.getByRole("button", { name: "github.com" }).click();
+  await page.getByRole("menuitemradio", { name: /^Local/ }).click();
 
   await expect(
     page.getByRole("heading", { name: "Local branch README" }),
@@ -3164,7 +3174,9 @@ test("repository files beyond the eager preview limit load on demand", async ({
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await addProjectToSidebar(page, "buzz");
-  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await page.getByTestId("project-home-context-repo-relay-tools").click();
+  await page.getByRole("button", { name: "github.com" }).click();
+  await page.getByRole("menuitemradio", { name: /^Local/ }).click();
 
   await expect(
     page.getByRole("heading", { name: "Deferred README" }),

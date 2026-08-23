@@ -4,6 +4,7 @@ export type ProjectRelatedChannelSource = {
   id: string;
   name: string;
   projectChannelId: string | null;
+  relatedChannelIds?: readonly string[];
   repositories: Array<{
     id: string;
     name: string;
@@ -57,6 +58,19 @@ export function collectProjectRelatedChannelRows(
         repositoryId: null,
         repositoryName: null,
       });
+      repositoryChannelIds.add(projectChannelId);
+    }
+    for (const relatedChannelId of project.relatedChannelIds ?? []) {
+      const channelId = trimmedChannelId(relatedChannelId);
+      if (!channelId || repositoryChannelIds.has(channelId)) continue;
+      repositoryChannelIds.add(channelId);
+      rows.push({
+        channelId,
+        projectId: project.id,
+        projectName: project.name,
+        repositoryId: null,
+        repositoryName: null,
+      });
     }
   }
   return rows;
@@ -72,4 +86,69 @@ export function uniqueProjectRelatedChannelCount(
 
 export function projectRelatedChannelRowKey(row: ProjectRelatedChannelRow) {
   return `${row.channelId}:${row.projectId}:${row.repositoryId ?? "project"}`;
+}
+
+export type ProjectBoundChannel = {
+  channelId: string;
+  repositoryId: string | null;
+  role: "home" | "related";
+};
+
+/**
+ * Unique channels bound to one project: the home stream first, then each
+ * repository channel that is not already the home channel.
+ */
+export function listProjectBoundChannels(
+  project: Pick<
+    ProjectRelatedChannelSource,
+    "projectChannelId" | "relatedChannelIds" | "repositories"
+  >,
+): ProjectBoundChannel[] {
+  const channels: ProjectBoundChannel[] = [];
+  const seen = new Set<string>();
+  const homeChannelId = trimmedChannelId(project.projectChannelId);
+  if (homeChannelId) {
+    channels.push({
+      channelId: homeChannelId,
+      repositoryId: null,
+      role: "home",
+    });
+    seen.add(homeChannelId);
+  }
+  for (const relatedChannelId of project.relatedChannelIds ?? []) {
+    const channelId = trimmedChannelId(relatedChannelId);
+    if (!channelId || seen.has(channelId)) continue;
+    channels.push({
+      channelId,
+      repositoryId: null,
+      role: "related",
+    });
+    seen.add(channelId);
+  }
+  for (const repository of project.repositories) {
+    const channelId = trimmedChannelId(repository.channelId);
+    if (!channelId || seen.has(channelId)) continue;
+    channels.push({
+      channelId,
+      repositoryId: repository.id,
+      role: "related",
+    });
+    seen.add(channelId);
+  }
+  return channels;
+}
+
+/**
+ * Nested sidebar rows under a project: bound streams except the home
+ * channel, which is the project row itself.
+ */
+export function listProjectChildChannels(
+  project: Pick<
+    ProjectRelatedChannelSource,
+    "projectChannelId" | "relatedChannelIds" | "repositories"
+  >,
+): ProjectBoundChannel[] {
+  return listProjectBoundChannels(project).filter(
+    (channel) => channel.role !== "home",
+  );
 }

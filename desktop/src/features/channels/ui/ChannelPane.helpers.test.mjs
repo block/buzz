@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getChannelIntroKind } from "./ChannelPane.helpers.ts";
+import {
+  getChannelIntroKind,
+  shouldUseFocusIdleDrawer,
+} from "./ChannelPane.helpers.ts";
 
 function channel(overrides = {}) {
   return {
@@ -11,6 +14,32 @@ function channel(overrides = {}) {
     ...overrides,
   };
 }
+
+test("focus idle drawers yield to every higher-priority auxiliary surface", () => {
+  const idleDrawer = {
+    channelManagementOpen: false,
+    hasAgentSession: false,
+    hasIdleAuxiliaryPanel: true,
+    hasIdlePanelCloseHandler: true,
+    hasProfilePanel: false,
+    hasThreadSurface: false,
+    useSplitAuxiliaryPane: true,
+  };
+
+  assert.equal(shouldUseFocusIdleDrawer(idleDrawer), true);
+  for (const surface of [
+    "channelManagementOpen",
+    "hasAgentSession",
+    "hasProfilePanel",
+    "hasThreadSurface",
+  ]) {
+    assert.equal(
+      shouldUseFocusIdleDrawer({ ...idleDrawer, [surface]: true }),
+      false,
+      `idle drawer must yield when ${surface} is open`,
+    );
+  }
+});
 
 test("getChannelIntroKind names project homes ahead of regular streams", () => {
   assert.equal(getChannelIntroKind(channel(), true), "project channel");

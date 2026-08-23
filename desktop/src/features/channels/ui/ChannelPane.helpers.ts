@@ -3,6 +3,34 @@ import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
+export function shouldUseFocusIdleDrawer({
+  channelManagementOpen,
+  hasAgentSession,
+  hasIdleAuxiliaryPanel,
+  hasIdlePanelCloseHandler,
+  hasProfilePanel,
+  hasThreadSurface,
+  useSplitAuxiliaryPane,
+}: {
+  channelManagementOpen: boolean;
+  hasAgentSession: boolean;
+  hasIdleAuxiliaryPanel: boolean;
+  hasIdlePanelCloseHandler: boolean;
+  hasProfilePanel: boolean;
+  hasThreadSurface: boolean;
+  useSplitAuxiliaryPane: boolean;
+}): boolean {
+  return (
+    useSplitAuxiliaryPane &&
+    !channelManagementOpen &&
+    !hasAgentSession &&
+    !hasProfilePanel &&
+    !hasThreadSurface &&
+    hasIdleAuxiliaryPanel &&
+    hasIdlePanelCloseHandler
+  );
+}
+
 export function getChannelIntroKind(
   channel: Channel,
   projectHome = false,
