@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelTemplateRecord {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -14,9 +15,13 @@ pub struct ChannelTemplateRecord {
     pub canvas_template: Option<String>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<TemplateMemberEntry>,
     #[serde(default)]
     pub is_builtin: bool,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
 }
 
@@ -56,6 +61,14 @@ pub struct TemplateTeamEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMemberEntry {
+    pub pubkey: String,
+    #[serde(default = "default_member_role")]
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TemplateBackend {
     Local,
@@ -70,6 +83,10 @@ fn default_visibility() -> String {
     "open".to_string()
 }
 
+fn default_member_role() -> String {
+    "member".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateChannelTemplateRequest {
@@ -80,6 +97,8 @@ pub struct CreateChannelTemplateRequest {
     pub canvas_template: Option<String>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
+    #[serde(default)]
+    pub members: Vec<TemplateMemberEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,4 +112,6 @@ pub struct UpdateChannelTemplateRequest {
     pub canvas_template: Option<String>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
+    #[serde(default)]
+    pub members: Vec<TemplateMemberEntry>,
 }

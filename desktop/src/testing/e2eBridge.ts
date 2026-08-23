@@ -12802,6 +12802,7 @@ export function maybeInstallE2eTauriMocks() {
           visibility: template.visibility,
           canvas_template: template.canvasTemplate,
           agents: template.agents,
+          members: template.members,
           is_builtin: template.isBuiltin,
           created_at: template.createdAt,
           updated_at: template.updatedAt,
@@ -12815,6 +12816,7 @@ export function maybeInstallE2eTauriMocks() {
             visibility?: "open" | "private";
             canvasTemplate?: string;
             agents?: ChannelTemplate["agents"];
+            members?: ChannelTemplate["members"];
           };
         };
         const timestamp = new Date().toISOString();
@@ -12826,6 +12828,7 @@ export function maybeInstallE2eTauriMocks() {
           visibility: input.visibility ?? "open",
           canvasTemplate: input.canvasTemplate ?? null,
           agents: input.agents ?? { personas: [], teams: [] },
+          members: input.members ?? [],
           isBuiltin: false,
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -12845,6 +12848,7 @@ export function maybeInstallE2eTauriMocks() {
           visibility: created.visibility,
           canvas_template: created.canvasTemplate,
           agents: created.agents,
+          members: created.members,
           is_builtin: created.isBuiltin,
           created_at: created.createdAt,
           updated_at: created.updatedAt,

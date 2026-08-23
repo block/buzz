@@ -2,8 +2,10 @@ use std::{fs, path::PathBuf};
 
 use tauri::AppHandle;
 use tauri::Manager;
+use uuid::Uuid;
 
 use crate::templates::ChannelTemplateRecord;
+use crate::util::now_iso;
 
 fn channel_templates_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -30,6 +32,28 @@ pub fn sort_channel_templates(records: &mut [ChannelTemplateRecord]) {
     });
 }
 
+fn migrate_missing_identity_fields(
+    records: &mut [ChannelTemplateRecord],
+    migration_timestamp: &str,
+) -> bool {
+    let mut migrated = false;
+    for record in records {
+        if record.id.trim().is_empty() {
+            record.id = Uuid::new_v4().to_string();
+            migrated = true;
+        }
+        if record.created_at.trim().is_empty() {
+            record.created_at = migration_timestamp.to_string();
+            migrated = true;
+        }
+        if record.updated_at.trim().is_empty() {
+            record.updated_at.clone_from(&record.created_at);
+            migrated = true;
+        }
+    }
+    migrated
+}
+
 pub fn load_channel_templates(app: &AppHandle) -> Result<Vec<ChannelTemplateRecord>, String> {
     let path = channel_templates_store_path(app)?;
 
@@ -41,6 +65,10 @@ pub fn load_channel_templates(app: &AppHandle) -> Result<Vec<ChannelTemplateReco
     } else {
         Vec::new()
     };
+
+    if migrate_missing_identity_fields(&mut records, &now_iso()) {
+        save_channel_templates(app, &records)?;
+    }
 
     sort_channel_templates(&mut records);
     Ok(records)
@@ -69,7 +97,7 @@ pub fn validate_channel_template_deletion(template: &ChannelTemplateRecord) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::sort_channel_templates;
+    use super::{migrate_missing_identity_fields, sort_channel_templates};
     use crate::templates::{
         validate_channel_template_deletion, ChannelTemplateRecord, TemplateAgentRoster,
     };
@@ -83,6 +111,7 @@ mod tests {
             visibility: "open".to_string(),
             canvas_template: None,
             agents: TemplateAgentRoster::default(),
+            members: Vec::new(),
             is_builtin: false,
             created_at: "2026-05-11T00:00:00Z".to_string(),
             updated_at: "2026-05-11T00:00:00Z".to_string(),
@@ -134,7 +163,9 @@ mod tests {
 
     #[test]
     fn serialization_round_trip() {
-        use crate::templates::{TemplateAgentEntry, TemplateBackend, TemplateTeamEntry};
+        use crate::templates::{
+            TemplateAgentEntry, TemplateBackend, TemplateMemberEntry, TemplateTeamEntry,
+        };
 
         let original = ChannelTemplateRecord {
             id: "t1".to_string(),
@@ -160,6 +191,10 @@ mod tests {
                     }),
                 }],
             },
+            members: vec![TemplateMemberEntry {
+                pubkey: "member-1".to_string(),
+                role: "guest".to_string(),
+            }],
             is_builtin: false,
             created_at: "2026-05-11T00:00:00Z".to_string(),
             updated_at: "2026-05-11T00:00:00Z".to_string(),
@@ -179,6 +214,8 @@ mod tests {
         assert_eq!(parsed.agents.personas[0].persona_id, "builtin:fizz");
         assert_eq!(parsed.agents.personas[0].runtime.as_deref(), Some("claude"));
         assert_eq!(parsed.agents.teams[0].team_id, "team-1");
+        assert_eq!(parsed.members[0].pubkey, "member-1");
+        assert_eq!(parsed.members[0].role, "guest");
         assert!(!parsed.is_builtin);
     }
 
@@ -194,6 +231,42 @@ mod tests {
         assert!(parsed.canvas_template.is_none());
         assert!(parsed.agents.personas.is_empty());
         assert!(parsed.agents.teams.is_empty());
+        assert!(parsed.members.is_empty());
+    }
+
+    #[test]
+    fn deserializes_live_legacy_record_without_identity_fields() {
+        let json = r#"{
+          "name": "Code Team",
+          "description": "Coding collaboration",
+          "channel_type": "stream",
+          "visibility": "private",
+          "canvas_template": "",
+          "agents": {
+            "teams": [],
+            "personas": [{ "personaId": "persona-1" }]
+          }
+        }"#;
+
+        let mut parsed: ChannelTemplateRecord = serde_json::from_str(json).unwrap();
+
+        assert!(parsed.id.is_empty());
+        assert!(parsed.created_at.is_empty());
+        assert!(parsed.updated_at.is_empty());
+        assert_eq!(parsed.agents.personas[0].persona_id, "persona-1");
+        assert!(parsed.members.is_empty());
+
+        assert!(migrate_missing_identity_fields(
+            std::slice::from_mut(&mut parsed),
+            "2026-08-23T19:30:00Z",
+        ));
+        assert!(uuid::Uuid::parse_str(&parsed.id).is_ok());
+        assert_eq!(parsed.created_at, "2026-08-23T19:30:00Z");
+        assert_eq!(parsed.updated_at, parsed.created_at);
+        assert!(!migrate_missing_identity_fields(
+            std::slice::from_mut(&mut parsed),
+            "2026-08-24T00:00:00Z",
+        ));
     }
 
     #[test]

@@ -27,6 +27,10 @@ type RawChannelTemplate = {
       backend?: { type: "local" } | { type: "provider"; id: string } | null;
     }>;
   };
+  members?: Array<{
+    pubkey: string;
+    role?: "admin" | "member" | "guest" | null;
+  }>;
   is_builtin: boolean;
   created_at: string;
   updated_at: string;
@@ -55,6 +59,10 @@ function fromRawChannelTemplate(raw: RawChannelTemplate): ChannelTemplate {
         backend: t.backend ?? null,
       })),
     },
+    members: (raw.members ?? []).map((member) => ({
+      pubkey: member.pubkey,
+      role: member.role ?? "member",
+    })),
     isBuiltin: raw.is_builtin,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
@@ -79,6 +87,7 @@ export async function createChannelTemplate(
         visibility: input.visibility,
         canvasTemplate: input.canvasTemplate,
         agents: input.agents ?? { personas: [], teams: [] },
+        members: input.members ?? [],
       },
     }),
   );
@@ -97,6 +106,7 @@ export async function updateChannelTemplate(
         visibility: input.visibility,
         canvasTemplate: input.canvasTemplate,
         agents: input.agents ?? { personas: [], teams: [] },
+        members: input.members ?? [],
       },
     }),
   );

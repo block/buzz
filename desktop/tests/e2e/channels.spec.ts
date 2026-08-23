@@ -1435,6 +1435,7 @@ test("create channel template selector matches the lifecycle controls", async ({
             },
           ],
         },
+        members: [],
         isBuiltin: false,
         createdAt: "2026-07-23T00:00:00Z",
         updatedAt: "2026-07-23T00:00:00Z",
@@ -1515,6 +1516,64 @@ test("create channel exposes templates when the library is empty", async ({
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Plan the next week.",
   );
+});
+
+test("channel templates save and apply selected community members", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelTemplates: [] });
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  await page.getByTestId("create-channel-template").click();
+  await page
+    .getByRole("menuitem", { name: "Create new channel template…" })
+    .click();
+
+  await page.locator("#template-name").fill("Project crew");
+  await page
+    .getByTestId(`template-member-${TEST_IDENTITIES.bob.pubkey}`)
+    .click();
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect
+    .poll(async () => {
+      const command = (await readCommandPayloadLog(page)).find(
+        (entry) => entry.command === "create_channel_template",
+      );
+      return (
+        command?.payload as
+          | {
+              input?: {
+                members?: Array<{ pubkey: string; role: string }>;
+              };
+            }
+          | undefined
+      )?.input?.members;
+    })
+    .toEqual([{ pubkey: TEST_IDENTITIES.bob.pubkey, role: "member" }]);
+
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Open · 1 member",
+  );
+  await page.getByTestId("create-channel-name").fill("project-crew-room");
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect
+    .poll(async () => {
+      const command = (await readCommandPayloadLog(page)).find(
+        (entry) =>
+          entry.command === "add_channel_members" &&
+          (
+            entry.payload as { pubkeys?: string[]; role?: string } | undefined
+          )?.pubkeys?.includes(TEST_IDENTITIES.bob.pubkey),
+      );
+      return command?.payload;
+    })
+    .toMatchObject({
+      pubkeys: [TEST_IDENTITIES.bob.pubkey],
+      role: "member",
+    });
 });
 
 test("create ephemeral stream shows sidebar and header affordances", async ({

@@ -43,6 +43,20 @@ fn validate_visibility(value: &str) -> Result<(), String> {
     }
 }
 
+fn validate_member_roles(members: &[crate::templates::TemplateMemberEntry]) -> Result<(), String> {
+    for member in members {
+        match member.role.as_str() {
+            "admin" | "member" | "guest" => {}
+            role => {
+                return Err(format!(
+                    "invalid template member role: {role:?} (expected \"admin\", \"member\", or \"guest\")"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_channel_templates(app: AppHandle) -> Result<Vec<ChannelTemplateRecord>, String> {
     tokio::task::spawn_blocking(move || {
@@ -70,6 +84,7 @@ pub async fn create_channel_template(
         let visibility = input.visibility.unwrap_or_else(|| "open".to_string());
         validate_channel_type(&channel_type)?;
         validate_visibility(&visibility)?;
+        validate_member_roles(&input.members)?;
         let now = now_iso();
 
         let state = app.state::<AppState>();
@@ -87,6 +102,7 @@ pub async fn create_channel_template(
             visibility,
             canvas_template,
             agents: input.agents,
+            members: input.members,
             is_builtin: false,
             created_at: now.clone(),
             updated_at: now,
@@ -113,6 +129,7 @@ pub async fn update_channel_template(
         let visibility = input.visibility.unwrap_or_else(|| "open".to_string());
         validate_channel_type(&channel_type)?;
         validate_visibility(&visibility)?;
+        validate_member_roles(&input.members)?;
 
         let state = app.state::<AppState>();
         let _store_guard = state
@@ -131,6 +148,7 @@ pub async fn update_channel_template(
         template.visibility = visibility;
         template.canvas_template = canvas_template;
         template.agents = input.agents;
+        template.members = input.members;
         template.updated_at = now_iso();
 
         let updated = template.clone();
