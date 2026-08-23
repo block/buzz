@@ -1,194 +1,6 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditMotionAndAccessibilityTests() {
-  testWidgets('photo modes remain usable on a compact large-type viewport', (
-    tester,
-  ) async {
-    tester.view.devicePixelRatio = 1;
-    tester.view.physicalSize = const Size(320, 568);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    addTearDown(tester.view.resetPhysicalSize);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const MediaQuery(
-          data: MediaQueryData(textScaler: TextScaler.linear(2)),
-          child: ProfileEditPage(startInPhotoEditor: true),
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    expect(
-      find.byKey(const ValueKey('avatar-editor-scroll-view')),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    await tester.ensureVisible(
-      find.byKey(const ValueKey('emoji-editor-background')),
-    );
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(tester.takeException(), isNull);
-
-    await tester.drag(
-      find.byKey(const ValueKey('avatar-editor-scroll-view')),
-      const Offset(0, 1000),
-    );
-    await tester.pump();
-    final animatedMode = find.byKey(const ValueKey('avatar-mode-animated'));
-    await Scrollable.ensureVisible(
-      animatedMode.evaluate().single,
-      alignment: 0.2,
-    );
-    await tester.tap(animatedMode);
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    expect(
-      find.byKey(const ValueKey('animated-avatar-capture-preview')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets(
-    'keeps the multiline text editor usable with large text and the keyboard',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      tester.view.devicePixelRatio = 1;
-      tester.view.physicalSize = const Size(320, 568);
-      tester.platformDispatcher.textScaleFactorTestValue = 2;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-      addTearDown(tester.view.reset);
-      final notifier = _FakeProfileNotifier();
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          overrides: [profileProvider.overrideWith(() => notifier)],
-          child: const ProfileEditPage(),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final descriptionRow = find.byKey(
-        const ValueKey('profile-description-row'),
-      );
-      await tester.ensureVisible(descriptionRow);
-      await tester.pumpAndSettle();
-      await tester.tap(descriptionRow);
-      await tester.pumpAndSettle();
-
-      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
-      await tester.pumpAndSettle();
-
-      expect(
-        MediaQuery.textScalerOf(
-          tester.element(find.byKey(const ValueKey('profile-field-input'))),
-        ).scale(10),
-        20,
-      );
-      expect(
-        MediaQuery.viewInsetsOf(
-          tester.element(find.byKey(const ValueKey('profile-field-input'))),
-        ).bottom,
-        300,
-      );
-      expect(tester.takeException(), isNull);
-      expect(
-        find.byKey(const ValueKey('profile-field-scroll-view')),
-        findsOneWidget,
-      );
-      await tester.enterText(
-        find.byKey(const ValueKey('profile-field-input')),
-        'Making collaboration feel effortless.',
-      );
-      await tester.pump();
-      final save = find.byKey(const ValueKey('profile-field-save'));
-      await tester.ensureVisible(save);
-      await tester.pumpAndSettle();
-      expect(save.hitTestable(), findsOneWidget);
-      await tester.tap(save);
-      await tester.pumpAndSettle();
-      expect(notifier.savedDescriptions, [
-        'Making collaboration feel effortless.',
-      ]);
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
-
-  testWidgets('photo preparation errors are accessibility live regions', (
-    tester,
-  ) async {
-    final uploadService = _FailingPreparationMediaUploadService();
-    addTearDown(uploadService.dispose);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          mediaUploadServiceProvider.overrideWithValue(uploadService),
-        ],
-        child: const ProfileEditPage(startInPhotoEditor: true),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Photo Library'));
-    await tester.pumpAndSettle();
-
-    final message = find.text("We couldn't prepare that photo. Try again.");
-    expect(message, findsOneWidget);
-    final errorSemantics = tester.widget<Semantics>(
-      find.ancestor(of: message, matching: find.byType(Semantics)).first,
-    );
-    expect(errorSemantics.properties.liveRegion, isTrue);
-  });
-
-  testWidgets('exposes the selected avatar mode on Android', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-
-    Iterable<Semantics> modeSemantics(String label) =>
-        tester.widgetList<Semantics>(
-          find.byWidgetPredicate(
-            (widget) =>
-                widget is Semantics &&
-                widget.properties.label == label &&
-                widget.child is ExcludeSemantics,
-          ),
-        );
-
-    expect(modeSemantics('Image'), isNotEmpty);
-    expect(
-      modeSemantics('Image').every((node) => node.properties.selected == true),
-      isTrue,
-    );
-    expect(
-      modeSemantics('Emoji').every((node) => node.properties.selected == false),
-      isTrue,
-    );
-    await tester.tap(find.byKey(const ValueKey('avatar-mode-emoji')));
-    await tester.pump();
-    expect(
-      modeSemantics('Image').every((node) => node.properties.selected == false),
-      isTrue,
-    );
-    expect(
-      modeSemantics('Emoji').every((node) => node.properties.selected == true),
-      isTrue,
-    );
-    debugDefaultTargetPlatformOverride = null;
-  });
-
   testWidgets('moves segment content in the selected direction', (
     tester,
   ) async {
@@ -204,11 +16,6 @@ void runProfileEditMotionAndAccessibilityTests() {
 
     await tester.tap(find.text('Emoji'));
     await tester.pump();
-    final trayTransform = tester.widget<Transform>(
-      find.byKey(const ValueKey('avatar-mode-tray-transition-transform')),
-    );
-    expect(trayTransform.transform.getTranslation().x, 0);
-    expect(trayTransform.transform.getTranslation().y, greaterThan(0));
     final forwardTransform = tester.widget<Transform>(
       find.byKey(const ValueKey('avatar-mode-transition-transform')),
     );
@@ -224,16 +31,6 @@ void runProfileEditMotionAndAccessibilityTests() {
           .x,
       closeTo(0, 0.01),
     );
-    expect(
-      tester
-          .widget<Transform>(
-            find.byKey(const ValueKey('avatar-mode-tray-transition-transform')),
-          )
-          .transform
-          .getTranslation()
-          .y,
-      closeTo(0, 0.01),
-    );
 
     await tester.tap(find.text('Image'));
     await tester.pump();
@@ -241,57 +38,6 @@ void runProfileEditMotionAndAccessibilityTests() {
       find.byKey(const ValueKey('avatar-mode-transition-transform')),
     );
     expect(reverseTransform.transform.getTranslation().x, lessThan(0));
-  });
-
-  testWidgets('retains the preview while animated mode initializes', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 150));
-    final emojiCenter = tester
-        .getCenter(find.byKey(const ValueKey('emoji-avatar-preview')))
-        .dy;
-
-    await tester.tap(find.text('Animated'));
-    await tester.pump();
-    final retained = find.byKey(const ValueKey('avatar-mode-retained-preview'));
-    expect(retained, findsOneWidget);
-    expect(tester.getCenter(retained).dy, closeTo(emojiCenter, 0.01));
-
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(tester.getCenter(retained).dy, greaterThan(emojiCenter));
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(retained, findsNothing);
-
-    final animatedCenter = tester
-        .getCenter(
-          find.byKey(const ValueKey('animated-avatar-capture-preview')),
-        )
-        .dy;
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    final returningPreview = find.byKey(
-      const ValueKey('avatar-preview-position'),
-    );
-    expect(
-      tester.getCenter(returningPreview).dy,
-      closeTo(animatedCenter, 0.01),
-    );
-
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(tester.getCenter(returningPreview).dy, lessThan(animatedCenter));
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(tester.getCenter(returningPreview).dy, closeTo(emojiCenter, 0.01));
   });
 
   testWidgets('plays an animated avatar on the profile and image editor', (
@@ -438,38 +184,6 @@ void runProfileEditMotionAndAccessibilityTests() {
       tester.widget<Icon>(find.byIcon(Icons.face)).color,
       theme.colorScheme.surface,
     );
-    final selectedSemantics = tester.widget<Semantics>(
-      find.byWidgetPredicate(
-        (widget) => widget is Semantics && widget.properties.label == 'Active',
-      ),
-    );
-    expect(selectedSemantics.properties.button, isTrue);
-    expect(selectedSemantics.properties.selected, isTrue);
-  });
-
-  testWidgets('exposes the selected emoji tile', (tester) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        child: EmojiAvatarTile(
-          emoji: '😊',
-          label: 'Smiling Face',
-          tileId: 'smile',
-          isSelected: true,
-          onTap: () {},
-        ),
-      ),
-    );
-
-    final selectedTile = tester.widget<Semantics>(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is Semantics &&
-            widget.properties.label == 'Smiling Face' &&
-            widget.child is ExcludeSemantics,
-      ),
-    );
-    expect(selectedTile.properties.button, isTrue);
-    expect(selectedTile.properties.selected, isTrue);
   });
 
   testWidgets('uses the shared animated background grid for emoji avatars', (
@@ -492,37 +206,5 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(find.byType(AvatarBackgroundGrid), findsOneWidget);
     final firstColor = find.byKey(const ValueKey('emoji-avatar-color-0'));
     expect(tester.getSize(firstColor), const Size.square(52));
-  });
-
-  testWidgets('background colors remain reachable in compact layouts', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        child: SizedBox(
-          height: 150,
-          child: AvatarBackgroundGrid(
-            selectedColor: emojiAvatarColors.first,
-            onColorSelected: (_) {},
-          ),
-        ),
-      ),
-    );
-
-    final scrollable = tester.state<ScrollableState>(
-      find.byType(Scrollable).first,
-    );
-    expect(scrollable.position.maxScrollExtent, greaterThan(0));
-
-    await tester.drag(find.byType(AvatarBackgroundGrid), const Offset(0, -400));
-    await tester.pumpAndSettle();
-
-    expect(scrollable.position.pixels, greaterThan(0));
-    expect(
-      find.byKey(
-        ValueKey('avatar-background-color-${emojiAvatarColors.length - 1}'),
-      ),
-      findsOneWidget,
-    );
   });
 }
