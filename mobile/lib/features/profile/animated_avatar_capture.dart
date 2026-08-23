@@ -19,6 +19,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
+import 'animated_avatar_orientation.dart';
 import 'profile_avatar_draft.dart';
 
 part 'animated_avatar_capture/review_controls.dart';
@@ -242,7 +243,11 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           try {
             final request = _FrameRequest.fromCameraImage(
               cameraImage,
-              sensorOrientation: active.description.sensorOrientation,
+              rotationDegrees: animatedAvatarFrameRotationDegrees(
+                sensorOrientation: active.description.sensorOrientation,
+                deviceOrientation: active.value.deviceOrientation,
+                lensDirection: active.description.lensDirection,
+              ),
               mirror:
                   active.description.lensDirection == CameraLensDirection.front,
             );
@@ -700,13 +705,13 @@ class _FrameRequest {
     required this.height,
     required this.planes,
     required this.isBgra,
-    required this.sensorOrientation,
+    required this.rotationDegrees,
     required this.mirror,
   });
 
   factory _FrameRequest.fromCameraImage(
     CameraImage frame, {
-    required int sensorOrientation,
+    required int rotationDegrees,
     required bool mirror,
   }) => _FrameRequest(
     width: frame.width,
@@ -723,7 +728,7 @@ class _FrameRequest {
         )
         .toList(growable: false),
     isBgra: frame.format.group == ImageFormatGroup.bgra8888,
-    sensorOrientation: sensorOrientation,
+    rotationDegrees: rotationDegrees,
     mirror: mirror,
   );
 
@@ -731,7 +736,7 @@ class _FrameRequest {
   final int height;
   final List<_FramePlane> planes;
   final bool isBgra;
-  final int sensorOrientation;
+  final int rotationDegrees;
   final bool mirror;
 }
 
@@ -774,11 +779,10 @@ Uint8List _convertCameraFrame(_FrameRequest request) {
       }
     }
   }
-  // camera_avfoundation applies the capture connection's orientation and front
-  // camera mirroring to BGRA pixel buffers before streaming them to Flutter.
-  // Android YUV buffers remain sensor-oriented and need both corrections here.
-  if (!request.isBgra && request.sensorOrientation != 0) {
-    result = image.copyRotate(result, angle: request.sensorOrientation);
+  // iOS pre-rotates and mirrors BGRA buffers. Android YUV buffers remain
+  // sensor-oriented and need both corrections here.
+  if (!request.isBgra && request.rotationDegrees != 0) {
+    result = image.copyRotate(result, angle: request.rotationDegrees);
   }
   if (!request.isBgra && request.mirror) {
     result = image.flipHorizontal(result);
