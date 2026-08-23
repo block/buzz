@@ -302,3 +302,81 @@ test("a hydrated channel still revalidates when live subscription setup fails", 
     ),
   );
 });
+
+test("a live subscription that settles before a slow cache load still revalidates", async () => {
+  // Carl/#6572 re-review: the query is parked on the hydration gate with no
+  // data yet, so an invalidation issued now dedupes onto that in-flight fetch
+  // (cancelRefetch only cancels when data exists). The seed then lands and the
+  // queryFn returns the persisted snapshot — zero authoritative fetches.
+  install(
+    [{ channelId, events: [root, bounds()], savedAt: 1, lastVisitedAt: 1 }],
+    { loadDelayMs: 150 },
+  );
+  mock.method(relayClient, "subscribeToReconnects", () => () => {});
+  mock.method(relayClient, "subscribeToChannelLive", () =>
+    Promise.resolve(async () => {}),
+  );
+  try {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    void hydrateChannelHeads(client, {
+      pubkey: "f".repeat(64),
+      relayUrl: "wss://relay",
+    });
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const view = renderHook(
+      () => {
+        useChannelSubscription(channel);
+        return useChannelMessagesQuery(channel);
+      },
+      {
+        wrapper: ({ children }) =>
+          React.createElement(QueryClientProvider, { client }, children),
+      },
+    );
+    await waitFor(() => assert.equal(channelWindowCalls, 1));
+    await waitFor(() =>
+      assert.deepEqual(view.result.current.data, [replacement]),
+    );
+    view.unmount();
+    client.clear();
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("a cold channel with an immediate live subscription fetches the window once", async () => {
+  // The post-subscribe refresh must still dedupe onto a cold relay fetch that
+  // is already in flight; only the hydration-parked fetch needs sequencing.
+  install([]);
+  mock.method(relayClient, "subscribeToReconnects", () => () => {});
+  mock.method(relayClient, "subscribeToChannelLive", () =>
+    Promise.resolve(async () => {}),
+  );
+  try {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const view = renderHook(
+      () => {
+        useChannelSubscription(channel);
+        return useChannelMessagesQuery(channel);
+      },
+      {
+        wrapper: ({ children }) =>
+          React.createElement(QueryClientProvider, { client }, children),
+      },
+    );
+    await waitFor(() =>
+      assert.deepEqual(view.result.current.data, [replacement]),
+    );
+    await waitFor(() => assert.equal(view.result.current.isFetching, false));
+    assert.equal(channelWindowCalls, 1);
+    view.unmount();
+    client.clear();
+  } finally {
+    mock.restoreAll();
+  }
+});
