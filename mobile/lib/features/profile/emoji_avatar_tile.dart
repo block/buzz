@@ -5,6 +5,7 @@ import '../../shared/theme/theme.dart';
 
 /// A selectable emoji tile with an explicit accessibility selection state.
 class EmojiAvatarTile extends StatelessWidget {
+  /// Creates an emoji option for an avatar picker.
   const EmojiAvatarTile({
     required this.emoji,
     required this.label,
@@ -14,10 +15,19 @@ class EmojiAvatarTile extends StatelessWidget {
     super.key,
   });
 
+  /// The Unicode emoji glyph rendered by this tile.
   final String emoji;
+
+  /// The human-readable emoji name announced to assistive technology.
   final String label;
+
+  /// The stable identifier used for the tile's widget key.
   final String tileId;
+
+  /// Whether this emoji is the current avatar selection.
   final bool isSelected;
+
+  /// Called when the tile is selected.
   final VoidCallback onTap;
 
   @override

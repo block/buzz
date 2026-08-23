@@ -1,6 +1,48 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditImageSelectionTests() {
+  testWidgets('photo crop exposes accessible move and zoom actions', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final bytes = Uint8List.fromList(
+      image.encodePng(image.Image(width: 20, height: 10)),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProfileAvatarCropPage(
+          imageBytes: Future<Uint8List?>.value(bytes),
+        ),
+      ),
+    );
+    await _waitForAvatarCropToLoad(tester);
+
+    final cropSemantics = tester.widget<Semantics>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == 'Photo crop',
+      ),
+    );
+    final actions = cropSemantics.properties.customSemanticsActions!;
+    expect(
+      actions.keys.map((action) => action.label),
+      containsAll([
+        'Move left',
+        'Move right',
+        'Move up',
+        'Move down',
+        'Zoom in',
+      ]),
+    );
+    final viewer = tester.widget<InteractiveViewer>(
+      find.byKey(const ValueKey('avatar-crop-viewer')),
+    );
+    actions.entries.firstWhere((entry) => entry.key.label == 'Zoom in').value();
+    await tester.pump();
+    expect(viewer.transformationController!.value.getMaxScaleOnAxis(), 1.1);
+    semantics.dispose();
+  });
+
   testWidgets('seeds emoji editing from the current avatar', (tester) async {
     final avatarUrl = emojiAvatarDataUrl('🦝', emojiAvatarColors[11]);
     final notifier = _FakeProfileNotifier(
