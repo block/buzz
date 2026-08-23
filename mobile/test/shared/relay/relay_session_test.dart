@@ -1291,6 +1291,125 @@ void main() {
     expect(closedMessages, ['restricted: no longer valid']);
     unsubscribe();
   });
+
+  test('BUZZ_SYNC_REQUIRED replays live subs with since watermark', () async {
+    final socket = _RecordingRelaySocket();
+    final session = RelaySessionNotifier();
+    session.debugAttachSocketForTest(socket);
+
+    final events = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, events.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    // Advance the watermark: lastSeenCreatedAt = 120.
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _event(createdAt: 120).toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+    socket.messages.clear();
+
+    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    final reqs = _reqs(socket);
+    expect(reqs, hasLength(1));
+    expect(reqs.single[1], 'l-1');
+    final filter = reqs.single[2] as Map<String, dynamic>;
+    // since = lastSeenCreatedAt - 5s skew.
+    expect(filter['since'], 115);
+  });
+
+  test('BUZZ_SYNC_REQUIRED refetches the missed event into channel state',
+      () async {
+    final socket = _RecordingRelaySocket();
+    final session = RelaySessionNotifier();
+    session.debugAttachSocketForTest(socket);
+
+    final events = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, events.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _event(createdAt: 30).toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+    expect(events, hasLength(1));
+    socket.messages.clear();
+
+    // The relay dropped the event at createdAt 40 and told us.
+    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
+    await Future<void>.delayed(Duration.zero);
+
+    // The relay answers the replay REQ with the missed event (distinct id:
+    // the recent-delivery dedup correctly drops literal re-deliveries).
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _event(createdAt: 40, id: 'event-2').toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+
+    expect(events.map((event) => event.createdAt), [30, 40]);
+  });
+
+  test('gap frame while disconnected does not replay', () async {
+    final socket = _RecordingRelaySocket();
+    final session = RelaySessionNotifier();
+    session.debugAttachSocketForTest(socket);
+    session.debugSetSessionStatus(SessionStatus.reconnecting);
+
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    socket.messages.clear();
+
+    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(_reqs(socket), isEmpty);
+  });
+
+  test('two gap frames in one burst trigger a single replay', () async {
+    final socket = _RecordingRelaySocket();
+    final session = RelaySessionNotifier();
+    session.debugAttachSocketForTest(socket);
+
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    socket.messages.clear();
+
+    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
+    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    final reqs = _reqs(socket);
+    expect(reqs, hasLength(1));
+  });
+
+  test('unknown reason string still triggers replay (fail-safe)', () async {
+    final socket = _RecordingRelaySocket();
+    final session = RelaySessionNotifier();
+    session.debugAttachSocketForTest(socket);
+
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    socket.messages.clear();
+
+    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'evil-cache']);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(_reqs(socket), hasLength(1));
+  });
 }
 
 class _ControlledHttpClient extends http.BaseClient {
@@ -1433,9 +1552,9 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
 }
 
-NostrEvent _event({int createdAt = 20}) {
+NostrEvent _event({int createdAt = 20, String id = 'event-1'}) {
   return NostrEvent(
-    id: 'event-1',
+    id: id,
     pubkey: 'alice',
     createdAt: createdAt,
     kind: EventKind.streamMessageV2,
