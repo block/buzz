@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -29,6 +30,13 @@ class InviteJoinSheet extends ConsumerWidget {
 
     if (state.status == InviteJoinStatus.success) {
       return _InviteJoinSuccess(host: host, communityName: derivedName);
+    }
+    if (state.status == InviteJoinStatus.reviewingPolicy ||
+        state.status == InviteJoinStatus.acceptingPolicy) {
+      return _InviteJoinPolicyReview(state: state);
+    }
+    if (state.status == InviteJoinStatus.declined) {
+      return _InviteJoinDeclined(message: state.errorMessage);
     }
 
     return SafeArea(
@@ -128,6 +136,238 @@ class InviteJoinSheet extends ConsumerWidget {
                   ),
                 ),
               ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InviteJoinPolicyReview extends ConsumerWidget {
+  final InviteJoinState state;
+
+  const _InviteJoinPolicyReview({required this.state});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final policy = state.policy;
+    if (policy == null) return const SizedBox.shrink();
+
+    final isAccepting = state.status == InviteJoinStatus.acceptingPolicy;
+    final canAccept =
+        (!policy.ageAttestationRequired || state.ageConfirmed) &&
+        (!policy.agreementRequired || state.agreementConfirmed);
+    final agreementLabel = switch ((
+      policy.termsMarkdown != null,
+      policy.privacyMarkdown != null,
+    )) {
+      (true, true) =>
+        'I agree to the Terms of Service and Privacy Policy shown above.',
+      (true, false) => 'I agree to the Terms of Service shown above.',
+      (false, true) => 'I agree to the Privacy Policy shown above.',
+      (false, false) => '',
+    };
+    final notifier = ref.read(inviteJoinProvider.notifier);
+
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.82,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(Grid.sm, 0, Grid.sm, Grid.sm),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Icon(
+                LucideIcons.fileCheck,
+                size: 40,
+                color: context.colors.primary,
+              ),
+              const SizedBox(height: Grid.sm),
+              Text(
+                'Review this community’s join policy',
+                style: context.textTheme.titleLarge,
+              ),
+              const SizedBox(height: Grid.xxs),
+              Text(
+                'Read the policy below, then confirm only the statements that are true for you.',
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: Grid.sm),
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (policy.termsMarkdown case final terms?) ...[
+                        Text(
+                          'Terms of Service',
+                          style: context.textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: Grid.xxs),
+                        GptMarkdown(terms, style: context.textTheme.bodyMedium),
+                        const SizedBox(height: Grid.sm),
+                      ],
+                      if (policy.privacyMarkdown case final privacy?) ...[
+                        Text(
+                          'Privacy Policy',
+                          style: context.textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: Grid.xxs),
+                        GptMarkdown(
+                          privacy,
+                          style: context.textTheme.bodyMedium,
+                        ),
+                        const SizedBox(height: Grid.sm),
+                      ],
+                      if (policy.ageAttestationRequired)
+                        _PolicyCheckbox(
+                          value: state.ageConfirmed,
+                          onChanged: isAccepting
+                              ? null
+                              : notifier.setAgeConfirmed,
+                          label: 'I am 18 years of age or older.',
+                        ),
+                      if (policy.agreementRequired) ...[
+                        if (policy.ageAttestationRequired)
+                          const SizedBox(height: Grid.xxs),
+                        _PolicyCheckbox(
+                          value: state.agreementConfirmed,
+                          onChanged: isAccepting
+                              ? null
+                              : notifier.setAgreementConfirmed,
+                          label: agreementLabel,
+                        ),
+                      ],
+                      if (state.errorMessage != null) ...[
+                        const SizedBox(height: Grid.sm),
+                        Text(
+                          state.errorMessage!,
+                          style: context.textTheme.bodySmall?.copyWith(
+                            color: context.colors.error,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: Grid.sm),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: isAccepting ? null : notifier.declinePolicy,
+                      child: const Text('Decline'),
+                    ),
+                  ),
+                  const SizedBox(width: Grid.sm),
+                  Expanded(
+                    child: FilledButton.icon(
+                      key: const Key('accept-join-policy'),
+                      onPressed: isAccepting || !canAccept
+                          ? null
+                          : notifier.acceptPolicy,
+                      icon: isAccepting
+                          ? SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: BuzzLoadingIndicator(
+                                size: 16,
+                                semanticLabel: 'Accepting join policy',
+                              ),
+                            )
+                          : const Icon(LucideIcons.check),
+                      label: Text(
+                        isAccepting ? 'Accepting…' : 'Accept and join',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PolicyCheckbox extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  final String label;
+
+  const _PolicyCheckbox({
+    required this.value,
+    required this.onChanged,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onChanged == null ? null : () => onChanged!(!value),
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: Grid.half),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Checkbox(
+              value: value,
+              onChanged: onChanged == null
+                  ? null
+                  : (checked) => onChanged!(checked ?? false),
+            ),
+            const SizedBox(width: Grid.xxs),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: Grid.twelve),
+                child: Text(label, style: context.textTheme.bodyMedium),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InviteJoinDeclined extends StatelessWidget {
+  final String? message;
+
+  const _InviteJoinDeclined({this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(Grid.sm, 0, Grid.sm, Grid.sm),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Icon(
+              LucideIcons.circleX,
+              size: 40,
+              color: context.colors.onSurfaceVariant,
+            ),
+            const SizedBox(height: Grid.sm),
+            Text('Community not joined', style: context.textTheme.titleLarge),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              message ?? 'You did not accept this community’s join policy.',
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: Grid.lg),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
             ),
           ],
         ),
