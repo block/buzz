@@ -46,7 +46,8 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       if (event.createdAt != current.createdAt) {
         return event.createdAt > current.createdAt ? event : current;
       }
-      return event.id.compareTo(current.id) > 0 ? event : current;
+      // Match the relay replacement tie-breaker: the lowest event id wins.
+      return event.id.compareTo(current.id) < 0 ? event : current;
     });
     final decoded = jsonDecode(latest.content);
     if (decoded is! Map<String, dynamic>) {

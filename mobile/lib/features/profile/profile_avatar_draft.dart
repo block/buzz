@@ -47,16 +47,48 @@ final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
   final Uint8List animation;
   final Uint8List poster;
   Future<String>? _uploadedUrl;
+  Future<BlobDescriptor>? _posterUpload;
+  Future<BlobDescriptor>? _animationUpload;
+
+  Future<BlobDescriptor> _uploadPoster(MediaUploadService service) {
+    final existing = _posterUpload;
+    if (existing != null) return existing;
+    late final Future<BlobDescriptor> upload;
+    upload = service.uploadBytes(poster, mimeType: 'image/png').catchError((
+      Object error,
+      StackTrace stackTrace,
+    ) {
+      if (identical(_posterUpload, upload)) _posterUpload = null;
+      Error.throwWithStackTrace(error, stackTrace);
+    });
+    _posterUpload = upload;
+    return upload;
+  }
+
+  Future<BlobDescriptor> _uploadAnimation(MediaUploadService service) {
+    final existing = _animationUpload;
+    if (existing != null) return existing;
+    late final Future<BlobDescriptor> upload;
+    upload = service.uploadBytes(animation, mimeType: 'image/png').catchError((
+      Object error,
+      StackTrace stackTrace,
+    ) {
+      if (identical(_animationUpload, upload)) _animationUpload = null;
+      Error.throwWithStackTrace(error, stackTrace);
+    });
+    _animationUpload = upload;
+    return upload;
+  }
 
   @override
   Future<String> upload(MediaUploadService service) async {
     final existing = _uploadedUrl;
     if (existing != null) return existing;
+    // Cache each content-addressed part independently. If one request fails,
+    // retry only that part so a successful counterpart remains attached to
+    // this draft instead of becoming an abandoned duplicate.
     final upload = Future.wait(
-      [
-        service.uploadBytes(poster, mimeType: 'image/png'),
-        service.uploadBytes(animation, mimeType: 'image/png'),
-      ],
+      [_uploadPoster(service), _uploadAnimation(service)],
     ).then((uploads) => buildAnimatedAvatarUrl(uploads[0].url, uploads[1].url));
     _uploadedUrl = upload;
     try {
