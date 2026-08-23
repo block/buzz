@@ -5,7 +5,9 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, OnceLock},
     time::Duration,
+    time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,7 @@ use super::{
 const STORE_VERSION: u32 = 4;
 const MAX_TASKS: usize = 250;
 const MODEL_SCAN_BYTES: u64 = 1024 * 1024;
+const MODEL_SCAN_CHUNK_BYTES: u64 = 64 * 1024;
 const MAX_HISTORY_MESSAGES: usize = 200;
 const MAX_HISTORY_MESSAGE_CHARS: usize = 20_000;
 pub const DEFAULT_CODEX_SHARED_APP_SERVER_URL: &str = "ws://127.0.0.1:51919";
@@ -82,6 +85,18 @@ struct SessionLocation {
     workspace: String,
     archived: bool,
     path: PathBuf,
+}
+
+#[derive(Clone)]
+struct CachedTaskModel {
+    len: u64,
+    modified: Option<SystemTime>,
+    model: Option<String>,
+}
+
+fn task_model_cache() -> &'static Mutex<HashMap<PathBuf, CachedTaskModel>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedTaskModel>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn codex_home_dir() -> Result<PathBuf, String> {
@@ -440,19 +455,28 @@ pub fn list_codex_tasks() -> Result<Vec<CodexTaskSummary>, String> {
         .into_iter()
         .filter_map(|(normalized, entry)| {
             let location = locations.get(&normalized)?;
-            Some(CodexTaskSummary {
-                id: normalized,
-                thread_name: entry.thread_name,
-                workspace: location.workspace.clone(),
-                updated_at: entry.updated_at,
-                archived: location.archived,
-                model: read_latest_codex_model(&location.path),
-            })
+            Some((
+                CodexTaskSummary {
+                    id: normalized,
+                    thread_name: entry.thread_name,
+                    workspace: location.workspace.clone(),
+                    updated_at: entry.updated_at,
+                    archived: location.archived,
+                    model: None,
+                },
+                location.path.clone(),
+            ))
         })
         .collect::<Vec<_>>();
-    tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    tasks.sort_by(|(left, _), (right, _)| right.updated_at.cmp(&left.updated_at));
     tasks.truncate(MAX_TASKS);
-    Ok(tasks)
+    Ok(tasks
+        .into_iter()
+        .map(|(mut task, path)| {
+            task.model = read_latest_codex_model(&path);
+            task
+        })
+        .collect())
 }
 
 pub fn get_codex_task_history(
@@ -601,47 +625,89 @@ fn collect_session_locations(
 }
 
 fn read_latest_codex_model(path: &Path) -> Option<String> {
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    if len > MODEL_SCAN_BYTES {
-        file.seek(SeekFrom::End(-(MODEL_SCAN_BYTES as i64))).ok()?;
-    }
-
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let tail = String::from_utf8_lossy(&bytes);
-    for line in tail.lines().rev() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) != Some("turn_context") {
-            continue;
-        }
-        let payload = value.get("payload")?;
-        let model = payload
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())?;
-        let effort = payload
-            .get("effort")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                payload
-                    .pointer("/collaboration_mode/settings/reasoning_effort")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        return Some(match effort {
-            Some(effort) if !(model.contains('[') && model.ends_with(']')) => {
-                format!("{model}[{effort}]")
+    let metadata = fs::metadata(path).ok()?;
+    let len = metadata.len();
+    let modified = metadata.modified().ok();
+    if let Ok(cache) = task_model_cache().lock() {
+        if let Some(cached) = cache.get(path) {
+            if cached.len == len && cached.modified == modified {
+                return cached.model.clone();
             }
-            _ => model.to_string(),
-        });
+        }
     }
-    None
+
+    let mut file = File::open(path).ok()?;
+    let model = scan_latest_codex_model(&mut file, len);
+
+    if let Ok(mut cache) = task_model_cache().lock() {
+        cache.insert(
+            path.to_path_buf(),
+            CachedTaskModel {
+                len,
+                modified,
+                model: model.clone(),
+            },
+        );
+    }
+    model
+}
+
+fn scan_latest_codex_model(file: &mut File, len: u64) -> Option<String> {
+    let min_offset = len.saturating_sub(MODEL_SCAN_BYTES);
+    let mut end = len;
+    let mut leading_fragment = Vec::new();
+    while end > min_offset {
+        let start = end.saturating_sub(MODEL_SCAN_CHUNK_BYTES).max(min_offset);
+        let mut bytes = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        bytes.extend_from_slice(&leading_fragment);
+
+        if let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            if let Some(model) = bytes[first_newline + 1..]
+                .split(|byte| *byte == b'\n')
+                .rev()
+                .find_map(parse_codex_model_line)
+            {
+                return Some(model);
+            }
+            leading_fragment.clear();
+            leading_fragment.extend_from_slice(&bytes[..first_newline]);
+        } else {
+            leading_fragment = bytes;
+        }
+        end = start;
+    }
+    parse_codex_model_line(&leading_fragment)
+}
+
+fn parse_codex_model_line(line: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("turn_context") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    let model = payload
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let effort = payload
+        .get("effort")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .pointer("/collaboration_mode/settings/reasoning_effort")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(match effort {
+        Some(effort) if !(model.contains('[') && model.ends_with(']')) => {
+            format!("{model}[{effort}]")
+        }
+        _ => model.to_string(),
+    })
 }
 
 fn read_session_meta(path: &Path) -> Option<(String, String)> {
@@ -663,6 +729,7 @@ fn read_session_meta(path: &Path) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::io::Write as _;
 
     #[test]
@@ -700,6 +767,55 @@ mod tests {
             r#"{{"type":"turn_context","payload":{{"model":"gpt-5.5","collaboration_mode":{{"settings":{{"reasoning_effort":"xhigh"}}}}}}}}"#
         )
         .unwrap();
+
+        assert_eq!(
+            read_latest_codex_model(&path).as_deref(),
+            Some("gpt-5.5[xhigh]")
+        );
+    }
+
+    #[test]
+    fn scans_additional_chunks_when_latest_context_is_outside_initial_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"turn_context","payload":{{"model":"gpt-5.5","effort":"high"}}}}"#
+        )
+        .unwrap();
+        file.write_all(&vec![b'x'; MODEL_SCAN_CHUNK_BYTES as usize + 1])
+            .unwrap();
+        drop(file);
+
+        assert_eq!(
+            read_latest_codex_model(&path).as_deref(),
+            Some("gpt-5.5[high]")
+        );
+    }
+
+    #[test]
+    fn invalidates_cached_model_when_session_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5","effort":"medium"}}
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_latest_codex_model(&path).as_deref(),
+            Some("gpt-5[medium]")
+        );
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"turn_context","payload":{{"model":"gpt-5.5","effort":"xhigh"}}}}"#
+        )
+        .unwrap();
+        drop(file);
 
         assert_eq!(
             read_latest_codex_model(&path).as_deref(),

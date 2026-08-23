@@ -46,7 +46,7 @@ export function CodexTaskAgentDialog({
   );
   const codexSetupReady = sharedRuntimeReady && Boolean(codexRuntime);
   const tasksQuery = useCodexTasksQuery({
-    enabled: open && codexSetupReady,
+    enabled: open,
   });
   const channelsQuery = useChannelsQuery({ enabled: open });
   const createMutation = useCreateManagedAgentMutation();
