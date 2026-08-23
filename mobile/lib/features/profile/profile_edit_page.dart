@@ -50,6 +50,9 @@ class ProfileEditPage extends HookConsumerWidget {
     final isEditingAvatar = useState(startInPhotoEditor);
     final avatarDraft = useState<ProfileAvatarDraft?>(null);
     final avatarDraftMode = useState<ProfileAvatarMode?>(null);
+    final avatarEditConfig = useRef<RelayConfig?>(
+      startInPhotoEditor ? ref.read(relayConfigProvider) : null,
+    );
     final isSavingAvatar = useState(false);
     final prepareAnimatedAvatar =
         useRef<Future<ProfileAvatarDraft?> Function()?>(null);
@@ -137,6 +140,7 @@ class ProfileEditPage extends HookConsumerWidget {
 
     void openAvatarEditor() {
       if (!profileHydrated) return;
+      avatarEditConfig.value = ref.read(relayConfigProvider);
       isEditingAvatar.value = true;
       unawaited(avatarTransition.forward(from: 0));
     }
@@ -152,6 +156,7 @@ class ProfileEditPage extends HookConsumerWidget {
       isEditingAvatar.value = false;
       avatarDraft.value = null;
       avatarDraftMode.value = null;
+      avatarEditConfig.value = null;
       prepareAnimatedAvatar.value = null;
       canPrepareAnimatedAvatar.value = false;
       avatarMode.value = ProfileAvatarMode.image;
@@ -159,23 +164,26 @@ class ProfileEditPage extends HookConsumerWidget {
 
     Future<void> saveAvatar() async {
       if (isSavingAvatar.value) return;
+      final openingConfig = avatarEditConfig.value;
+      if (openingConfig == null) return;
       final saveConfig = ref.read(relayConfigProvider);
       final uploadService = ref.read(mediaUploadServiceProvider);
 
       void requireCurrentCommunity() {
         final currentConfig = ref.read(relayConfigProvider);
-        if (currentConfig.storedOrigin != saveConfig.storedOrigin ||
+        if (currentConfig.storedOrigin != openingConfig.storedOrigin ||
+            currentConfig.nsec != openingConfig.nsec ||
+            currentConfig.storedOrigin != saveConfig.storedOrigin ||
             currentConfig.nsec != saveConfig.nsec ||
             !identical(ref.read(mediaUploadServiceProvider), uploadService)) {
-          throw StateError(
-            'Profile photo save cancelled because the active community changed.',
-          );
+          throw ProfileCommunityChangedException();
         }
       }
 
       isSavingAvatar.value = true;
       avatarSaveError.value = null;
       try {
+        requireCurrentCommunity();
         var nextDraft = avatarDraftMode.value == avatarMode.value
             ? avatarDraft.value
             : null;
@@ -194,6 +202,12 @@ class ProfileEditPage extends HookConsumerWidget {
         requireCurrentCommunity();
         await ref.read(profileProvider.notifier).updateAvatarUrl(nextAvatar);
         requireCurrentCommunity();
+        if (context.mounted) await closeAvatarEditor(whileSaving: true);
+      } on ProfileCommunityChangedException {
+        avatarDraft.value = null;
+        avatarDraftMode.value = null;
+        prepareAnimatedAvatar.value = null;
+        canPrepareAnimatedAvatar.value = false;
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
       } catch (_) {
         avatarSaveError.value =

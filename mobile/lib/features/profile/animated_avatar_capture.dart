@@ -837,21 +837,34 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
   final composed = request.frames
       .map((bytes) {
         final source = image.decodePng(bytes)!;
-        final cropSize = (source.width / request.scale).round().clamp(
+        final scaledSize = (_outputSize * request.scale).round().clamp(
           1,
-          source.width,
+          _outputSize * 2,
         );
-        final available = source.width - cropSize;
-        final x = ((available / 2) - request.offsetX * available / 2)
-            .round()
-            .clamp(0, available);
-        final y = ((available / 2) - request.offsetY * available / 2)
-            .round()
-            .clamp(0, available);
-        final person = image.copyResize(
-          image.copyCrop(source, x: x, y: y, width: cropSize, height: cropSize),
+        final scaledPerson = image.copyResize(
+          source,
+          width: scaledSize,
+          height: scaledSize,
+        );
+        final person = image.Image(
           width: _outputSize,
           height: _outputSize,
+          numChannels: 4,
+        );
+        const previewSize = 220.0;
+        const previewTranslation = 48.0;
+        final translationScale = _outputSize / previewSize;
+        image.compositeImage(
+          person,
+          scaledPerson,
+          dstX:
+              ((_outputSize - scaledSize) / 2 +
+                      request.offsetX * previewTranslation * translationScale)
+                  .round(),
+          dstY:
+              ((_outputSize - scaledSize) / 2 +
+                      request.offsetY * previewTranslation * translationScale)
+                  .round(),
         );
         final frame = image.Image(
           width: _outputSize,
@@ -913,6 +926,26 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
   );
   return _EncodedAvatar(animation, poster);
 }
+
+/// Encodes one poster frame for validating animated-avatar framing parity.
+@visibleForTesting
+Uint8List encodeAnimatedAvatarPoster({
+  required Uint8List frame,
+  required double scale,
+}) => _encodeAvatar(
+  _EncodeRequest(
+    frames: [frame],
+    posterIndex: 0,
+    scale: scale,
+    offsetX: 0,
+    offsetY: 0,
+    backdropColor: 0xff0000ff,
+    personOutline: false,
+    shapeScale: 1,
+    shapeOffsetX: 0,
+    shapeOffsetY: 0,
+  ),
+).poster;
 
 extension<T> on Iterable<T> {
   Iterable<T> skipLast(int count) {

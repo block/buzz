@@ -268,7 +268,71 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('avatar retry reuploads after a community switch', (
+  testWidgets('avatar draft cannot save after a prior community switch', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final notifier = _RetryProfileNotifier();
+    final config = _MutableRelayConfigNotifier();
+    final firstUpload = _RetryMediaUploadService(
+      baseUrl: 'https://first.example',
+    );
+    final secondUpload = _RetryMediaUploadService(
+      baseUrl: 'https://second.example',
+    );
+    addTearDown(firstUpload.dispose);
+    addTearDown(secondUpload.dispose);
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          relayConfigProvider.overrideWith(() => config),
+          mediaUploadServiceProvider.overrideWith((ref) {
+            final current = ref.watch(relayConfigProvider);
+            return current.baseUrl == 'https://first.example'
+                ? firstUpload
+                : secondUpload;
+          }),
+        ],
+        child: ProfileEditPage(
+          startInPhotoEditor: true,
+          animatedAvatarCaptureBuilder:
+              ({required height, required onPrepareChanged}) => HookBuilder(
+                builder: (context) {
+                  useEffect(() {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      onPrepareChanged(
+                        () async => ProfileImageAvatarDraft(
+                          Uint8List.fromList([1, 2, 3]),
+                        ),
+                      );
+                    });
+                    return null;
+                  }, const []);
+                  return SizedBox(height: height);
+                },
+              ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Animated'));
+    await tester.pumpAndSettle();
+
+    config.update(baseUrl: 'https://second.example', nsec: 'second-identity');
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+
+    expect(firstUpload.uploadCount, 0);
+    expect(secondUpload.uploadCount, 0);
+    expect(notifier.savedAvatarUrls, isEmpty);
+    expect(find.byKey(const ValueKey('avatar-save')), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('avatar editor closes when community changes during save', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
@@ -330,15 +394,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(notifier.savedAvatarUrls, isEmpty);
-    expect(
-      find.text("We couldn't save your profile photo. Try again."),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.byKey(const ValueKey('avatar-save')));
-    await tester.pumpAndSettle();
-    expect(secondUpload.uploadCount, 1);
-    expect(notifier.savedAvatarUrls, ['https://second.example/avatar.jpg']);
+    expect(secondUpload.uploadCount, 0);
+    expect(find.byKey(const ValueKey('avatar-save')), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 }

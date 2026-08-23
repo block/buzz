@@ -13,6 +13,20 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image/image.dart' as image;
 
 void main() {
+  test('encoded poster preserves avatar scales below one', () {
+    final source = image.Image(width: 256, height: 256, numChannels: 4);
+    image.fill(source, color: image.ColorRgba8(255, 0, 0, 255));
+
+    final poster = image.decodePng(
+      encodeAnimatedAvatarPoster(frame: image.encodePng(source), scale: 0.75),
+    )!;
+
+    final edge = poster.getPixel(8, 128);
+    final center = poster.getPixel(128, 128);
+    expect(edge.r, isNot(255));
+    expect(center.r, 255);
+  });
+
   test('capture frame workspaces are isolated', () async {
     final first = await createAnimatedAvatarFrameDirectory(
       parent: Directory.systemTemp,
