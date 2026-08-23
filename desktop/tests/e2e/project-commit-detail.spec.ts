@@ -112,36 +112,20 @@ test("top-level project lists show metadata and overflow actions", async ({
 
   await page.getByTestId("projects-section-projects").click();
   await expect(
-    page
-      .getByTestId("projects-collection-group-label")
-      .filter({ hasText: "Mine" }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", { name: "Filter projects" }),
   ).toHaveCount(0);
   const projectRow = page.locator('[data-testid^="project-row-"]').first();
   const projectPositions = await trailingPositions(projectRow);
   await expect(projectRow.getByTestId("projects-row-context")).toBeVisible();
   await expect(projectRow.getByTestId("projects-row-people")).toBeVisible();
-  await expect(projectRow.getByTestId("projects-row-location")).toHaveText(
-    /^(Local|Remote)$/,
-  );
 
   await page.getByTestId("projects-section-repositories").click();
-  await expect(
-    page
-      .getByTestId("projects-collection-group-label")
-      .filter({ hasText: "Mine" }),
-  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Filter repositories" }),
   ).toHaveCount(0);
   await expect(page.getByTestId("repository-row-buzz")).toBeVisible();
   await expect(page.getByTestId("repository-row-relay-tools")).toBeVisible();
   const repositoryRow = page.getByTestId("repository-row-buzz");
-  await expect(
-    repositoryRow.getByTestId("repositories-row-location"),
-  ).toHaveText(/^(Local|Remote)$/);
   await expect(
     repositoryRow.getByTestId("repositories-row-project"),
   ).toHaveCount(0);

@@ -761,7 +761,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ).toHaveCount(0);
   await repositoryPanelTab.click();
   await expect(contextRail).toHaveCSS("width", "0px");
-  await expect(repositoryContextIcon).toHaveCSS("opacity", "0.6");
+  await expect(repositoryPanelTab).toHaveAttribute("aria-pressed", "false");
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
     "Show project context",
@@ -797,7 +797,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ).toBeLessThanOrEqual(8);
   await repositoryPanelTab.click();
   await expect(contextRail).toHaveCSS("width", "288px");
-  await expect(repositoryContextIcon).toHaveCSS("opacity", "1");
+  await expect(repositoryPanelTab).toHaveAttribute("aria-pressed", "true");
   await expect(repositoryActionsPanel).toBeVisible();
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
