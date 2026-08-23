@@ -141,6 +141,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
+  Future<void>? _syncReplayScheduled;
 
   @override
   SessionState build() {
@@ -597,6 +598,34 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _isActiveConnection(int generation) =>
       !_disposed && generation == _connectionGeneration;
 
+  /// Replay-in-flight dedup state for `BUZZ_SYNC_REQUIRED` handling.
+  static const _syncRequiredKnownReasons = {'backpressure'};
+
+  /// Handle a `BUZZ_SYNC_REQUIRED` control frame: the relay dropped a fan-out
+  /// EVENT on this connection's data channel (e.g. under backpressure) and is
+  /// signalling a gap in the live event stream. Recovery re-uses the existing
+  /// reconnect replay path — REQs with `since: lastSeenCreatedAt - 5s` per
+  /// live subscription — so the dropped range is re-fetched through the
+  /// identical validation pipeline. No UI surface; recovery is silent.
+  void _handleSyncRequired(List<dynamic> data) {
+    if (!_socketConnected) return; // Gap frames during a reconnect are
+    // consumed by the in-flight generation's own replay.
+    final reason = data.length > 1 && data[1] is String ? data[1] as String : null;
+    // The reason is attacker-controllable text: never render it and only log
+    // values from a fixed allowlist.
+    if (reason != null && _syncRequiredKnownReasons.contains(reason)) {
+      debugPrint('relay sync gap ($reason): replaying live subscriptions');
+    }
+    if (_syncReplayScheduled != null) return; // One replay per burst.
+    _syncReplayScheduled = _replayLiveSubscriptions(_connectionGeneration)
+        .then((_) {
+          _syncReplayScheduled = null;
+        })
+        .catchError((Object _) {
+          _syncReplayScheduled = null;
+        });
+  }
+
   NostrFilter _replayFilter(_LiveSubscription subscription) {
     final since = subscription.lastSeenCreatedAt;
     return since == null
@@ -608,6 +637,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _handleMessage(List<dynamic> data) {
     if (data.isEmpty) return;
+    if (data[0] is! String) return;
     final type = data[0] as String;
 
     switch (type) {
@@ -619,6 +649,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _handleClosed(data);
       case 'OK':
         _handleOk(data);
+      case 'BUZZ_SYNC_REQUIRED':
+        _handleSyncRequired(data);
     }
   }
 
