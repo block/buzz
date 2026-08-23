@@ -440,7 +440,14 @@ mod tests {
     fn fold_edit_content_ignores_edit_targeting_different_event() {
         let author = Keys::generate();
         let original = signed_event(&author, 45001, Vec::new());
-        let other = signed_event(&author, 45001, Vec::new());
+        // Distinct created_at so `other` has a different event id from `original`.
+        // Without this, both events share the same author, kind, content, and
+        // timestamp, producing the same event id — the edit targeting `other`
+        // would then match `original`, defeating the test's purpose.
+        let other = EventBuilder::new(Kind::Custom(45001), "body")
+            .custom_created_at(nostr::Timestamp::from_secs(1))
+            .sign_with_keys(&author)
+            .expect("event signs");
         let edit = edit_event(&author, "wrong target", &other.id.to_hex(), nostr::Timestamp::now());
         let owners = std::collections::HashMap::new();
         let result = fold_edit_content(&original, std::slice::from_ref(&edit), &owners);
