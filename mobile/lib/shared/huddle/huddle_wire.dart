@@ -2,18 +2,17 @@ import 'package:flutter/foundation.dart';
 
 /// Fixed audio framing contract shared with Buzz Desktop and `buzz-relay`.
 ///
-/// Huddle audio rooms pin the first participant's protocol version. New mobile
-/// clients request v3 because relay-to-client frames add an occupancy epoch to
-/// v2's one-byte peer prefix. They must not silently fall back: the relay
-/// rejects mixed-version rooms with `upgrade_required`.
-abstract final class HuddleWireV3 {
-  static const protocolVersion = 3;
+/// Huddle audio rooms pin the first participant's protocol version. This
+/// compatibility build requests the released v2 contract so it can connect to
+/// relays that have not yet rolled out v3.
+abstract final class HuddleWireV2 {
+  static const protocolVersion = 2;
   static const sampleRateHz = 48000;
   static const channels = 1;
   static const frameSamples = 960;
   static const frameDuration = Duration(milliseconds: 20);
   static const headerLength = 8;
-  static const relayPeerPrefixLength = 2;
+  static const relayPeerPrefixLength = 1;
   static const dtxFlag = 0x01;
   static const maxBinaryFrameLength = 4096;
 
@@ -37,7 +36,7 @@ abstract final class HuddleWireV3 {
   }
 
   /// Decodes a relay-to-client frame:
-  /// `peer index | epoch | header | opus payload`.
+  /// `peer index | header | opus payload`.
   static HuddleRemoteAudioFrame decodeRelayFrame(Uint8List bytes) {
     final minimumLength = relayPeerPrefixLength + headerLength + 1;
     if (bytes.length < minimumLength) {
@@ -55,7 +54,10 @@ abstract final class HuddleWireV3 {
 
     return HuddleRemoteAudioFrame(
       peerIndex: bytes[0],
-      epoch: bytes[1],
+      // Protocol v2 has no occupancy epoch on media frames. Keep the internal
+      // field at its legacy value so the rest of the playout model remains
+      // unchanged while routing by the authoritative peer index.
+      epoch: 0,
       header: HuddleAudioHeader.decode(bytes, offset: relayPeerPrefixLength),
       opusPayload: Uint8List.fromList(
         bytes.sublist(relayPeerPrefixLength + headerLength),
@@ -104,11 +106,11 @@ final class HuddleAudioHeader {
     );
   }
 
-  bool get isDtx => flags & HuddleWireV3.dtxFlag != 0;
+  bool get isDtx => flags & HuddleWireV2.dtxFlag != 0;
 
   Uint8List encode() {
     _validate();
-    final bytes = Uint8List(HuddleWireV3.headerLength);
+    final bytes = Uint8List(HuddleWireV2.headerLength);
     final view = ByteData.sublistView(bytes);
     view.setUint16(0, sequence, Endian.big);
     view.setUint32(2, timestamp48k, Endian.big);
@@ -118,7 +120,7 @@ final class HuddleAudioHeader {
   }
 
   static HuddleAudioHeader decode(Uint8List bytes, {int offset = 0}) {
-    if (offset < 0 || bytes.length - offset < HuddleWireV3.headerLength) {
+    if (offset < 0 || bytes.length - offset < HuddleWireV2.headerLength) {
       throw const HuddleWireException(
         'Huddle audio header requires eight bytes.',
       );
@@ -126,7 +128,7 @@ final class HuddleAudioHeader {
     final view = ByteData.sublistView(
       bytes,
       offset,
-      offset + HuddleWireV3.headerLength,
+      offset + HuddleWireV2.headerLength,
     );
     final rawLevel = view.getInt8(6);
     // Match the desktop contract: malformed VU telemetry becomes the silent
@@ -167,10 +169,8 @@ final class HuddleAudioHeader {
 final class HuddleRemoteAudioFrame {
   final int peerIndex;
 
-  /// Occupancy epoch of `peerIndex` this frame was authored under. Fenced by
-  /// the transport against the current roster occupant's epoch so a frame from
-  /// a departed occupant that arrives after its slot is reused is dropped
-  /// rather than mis-attributed to the new occupant.
+  /// Always zero for protocol v2, whose relay prefix contains only
+  /// `peerIndex`. Retained as an internal compatibility field.
   final int epoch;
   final HuddleAudioHeader header;
   final Uint8List opusPayload;
