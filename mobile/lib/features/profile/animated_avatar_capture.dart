@@ -5,7 +5,6 @@ import 'dart:math';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -20,13 +19,10 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
-import 'animated_avatar_orientation.dart';
 import 'profile_avatar_draft.dart';
 
 part 'animated_avatar_capture/review_controls.dart';
 part 'animated_avatar_capture/capture_controls.dart';
-part 'animated_avatar_capture/frame_processing.dart';
-part 'animated_avatar_capture/error_text.dart';
 
 const _captureDuration = Duration(seconds: 3);
 const _captureFrameInterval = Duration(milliseconds: 125);
@@ -39,35 +35,25 @@ enum _AnimatedReviewSection { person, color, poster }
 
 /// Records and prepares a short camera animation for a profile avatar.
 class AnimatedAvatarCapture extends HookConsumerWidget {
-  /// Creates an animated-avatar capture and review surface.
   const AnimatedAvatarCapture({
     super.key,
     required this.height,
     required this.onPrepareChanged,
-    this.initialFrames = const [],
   });
 
-  /// The vertical space available to the capture surface.
   final double height;
-
-  /// Reports the current deferred draft-preparation callback to the parent.
   final ValueChanged<Future<ProfileAvatarDraft?> Function()?> onPrepareChanged;
 
-  /// Seeds processed frames in lifecycle-focused widget tests.
-  @visibleForTesting
-  final List<Uint8List> initialFrames;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
-    final captureEpoch = useRef(0);
-    final cameraGeneration = useState(0);
     final isInitializing = useState(true);
     final isRecording = useState(false);
     final isPreparingFrames = useState(false);
     final isProcessing = useState(false);
     final progress = useState(0.0);
-    final frames = useState<List<Uint8List>>(initialFrames);
+    final frames = useState<List<Uint8List>>(const []);
     final posterIndex = useState(0);
     final previewFrameIndex = useState(0);
     final scale = useState(_mobileDefaultPersonScale);
@@ -82,6 +68,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     final encodedCache = useRef<_EncodedAvatarCache?>(null);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final lifecycle = ref.watch(appLifecycleProvider);
+
     final encodeKey = frames.value.isEmpty
         ? null
         : _EncodeKey(
@@ -96,6 +83,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
             shapeOffsetX: shapeOffset.value.dx,
             shapeOffsetY: shapeOffset.value.dy,
           );
+
     useEffect(() {
       encodedCache.value = null;
       final key = encodeKey;
@@ -121,13 +109,13 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     useEffect(() {
       var disposed = false;
 
-      if (lifecycle != AppLifecycleState.resumed || frames.value.isNotEmpty) {
+      if (lifecycle != AppLifecycleState.resumed) {
         isInitializing.value = false;
         controller.value = null;
+        frames.value = const [];
+        onPrepareChanged(null);
         return null;
       }
-
-      isInitializing.value = true;
 
       Future<void> initialize() async {
         try {
@@ -162,12 +150,12 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       unawaited(initialize());
       return () {
         disposed = true;
-        captureEpoch.value++;
+        onPrepareChanged(null);
         final active = controllerRef.value;
         controllerRef.value = null;
         unawaited(active?.dispose() ?? Future<void>.value());
       };
-    }, [lifecycle, frames.value.isEmpty, cameraGeneration.value]);
+    }, [lifecycle]);
 
     Future<ProfileAvatarDraft?> prepare() async {
       final key = encodeKey;
@@ -216,7 +204,6 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     Future<void> record() async {
       final active = controller.value;
       if (active == null || isRecording.value) return;
-      final currentCapture = ++captureEpoch.value;
       frames.value = const [];
       posterIndex.value = 0;
       previewFrameIndex.value = 0;
@@ -231,22 +218,9 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       final startedAt = DateTime.now();
       var lastFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
       var converting = false;
-      var releasedCamera = false;
-
-      Future<void> releaseCamera() async {
-        if (releasedCamera || captureEpoch.value != currentCapture) return;
-        releasedCamera = true;
-        if (identical(controllerRef.value, active)) {
-          controllerRef.value = null;
-        }
-        if (context.mounted && identical(controller.value, active)) {
-          controller.value = null;
-        }
-        await active.dispose();
-      }
 
       final timer = Timer.periodic(const Duration(milliseconds: 40), (_) {
-        if (!context.mounted || captureEpoch.value != currentCapture) return;
+        if (!context.mounted) return;
         final elapsed = DateTime.now().difference(startedAt);
         progress.value =
             (elapsed.inMilliseconds / _captureDuration.inMilliseconds).clamp(
@@ -258,8 +232,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       try {
         await active.startImageStream((cameraImage) async {
           final now = DateTime.now();
-          if (captureEpoch.value != currentCapture ||
-              converting ||
+          if (converting ||
               now.difference(lastFrameAt) < _captureFrameInterval ||
               now.difference(startedAt) >= _captureDuration) {
             return;
@@ -269,37 +242,30 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           try {
             final request = _FrameRequest.fromCameraImage(
               cameraImage,
-              rotationDegrees: animatedAvatarFrameRotationDegrees(
-                sensorOrientation: active.description.sensorOrientation,
-                deviceOrientation: active.value.deviceOrientation,
-                lensDirection: active.description.lensDirection,
-              ),
+              sensorOrientation: active.description.sensorOrientation,
               mirror:
                   active.description.lensDirection == CameraLensDirection.front,
             );
-            final frame = await compute(_convertCameraFrame, request);
-            if (captureEpoch.value == currentCapture) captured.add(frame);
+            captured.add(await compute(_convertCameraFrame, request));
           } finally {
             converting = false;
           }
         });
         await Future<void>.delayed(_captureDuration);
-        if (captureEpoch.value != currentCapture || !context.mounted) return;
         await active.stopImageStream();
-        while (converting && captureEpoch.value == currentCapture) {
+        while (converting) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
-        if (captureEpoch.value != currentCapture || !context.mounted) return;
-        await releaseCamera();
         if (captured.length < 2) {
           throw StateError('Not enough frames were captured.');
         }
         isRecording.value = false;
         isPreparingFrames.value = true;
-        // Cut out only the frames each device captured, then resample the
-        // three-second window so Android and iOS use the same playback cadence.
+        // Camera image conversion throughput differs by platform. Cut out only
+        // the frames each device captured, then resample the same three-second
+        // window onto one fixed timeline so Android and iOS produce the same
+        // frame count and playback cadence without duplicating segmentation.
         final cutouts = await _removeBackgrounds(captured);
-        if (captureEpoch.value != currentCapture || !context.mounted) return;
         final processed = List<Uint8List>.unmodifiable(
           _resampleCapturedFrames(cutouts, _captureFrameCount),
         );
@@ -310,19 +276,8 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         ]);
         if (context.mounted) frames.value = processed;
       } catch (_) {
-        if (captureEpoch.value != currentCapture || !context.mounted) return;
-        try {
-          if (!releasedCamera && active.value.isStreamingImages) {
-            await active.stopImageStream();
-          }
-        } on CameraException {
-          // The camera can stop independently while the capture is unwinding.
-        }
-        await releaseCamera();
-        if (context.mounted) {
-          cameraGeneration.value++;
-          error.value = 'Recording failed. Try again.';
-        }
+        if (active.value.isStreamingImages) await active.stopImageStream();
+        error.value = 'Recording failed. Try again.';
       } finally {
         timer.cancel();
         if (context.mounted) {
@@ -359,84 +314,78 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
               top: previewTop,
               height: 220,
               child: Center(
-                child: _RepositionablePreviewSemantics(
-                  offset: offset.value,
-                  onMove: (delta) {
-                    unawaited(HapticFeedback.selectionClick());
-                    offset.value = Offset(
-                      (offset.value.dx + delta.dx).clamp(-1.0, 1.0),
-                      (offset.value.dy + delta.dy).clamp(-1.0, 1.0),
+                child: GestureDetector(
+                  key: const ValueKey('animated-avatar-review-preview'),
+                  behavior: HitTestBehavior.opaque,
+                  onScaleStart: (_) => gestureStartScale.value = scale.value,
+                  onScaleUpdate: (details) {
+                    final next = Offset(
+                      (offset.value.dx + details.focalPointDelta.dx / 96).clamp(
+                        -1,
+                        1,
+                      ),
+                      (offset.value.dy + details.focalPointDelta.dy / 96).clamp(
+                        -1,
+                        1,
+                      ),
                     );
+                    offset.value = next;
+                    scale.value = (gestureStartScale.value * details.scale)
+                        .clamp(0.7, 2.0)
+                        .toDouble();
                   },
-                  child: GestureDetector(
-                    key: const ValueKey('animated-avatar-review-preview'),
-                    behavior: HitTestBehavior.opaque,
-                    onScaleStart: (_) => gestureStartScale.value = scale.value,
-                    onScaleUpdate: (details) {
-                      final next = Offset(
-                        (offset.value.dx + details.focalPointDelta.dx / 96)
-                            .clamp(-1, 1),
-                        (offset.value.dy + details.focalPointDelta.dy / 96)
-                            .clamp(-1, 1),
-                      );
-                      offset.value = next;
-                      scale.value = (gestureStartScale.value * details.scale)
-                          .clamp(0.7, 2.0)
-                          .toDouble();
-                    },
-                    child: SizedBox.square(
-                      dimension: 220,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          ClipOval(
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                Center(
-                                  child: Transform.translate(
-                                    offset:
-                                        const Offset(0, 20.625) +
-                                        shapeOffset.value * 51.5625,
-                                    child: Transform.scale(
-                                      scale: shapeScale.value,
-                                      child: Container(
-                                        width: 172,
-                                        height: 172,
-                                        decoration: BoxDecoration(
-                                          color: Color(backdropColor.value),
-                                          shape: BoxShape.circle,
-                                        ),
+                  child: SizedBox.square(
+                    dimension: 220,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        ClipOval(
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Center(
+                                child: Transform.translate(
+                                  offset:
+                                      const Offset(0, 20.625) +
+                                      shapeOffset.value * 51.5625,
+                                  child: Transform.scale(
+                                    scale: shapeScale.value,
+                                    child: Container(
+                                      width: 172,
+                                      height: 172,
+                                      decoration: BoxDecoration(
+                                        color: Color(backdropColor.value),
+                                        shape: BoxShape.circle,
                                       ),
                                     ),
                                   ),
                                 ),
-                                _AnimatedPersonPreview(
-                                  bytes: selectedFrame,
-                                  offset: offset.value * 48,
-                                  scale: scale.value,
-                                  outline: personOutline.value,
-                                  outlineColor: _personOutlineColor(
-                                    backdropColor.value,
-                                  ),
+                              ),
+                              _AnimatedPersonPreview(
+                                bytes: selectedFrame,
+                                offset: offset.value * 48,
+                                scale: scale.value,
+                                outline: personOutline.value,
+                                outlineColor: _personOutlineColor(
+                                  backdropColor.value,
                                 ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
-                          IgnorePointer(
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: context.colors.onSurface.withValues(
-                                    alpha: 0.1,
-                                  ),
+                        ),
+                        IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: context.colors.onSurface.withValues(
+                                  alpha: 0.1,
                                 ),
                               ),
                             ),
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -634,6 +583,64 @@ List<Uint8List> _resampleCapturedFrames(
   }, growable: false);
 }
 
+Future<List<Uint8List>> _removeBackgrounds(List<Uint8List> frames) async {
+  final segmenter = SelfieSegmenter(
+    mode: SegmenterMode.stream,
+    enableRawSizeMask: false,
+  );
+  final directory = await getTemporaryDirectory();
+  final results = <Uint8List>[];
+  try {
+    for (var index = 0; index < frames.length; index++) {
+      final file = File('${directory.path}/buzz-avatar-frame-$index.png');
+      try {
+        await file.writeAsBytes(frames[index], flush: false);
+        final mask = await segmenter.processImage(
+          InputImage.fromFilePath(file.path),
+        );
+        if (mask == null) {
+          results.add(frames[index]);
+          continue;
+        }
+        results.add(
+          await compute(
+            _applySegmentationMask,
+            _MaskRequest(
+              frame: frames[index],
+              maskWidth: mask.width,
+              maskHeight: mask.height,
+              confidences: Float32List.fromList(mask.confidences),
+            ),
+          ),
+        );
+      } finally {
+        if (await file.exists()) {
+          await file.delete().catchError((_) => file);
+        }
+      }
+    }
+  } finally {
+    await segmenter.close();
+  }
+  return results;
+}
+
+class _ErrorText extends StatelessWidget {
+  const _ErrorText(this.message);
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: Grid.xs),
+    child: Text(
+      message,
+      textAlign: TextAlign.center,
+      style: context.textTheme.bodySmall?.copyWith(color: context.colors.error),
+    ),
+  );
+}
+
 Color _personOutlineColor(int backdropColor) {
   final color = Color(backdropColor);
   return color.computeLuminance() > 0.74
@@ -651,19 +658,55 @@ class _FramePlane {
 }
 
 @immutable
+class _MaskRequest {
+  const _MaskRequest({
+    required this.frame,
+    required this.maskWidth,
+    required this.maskHeight,
+    required this.confidences,
+  });
+
+  final Uint8List frame;
+  final int maskWidth;
+  final int maskHeight;
+  final Float32List confidences;
+}
+
+Uint8List _applySegmentationMask(_MaskRequest request) {
+  final result = image.decodePng(request.frame)!.convert(numChannels: 4);
+  for (var y = 0; y < result.height; y++) {
+    final maskY = (y * request.maskHeight / result.height).floor().clamp(
+      0,
+      request.maskHeight - 1,
+    );
+    for (var x = 0; x < result.width; x++) {
+      final maskX = (x * request.maskWidth / result.width).floor().clamp(
+        0,
+        request.maskWidth - 1,
+      );
+      final confidence = request.confidences[maskY * request.maskWidth + maskX];
+      final alpha = ((confidence - 0.28) / (0.72 - 0.28)).clamp(0, 1);
+      final pixel = result.getPixel(x, y);
+      pixel.a = (alpha * 255).round();
+    }
+  }
+  return image.encodePng(result, level: 4);
+}
+
+@immutable
 class _FrameRequest {
   const _FrameRequest({
     required this.width,
     required this.height,
     required this.planes,
     required this.isBgra,
-    required this.rotationDegrees,
+    required this.sensorOrientation,
     required this.mirror,
   });
 
   factory _FrameRequest.fromCameraImage(
     CameraImage frame, {
-    required int rotationDegrees,
+    required int sensorOrientation,
     required bool mirror,
   }) => _FrameRequest(
     width: frame.width,
@@ -680,7 +723,7 @@ class _FrameRequest {
         )
         .toList(growable: false),
     isBgra: frame.format.group == ImageFormatGroup.bgra8888,
-    rotationDegrees: rotationDegrees,
+    sensorOrientation: sensorOrientation,
     mirror: mirror,
   );
 
@@ -688,7 +731,7 @@ class _FrameRequest {
   final int height;
   final List<_FramePlane> planes;
   final bool isBgra;
-  final int rotationDegrees;
+  final int sensorOrientation;
   final bool mirror;
 }
 
@@ -731,10 +774,11 @@ Uint8List _convertCameraFrame(_FrameRequest request) {
       }
     }
   }
-  // iOS pre-rotates and mirrors BGRA buffers. Android YUV buffers remain
-  // sensor-oriented and need both corrections here.
-  if (!request.isBgra && request.rotationDegrees != 0) {
-    result = image.copyRotate(result, angle: request.rotationDegrees);
+  // camera_avfoundation applies the capture connection's orientation and front
+  // camera mirroring to BGRA pixel buffers before streaming them to Flutter.
+  // Android YUV buffers remain sensor-oriented and need both corrections here.
+  if (!request.isBgra && request.sensorOrientation != 0) {
+    result = image.copyRotate(result, angle: request.sensorOrientation);
   }
   if (!request.isBgra && request.mirror) {
     result = image.flipHorizontal(result);
@@ -866,34 +910,21 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
   final composed = request.frames
       .map((bytes) {
         final source = image.decodePng(bytes)!;
-        final scaledSize = (_outputSize * request.scale).round().clamp(
+        final cropSize = (source.width / request.scale).round().clamp(
           1,
-          _outputSize * 2,
+          source.width,
         );
-        final scaledPerson = image.copyResize(
-          source,
-          width: scaledSize,
-          height: scaledSize,
-        );
-        final person = image.Image(
+        final available = source.width - cropSize;
+        final x = ((available / 2) - request.offsetX * available / 2)
+            .round()
+            .clamp(0, available);
+        final y = ((available / 2) - request.offsetY * available / 2)
+            .round()
+            .clamp(0, available);
+        final person = image.copyResize(
+          image.copyCrop(source, x: x, y: y, width: cropSize, height: cropSize),
           width: _outputSize,
           height: _outputSize,
-          numChannels: 4,
-        );
-        const previewSize = 220.0;
-        const previewTranslation = 48.0;
-        final translationScale = _outputSize / previewSize;
-        image.compositeImage(
-          person,
-          scaledPerson,
-          dstX:
-              ((_outputSize - scaledSize) / 2 +
-                      request.offsetX * previewTranslation * translationScale)
-                  .round(),
-          dstY:
-              ((_outputSize - scaledSize) / 2 +
-                      request.offsetY * previewTranslation * translationScale)
-                  .round(),
         );
         final frame = image.Image(
           width: _outputSize,
@@ -955,26 +986,6 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
   );
   return _EncodedAvatar(animation, poster);
 }
-
-/// Encodes one poster frame for validating animated-avatar framing parity.
-@visibleForTesting
-Uint8List encodeAnimatedAvatarPoster({
-  required Uint8List frame,
-  required double scale,
-}) => _encodeAvatar(
-  _EncodeRequest(
-    frames: [frame],
-    posterIndex: 0,
-    scale: scale,
-    offsetX: 0,
-    offsetY: 0,
-    backdropColor: 0xff0000ff,
-    personOutline: false,
-    shapeScale: 1,
-    shapeOffsetX: 0,
-    shapeOffsetY: 0,
-  ),
-).poster;
 
 extension<T> on Iterable<T> {
   Iterable<T> skipLast(int count) {

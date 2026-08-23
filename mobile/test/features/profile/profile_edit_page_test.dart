@@ -2,15 +2,11 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:buzz/features/profile/profile_edit_page.dart';
-import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
-import 'package:buzz/features/profile/emoji_avatar_tile.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
-import 'package:buzz/shared/emoji/emoji_data.dart';
-import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -30,37 +26,9 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../helpers/widget_helpers.dart';
 
-part 'profile_edit_page_test/motion_and_accessibility_tests.dart';
-part 'profile_edit_page_test/image_selection_tests.dart';
-
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
 void main() {
-  testWidgets('keeps crop Save disabled while dimensions decode', (
-    tester,
-  ) async {
-    final bytes = Uint8List.fromList(
-      image.encodePng(image.Image(width: 20, height: 10)),
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ProfileAvatarCropPage(
-          imageBytes: Future<Uint8List?>.value(bytes),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-
-    final saveButton = tester.widget<TextButton>(
-      find.descendant(
-        of: find.byKey(const ValueKey('avatar-crop-use-photo')),
-        matching: find.byType(TextButton),
-      ),
-    );
-    expect(saveButton.onPressed, isNull);
-  });
-
   testWidgets('can open directly into the photo editor from Settings', (
     tester,
   ) async {
@@ -211,12 +179,9 @@ void main() {
     final notifier = _FakeProfileNotifier();
 
     await tester.pumpWidget(
-      ProviderScope(
+      WidgetHelpers.testable(
         overrides: [profileProvider.overrideWith(() => notifier)],
-        child: MaterialApp(
-          theme: AppTheme.dark(),
-          home: const Scaffold(body: ProfileEditPage()),
-        ),
+        child: const ProfileEditPage(),
       ),
     );
     await tester.pumpAndSettle();
@@ -229,8 +194,6 @@ void main() {
       'initialValue': 'Alice',
       'placeholder': 'Display name',
       'multiline': false,
-      'brightness': 'dark',
-      'allowUnchangedSubmission': false,
     });
     expect(notifier.savedDisplayNames, ['Alice Native']);
     debugDefaultTargetPlatformOverride = null;
@@ -350,7 +313,7 @@ void main() {
     );
     expect(tester.widget<AvatarImage>(preview).radius, 110);
     await tester.tap(find.text('Photo Library'));
-    await _waitForAvatarCropToLoad(tester);
+    await tester.pumpAndSettle();
     expect(find.text('Position Photo'), findsOneWidget);
     final cancelButton = find.ancestor(
       of: find.text('Cancel'),
@@ -384,7 +347,10 @@ void main() {
       closeTo(expectedY, 0.01),
     );
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
-    await _waitForAvatarCropToClose(tester);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 200)),
+    );
+    await tester.pumpAndSettle();
     expect(notifier.savedAvatarUrls, isEmpty);
     expect(uploadService.uploadCount, 0);
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
@@ -413,9 +379,12 @@ void main() {
     await tester.tap(find.text('Edit Photo'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Photo Library'));
-    await _waitForAvatarCropToLoad(tester);
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
-    await _waitForAvatarCropToClose(tester);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 200)),
+    );
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
     await tester.pumpAndSettle();
@@ -433,6 +402,54 @@ void main() {
     await tester.pumpAndSettle();
     expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
     expect(uploadService.uploadCount, 1);
+  });
+
+  testWidgets('photo modes remain usable on a compact large-type viewport', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 568);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const MediaQuery(
+          data: MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: ProfileEditPage(startInPhotoEditor: true),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey('avatar-editor-scroll-view')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Emoji'));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('emoji-editor-background')),
+    );
+    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.takeException(), isNull);
+
+    await tester.drag(
+      find.byKey(const ValueKey('avatar-editor-scroll-view')),
+      const Offset(0, 1000),
+    );
+    await tester.pump();
+    final animatedMode = find.byKey(const ValueKey('avatar-mode-animated'));
+    await tester.tap(animatedMode);
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey('animated-avatar-capture-preview')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('centers every preview while controls fill the page gutters', (
@@ -572,13 +589,6 @@ void main() {
       tester.getSize(recordButton).width,
       closeTo(expectedContentWidth, 0.01),
     );
-    final recordMaterial = tester.widget<Material>(
-      find.descendant(of: recordButton, matching: find.byType(Material)).first,
-    );
-    expect(
-      recordMaterial.borderRadius,
-      const BorderRadius.all(Radius.circular(Radii.full)),
-    );
     expect(
       screenSize.height - tester.getRect(recordButton).bottom,
       _editorControlBottomForTest,
@@ -616,7 +626,7 @@ void main() {
     );
 
     uploadService.completeGallerySelection();
-    await _waitForAvatarCropToLoad(tester);
+    await tester.pumpAndSettle();
     expect(find.text('Position Photo'), findsOneWidget);
   });
 
@@ -640,7 +650,7 @@ void main() {
     await tester.tap(find.text('Edit Photo'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Camera'));
-    await _waitForAvatarCropToLoad(tester);
+    await tester.pumpAndSettle();
     expect(find.text('Position Photo'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
     await tester.runAsync(
@@ -748,33 +758,6 @@ void main() {
     );
   });
 
-  testWidgets('saves the displayed default emoji without another selection', (
-    tester,
-  ) async {
-    final notifier = _FakeProfileNotifier();
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(() => notifier)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.byKey(const ValueKey('avatar-save')));
-    await tester.pumpAndSettle();
-
-    expect(notifier.savedAvatarUrls, hasLength(1));
-    expect(notifier.savedAvatarUrls.single, startsWith('data:image/svg+xml,'));
-    expect(
-      Uri.decodeComponent(notifier.savedAvatarUrls.single),
-      contains('😊'),
-    );
-  });
-
   testWidgets('keeps emoji drafts scoped to the emoji mode', (tester) async {
     final notifier = _FakeProfileNotifier();
     await tester.pumpWidget(
@@ -805,38 +788,212 @@ void main() {
     );
   });
 
-  runProfileEditMotionAndAccessibilityTests();
-  runProfileEditImageSelectionTests();
-}
-
-Future<void> _waitForAvatarCropToClose(WidgetTester tester) async {
-  final cropPage = find.byKey(const ValueKey('avatar-crop-viewer'));
-  for (var attempt = 0; attempt < 100; attempt += 1) {
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 25)),
+  testWidgets('moves segment content in the selected direction', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(),
+      ),
     );
-    await tester.pump(const Duration(milliseconds: 25));
-    if (cropPage.evaluate().isEmpty) {
-      await tester.pump(const Duration(milliseconds: 250));
-      return;
-    }
-  }
-  fail('Avatar crop did not complete within 5 seconds.');
-}
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
 
-Future<void> _waitForAvatarCropToLoad(WidgetTester tester) async {
-  final cropViewer = find.byKey(const ValueKey('avatar-crop-viewer'));
-  for (var attempt = 0; attempt < 100; attempt += 1) {
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 25)),
+    await tester.tap(find.text('Emoji'));
+    await tester.pump();
+    final forwardTransform = tester.widget<Transform>(
+      find.byKey(const ValueKey('avatar-mode-transition-transform')),
     );
-    await tester.pump(const Duration(milliseconds: 25));
-    if (cropViewer.evaluate().isNotEmpty) {
-      await tester.pumpAndSettle();
-      return;
-    }
-  }
-  fail('Avatar crop did not load within 5 seconds.');
+    expect(forwardTransform.transform.getTranslation().x, greaterThan(0));
+    await tester.pump(const Duration(milliseconds: 240));
+    expect(
+      tester
+          .widget<Transform>(
+            find.byKey(const ValueKey('avatar-mode-transition-transform')),
+          )
+          .transform
+          .getTranslation()
+          .x,
+      closeTo(0, 0.01),
+    );
+
+    await tester.tap(find.text('Image'));
+    await tester.pump();
+    final reverseTransform = tester.widget<Transform>(
+      find.byKey(const ValueKey('avatar-mode-transition-transform')),
+    );
+    expect(reverseTransform.transform.getTranslation().x, lessThan(0));
+  });
+
+  testWidgets('plays an animated avatar on the profile and image editor', (
+    tester,
+  ) async {
+    const avatar =
+        'https://relay.example/poster.png#buzz-anim=https%3A%2F%2Frelay.example%2Fanimation.png';
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(
+            () => _FakeProfileNotifier(
+              profile: const UserProfile(
+                pubkey: 'aabb',
+                displayName: 'Alice',
+                about: 'Building Buzz',
+                avatarUrl: avatar,
+              ),
+            ),
+          ),
+        ],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(PlayingAvatarImage), findsOneWidget);
+    expect(find.byType(ProgressiveAnimatedAvatar), findsOneWidget);
+
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pump();
+    expect(find.byType(PlayingAvatarImage), findsOneWidget);
+    expect(find.byType(ProgressiveAnimatedAvatar), findsOneWidget);
+  });
+
+  testWidgets('shows only the animated-avatar poster with Reduce Motion', (
+    tester,
+  ) async {
+    const avatar =
+        'https://relay.example/poster.png#buzz-anim=https%3A%2F%2Frelay.example%2Fanimation.png';
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(
+            () => _FakeProfileNotifier(
+              profile: const UserProfile(
+                pubkey: 'aabb',
+                displayName: 'Alice',
+                avatarUrl: avatar,
+              ),
+            ),
+          ),
+        ],
+        child: const MediaQuery(
+          data: MediaQueryData(disableAnimations: true),
+          child: ProfileEditPage(),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(ProgressiveAnimatedAvatar), findsNothing);
+    expect(
+      tester.widget<AvatarImage>(find.byType(AvatarImage)).imageUrl,
+      'https://relay.example/poster.png',
+    );
+  });
+
+  testWidgets('keeps emoji actions anchored when search opens the keyboard', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(800, 900);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Emoji'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    final action = find.byKey(const ValueKey('emoji-editor-background'));
+    final actionBottomBefore = tester.getRect(action).bottom;
+    await tester.tap(find.byKey(const ValueKey('emoji-avatar-search')));
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pump();
+
+    expect(tester.getRect(action).bottom, actionBottomBefore);
+    expect(
+      tester.getRect(find.byKey(const ValueKey('emoji-avatar-search'))).bottom,
+      lessThan(600),
+    );
+    expect(
+      tester
+          .widgetList<Scaffold>(find.byType(Scaffold))
+          .any((scaffold) => scaffold.resizeToAvoidBottomInset == false),
+      isTrue,
+    );
+  });
+
+  testWidgets('uses high-contrast inverse colors for avatar action icons', (
+    tester,
+  ) async {
+    final theme = AppTheme.dark();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: theme,
+        home: Scaffold(
+          body: Row(
+            children: [
+              Expanded(
+                child: AvatarEditorOptionButton(
+                  icon: Icons.palette,
+                  label: 'Inactive',
+                  selected: false,
+                  onTap: () {},
+                ),
+              ),
+              Expanded(
+                child: AvatarEditorOptionButton(
+                  icon: Icons.face,
+                  label: 'Active',
+                  selected: true,
+                  onTap: () {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      tester.widget<Icon>(find.byIcon(Icons.palette)).color,
+      theme.colorScheme.onSurface,
+    );
+    expect(
+      tester.widget<Icon>(find.byIcon(Icons.face)).color,
+      theme.colorScheme.surface,
+    );
+  });
+
+  testWidgets('uses the shared animated background grid for emoji avatars', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.text('Emoji'));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.byType(AvatarBackgroundGrid), findsOneWidget);
+    final firstColor = find.byKey(const ValueKey('emoji-avatar-color-0'));
+    expect(tester.getSize(firstColor), const Size.square(52));
+  });
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {
@@ -895,13 +1052,6 @@ class _FakeProfileNotifier extends ProfileNotifier {
       throw Exception('profile publish failed');
     }
     savedAvatarUrls.add(avatarUrl);
-  }
-}
-
-class _FailingPreparationMediaUploadService extends _FakeMediaUploadService {
-  @override
-  Future<Uint8List> prepareImageBytes(XFile image) async {
-    throw Exception('image preparation failed');
   }
 }
 

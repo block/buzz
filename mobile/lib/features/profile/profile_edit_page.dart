@@ -24,23 +24,13 @@ import 'ios_profile_text_editor.dart';
 import 'profile_avatar_editor.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_provider.dart';
-import 'profile_text_editor.dart';
-import 'profile_text_edit_sheet.dart';
 
 /// Edits the current user's public profile metadata.
 class ProfileEditPage extends HookConsumerWidget {
-  /// Creates the profile details and avatar editing page.
-  const ProfileEditPage({
-    super.key,
-    this.startInPhotoEditor = false,
-    this.animatedAvatarCaptureBuilder,
-  });
+  const ProfileEditPage({super.key, this.startInPhotoEditor = false});
 
   /// Opens directly into the photo editor when launched from Settings.
   final bool startInPhotoEditor;
-
-  /// Overrides animated capture for focused integration tests.
-  final AnimatedAvatarCaptureBuilder? animatedAvatarCaptureBuilder;
 
   static const _avatarRadius = 64.0;
 
@@ -53,11 +43,7 @@ class ProfileEditPage extends HookConsumerWidget {
     final isEditingAvatar = useState(startInPhotoEditor);
     final avatarDraft = useState<ProfileAvatarDraft?>(null);
     final avatarDraftMode = useState<ProfileAvatarMode?>(null);
-    final avatarEditConfig = useRef<RelayConfig?>(
-      startInPhotoEditor ? ref.read(relayConfigProvider) : null,
-    );
     final isSavingAvatar = useState(false);
-    final isClosingAvatar = useState(false);
     final prepareAnimatedAvatar =
         useRef<Future<ProfileAvatarDraft?> Function()?>(null);
     final avatarSaveError = useState<String?>(null);
@@ -87,11 +73,10 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) => showBuzzModalBottomSheet<void>(
       context: context,
+      title: title,
       isScrollControlled: true,
       requestFocus: true,
-      showCloseButton: false,
-      builder: (_) => ProfileTextEditSheet(
-        title: title,
+      builder: (_) => _ProfileTextEditSheet(
         initialValue: initialValue,
         hintText: hintText,
         multiline: multiline,
@@ -108,29 +93,24 @@ class ProfileEditPage extends HookConsumerWidget {
     }) async {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         try {
-          await IosProfileTextEditor.presentUntilSaved(
+          final value = await IosProfileTextEditor.present(
             title: title,
             initialValue: initialValue,
             placeholder: hintText,
             multiline: multiline,
-            brightness: Theme.of(context).brightness,
-            onSave: onSave,
-            shouldRetryOnError: (error) =>
-                error is! ProfileCommunityChangedException,
-            canPresent: () =>
-                context.mounted && (ModalRoute.of(context)?.isCurrent ?? true),
-            onSaveError: () {
-              if (!context.mounted ||
-                  !(ModalRoute.of(context)?.isCurrent ?? true)) {
-                return;
-              }
+          );
+          if (value == null) return;
+          try {
+            await onSave(value);
+          } catch (_) {
+            if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text("We couldn't save this change. Try again."),
                 ),
               );
-            },
-          );
+            }
+          }
           return;
         } on MissingPluginException {
           // Keep the Flutter editor available in previews and older builds.
@@ -150,16 +130,12 @@ class ProfileEditPage extends HookConsumerWidget {
 
     void openAvatarEditor() {
       if (!profileHydrated) return;
-      avatarEditConfig.value = ref.read(relayConfigProvider);
       isEditingAvatar.value = true;
       unawaited(avatarTransition.forward(from: 0));
     }
 
     Future<void> closeAvatarEditor({bool whileSaving = false}) async {
-      if ((isSavingAvatar.value && !whileSaving) || isClosingAvatar.value) {
-        return;
-      }
-      isClosingAvatar.value = true;
+      if (isSavingAvatar.value && !whileSaving) return;
       await avatarTransition.reverse();
       if (!context.mounted) return;
       if (startInPhotoEditor) {
@@ -169,71 +145,29 @@ class ProfileEditPage extends HookConsumerWidget {
       isEditingAvatar.value = false;
       avatarDraft.value = null;
       avatarDraftMode.value = null;
-      avatarEditConfig.value = null;
       prepareAnimatedAvatar.value = null;
       canPrepareAnimatedAvatar.value = false;
       avatarMode.value = ProfileAvatarMode.image;
-      isClosingAvatar.value = false;
     }
 
     Future<void> saveAvatar() async {
-      if (isSavingAvatar.value || isClosingAvatar.value) return;
-      final openingConfig = avatarEditConfig.value;
-      if (openingConfig == null) return;
-      final saveConfig = ref.read(relayConfigProvider);
-      final uploadService = ref.read(mediaUploadServiceProvider);
-
-      void requireCurrentCommunity() {
-        final currentConfig = ref.read(relayConfigProvider);
-        if (currentConfig.storedOrigin != openingConfig.storedOrigin ||
-            currentConfig.nsec != openingConfig.nsec ||
-            currentConfig.storedOrigin != saveConfig.storedOrigin ||
-            currentConfig.nsec != saveConfig.nsec ||
-            !identical(ref.read(mediaUploadServiceProvider), uploadService)) {
-          throw ProfileCommunityChangedException();
-        }
-      }
-
-      Future<void> discardStaleEditor() async {
-        avatarDraft.value = null;
-        avatarDraftMode.value = null;
-        prepareAnimatedAvatar.value = null;
-        canPrepareAnimatedAvatar.value = false;
-        if (context.mounted) await closeAvatarEditor(whileSaving: true);
-      }
-
+      if (isSavingAvatar.value) return;
       isSavingAvatar.value = true;
       avatarSaveError.value = null;
       try {
-        requireCurrentCommunity();
         var nextDraft = avatarDraftMode.value == avatarMode.value
             ? avatarDraft.value
             : null;
-        if (avatarMode.value == ProfileAvatarMode.animated &&
-            nextDraft == null) {
+        if (avatarMode.value == ProfileAvatarMode.animated) {
           nextDraft = await prepareAnimatedAvatar.value?.call();
-          requireCurrentCommunity();
-          if (nextDraft != null) {
-            avatarDraft.value = nextDraft;
-            avatarDraftMode.value = ProfileAvatarMode.animated;
-          }
         }
         if (nextDraft == null) return;
-        requireCurrentCommunity();
-        final nextAvatar = await nextDraft.upload(uploadService);
-        requireCurrentCommunity();
+        final nextAvatar = await nextDraft.upload(
+          ref.read(mediaUploadServiceProvider),
+        );
         await ref.read(profileProvider.notifier).updateAvatarUrl(nextAvatar);
-        requireCurrentCommunity();
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
-      } on ProfileCommunityChangedException {
-        await discardStaleEditor();
       } catch (_) {
-        try {
-          requireCurrentCommunity();
-        } on ProfileCommunityChangedException {
-          await discardStaleEditor();
-          return;
-        }
         avatarSaveError.value =
             "We couldn't save your profile photo. Try again.";
       } finally {
@@ -278,16 +212,12 @@ class ProfileEditPage extends HookConsumerWidget {
                         key: const ValueKey('avatar-editor-back'),
                         icon: IosGlassNavigationIcon.back,
                         semanticLabel: 'Back to profile',
-                        onPressed: isClosingAvatar.value
-                            ? null
-                            : () => unawaited(closeAvatarEditor()),
+                        onPressed: () => unawaited(closeAvatarEditor()),
                       )
                     : IconButton(
                         key: const ValueKey('avatar-editor-back'),
                         tooltip: 'Back to profile',
-                        onPressed: isClosingAvatar.value
-                            ? null
-                            : () => unawaited(closeAvatarEditor()),
+                        onPressed: () => unawaited(closeAvatarEditor()),
                         icon: const Icon(LucideIcons.arrowLeft),
                       )
               : null,
@@ -299,10 +229,7 @@ class ProfileEditPage extends HookConsumerWidget {
                       label: 'Save',
                       width: 72,
                       isBusy: isSavingAvatar.value,
-                      onPressed:
-                          canSaveAvatar &&
-                              !isSavingAvatar.value &&
-                              !isClosingAvatar.value
+                      onPressed: canSaveAvatar && !isSavingAvatar.value
                           ? () {
                               unawaited(HapticFeedback.lightImpact());
                               unawaited(saveAvatar());
@@ -316,10 +243,7 @@ class ProfileEditPage extends HookConsumerWidget {
                         key: const ValueKey('avatar-save'),
                         label: 'Save',
                         isBusy: isSavingAvatar.value,
-                        onTap:
-                            canSaveAvatar &&
-                                !isSavingAvatar.value &&
-                                !isClosingAvatar.value
+                        onTap: canSaveAvatar && !isSavingAvatar.value
                             ? () {
                                 unawaited(HapticFeedback.lightImpact());
                                 unawaited(saveAvatar());
@@ -363,14 +287,7 @@ class ProfileEditPage extends HookConsumerWidget {
                             onAnimatedPrepareChanged: (prepare) {
                               prepareAnimatedAvatar.value = prepare;
                               canPrepareAnimatedAvatar.value = prepare != null;
-                              if (avatarMode.value ==
-                                  ProfileAvatarMode.animated) {
-                                avatarDraft.value = null;
-                                avatarDraftMode.value = null;
-                              }
                             },
-                            animatedCaptureBuilder:
-                                animatedAvatarCaptureBuilder,
                           ),
                         ),
                       ),
@@ -425,25 +342,16 @@ class ProfileEditPage extends HookConsumerWidget {
                         trailing: const _EditChevron(),
                         onTap: !profileHydrated
                             ? null
-                            : () {
-                                final container = ProviderScope.containerOf(
-                                  context,
-                                  listen: false,
-                                );
-                                unawaited(
-                                  editField(
-                                    title: 'Display name',
-                                    initialValue: profile?.displayName ?? '',
-                                    hintText: 'Display name',
-                                    onSave: bindProfileSaveToOpeningContext(
-                                      container,
-                                      container
-                                          .read(profileProvider.notifier)
-                                          .updateDisplayName,
-                                    ),
-                                  ),
-                                );
-                              },
+                            : () => unawaited(
+                                editField(
+                                  title: 'Display name',
+                                  initialValue: profile?.displayName ?? '',
+                                  hintText: 'Display name',
+                                  onSave: ref
+                                      .read(profileProvider.notifier)
+                                      .updateDisplayName,
+                                ),
+                              ),
                       ),
                       AppListRow(
                         key: const ValueKey('profile-description-row'),
@@ -453,26 +361,17 @@ class ProfileEditPage extends HookConsumerWidget {
                         trailing: const _EditChevron(),
                         onTap: !profileHydrated
                             ? null
-                            : () {
-                                final container = ProviderScope.containerOf(
-                                  context,
-                                  listen: false,
-                                );
-                                unawaited(
-                                  editField(
-                                    title: 'Profile description',
-                                    initialValue: profile?.about ?? '',
-                                    hintText: 'Profile description',
-                                    multiline: true,
-                                    onSave: bindProfileSaveToOpeningContext(
-                                      container,
-                                      container
-                                          .read(profileProvider.notifier)
-                                          .updateAbout,
-                                    ),
-                                  ),
-                                );
-                              },
+                            : () => unawaited(
+                                editField(
+                                  title: 'Profile description',
+                                  initialValue: profile?.about ?? '',
+                                  hintText: 'Profile description',
+                                  multiline: true,
+                                  onSave: ref
+                                      .read(profileProvider.notifier)
+                                      .updateAbout,
+                                ),
+                              ),
                       ),
                     ],
                   ),
@@ -581,4 +480,88 @@ class _EditChevron extends StatelessWidget {
     size: 18,
     color: context.colors.onSurfaceVariant,
   );
+}
+
+class _ProfileTextEditSheet extends HookWidget {
+  const _ProfileTextEditSheet({
+    required this.initialValue,
+    required this.hintText,
+    required this.multiline,
+    required this.onSave,
+  });
+
+  final String initialValue;
+  final String hintText;
+  final bool multiline;
+  final Future<void> Function(String value) onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = useTextEditingController(text: initialValue);
+    useListenable(controller);
+    final isSaving = useState(false);
+    final error = useState<String?>(null);
+    final hasChanges = controller.text.trim() != initialValue.trim();
+
+    Future<void> save() async {
+      if (!hasChanges || isSaving.value) return;
+      isSaving.value = true;
+      error.value = null;
+      try {
+        await onSave(controller.text);
+        if (context.mounted) Navigator.of(context).pop();
+      } catch (_) {
+        error.value = "We couldn't save this change. Try again.";
+      } finally {
+        if (context.mounted) isSaving.value = false;
+      }
+    }
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          Grid.gutter,
+          Grid.xxs,
+          Grid.gutter,
+          MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              key: const ValueKey('profile-field-input'),
+              controller: controller,
+              autofocus: true,
+              enabled: !isSaving.value,
+              minLines: multiline ? 4 : 1,
+              maxLines: multiline ? 6 : 1,
+              textCapitalization: TextCapitalization.sentences,
+              textInputAction: multiline
+                  ? TextInputAction.newline
+                  : TextInputAction.done,
+              onSubmitted: multiline ? null : (_) => unawaited(save()),
+              decoration: InputDecoration(hintText: hintText),
+            ),
+            if (error.value != null) ...[
+              const SizedBox(height: Grid.xxs),
+              Text(
+                error.value!,
+                style: context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
+            ],
+            const SizedBox(height: Grid.xs),
+            FilledButton(
+              key: const ValueKey('profile-field-save'),
+              onPressed: hasChanges && !isSaving.value ? save : null,
+              child: Text(isSaving.value ? 'Saving…' : 'Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
