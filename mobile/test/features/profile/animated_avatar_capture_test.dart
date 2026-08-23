@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:buzz/features/profile/animated_avatar_orientation.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
@@ -127,6 +128,53 @@ void main() {
       findsOneWidget,
     );
     expect(prepare, isNotNull);
+  });
+
+  testWidgets('poster scrubber supports semantic adjustment actions', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final frames = [
+      for (var index = 0; index < 3; index++)
+        image.encodePng(image.Image(width: 2, height: 2)),
+    ];
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: AnimatedAvatarCapture(
+              height: 600,
+              initialFrames: frames,
+              onPrepareChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Frame'));
+    await tester.pump();
+
+    final scrubber = find.bySemanticsLabel('Choose still frame');
+    expect(scrubber, findsOneWidget);
+    final initialSemantics = tester.getSemantics(scrubber);
+    expect(initialSemantics.value, '1 of 3');
+    final initialData = initialSemantics.getSemanticsData();
+    expect(initialData.hasAction(SemanticsAction.increase), isTrue);
+    expect(initialData.hasAction(SemanticsAction.decrease), isFalse);
+
+    final semanticsWidget = tester.widget<Semantics>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Choose still frame',
+      ),
+    );
+    semanticsWidget.properties.onIncrease!();
+    await tester.pump();
+    expect(tester.getSemantics(scrubber).value, '2 of 3');
+    semantics.dispose();
   });
 }
 

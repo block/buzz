@@ -58,6 +58,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
+    final cameraGeneration = useState(0);
     final isInitializing = useState(true);
     final isRecording = useState(false);
     final isPreparingFrames = useState(false);
@@ -117,7 +118,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     useEffect(() {
       var disposed = false;
 
-      if (lifecycle != AppLifecycleState.resumed) {
+      if (lifecycle != AppLifecycleState.resumed || frames.value.isNotEmpty) {
         isInitializing.value = false;
         controller.value = null;
         return null;
@@ -162,7 +163,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         controllerRef.value = null;
         unawaited(active?.dispose() ?? Future<void>.value());
       };
-    }, [lifecycle]);
+    }, [lifecycle, frames.value.isEmpty, cameraGeneration.value]);
 
     Future<ProfileAvatarDraft?> prepare() async {
       final key = encodeKey;
@@ -225,6 +226,19 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       final startedAt = DateTime.now();
       var lastFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
       var converting = false;
+      var releasedCamera = false;
+
+      Future<void> releaseCamera() async {
+        if (releasedCamera) return;
+        releasedCamera = true;
+        if (identical(controllerRef.value, active)) {
+          controllerRef.value = null;
+        }
+        if (context.mounted && identical(controller.value, active)) {
+          controller.value = null;
+        }
+        await active.dispose();
+      }
 
       final timer = Timer.periodic(const Duration(milliseconds: 40), (_) {
         if (!context.mounted) return;
@@ -267,6 +281,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         while (converting) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
+        await releaseCamera();
         if (captured.length < 2) {
           throw StateError('Not enough frames were captured.');
         }
@@ -287,8 +302,14 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         ]);
         if (context.mounted) frames.value = processed;
       } catch (_) {
-        if (active.value.isStreamingImages) await active.stopImageStream();
-        error.value = 'Recording failed. Try again.';
+        if (!releasedCamera && active.value.isStreamingImages) {
+          await active.stopImageStream();
+        }
+        await releaseCamera();
+        if (context.mounted) {
+          cameraGeneration.value++;
+          error.value = 'Recording failed. Try again.';
+        }
       } finally {
         timer.cancel();
         if (context.mounted) {
