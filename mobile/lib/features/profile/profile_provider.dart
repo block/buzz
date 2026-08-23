@@ -16,6 +16,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
   Map<String, dynamic> _metadata = {};
   bool _hasHydrated = false;
   int _lastCreatedAt = 0;
+  Future<void> _patchQueue = Future.value();
 
   @override
   Future<UserProfile?> build() {
@@ -75,7 +76,21 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
   Future<void> updateAvatarUrl(String avatarUrl) =>
       _publishProfilePatch({'picture': avatarUrl.trim()});
 
-  Future<void> _publishProfilePatch(Map<String, dynamic> patch) async {
+  Future<void> _publishProfilePatch(Map<String, dynamic> patch) {
+    final previous = _patchQueue;
+    final released = Completer<void>();
+    _patchQueue = released.future;
+    return () async {
+      await previous;
+      try {
+        await _publishProfilePatchNow(patch);
+      } finally {
+        released.complete();
+      }
+    }();
+  }
+
+  Future<void> _publishProfilePatchNow(Map<String, dynamic> patch) async {
     if (!_hasHydrated || !state.hasValue) {
       throw StateError('Cannot update profile before metadata is loaded.');
     }

@@ -27,10 +27,17 @@ import 'profile_provider.dart';
 
 /// Edits the current user's public profile metadata.
 class ProfileEditPage extends HookConsumerWidget {
-  const ProfileEditPage({super.key, this.startInPhotoEditor = false});
+  const ProfileEditPage({
+    super.key,
+    this.startInPhotoEditor = false,
+    this.animatedAvatarCaptureBuilder,
+  });
 
   /// Opens directly into the photo editor when launched from Settings.
   final bool startInPhotoEditor;
+
+  /// Overrides animated capture for focused integration tests.
+  final AnimatedAvatarCaptureBuilder? animatedAvatarCaptureBuilder;
 
   static const _avatarRadius = 64.0;
 
@@ -93,24 +100,21 @@ class ProfileEditPage extends HookConsumerWidget {
     }) async {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         try {
-          final value = await IosProfileTextEditor.present(
+          await IosProfileTextEditor.presentUntilSaved(
             title: title,
             initialValue: initialValue,
             placeholder: hintText,
             multiline: multiline,
-          );
-          if (value == null) return;
-          try {
-            await onSave(value);
-          } catch (_) {
-            if (context.mounted) {
+            onSave: onSave,
+            onSaveError: () {
+              if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text("We couldn't save this change. Try again."),
                 ),
               );
-            }
-          }
+            },
+          );
           return;
         } on MissingPluginException {
           // Keep the Flutter editor available in previews and older builds.
@@ -158,8 +162,13 @@ class ProfileEditPage extends HookConsumerWidget {
         var nextDraft = avatarDraftMode.value == avatarMode.value
             ? avatarDraft.value
             : null;
-        if (avatarMode.value == ProfileAvatarMode.animated) {
+        if (avatarMode.value == ProfileAvatarMode.animated &&
+            nextDraft == null) {
           nextDraft = await prepareAnimatedAvatar.value?.call();
+          if (nextDraft != null) {
+            avatarDraft.value = nextDraft;
+            avatarDraftMode.value = ProfileAvatarMode.animated;
+          }
         }
         if (nextDraft == null) return;
         final nextAvatar = await nextDraft.upload(
@@ -287,7 +296,14 @@ class ProfileEditPage extends HookConsumerWidget {
                             onAnimatedPrepareChanged: (prepare) {
                               prepareAnimatedAvatar.value = prepare;
                               canPrepareAnimatedAvatar.value = prepare != null;
+                              if (avatarMode.value ==
+                                  ProfileAvatarMode.animated) {
+                                avatarDraft.value = null;
+                                avatarDraftMode.value = null;
+                              }
                             },
+                            animatedCaptureBuilder:
+                                animatedAvatarCaptureBuilder,
                           ),
                         ),
                       ),

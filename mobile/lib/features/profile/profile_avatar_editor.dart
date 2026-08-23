@@ -31,6 +31,14 @@ part 'profile_avatar_editor/emoji_avatar_picker.dart';
 /// Avatar kinds shared with the desktop profile editor.
 enum ProfileAvatarMode { image, emoji, animated }
 
+/// Builds the animated capture surface for the profile avatar editor.
+typedef AnimatedAvatarCaptureBuilder =
+    Widget Function({
+      required double height,
+      required ValueChanged<Future<ProfileAvatarDraft?> Function()?>
+      onPrepareChanged,
+    });
+
 const _previewSize = 220.0;
 const _motionDuration = Duration(milliseconds: 240);
 const _previewSquishDuration = Duration(milliseconds: 200);
@@ -60,6 +68,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     required this.onModeChanged,
     required this.onDraftChanged,
     required this.onAnimatedPrepareChanged,
+    this.animatedCaptureBuilder,
   });
 
   final String? currentAvatarUrl;
@@ -71,6 +80,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
   final ValueChanged<ProfileAvatarDraft?> onDraftChanged;
   final ValueChanged<Future<ProfileAvatarDraft?> Function()?>
   onAnimatedPrepareChanged;
+  final AnimatedAvatarCaptureBuilder? animatedCaptureBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -266,10 +276,17 @@ class ProfileAvatarEditor extends HookConsumerWidget {
               updateEmojiPreview();
             },
           ),
-          ProfileAvatarMode.animated => AnimatedAvatarCapture(
+          ProfileAvatarMode.animated => KeyedSubtree(
             key: const ValueKey(2),
-            height: modeHeight,
-            onPrepareChanged: onAnimatedPrepareChanged,
+            child:
+                animatedCaptureBuilder?.call(
+                  height: modeHeight,
+                  onPrepareChanged: onAnimatedPrepareChanged,
+                ) ??
+                AnimatedAvatarCapture(
+                  height: modeHeight,
+                  onPrepareChanged: onAnimatedPrepareChanged,
+                ),
           ),
         };
         final collapsedPreviewOffset =

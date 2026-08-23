@@ -231,6 +231,47 @@ void main() {
   );
 
   test(
+    'overlapping profile updates serialize their full merge cycles',
+    () async {
+      final keys = nostr.Keys.generate();
+      final relaySession = _ControlledProfileRelaySession(
+        fetch: () async => [
+          NostrEvent(
+            id: 'profile-initial',
+            pubkey: keys.public,
+            createdAt: 10,
+            kind: EventKind.profile,
+            tags: const [],
+            content: jsonEncode({
+              'display_name': 'Initial',
+              'about': 'Initial about',
+            }),
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _profileContainer(keys.nsec, relaySession);
+      addTearDown(container.dispose);
+
+      await container.read(profileProvider.future);
+      await Future.wait([
+        container.read(profileProvider.notifier).updateDisplayName('Mobile'),
+        container.read(profileProvider.notifier).updateAbout('Mobile about'),
+      ]);
+
+      expect(relaySession.published, hasLength(2));
+      expect(jsonDecode(relaySession.published.last.content), {
+        'display_name': 'Mobile',
+        'about': 'Mobile about',
+      });
+      expect(
+        relaySession.published.last.createdAt,
+        greaterThan(relaySession.published.first.createdAt),
+      );
+    },
+  );
+
+  test(
     'manual presence persists until Online restores automatic mode',
     () async {
       SharedPreferences.setMockInitialValues({});
