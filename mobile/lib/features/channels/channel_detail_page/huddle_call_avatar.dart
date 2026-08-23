@@ -7,6 +7,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     required this.fallbackLabel,
     required this.active,
     required this.speakerLevel,
+    required this.preparingResponse,
     required this.onTap,
     this.isSelf = false,
     this.frameSize = _huddleAvatarFrameSize,
@@ -17,6 +18,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
   final String? fallbackLabel;
   final bool active;
   final double speakerLevel;
+  final bool preparingResponse;
   final VoidCallback? onTap;
   final bool isSelf;
   final double frameSize;
@@ -24,6 +26,14 @@ class _HuddleCallAvatar extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final responseHasStarted = useRef(false);
+    if (!preparingResponse) {
+      responseHasStarted.value = false;
+    } else if (active) {
+      responseHasStarted.value = true;
+    }
+    final showPreparingResponse =
+        preparingResponse && !active && !responseHasStarted.value;
     final scale = frameSize / _huddleAvatarFrameSize;
     final avatarRadius = _huddleAvatarRadius * scale;
     final speakingRingSize = _huddleSpeakingRingSize * scale;
@@ -65,10 +75,16 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       isSelf: isSelf,
     );
 
+    final semanticStates = [
+      label,
+      if (showPreparingResponse) 'preparing a response',
+      if (active) 'speaking',
+    ].join(', ');
+
     return SizedBox(
       width: frameSize,
       child: Semantics(
-        label: active ? '$label, speaking' : label,
+        label: semanticStates,
         hint: onTap == null ? null : 'Tap to focus participant',
         button: onTap != null,
         onTap: onTap,
@@ -121,15 +137,46 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                           ),
                         ),
                       ),
-                      AvatarImage(
-                        imageUrl: profile?.avatarUrl,
-                        radius: avatarRadius,
-                        backgroundColor: context.colors.primaryContainer,
-                        fallback: Icon(
-                          LucideIcons.userRound,
-                          size: fallbackIconSize,
-                          color: context.colors.onPrimaryContainer,
-                        ),
+                      AnimatedSwitcher(
+                        duration: reducedMotion
+                            ? Duration.zero
+                            : const Duration(milliseconds: 180),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, animation) =>
+                            FadeTransition(opacity: animation, child: child),
+                        child: showPreparingResponse
+                            ? Container(
+                                key: ValueKey(
+                                  'huddle-agent-preparing-response-$pubkey',
+                                ),
+                                width: avatarRadius * 2,
+                                height: avatarRadius * 2,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: context.colors.primaryContainer,
+                                ),
+                                alignment: Alignment.center,
+                                child: BouncingDotsIndicator(
+                                  color: context.colors.onPrimaryContainer,
+                                  dotSize: 6 * scale,
+                                  gap: 4 * scale,
+                                  semanticLabel:
+                                      '$label is preparing a response',
+                                ),
+                              )
+                            : AvatarImage(
+                                key: ValueKey('huddle-avatar-image-$pubkey'),
+                                imageUrl: profile?.avatarUrl,
+                                radius: avatarRadius,
+                                backgroundColor:
+                                    context.colors.primaryContainer,
+                                fallback: Icon(
+                                  LucideIcons.userRound,
+                                  size: fallbackIconSize,
+                                  color: context.colors.onPrimaryContainer,
+                                ),
+                              ),
                       ),
                     ],
                   ),

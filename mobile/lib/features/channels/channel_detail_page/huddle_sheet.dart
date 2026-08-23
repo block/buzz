@@ -31,10 +31,12 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
         ),
       ),
     );
+    final backingMembers =
+        ref.watch(channelMembersProvider(channelId)).value ??
+        const <ChannelMember>[];
     final members = session.wasAdmitted
-        ? const <ChannelMember>[]
-        : ref.watch(channelMembersProvider(channelId)).value ??
-              const <ChannelMember>[];
+        ? backingMembers.where((member) => member.isBot)
+        : backingMembers;
     final relayState = ref.watch(relaySessionProvider);
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.ephemeralChannelId == channelId
@@ -553,7 +555,12 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.participantPubkeys,
       currentPubkey: localPubkey,
-      members: session.wasAdmitted ? const [] : backingMembers,
+      // Audio peers remain authoritative for humans after admission. Agents
+      // are logical Huddle participants as soon as their bot membership is
+      // published, before their send-only audio connection starts speaking.
+      members: session.wasAdmitted
+          ? backingMembers.where((member) => member.isBot)
+          : backingMembers,
     );
     final remotePubkeys = participantPubkeys
         .where((pubkey) => pubkey != localPubkey)
@@ -564,6 +571,17 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     );
     final profiles = ref.watch(userCacheProvider);
     final directoryDisplayNames = ref.watch(agentDirectoryDisplayNamesProvider);
+    final huddleTypingEntries = ref.watch(
+      channelTypingProvider(invite.ephemeralChannelId),
+    );
+    final parentAgentPubkeys = ref.watch(
+      agentMentionPubkeysProvider(invite.parentChannelId),
+    );
+    final workingAgentPubkeys = <String>{
+      for (final entry in huddleTypingEntries)
+        if (parentAgentPubkeys.contains(entry.pubkey.toLowerCase()))
+          entry.pubkey.toLowerCase(),
+    };
     final reactionSenderName = _huddleReactionSenderName(
       localPubkey: localPubkey,
       profile: localPubkey == null ? null : profiles[localPubkey],
@@ -651,6 +669,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     localPubkey: localPubkey,
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,
                     speakerLevels: session.speakerLevels,
+                    workingAgentPubkeys: workingAgentPubkeys,
                     retryTooltip: retryTooltip,
                     retryIcon: retryIcon,
                     onRetry: onRetry,
