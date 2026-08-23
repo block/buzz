@@ -141,6 +141,96 @@ void main() {
   });
 
   test(
+    'profile updates merge the current relay head before publishing',
+    () async {
+      final keys = nostr.Keys.generate();
+      var history = [
+        NostrEvent(
+          id: 'profile-initial',
+          pubkey: keys.public,
+          createdAt: 10,
+          kind: EventKind.profile,
+          tags: const [],
+          content: jsonEncode({
+            'display_name': 'Initial',
+            'about': 'Initial about',
+            'custom': 'initial',
+          }),
+          sig: 'sig',
+        ),
+      ];
+      final relaySession = _ControlledProfileRelaySession(
+        fetch: () async => history,
+      );
+      final container = _profileContainer(keys.nsec, relaySession);
+      addTearDown(container.dispose);
+
+      await container.read(profileProvider.future);
+      history = [
+        NostrEvent(
+          id: 'profile-remote',
+          pubkey: keys.public,
+          createdAt: 20,
+          kind: EventKind.profile,
+          tags: const [],
+          content: jsonEncode({
+            'display_name': 'Remote',
+            'about': 'Remote about',
+            'custom': 'remote',
+          }),
+          sig: 'sig',
+        ),
+      ];
+
+      await container
+          .read(profileProvider.notifier)
+          .updateDisplayName('Mobile');
+
+      final content =
+          jsonDecode(relaySession.published.single.content)
+              as Map<String, dynamic>;
+      expect(content, {
+        'display_name': 'Mobile',
+        'about': 'Remote about',
+        'custom': 'remote',
+      });
+      expect(relaySession.published.single.createdAt, greaterThan(20));
+    },
+  );
+
+  test(
+    'a competing profile head does not become optimistic local state',
+    () async {
+      final keys = nostr.Keys.generate();
+      final relaySession = _LosingProfileRelaySession(
+        NostrEvent(
+          id: 'profile-initial',
+          pubkey: keys.public,
+          createdAt: 10,
+          kind: EventKind.profile,
+          tags: const [],
+          content: jsonEncode({'display_name': 'Initial'}),
+          sig: 'sig',
+        ),
+      );
+      final container = _profileContainer(keys.nsec, relaySession);
+      addTearDown(container.dispose);
+
+      await container.read(profileProvider.future);
+
+      await expectLater(
+        container.read(profileProvider.notifier).updateDisplayName('Mobile'),
+        throwsStateError,
+      );
+      expect(relaySession.published, hasLength(1));
+      expect(
+        container.read(profileProvider).requireValue?.displayName,
+        'Initial',
+      );
+    },
+  );
+
+  test(
     'manual presence persists until Online restores automatic mode',
     () async {
       SharedPreferences.setMockInitialValues({});
@@ -217,7 +307,7 @@ class _ProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [profile];
+  }) async => [profile, ...published];
 
   @override
   Future<NostrEvent> publish(
@@ -252,7 +342,7 @@ class _ControlledProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) => fetch();
+  }) async => [...await fetch(), ...published];
 
   @override
   Future<NostrEvent> publish(
@@ -260,6 +350,41 @@ class _ControlledProfileRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     published.add(event);
+    return event;
+  }
+}
+
+class _LosingProfileRelaySession extends RelaySessionNotifier {
+  _LosingProfileRelaySession(this.initial);
+
+  final NostrEvent initial;
+  final List<NostrEvent> published = [];
+  NostrEvent? competing;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [competing ?? initial];
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    published.add(event);
+    competing = NostrEvent(
+      id: 'profile-competing',
+      pubkey: initial.pubkey,
+      createdAt: event.createdAt + 1,
+      kind: EventKind.profile,
+      tags: const [],
+      content: jsonEncode({'display_name': 'Remote'}),
+      sig: 'sig',
+    );
     return event;
   }
 }

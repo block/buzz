@@ -42,18 +42,8 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       _hasHydrated = true;
       return null;
     }
-    final latest = events.reduce((current, event) {
-      if (event.createdAt != current.createdAt) {
-        return event.createdAt > current.createdAt ? event : current;
-      }
-      // Match the relay replacement tie-breaker: the lowest event id wins.
-      return event.id.compareTo(current.id) < 0 ? event : current;
-    });
-    final decoded = jsonDecode(latest.content);
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('Profile metadata must be a JSON object.');
-    }
-    _metadata = Map<String, dynamic>.from(decoded);
+    final latest = _latestProfileEvent(events)!;
+    _metadata = _decodeProfileMetadata(latest);
     _lastCreatedAt = latest.createdAt;
     final data = ProfileData.fromEvent(latest);
     final profile = UserProfile(
@@ -94,20 +84,45 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       throw StateError('Cannot update profile without a signing identity.');
     }
 
-    final nextMetadata = {..._metadata, ...patch};
-    final config = ref.read(relayConfigProvider);
-    final relay = SignedEventRelay(
-      session: ref.read(relaySessionProvider.notifier),
-      nsec: config.nsec,
+    final session = ref.read(relaySessionProvider.notifier);
+    final currentEvents = await session.fetchHistory(
+      NostrFilters.profile(pubkey),
     );
+    final currentHead = _latestProfileEvent(currentEvents);
+    if (_lastCreatedAt > 0 &&
+        (currentHead == null || currentHead.createdAt < _lastCreatedAt)) {
+      throw StateError('Cannot confirm the latest profile metadata.');
+    }
+    final currentMetadata = currentHead == null
+        ? <String, dynamic>{}
+        : _decodeProfileMetadata(currentHead);
+    final nextMetadata = {...currentMetadata, ...patch};
+    final config = ref.read(relayConfigProvider);
+    final relay = SignedEventRelay(session: session, nsec: config.nsec);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final createdAt = now > _lastCreatedAt ? now : _lastCreatedAt + 1;
+    final currentCreatedAt = currentHead?.createdAt ?? 0;
+    final previousCreatedAt = currentCreatedAt > _lastCreatedAt
+        ? currentCreatedAt
+        : _lastCreatedAt;
+    final createdAt = now > previousCreatedAt ? now : previousCreatedAt + 1;
+    NostrEvent? signedEvent;
     await relay.submit(
       kind: EventKind.profile,
       content: jsonEncode(nextMetadata),
       tags: const [],
       createdAt: createdAt,
+      onSigned: (event) => signedEvent = event,
     );
+    final submittedEvent = signedEvent;
+    if (submittedEvent == null) {
+      throw StateError('Profile update was not signed.');
+    }
+    final verifiedHead = _latestProfileEvent(
+      await session.fetchHistory(NostrFilters.profile(pubkey)),
+    );
+    if (verifiedHead?.id != submittedEvent.id) {
+      throw StateError('Profile changed before the update could be confirmed.');
+    }
 
     _metadata = nextMetadata;
     _lastCreatedAt = createdAt;
@@ -122,6 +137,25 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     state = AsyncData(profile);
     ref.read(userCacheProvider.notifier).put(profile);
   }
+}
+
+NostrEvent? _latestProfileEvent(List<NostrEvent> events) {
+  if (events.isEmpty) return null;
+  return events.reduce((current, event) {
+    if (event.createdAt != current.createdAt) {
+      return event.createdAt > current.createdAt ? event : current;
+    }
+    // Match the relay replacement tie-breaker: the lowest event id wins.
+    return event.id.compareTo(current.id) < 0 ? event : current;
+  });
+}
+
+Map<String, dynamic> _decodeProfileMetadata(NostrEvent event) {
+  final decoded = jsonDecode(event.content);
+  if (decoded is! Map<String, dynamic>) {
+    throw const FormatException('Profile metadata must be a JSON object.');
+  }
+  return Map<String, dynamic>.from(decoded);
 }
 
 final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
