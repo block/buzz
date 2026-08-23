@@ -33,17 +33,21 @@ export async function refreshChannelWindowMessages(
   // onto it — and that fetch returns the seeded snapshot, never asking the
   // relay. A seeded query is recognisable by data at `dataUpdatedAt` 0; let its
   // snapshot fetch settle (consuming the mount gate) before invalidating, so
-  // the refetch is a distinct authoritative window fetch. Cold and warm
-  // channels carry no such marker and dedupe/cancel exactly as before.
+  // the refetch is a distinct authoritative window fetch. Concurrent callers
+  // (subscribe settlement + reconnect) wake on the same promise, so the seeded
+  // branch must join an authoritative fetch already in flight rather than
+  // cancel and replace it. Cold and warm channels carry no such marker and
+  // dedupe/cancel exactly as before.
   await channelHeadHydration(queryClient);
   const query = queryClient.getQueryCache().find({ queryKey, exact: true });
-  if (query?.state.data !== undefined && query.state.dataUpdatedAt === 0) {
+  const seeded =
+    query?.state.data !== undefined && query.state.dataUpdatedAt === 0;
+  if (seeded) {
     await query.promise?.catch(() => {});
   }
-  await queryClient.invalidateQueries({
-    queryKey,
-    exact: true,
-    refetchType: "active",
-  });
+  await queryClient.invalidateQueries(
+    { queryKey, exact: true, refetchType: "active" },
+    { cancelRefetch: !seeded },
+  );
   projectChannelWindowMessages(queryClient, channelId);
 }
