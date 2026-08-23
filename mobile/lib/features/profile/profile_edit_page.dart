@@ -111,9 +111,13 @@ class ProfileEditPage extends HookConsumerWidget {
             onSave: onSave,
             shouldRetryOnError: (error) =>
                 error is! ProfileCommunityChangedException,
-            canPresent: () => context.mounted,
+            canPresent: () =>
+                context.mounted && (ModalRoute.of(context)?.isCurrent ?? true),
             onSaveError: () {
-              if (!context.mounted) return;
+              if (!context.mounted ||
+                  !(ModalRoute.of(context)?.isCurrent ?? true)) {
+                return;
+              }
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text("We couldn't save this change. Try again."),

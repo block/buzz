@@ -87,9 +87,12 @@ Future<void> _showProfileTextEditor({
         onSave: onSave,
         shouldRetryOnError: (error) =>
             error is! ProfileCommunityChangedException,
-        canPresent: () => context.mounted,
+        canPresent: () =>
+            context.mounted && (ModalRoute.of(context)?.isCurrent ?? true),
         onSaveError: () {
-          if (context.mounted) _showSaveError(context);
+          if (context.mounted && (ModalRoute.of(context)?.isCurrent ?? true)) {
+            _showSaveError(context);
+          }
         },
       );
       return;

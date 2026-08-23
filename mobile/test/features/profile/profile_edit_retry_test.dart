@@ -182,6 +182,64 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('native text retry stops when its owner route is covered', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/profile_text_editor');
+    var presentations = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async {
+          presentations++;
+          return 'Pending draft';
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    final notifier = _DeferredFailureProfileNotifier();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(() => notifier)],
+        child: Builder(
+          builder: (context) => Column(
+            children: [
+              TextButton(
+                onPressed: () =>
+                    unawaited(showProfileDisplayNameEditor(context)),
+                child: const Text('Open editor'),
+              ),
+              TextButton(
+                onPressed: () => unawaited(
+                  Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const Scaffold(body: Text('Theme')),
+                    ),
+                  ),
+                ),
+                child: const Text('Open destination'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open editor'));
+    await tester.pump();
+    expect(notifier.displayNameAttempts, ['Pending draft']);
+
+    await tester.tap(find.text('Open destination'));
+    await tester.pumpAndSettle();
+    notifier.failSave();
+    await tester.pump();
+
+    expect(presentations, 1);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('Flutter text editor closes after a community switch', (
     tester,
   ) async {

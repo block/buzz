@@ -65,6 +65,38 @@ void main() {
     );
   });
 
+  test('clearing a display name restores the pubkey label fallback', () async {
+    final keys = nostr.Keys.generate();
+    final relaySession = _ProfileRelaySession(
+      NostrEvent(
+        id: 'profile-1',
+        pubkey: keys.public,
+        createdAt: 1,
+        kind: EventKind.profile,
+        tags: const [],
+        content: jsonEncode({
+          'name': 'legacy-alice',
+          'display_name': 'Alice',
+          'about': 'Building Buzz',
+        }),
+        sig: 'sig',
+      ),
+    );
+    final container = _profileContainer(keys.nsec, relaySession);
+    addTearDown(container.dispose);
+
+    await container.read(profileProvider.future);
+    await container.read(profileProvider.notifier).updateDisplayName('   ');
+
+    final content =
+        jsonDecode(relaySession.published.single.content)
+            as Map<String, dynamic>;
+    expect(content, {'about': 'Building Buzz'});
+    final profile = container.read(profileProvider).requireValue!;
+    expect(profile.displayName, isNull);
+    expect(profile.label, '${keys.public.substring(0, 8)}...');
+  });
+
   test('profile updates fail closed while hydration is pending', () async {
     final keys = nostr.Keys.generate();
     final history = Completer<List<NostrEvent>>();

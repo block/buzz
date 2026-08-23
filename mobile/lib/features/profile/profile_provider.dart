@@ -140,6 +140,11 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
         ? <String, dynamic>{}
         : _decodeProfileMetadata(currentHead);
     final nextMetadata = {...currentMetadata, ...patch};
+    if (patch['display_name'] == '') {
+      nextMetadata
+        ..remove('display_name')
+        ..remove('name');
+    }
     final relay = SignedEventRelay(session: session, nsec: context.config.nsec);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final currentCreatedAt = currentHead?.createdAt ?? 0;
