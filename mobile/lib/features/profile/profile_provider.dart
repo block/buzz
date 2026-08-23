@@ -26,32 +26,39 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
   @override
   Future<UserProfile?> build() {
-    ref.watch(relayConfigProvider);
+    final config = ref.watch(relayConfigProvider);
+    final pubkey = ref.watch(myPubkeyProvider);
     ref.watch(relaySessionProvider);
+    final context = _ProfileWriteContext(
+      config: config,
+      pubkey: pubkey,
+      session: ref.read(relaySessionProvider.notifier),
+    );
     _hasHydrated = false;
-    return _fetch();
+    return _fetch(context);
   }
 
-  Future<UserProfile?> _fetch() async {
-    final myPk = ref.read(myPubkeyProvider);
+  Future<UserProfile?> _fetch(_ProfileWriteContext context) async {
+    final myPk = context.pubkey;
     if (myPk == null) {
+      _requireCurrentWriteContext(context);
       _metadata = {};
       _lastCreatedAt = 0;
       _hasHydrated = true;
       return null;
     }
 
-    final session = ref.read(relaySessionProvider.notifier);
+    final session = context.session;
     final events = await session.fetchHistory(NostrFilters.profile(myPk));
     if (events.isEmpty) {
+      _requireCurrentWriteContext(context);
       _metadata = {};
       _lastCreatedAt = 0;
       _hasHydrated = true;
       return null;
     }
     final latest = _latestProfileEvent(events)!;
-    _metadata = _decodeProfileMetadata(latest);
-    _lastCreatedAt = latest.createdAt;
+    final metadata = _decodeProfileMetadata(latest);
     final data = ProfileData.fromEvent(latest);
     final profile = UserProfile(
       pubkey: data.pubkey,
@@ -60,13 +67,17 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       about: data.about,
       nip05Handle: data.nip05,
     );
+    _requireCurrentWriteContext(context);
+    _metadata = metadata;
+    _lastCreatedAt = latest.createdAt;
     _hasHydrated = true;
     return profile;
   }
 
   Future<void> refresh() async {
+    final context = _currentWriteContext();
     _hasHydrated = false;
-    state = await AsyncValue.guard(_fetch);
+    state = await AsyncValue.guard(() => _fetch(context));
   }
 
   /// Updates the current user's display name while preserving the other
@@ -83,11 +94,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       _publishProfilePatch({'picture': avatarUrl.trim()});
 
   Future<void> _publishProfilePatch(Map<String, dynamic> patch) {
-    final context = _ProfileWriteContext(
-      config: ref.read(relayConfigProvider),
-      pubkey: ref.read(myPubkeyProvider),
-      session: ref.read(relaySessionProvider.notifier),
-    );
+    final context = _currentWriteContext();
     final previous = _patchQueue;
     final released = Completer<void>();
     _patchQueue = released.future;
@@ -100,6 +107,12 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       }
     }();
   }
+
+  _ProfileWriteContext _currentWriteContext() => _ProfileWriteContext(
+    config: ref.read(relayConfigProvider),
+    pubkey: ref.read(myPubkeyProvider),
+    session: ref.read(relaySessionProvider.notifier),
+  );
 
   Future<void> _publishProfilePatchNow(
     Map<String, dynamic> patch,

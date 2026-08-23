@@ -381,6 +381,69 @@ void main() {
     },
   );
 
+  test('stale hydration cannot overwrite the active community head', () async {
+    final keys = nostr.Keys.generate();
+    final otherKeys = nostr.Keys.generate();
+    final oldFetchStarted = Completer<void>();
+    final oldHistory = Completer<List<NostrEvent>>();
+    final activeProfile = NostrEvent(
+      id: 'profile-active',
+      pubkey: otherKeys.public,
+      createdAt: 20,
+      kind: EventKind.profile,
+      tags: const [],
+      content: jsonEncode({'display_name': 'Active'}),
+      sig: 'sig',
+    );
+    var fetchCount = 0;
+    final relaySession = _ControlledProfileRelaySession(
+      fetch: () async {
+        fetchCount += 1;
+        if (fetchCount == 1) {
+          oldFetchStarted.complete();
+          return oldHistory.future;
+        }
+        return [activeProfile];
+      },
+    );
+    final config = _MutableRelayConfigNotifier(keys.nsec);
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(() => relaySession),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(profileProvider);
+    await oldFetchStarted.future;
+    config.update(baseUrl: 'https://other-relay.example', nsec: otherKeys.nsec);
+    expect(
+      (await container.read(profileProvider.future))?.displayName,
+      'Active',
+    );
+    oldHistory.complete([
+      NostrEvent(
+        id: 'profile-stale',
+        pubkey: keys.public,
+        createdAt: 100,
+        kind: EventKind.profile,
+        tags: const [],
+        content: jsonEncode({'display_name': 'Stale'}),
+        sig: 'sig',
+      ),
+    ]);
+    await Future<void>.delayed(Duration.zero);
+
+    await container.read(profileProvider.notifier).updateAbout('Active about');
+
+    expect(relaySession.published, hasLength(1));
+    expect(jsonDecode(relaySession.published.single.content), {
+      'display_name': 'Active',
+      'about': 'Active about',
+    });
+  });
+
   test(
     'manual presence persists until Online restores automatic mode',
     () async {

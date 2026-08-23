@@ -3,24 +3,38 @@ import 'dart:typed_data';
 import '../../shared/animated_avatar.dart';
 import '../../shared/relay/relay.dart';
 
+/// A prepared profile-avatar change that is uploaded only when the user saves.
 sealed class ProfileAvatarDraft {
+  /// Creates a prepared profile-avatar draft.
   const ProfileAvatarDraft();
 
+  /// Returns the avatar URL for this draft using [service] when upload is
+  /// required.
+  ///
+  /// Implementations cache successful uploads for the same service so a
+  /// profile-publish retry does not create duplicate media. Failed uploads may
+  /// be retried, and changing services starts a new upload for that community.
   Future<String> upload(MediaUploadService service);
 }
 
+/// An avatar draft that already has its final URL and needs no media upload.
 final class ProfileUrlAvatarDraft extends ProfileAvatarDraft {
+  /// Creates a draft backed by [url].
   const ProfileUrlAvatarDraft(this.url);
 
+  /// The URL that will be written to the profile.
   final String url;
 
   @override
   Future<String> upload(MediaUploadService service) async => url;
 }
 
+/// A locally prepared still image awaiting upload on Save.
 final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
+  /// Creates a still-image draft from JPEG [bytes].
   ProfileImageAvatarDraft(this.bytes);
 
+  /// The prepared JPEG payload.
   final Uint8List bytes;
   MediaUploadService? _uploadService;
   Future<String>? _uploadedUrl;
@@ -46,10 +60,15 @@ final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
   }
 }
 
+/// A locally prepared animated avatar and its still poster awaiting upload.
 final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
+  /// Creates an animated draft from PNG [animation] and [poster] payloads.
   ProfileAnimatedAvatarDraft({required this.animation, required this.poster});
 
+  /// The animated PNG payload.
   final Uint8List animation;
+
+  /// The still PNG poster shown when animation is unavailable or disabled.
   final Uint8List poster;
   MediaUploadService? _uploadService;
   Future<String>? _uploadedUrl;
