@@ -77,32 +77,42 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       _publishProfilePatch({'picture': avatarUrl.trim()});
 
   Future<void> _publishProfilePatch(Map<String, dynamic> patch) {
+    final context = _ProfileWriteContext(
+      config: ref.read(relayConfigProvider),
+      pubkey: ref.read(myPubkeyProvider),
+      session: ref.read(relaySessionProvider.notifier),
+    );
     final previous = _patchQueue;
     final released = Completer<void>();
     _patchQueue = released.future;
     return () async {
       await previous;
       try {
-        await _publishProfilePatchNow(patch);
+        await _publishProfilePatchNow(patch, context);
       } finally {
         released.complete();
       }
     }();
   }
 
-  Future<void> _publishProfilePatchNow(Map<String, dynamic> patch) async {
+  Future<void> _publishProfilePatchNow(
+    Map<String, dynamic> patch,
+    _ProfileWriteContext context,
+  ) async {
     if (!_hasHydrated || !state.hasValue) {
       throw StateError('Cannot update profile before metadata is loaded.');
     }
-    final pubkey = ref.read(myPubkeyProvider);
+    final pubkey = context.pubkey;
     if (pubkey == null) {
       throw StateError('Cannot update profile without a signing identity.');
     }
+    _requireCurrentWriteContext(context);
 
-    final session = ref.read(relaySessionProvider.notifier);
+    final session = context.session;
     final currentEvents = await session.fetchHistory(
       NostrFilters.profile(pubkey),
     );
+    _requireCurrentWriteContext(context);
     final currentHead = _latestProfileEvent(currentEvents);
     if (_lastCreatedAt > 0 &&
         (currentHead == null || currentHead.createdAt < _lastCreatedAt)) {
@@ -112,8 +122,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
         ? <String, dynamic>{}
         : _decodeProfileMetadata(currentHead);
     final nextMetadata = {...currentMetadata, ...patch};
-    final config = ref.read(relayConfigProvider);
-    final relay = SignedEventRelay(session: session, nsec: config.nsec);
+    final relay = SignedEventRelay(session: session, nsec: context.config.nsec);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final currentCreatedAt = currentHead?.createdAt ?? 0;
     final previousCreatedAt = currentCreatedAt > _lastCreatedAt
@@ -128,6 +137,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       createdAt: createdAt,
       onSigned: (event) => signedEvent = event,
     );
+    _requireCurrentWriteContext(context);
     final submittedEvent = signedEvent;
     if (submittedEvent == null) {
       throw StateError('Profile update was not signed.');
@@ -135,6 +145,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     final verifiedHead = _latestProfileEvent(
       await session.fetchHistory(NostrFilters.profile(pubkey)),
     );
+    _requireCurrentWriteContext(context);
     if (verifiedHead?.id != submittedEvent.id) {
       throw StateError('Profile changed before the update could be confirmed.');
     }
@@ -152,6 +163,32 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     state = AsyncData(profile);
     ref.read(userCacheProvider.notifier).put(profile);
   }
+
+  void _requireCurrentWriteContext(_ProfileWriteContext context) {
+    final currentConfig = ref.read(relayConfigProvider);
+    final currentSession = ref.read(relaySessionProvider.notifier);
+    final currentPubkey = ref.read(myPubkeyProvider);
+    if (currentConfig.storedOrigin != context.config.storedOrigin ||
+        currentConfig.nsec != context.config.nsec ||
+        currentPubkey != context.pubkey ||
+        !identical(currentSession, context.session)) {
+      throw StateError(
+        'Profile update cancelled because the active community changed.',
+      );
+    }
+  }
+}
+
+class _ProfileWriteContext {
+  const _ProfileWriteContext({
+    required this.config,
+    required this.pubkey,
+    required this.session,
+  });
+
+  final RelayConfig config;
+  final String? pubkey;
+  final RelaySessionNotifier session;
 }
 
 NostrEvent? _latestProfileEvent(List<NostrEvent> events) {

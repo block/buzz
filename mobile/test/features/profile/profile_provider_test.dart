@@ -271,6 +271,50 @@ void main() {
     },
   );
 
+  test('profile updates abort when the active community changes', () async {
+    final keys = nostr.Keys.generate();
+    final otherKeys = nostr.Keys.generate();
+    final initial = NostrEvent(
+      id: 'profile-initial',
+      pubkey: keys.public,
+      createdAt: 10,
+      kind: EventKind.profile,
+      tags: const [],
+      content: jsonEncode({'display_name': 'Initial'}),
+      sig: 'sig',
+    );
+    final patchFetchStarted = Completer<void>();
+    final patchHistory = Completer<List<NostrEvent>>();
+    var fetchCount = 0;
+    final relaySession = _ControlledProfileRelaySession(
+      fetch: () async {
+        fetchCount += 1;
+        if (fetchCount == 1) return [initial];
+        if (!patchFetchStarted.isCompleted) patchFetchStarted.complete();
+        return patchHistory.future;
+      },
+    );
+    final config = _MutableRelayConfigNotifier(keys.nsec);
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(() => relaySession),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(profileProvider.future);
+    final update = container
+        .read(profileProvider.notifier)
+        .updateDisplayName('Mobile');
+    await patchFetchStarted.future;
+    config.update(baseUrl: 'https://other-relay.example', nsec: otherKeys.nsec);
+    patchHistory.complete([initial]);
+
+    await expectLater(update, throwsStateError);
+    expect(relaySession.published, isEmpty);
+  });
+
   test(
     'manual presence persists until Online restores automatic mode',
     () async {
@@ -333,6 +377,16 @@ class _FixedRelayConfigNotifier extends RelayConfigNotifier {
   @override
   RelayConfig build() =>
       RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
+}
+
+class _MutableRelayConfigNotifier extends RelayConfigNotifier {
+  _MutableRelayConfigNotifier(this.initialNsec);
+
+  final String initialNsec;
+
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://relay.example', nsec: initialNsec);
 }
 
 class _ProfileRelaySession extends RelaySessionNotifier {
