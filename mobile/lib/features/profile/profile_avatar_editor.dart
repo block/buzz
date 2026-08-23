@@ -58,6 +58,7 @@ const double _settingsAvatarCenterBelowAppBar = 96;
 
 /// In-page profile avatar editor used on Android and iOS.
 class ProfileAvatarEditor extends HookConsumerWidget {
+  /// Creates an avatar editor backed by the current profile and draft state.
   const ProfileAvatarEditor({
     super.key,
     required this.currentAvatarUrl,
@@ -71,15 +72,32 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     this.animatedCaptureBuilder,
   });
 
+  /// The avatar URL shown until the user selects a new draft.
   final String? currentAvatarUrl;
+
+  /// The text initial used when [currentAvatarUrl] has no displayable image.
   final String fallbackInitial;
+
+  /// The unsaved avatar selection for the active editing session.
   final ProfileAvatarDraft? draft;
+
+  /// The currently selected avatar editing mode.
   final ProfileAvatarMode mode;
+
+  /// Drives the shared preview transition into and out of editing.
   final Animation<double> transition;
+
+  /// Called when the user selects a different avatar editing mode.
   final ValueChanged<ProfileAvatarMode> onModeChanged;
+
+  /// Called whenever the unsaved avatar selection changes.
   final ValueChanged<ProfileAvatarDraft?> onDraftChanged;
+
+  /// Supplies or clears the deferred animated-avatar preparation callback.
   final ValueChanged<Future<ProfileAvatarDraft?> Function()?>
   onAnimatedPrepareChanged;
+
+  /// Overrides the animated capture surface, primarily for tests.
   final AnimatedAvatarCaptureBuilder? animatedCaptureBuilder;
 
   @override

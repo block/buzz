@@ -151,7 +151,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     await relay.submit(
       kind: EventKind.profile,
       content: jsonEncode(nextMetadata),
-      tags: const [],
+      tags: currentHead?.tags ?? const [],
       createdAt: createdAt,
       onSigned: (event) => signedEvent = event,
     );

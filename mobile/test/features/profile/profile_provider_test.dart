@@ -14,13 +14,17 @@ import 'package:nostr/nostr.dart' as nostr;
 void main() {
   test('profile updates preserve existing kind:0 metadata', () async {
     final keys = nostr.Keys.generate();
+    const profileTags = [
+      ['auth', 'agent-pubkey', 'ownership-proof'],
+      ['custom', 'preserve-tag'],
+    ];
     final relaySession = _ProfileRelaySession(
       NostrEvent(
         id: 'profile-1',
         pubkey: keys.public,
         createdAt: 1,
         kind: EventKind.profile,
-        tags: const [],
+        tags: profileTags,
         content: jsonEncode({
           'name': 'alice',
           'display_name': 'Alice',
@@ -54,6 +58,7 @@ void main() {
     expect(content['picture'], 'https://relay.example/alice.png');
     expect(content['nip05'], 'alice@example.com');
     expect(content['custom'], 'preserve-me');
+    expect(relaySession.published.single.tags, profileTags);
     expect(
       container.read(profileProvider).requireValue?.displayName,
       'Alice L',
