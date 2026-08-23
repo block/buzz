@@ -23,7 +23,7 @@ fn apple_all_day_free_calendar_evidence_remains_mission_context() {
         serde_json::from_str(source.quote()).expect("encoded calendar evidence JSON");
     let quote: Value = serde_json::from_str(&encoded_quote).expect("calendar evidence JSON");
 
-    assert_eq!(quote["schedule_role"], "mission_context", "{quote}");
+    assert_eq!(quote["scheduleRole"], "mission_context", "{quote}");
     assert_eq!(quote["blocks_availability"], "false");
 }
 

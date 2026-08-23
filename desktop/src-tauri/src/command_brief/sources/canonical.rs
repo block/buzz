@@ -293,7 +293,7 @@ fn apple_candidate(
         let is_mission_context = bool_field(fields, "is_all_day") == Some(true)
             && bool_field(fields, "blocks_availability") == Some(false);
         quote_fields.insert(
-            "schedule_role".to_string(),
+            "scheduleRole".to_string(),
             if is_mission_context {
                 "mission_context"
             } else {
