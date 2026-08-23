@@ -184,6 +184,13 @@ void runProfileEditMotionAndAccessibilityTests() {
       tester.widget<Icon>(find.byIcon(Icons.face)).color,
       theme.colorScheme.surface,
     );
+    final selectedSemantics = tester.widget<Semantics>(
+      find.byWidgetPredicate(
+        (widget) => widget is Semantics && widget.properties.label == 'Active',
+      ),
+    );
+    expect(selectedSemantics.properties.button, isTrue);
+    expect(selectedSemantics.properties.selected, isTrue);
   });
 
   testWidgets('uses the shared animated background grid for emoji avatars', (
