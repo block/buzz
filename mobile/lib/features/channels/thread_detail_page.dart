@@ -22,6 +22,7 @@ import '../../shared/tasks/task.dart';
 import '../../shared/tasks/tasks_api.dart';
 import '../../shared/tasks/thread_summary.dart';
 import '../../shared/tasks/thread_summary_sheet.dart';
+import 'thread_detail_page/task_detail_sheet.dart';
 import 'thread_detail_page/thread_task_chip.dart';
 import 'android_ime_lift.dart';
 import 'channel_link_navigation.dart';
@@ -911,10 +912,36 @@ class ThreadDetailPage extends HookConsumerWidget {
           Column(
             children: [
               if (linkedTask != null)
-                ThreadTaskChip(
-                  key: const ValueKey('thread-task-chip'),
-                  task: linkedTask,
-                  additionalCount: linkedTasks.length - 1,
+                // HW-005: the tap affordance lives HERE, at the page, not in
+                // the chip widget. ThreadTaskChip stays a pure display widget
+                // with no gesture detector in its subtree, so its standalone
+                // non-interactivity test keeps its meaning; the page-level
+                // test covers the tap that opens the task detail sheet.
+                //
+                // The chip is padded below the floating frosted app bar for
+                // the same reason the message list pads its first row: the
+                // bar is painted after the body and hit-tests above it, so a
+                // chip left at the Column's top edge sits UNDER the bar —
+                // invisible behind the frost and untappable. Padding by
+                // frostedAppBarHeight puts the banner in the bar's clear
+                // band, always visible and tappable.
+                Padding(
+                  padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+                  child: InkWell(
+                    key: const ValueKey('thread-task-chip-tap'),
+                    onTap: () => unawaited(
+                      showTaskDetailSheet(
+                        context: context,
+                        ref: ref,
+                        taskId: linkedTask.id,
+                      ),
+                    ),
+                    child: ThreadTaskChip(
+                      key: const ValueKey('thread-task-chip'),
+                      task: linkedTask,
+                      additionalCount: linkedTasks.length - 1,
+                    ),
+                  ),
                 ),
               Expanded(
                 child: _ThreadMessageList(
