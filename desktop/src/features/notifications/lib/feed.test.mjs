@@ -120,3 +120,55 @@ test("resolves and excludes a DM whose feed item has a name but no type", () => 
 
   assert.equal(items.length, 0);
 });
+
+test("excludes a reply that only reaches the mention feed via its addressing p-tag", () => {
+  // The live thread-reply path owns those. Notifying here too would toast
+  // and sound twice for one event.
+  const replyItem = feedItem({
+    category: "mention",
+    channelId: "general",
+    channelName: "general",
+    channelType: "stream",
+    replyToSelf: true,
+  });
+  const items = eligibleFeedNotificationItems(
+    feedResponse([replyItem]),
+    allSlots,
+    [{ id: "general", name: "general", channelType: "stream" }],
+  );
+
+  assert.equal(items.length, 0);
+});
+
+test("keeps a real mention that also happens to be a reply", () => {
+  const mentionInReply = feedItem({
+    category: "mention",
+    channelId: "general",
+    channelName: "general",
+    channelType: "stream",
+    replyToSelf: false,
+  });
+  const items = eligibleFeedNotificationItems(
+    feedResponse([mentionInReply]),
+    allSlots,
+    [{ id: "general", name: "general", channelType: "stream" }],
+  );
+
+  assert.equal(items.length, 1);
+});
+
+test("keeps a mention with no replyToSelf field (older backend payloads)", () => {
+  const legacyItem = feedItem({
+    category: "mention",
+    channelId: "general",
+    channelName: "general",
+    channelType: "stream",
+  });
+  const items = eligibleFeedNotificationItems(
+    feedResponse([legacyItem]),
+    allSlots,
+    [{ id: "general", name: "general", channelType: "stream" }],
+  );
+
+  assert.equal(items.length, 1);
+});

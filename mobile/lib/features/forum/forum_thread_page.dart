@@ -311,6 +311,7 @@ class _ThreadContent extends HookConsumerWidget {
                 }) => forumDelivery.createReply(
                   channelId: channelId,
                   parentEventId: post.eventId,
+                  parentAuthorPubkey: post.pubkey,
                   content: content,
                   mentionPubkeys: mentionPubkeys,
                   mediaTags: mediaTags,

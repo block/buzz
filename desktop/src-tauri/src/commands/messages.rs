@@ -1,21 +1,15 @@
 use nostr::{Event, EventId, Keys, PublicKey};
 use tauri::{AppHandle, State};
 
-mod forum;
+pub(super) mod forum;
 
-use forum::{
-    apply_link_preview_suppression, fetch_agent_owner_pubkeys, link_preview_suppression_targets,
-};
 pub use forum::{get_forum_posts, get_forum_thread};
 
 use crate::{
     app_state::AppState,
     events,
     managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
-    models::{
-        FeedItemInfo, FeedMeta, FeedResponse, FeedSections, SearchResponse,
-        SendChannelMessageResponse, ThreadRepliesResponse,
-    },
+    models::{FeedItemInfo, SearchResponse, SendChannelMessageResponse, ThreadRepliesResponse},
     nostr_convert,
     relay::{
         assert_expected_relay_scope, assert_expected_signer, query_relay, submit_event,
@@ -45,124 +39,6 @@ const TIMELINE_KINDS: [u32; 11] = [
     43006,
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
-
-#[tauri::command]
-pub async fn get_feed(
-    since: Option<i64>,
-    limit: Option<u32>,
-    types: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<FeedResponse, String> {
-    let cap = limit.unwrap_or(50).min(100);
-
-    // Parse types filter — if absent, run all sub-queries.
-    // Comma-separated: e.g. "mentions,needs_action".
-    let want_mentions = types
-        .as_deref()
-        .map(|t| t.split(',').any(|s| s.trim() == "mentions"))
-        .unwrap_or(true);
-    let want_needs_action = types
-        .as_deref()
-        .map(|t| t.split(',').any(|s| s.trim() == "needs_action"))
-        .unwrap_or(true);
-
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
-
-    // Mentions: messages that reference me via #p.
-    let mut mention_filter = serde_json::json!({
-        "kinds": [
-            9,
-            40002,
-            1,
-            45001,
-            45003,
-            buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
-            buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
-            buzz_core_pkg::kind::KIND_GIT_ISSUE,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_DRAFT,
-        ],
-        "#p": [my_pubkey],
-        "limit": cap,
-    });
-    if let Some(s) = since {
-        mention_filter["since"] = serde_json::json!(s);
-    }
-    // Needs-action: workflow approval-request events sent to me.
-    let mut approval_filter = serde_json::json!({
-        "kinds": [46010, 46011, 46012],
-        "#p": [my_pubkey],
-        "limit": 20,
-    });
-    if let Some(s) = since {
-        approval_filter["since"] = serde_json::json!(s);
-    }
-
-    let mention_events = if want_mentions {
-        query_relay(&state, &[mention_filter])
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let approval_events = if want_needs_action {
-        query_relay(&state, &[approval_filter])
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let mention_ids = mention_events
-        .iter()
-        .map(|event| event.id.to_hex())
-        .collect::<Vec<_>>();
-    let mention_edits = if mention_ids.is_empty() {
-        Vec::new()
-    } else {
-        query_relay(
-            &state,
-            &[serde_json::json!({ "kinds": [40003], "#e": mention_ids })],
-        )
-        .await
-        .unwrap_or_default()
-    };
-    let mention_owner_pubkeys = fetch_agent_owner_pubkeys(&state, &mention_events).await;
-    let suppressed_mentions =
-        link_preview_suppression_targets(&mention_events, &mention_edits, &mention_owner_pubkeys);
-    let mentions: Vec<FeedItemInfo> = mention_events
-        .iter()
-        .map(|ev| {
-            let mut item = feed_item_from_event(ev, "mentions");
-            apply_link_preview_suppression(&mut item.tags, &item.id, &suppressed_mentions);
-            item
-        })
-        .collect();
-    let needs_action: Vec<FeedItemInfo> = approval_events
-        .iter()
-        .map(|ev| feed_item_from_event(ev, "needs_action"))
-        .collect();
-
-    let total = (mentions.len() + needs_action.len()) as u64;
-    Ok(FeedResponse {
-        feed: FeedSections {
-            mentions,
-            needs_action,
-            activity: Vec::new(),
-            agent_activity: Vec::new(),
-        },
-        meta: FeedMeta {
-            since: since.unwrap_or(0),
-            total,
-            generated_at: chrono::Utc::now().timestamp(),
-        },
-    })
-}
 
 fn build_search_messages_filter(
     q: &str,
@@ -437,6 +313,13 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
 mod thread_ref;
 use thread_ref::resolve_thread_ref;
 
+/// Publish a channel message, reply, or forum comment.
+///
+/// `mention_pubkeys` are the pubkeys typed as `@name` in the body.
+/// `recipient_pubkeys` are the ones the *channel* addresses instead — every
+/// other participant in a DM, tagged whether or not anyone typed their name.
+/// They stay apart so a reply does not claim a DM counterpart was mentioned,
+/// which would let a DM thread reply pierce a mute and outrank a real `@you`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn send_channel_message(
@@ -449,6 +332,7 @@ pub async fn send_channel_message(
     link_preview_tags: Option<Vec<Vec<String>>>,
     sent_from_thread_tag: Option<Vec<String>>,
     mention_pubkeys: Option<Vec<String>>,
+    recipient_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
@@ -458,6 +342,12 @@ pub async fn send_channel_message(
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let mentions = mention_pubkeys.unwrap_or_default();
     let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+    let addressed = recipient_pubkeys.unwrap_or_default();
+    let addressed_refs: Vec<&str> = addressed.iter().map(|s| s.as_str()).collect();
+    let recipients = events::Recipients {
+        typed: &mention_refs,
+        addressed: &addressed_refs,
+    };
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
@@ -498,14 +388,20 @@ pub async fn send_channel_message(
             let parent_id = parent_event_id
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
-            let thread_ref =
-                resolve_thread_ref(parent_id, &state, &relay_base, Some(&signing_keys)).await?;
+            let thread_ref = resolve_thread_ref(
+                parent_id,
+                &state,
+                &relay_base,
+                Some(&signing_keys),
+                Some(signing_keys.public_key()),
+            )
+            .await?;
             resolved_root = Some(thread_ref.root_event_id.to_hex());
             events::build_forum_comment(
                 channel_uuid,
                 content.trim(),
                 &thread_ref,
-                &mention_refs,
+                recipients,
                 &media,
                 &mention_refs_only,
             )?
@@ -513,8 +409,14 @@ pub async fn send_channel_message(
         _ => {
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
-                    let tr =
-                        resolve_thread_ref(pid, &state, &relay_base, Some(&signing_keys)).await?;
+                    let tr = resolve_thread_ref(
+                        pid,
+                        &state,
+                        &relay_base,
+                        Some(&signing_keys),
+                        Some(signing_keys.public_key()),
+                    )
+                    .await?;
                     resolved_root = Some(tr.root_event_id.to_hex());
                     Some(tr)
                 }
@@ -524,7 +426,7 @@ pub async fn send_channel_message(
                 channel_uuid,
                 content.trim(),
                 thread_ref.as_ref(),
-                &mention_refs,
+                recipients,
                 &media,
                 &emoji,
                 &mention_refs_only,
@@ -699,7 +601,10 @@ fn build_managed_agent_channel_message(
         channel_id,
         content,
         thread_ref,
-        &mention_refs,
+        events::Recipients {
+            typed: &mention_refs,
+            ..Default::default()
+        },
         &[],
         &[],
         &[],
@@ -761,12 +666,15 @@ pub async fn send_managed_agent_channel_message(
         Some(parent_id) => Some(
             // Same active-relay resolution as before — this path has no
             // caller-captured tenant scope (yet), so resolve the override
-            // here and read through it with the active identity.
+            // here and read through it with the active identity. The agent
+            // still *signs* as itself, so that is the key the self-reply check
+            // is judged against, not the identity that authed the read.
             resolve_thread_ref(
                 parent_id,
                 &state,
                 &crate::relay::relay_api_base_url_with_override(&state),
                 None,
+                Some(keys.public_key()),
             )
             .await?,
         ),
@@ -968,7 +876,29 @@ fn tags_to_vec(ev: &nostr::Event) -> Vec<Vec<String>> {
     ev.tags.iter().map(|t| t.as_slice().to_vec()).collect()
 }
 
-fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
+/// NIP-10 reply target of an event, if it has one.
+///
+/// Lowercased, because hex decodes case-insensitively: an uppercase `e` value is
+/// a valid id the relay will resolve, but every set it is tested against here is
+/// built from `Event::id().to_hex()`, which is always lowercase. Comparing the
+/// raw value made such a reply look like it had no self-authored parent, which
+/// relabels it a real mention — a second notification on top of the live path's,
+/// and a pierced channel mute.
+pub(super) fn reply_parent_id(ev: &nostr::Event) -> Option<String> {
+    ev.tags
+        .iter()
+        .filter_map(|tag| {
+            let s = tag.as_slice();
+            (s.len() >= 4 && s[0] == "e" && s[3] == "reply").then(|| s[1].to_ascii_lowercase())
+        })
+        // Last, not first — `getThreadReference` in
+        // desktop/src/features/messages/lib/threading.ts reverses before it
+        // searches. The two must resolve the same parent or they disagree
+        // about who owns a reply notification and it fires twice or not at all.
+        .next_back()
+}
+
+pub(super) fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
     let channel_id = channel_id_from_tags(ev);
     FeedItemInfo {
         id: ev.id.to_hex(),
@@ -981,6 +911,7 @@ fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
         channel_type: None,
         tags: tags_to_vec(ev),
         category: category.to_string(),
+        reply_to_self: false,
     }
 }
 #[cfg(test)]

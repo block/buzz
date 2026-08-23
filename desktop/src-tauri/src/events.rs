@@ -8,14 +8,20 @@
 //!
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
-use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+mod identity_archive;
 mod message_tags;
 
+pub(crate) use identity_archive::{
+    build_archive_identity_request, build_unarchive_identity_request,
+};
+pub(crate) use message_tags::{Recipients, P_TAG_ADDRESSING_MARKER, P_TAG_MENTION_MARKER};
+
 use message_tags::{
-    append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
+    append_client_tags, append_sent_from_thread_tag, check_pubkey, emoji_tags, imeta_tags,
+    mention_reference_tags, mention_tags, reply_mention_tags, top_level_recipient_tags,
 };
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -49,6 +55,14 @@ fn check_content(content: &str) -> Result<(), String> {
 pub struct ThreadRef {
     pub root_event_id: EventId,
     pub parent_event_id: EventId,
+    /// Author of `parent_event_id`, when the resolver saw the parent event.
+    ///
+    /// Resolving the root already fetches the parent, so this costs nothing and
+    /// is more reliable than asking the sender: the client's cache misses for
+    /// any channel it has not opened, and a miss there used to mean the reply
+    /// shipped with no addressing tag at all — the exact delivery gap that
+    /// `p`-tagging the parent's author exists to close.
+    pub parent_author: Option<nostr::PublicKey>,
 }
 
 fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
@@ -62,33 +76,6 @@ fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
             tag(vec!["e", &parent, "", "reply"])?,
         ])
     }
-}
-
-fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
-    if mentions.len() > MAX_MENTIONS {
-        return Err(format!("too many mentions (max {MAX_MENTIONS})"));
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut tags = Vec::new();
-    for &hex in mentions {
-        check_pubkey(hex)?;
-        let lower = hex.to_ascii_lowercase();
-        if seen.insert(lower.clone()) {
-            tags.push(tag(vec!["p", &lower])?);
-        }
-    }
-    Ok(tags)
-}
-
-/// Validate a hex pubkey is exactly 64 hex characters.
-fn check_pubkey(pubkey: &str) -> Result<(), String> {
-    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!(
-            "pubkey must be a 64-character hex string (got {} chars)",
-            pubkey.len()
-        ));
-    }
-    Ok(())
 }
 
 // ── Channel operations ───────────────────────────────────────────────────────
@@ -253,7 +240,7 @@ pub fn build_message(
     channel_id: Uuid,
     content: &str,
     thread_ref: Option<&ThreadRef>,
-    mentions: &[&str],
+    recipients: Recipients<'_>,
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
@@ -265,7 +252,7 @@ pub fn build_message(
         channel_id,
         content,
         thread_ref,
-        mentions,
+        recipients,
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
@@ -286,7 +273,7 @@ pub fn build_message_with_client_tags(
     channel_id: Uuid,
     content: &str,
     thread_ref: Option<&ThreadRef>,
-    mentions: &[&str],
+    recipients: Recipients<'_>,
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
@@ -300,10 +287,17 @@ pub fn build_message_with_client_tags(
     }
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
-    if let Some(tr) = thread_ref {
-        tags.extend(thread_tags(tr)?);
+    match thread_ref {
+        Some(tr) => {
+            tags.extend(thread_tags(tr)?);
+            tags.extend(reply_mention_tags(
+                recipients,
+                tr.parent_author.map(|pk| pk.to_hex()).as_deref(),
+            )?);
+        }
+        // Top-level: nothing to disambiguate, so no marker to add.
+        None => tags.extend(top_level_recipient_tags(recipients)?),
     }
-    tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
@@ -334,14 +328,17 @@ pub fn build_forum_comment(
     channel_id: Uuid,
     content: &str,
     thread_ref: &ThreadRef,
-    mentions: &[&str],
+    recipients: Recipients<'_>,
     media_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(thread_tags(thread_ref)?);
-    tags.extend(mention_tags(mentions)?);
+    tags.extend(reply_mention_tags(
+        recipients,
+        thread_ref.parent_author.map(|pk| pk.to_hex()).as_deref(),
+    )?);
     imeta_tags(media_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
@@ -583,127 +580,6 @@ pub fn build_relay_admin_change_role(
     Ok(EventBuilder::new(Kind::Custom(9032), "").tags(tags))
 }
 
-// ── NIP-IA identity archival ─────────────────────────────────────────────────
-//
-// kind:9035 archive request, kind:9036 unarchive request.
-// Both protected by NIP-70 (`["-"]`), p-tag the target, and may carry
-// optional `reason` (machine-readable code), `replaced-by` (9035 only),
-// and a NIP-OA `auth` tag for owner-of-agent requests.
-//
-// See docs/nips/NIP-IA.md §Event Formats. The relay verifies; the desktop's
-// job is to produce a well-formed, signed request — consent path is selected
-// by the relay, not declared here.
-
-fn check_reason(reason: &str) -> Result<(), String> {
-    // Reason codes are machine-readable strings; the spec doesn't cap length
-    // but we keep them short to discourage stuffing prose where `content` goes.
-    if reason.len() > 64 {
-        return Err(format!(
-            "reason code exceeds maximum length of 64 chars (got {})",
-            reason.len()
-        ));
-    }
-    if reason.chars().any(|c| c.is_control()) {
-        return Err("reason code must not contain control characters".into());
-    }
-    Ok(())
-}
-
-fn identity_archive_tags(
-    target_pubkey: &str,
-    reason: Option<&str>,
-    replaced_by: Option<&str>,
-    auth_tag: Option<&[String; 4]>,
-) -> Result<Vec<Tag>, String> {
-    check_pubkey(target_pubkey)?;
-    let target_lower = target_pubkey.to_ascii_lowercase();
-
-    let mut tags = Vec::with_capacity(5);
-    // NIP-70: mark as protected administrative state.
-    tags.push(tag(vec!["-"])?);
-    tags.push(tag(vec!["p", &target_lower])?);
-
-    if let Some(r) = reason {
-        check_reason(r)?;
-        tags.push(tag(vec!["reason", r])?);
-    }
-
-    if let Some(rb) = replaced_by {
-        check_pubkey(rb)?;
-        let rb_lower = rb.to_ascii_lowercase();
-        if rb_lower == target_lower {
-            return Err("replaced-by must differ from the target".into());
-        }
-        tags.push(tag(vec!["replaced-by", &rb_lower])?);
-    }
-
-    if let Some(auth) = auth_tag {
-        // Structural check only — the relay performs full NIP-OA verification.
-        // We require the label, a 64-hex owner pubkey, and a 128-hex signature.
-        if auth[0] != "auth" {
-            return Err(format!(
-                "auth tag label must be \"auth\" (got \"{}\")",
-                auth[0]
-            ));
-        }
-        check_pubkey(&auth[1])?;
-        if auth[3].len() != 128 || !auth[3].chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err("auth tag signature must be 128-character hex".into());
-        }
-        tags.push(tag(vec!["auth", &auth[1], &auth[2], &auth[3]])?);
-    }
-
-    Ok(tags)
-}
-
-/// Kind 9035 — NIP-IA archive request.
-///
-/// `content` is an optional human-readable reason (clients MUST NOT parse
-/// authorization semantics from it). `reason` is the machine-readable code
-/// (`rotated`, `retired`, `bot-rebuilt`, `left-organization`, `spam`, ...).
-/// `replaced_by` is the rotation pointer. `auth` is a NIP-OA owner-attestation
-/// tag required only for the owner-of-agent consent path.
-///
-/// `.allow_self_tagging()` is required: NIP-IA's self path has `actor==target`,
-/// which means the request's `["p", target]` matches the signer. nostr 0.44
-/// strips matching `p` tags by default — we need the wire form intact.
-pub fn build_archive_identity_request(
-    target_pubkey: &str,
-    content: &str,
-    reason: Option<&str>,
-    replaced_by: Option<&str>,
-    auth: Option<&[String; 4]>,
-) -> Result<EventBuilder, String> {
-    check_content(content)?;
-    let tags = identity_archive_tags(target_pubkey, reason, replaced_by, auth)?;
-    Ok(
-        EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), content)
-            .tags(tags)
-            .allow_self_tagging(),
-    )
-}
-
-/// Kind 9036 — NIP-IA unarchive request.
-///
-/// Same shape as 9035 minus `replaced-by` (which has no defined meaning on
-/// unarchive per spec). `auth` is used for owner-of-agent unarchive paths.
-/// See `build_archive_identity_request` for the rationale on
-/// `.allow_self_tagging()`.
-pub fn build_unarchive_identity_request(
-    target_pubkey: &str,
-    content: &str,
-    reason: Option<&str>,
-    auth: Option<&[String; 4]>,
-) -> Result<EventBuilder, String> {
-    check_content(content)?;
-    let tags = identity_archive_tags(target_pubkey, reason, None, auth)?;
-    Ok(
-        EventBuilder::new(Kind::Custom(KIND_IA_UNARCHIVE_REQUEST as u16), content)
-            .tags(tags)
-            .allow_self_tagging(),
-    )
-}
-
 /// Maximum contacts per contact list event.
 const MAX_CONTACTS: usize = 10_000;
 
@@ -768,6 +644,7 @@ pub use workflows::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
     use nostr::Keys;
     #[test]
     fn channel_builders_reject_hash_only_names() {

@@ -588,10 +588,36 @@ async fn handle_setup_membership(
     }
 }
 
-/// Build and publish a setup nudge reply to the triggering event.
+/// Thread placement for a setup nudge answering `triggering_event`.
 ///
-/// Threading: flat reply to the thread root if one exists; otherwise reply
-/// to the triggering event itself. P-tags the asker.
+/// The nudge replies to the triggering event, rooted at that event's thread when
+/// it has one. `parent_event_id` and `parent_author` must describe the same
+/// event: receivers read the addressing marker on the asker's `p` tag as "this
+/// answers something I wrote", so pointing the `e` tag at the thread root while
+/// naming the triggering event's author made that claim false for anyone who
+/// asked inside somebody else's thread.
+fn nudge_thread_ref(triggering_event: &nostr::Event) -> Result<buzz_sdk::ThreadRef> {
+    use buzz_sdk::ThreadRef;
+
+    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
+    let root_event_id = match &thread_tags.root_event_id {
+        Some(root_str) => nostr::EventId::from_hex(root_str)
+            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?,
+        // Top-level event: it is its own thread root.
+        None => triggering_event.id,
+    };
+
+    Ok(ThreadRef {
+        root_event_id,
+        parent_event_id: triggering_event.id,
+        // The asker. Carried here, marked as addressing, rather than passed as a
+        // mention: the nudge answers them, it does not `@` them, and a bare `p`
+        // tag cannot say which.
+        parent_author: Some(triggering_event.pubkey),
+    })
+}
+
+/// Build and publish a setup nudge reply to the triggering event.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
@@ -599,35 +625,15 @@ async fn publish_setup_nudge(
     triggering_event: &nostr::Event,
     payload: &SetupPayload,
 ) -> Result<()> {
-    use buzz_sdk::ThreadRef;
-
-    // Parse NIP-10 thread tags to determine reply target.
-    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
-
-    let thread_ref = if let Some(root_str) = &thread_tags.root_event_id {
-        // Threaded event: reply flat to the root.
-        let root_id = nostr::EventId::from_hex(root_str)
-            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?;
-        Some(ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: root_id,
-        })
-    } else {
-        // Top-level event: reply to the triggering event.
-        Some(ThreadRef {
-            root_event_id: triggering_event.id,
-            parent_event_id: triggering_event.id,
-        })
-    };
+    let thread_ref = Some(nudge_thread_ref(triggering_event)?);
 
     let body = payload.nudge_body();
-    let author_hex = triggering_event.pubkey.to_hex();
 
     let event_builder = buzz_sdk::build_message(
         channel_id,
         &body,
         thread_ref.as_ref(),
-        &[&author_hex], // p-tag the asker
+        &[], // the asker is p-tagged via `thread_ref.parent_author`
         false,
         &[],
     )
@@ -650,6 +656,54 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sign an event carrying the given tags, as the triggering ask would arrive.
+    fn asked(tags: Vec<Vec<&str>>) -> nostr::Event {
+        let keys = nostr::Keys::generate();
+        nostr::EventBuilder::new(nostr::Kind::Custom(9), "@eva do the thing")
+            .tags(tags.into_iter().map(|t| nostr::Tag::parse(t).unwrap()))
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_nudge_answers_the_ask_it_replies_to_not_the_thread_root() {
+        // The ask is a reply inside someone else's thread. `parent_author` names
+        // the asker, so `parent_event_id` has to be the asker's event: the
+        // addressing marker on the resulting `p` tag tells receivers "this
+        // answers something you wrote", and naming the root would make that
+        // false for everyone but the root's author.
+        // Distinct ids, or `root_event_id` would match whichever tag the code
+        // happened to read and the assertion below would prove nothing.
+        let root = nostr::EventId::from_hex(&format!("{:064x}", 0xd00du64)).unwrap();
+        let answered = nostr::EventId::from_hex(&format!("{:064x}", 0xa11cu64)).unwrap();
+        let ask = asked(vec![
+            vec!["h", "5e0f6b1c-0000-4000-8000-000000000000"],
+            vec!["e", &root.to_hex(), "", "root"],
+            vec!["e", &answered.to_hex(), "", "reply"],
+        ]);
+
+        let tr = nudge_thread_ref(&ask).unwrap();
+        assert_eq!(
+            tr.root_event_id, root,
+            "the nudge stays in the ask's thread"
+        );
+        assert_eq!(
+            tr.parent_event_id, ask.id,
+            "the nudge replies to the ask, not to the root"
+        );
+        assert_eq!(tr.parent_author, Some(ask.pubkey));
+    }
+
+    #[test]
+    fn a_nudge_to_a_top_level_ask_roots_the_thread_at_that_ask() {
+        let ask = asked(vec![vec!["h", "5e0f6b1c-0000-4000-8000-000000000000"]]);
+
+        let tr = nudge_thread_ref(&ask).unwrap();
+        assert_eq!(tr.root_event_id, ask.id);
+        assert_eq!(tr.parent_event_id, ask.id);
+        assert_eq!(tr.parent_author, Some(ask.pubkey));
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {

@@ -544,7 +544,11 @@ mod real_relay_tests {
             channel_id,
             "Ask @Agent Probe to reply",
             None,
-            &[mention_pubkey],
+            // Typed in the body, so this is a real mention.
+            events::Recipients {
+                typed: &[mention_pubkey],
+                ..Default::default()
+            },
             &[],
             &[],
             &[],

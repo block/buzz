@@ -88,6 +88,30 @@ test("home badge subtotal excludes channel-counted high-priority items", () => {
     ),
     false,
   );
+  // Production shape: the backend never populates `channel_type` on a feed item,
+  // so asserting only the hand-supplied "dm" above left this guard dead at
+  // runtime and double-counted every DM thread reply on the dock badge. The
+  // channel list is the authoritative source.
+  assert.equal(
+    shouldCountTowardHomeBadgeSubtotal(
+      { channelId: "dm-channel", channelType: undefined, tags: ROOT_TAGS },
+      highPriorityChannelIds,
+      false,
+      new Set(["dm-channel"]),
+    ),
+    false,
+  );
+  // Without the channel list it cannot tell, and a non-DM thread reply must
+  // still count.
+  assert.equal(
+    shouldCountTowardHomeBadgeSubtotal(
+      { channelId: "stream-channel", channelType: undefined, tags: ROOT_TAGS },
+      new Set(["stream-channel"]),
+      false,
+      new Set(["dm-channel"]),
+    ),
+    true,
+  );
 });
 
 test("home badge subtotal still counts non-DM thread-only rows", () => {

@@ -31,7 +31,11 @@ import {
 
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
-import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
+import { messageRecipients } from "@/features/messages/lib/messageRecipients";
+import {
+  findReplyParentAuthor,
+  getReplyContextEvents,
+} from "@/features/messages/lib/replyContextEvents";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
   clearTimeoutState,
@@ -95,11 +99,19 @@ export function createOptimisticMessage(
   mediaTags: string[][] = [],
   sentFromThreadRootId: string | null = null,
   sentFromThreadRootExcerpt: string | null = null,
+  addressedPubkeys: string[] = [],
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
 
   if (parentEventId) {
+    // Mirror the published event: a reply p-tags the author it answers.
+    // `buildReplyTags` dedupes and drops self, so passing it unconditionally
+    // is safe when the parent is our own message or is not cached.
+    const parentAuthorPubkey = findReplyParentAuthor(
+      currentMessages,
+      parentEventId,
+    );
     tags.push(
       ...buildReplyTags(
         channelId,
@@ -107,13 +119,15 @@ export function createOptimisticMessage(
         parentEventId,
         resolveReplyRootId(parentEventId, currentMessages),
         mentionPubkeys,
+        parentAuthorPubkey,
+        addressedPubkeys,
       ),
     );
   } else {
     tags.push(["h", channelId]);
     tags.push(["p", identity.pubkey]);
     for (const pubkey of normalizeMentionPubkeys(
-      mentionPubkeys,
+      [...mentionPubkeys, ...addressedPubkeys],
       identity.pubkey,
     )) {
       tags.push(["p", pubkey]);
@@ -505,10 +519,24 @@ export function useSendMessageMutation(
         mentionTags,
         linkPreviewTags,
       } = splitOutgoingTags(mediaTags);
-      const recipientPubkeys = messageMentionPubkeys(
+      // A reply addresses the message it answers (NIP-10). The relay turns
+      // `require_mention` into a `#p` REQ filter, so omitting this tag makes
+      // the reply invisible to agent harnesses rather than merely un-notified.
+      // The thread panel replies to events the channel cache never holds, so
+      // the lookup spans the thread caches too.
+      const replyContextEvents = getReplyContextEvents(
+        queryClient,
+        effectiveChannel.id,
+      );
+      const parentAuthorPubkey = findReplyParentAuthor(
+        replyContextEvents,
+        parentEventId,
+      );
+      const recipients = messageRecipients(
         effectiveChannel,
         identity.pubkey,
         mentionPubkeys,
+        parentAuthorPubkey,
       );
       if (sentFromThreadRootId && parentEventId) {
         throw new Error(
@@ -534,21 +562,20 @@ export function useSendMessageMutation(
         emojiTags.length > 0 ||
         linkPreviewTags.length > 0
       ) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
           parentEventId ?? null,
           imetaTags,
-          recipientPubkeys,
+          recipients.mentions,
           undefined,
           emojiTags,
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          undefined, // expectedRelayUrl — this path is not tenant-pinned
+          undefined, // expectedSignerPubkey
+          recipients.addressed,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -559,8 +586,10 @@ export function useSendMessageMutation(
               effectiveChannel.id,
               identity.pubkey,
               parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
-              recipientPubkeys,
+              resolveReplyRootId(parentEventId, replyContextEvents),
+              recipients.mentions,
+              parentAuthorPubkey,
+              recipients.addressed,
             )
           : [];
         const baseTags = parentEventId
@@ -579,9 +608,10 @@ export function useSendMessageMutation(
             ...baseTags,
             // For non-replies, add mention p-tags here (replies get them via buildReplyTags)
             ...(!parentEventId
-              ? normalizeMentionPubkeys(recipientPubkeys, identity.pubkey).map(
-                  (pk) => ["p", pk],
-                )
+              ? normalizeMentionPubkeys(
+                  [...recipients.mentions, ...recipients.addressed],
+                  identity.pubkey,
+                ).map((pk) => ["p", pk])
               : []),
             ...imetaTags,
             ...emojiTags,
@@ -597,7 +627,7 @@ export function useSendMessageMutation(
       return relayClient.sendMessage(
         effectiveChannel.id,
         content,
-        recipientPubkeys,
+        [...recipients.mentions, ...recipients.addressed],
         [...mentionTags, ...(sentFromThreadTag ? [sentFromThreadTag] : [])],
       );
     },
@@ -637,16 +667,34 @@ export function useSendMessageMutation(
       const windowKey = channelWindowKey(effectiveChannel.id);
       const previousWindow =
         queryClient.getQueryData<ChannelWindowStore>(windowKey);
+      // Wider than `previousMessages` (the rollback snapshot) on purpose: the
+      // optimistic row must resolve the same parent author and root as the
+      // published event, including thread-panel parents.
+      const replyContextEvents = getReplyContextEvents(
+        queryClient,
+        effectiveChannel.id,
+      );
       const optimisticMessage = createOptimisticMessage(
         effectiveChannel.id,
         content.trim(),
         identity,
-        previousMessages,
+        replyContextEvents,
         mentionPubkeys ?? [],
         parentEventId ?? null,
         mediaTags ?? [],
         sentFromThreadRootId ?? null,
         sentFromThreadRootExcerpt ?? null,
+        // A DM tags its other participants whether or not anyone typed their
+        // names; mirror that here so the optimistic row matches what is sent.
+        // The parent's author goes in too: it reserves a cap slot in the send
+        // path, so omitting it here lets the optimistic row carry an addressed
+        // tag the published event dropped.
+        messageRecipients(
+          effectiveChannel,
+          identity.pubkey,
+          mentionPubkeys ?? [],
+          findReplyParentAuthor(replyContextEvents, parentEventId),
+        ).addressed,
       );
 
       const nextWindow = mergeLiveChannelWindowEvent(

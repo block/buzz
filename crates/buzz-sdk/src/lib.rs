@@ -30,6 +30,13 @@ pub struct ThreadRef {
     pub root_event_id: nostr::EventId,
     /// The immediate parent being replied to.
     pub parent_event_id: nostr::EventId,
+    /// Author of `parent_event_id`, when the caller resolved the parent event.
+    ///
+    /// Emitted as a `p` tag marked with the addressing role rather than folded
+    /// into the mention list. As a bare tag the two are byte-identical, which
+    /// forces every receiver to fetch the parent just to tell "answered you"
+    /// from "mentioned you".
+    pub parent_author: Option<nostr::PublicKey>,
 }
 
 /// Metadata for diff/patch messages (kind 40008).

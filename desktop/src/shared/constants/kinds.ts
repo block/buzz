@@ -92,6 +92,23 @@ export const CHANNEL_MESSAGE_EVENT_KINDS = [
 // Keep this in sync with the Home-feed mention query in buzz-db.
 export const HOME_MENTION_EVENT_KINDS = [...CHANNEL_MESSAGE_EVENT_KINDS];
 
+// Kinds a reply's parent can have. Deliberately wider than
+// CHANNEL_MESSAGE_EVENT_KINDS: a reply can answer a diff message (40008) or a
+// plain NIP-01 note (1), and neither is a phantom-unread risk here because
+// this set is only ever used to look a parent up by id.
+//
+// Keep in sync with the reply-parent query in
+// `desktop/src-tauri/src/commands/feed.rs`. The backend feed and the live
+// desktop path decide notification ownership independently from the same
+// question ("did this answer one of my messages?"), so a kind present in one
+// list and missing from the other makes them disagree and notify twice.
+export const REPLY_PARENT_EVENT_KINDS = [
+  ...CHANNEL_MESSAGE_EVENT_KINDS,
+  KIND_TEXT_NOTE, // 1 — NIP-01 notes bridged in from other clients
+  40001, // legacy: pre-migration stream messages, still repliable
+  KIND_STREAM_MESSAGE_DIFF, // 40008 — `buzz messages send-diff`
+] as const;
+
 export const CHANNEL_EVENT_KINDS = [
   KIND_DELETION, // 5 — NIP-09 event deletions
   KIND_REACTION, // 7 — NIP-25 reactions

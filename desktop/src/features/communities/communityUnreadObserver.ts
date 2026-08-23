@@ -14,7 +14,11 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
-import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  hasAuthoredMentionForEvent,
+  shouldNotifyForEvent,
+} from "@/features/notifications/lib/shouldNotify";
+import { collectReplyParentAuthors } from "@/features/notifications/lib/replyParentAuthors";
 import {
   mutedChannelIdsFromStore,
   parseMutePayload,
@@ -30,6 +34,7 @@ import {
   KIND_CHANNEL_MUTES,
   KIND_DM_VISIBILITY,
   KIND_READ_STATE,
+  REPLY_PARENT_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 
 const KIND_NIP29_GROUP_METADATA = 39000;
@@ -39,6 +44,7 @@ const KIND_NIP29_GROUP_MEMBERS = 39002;
 // so they read correctly from the same origin regardless of which community is active.
 const participationStore = makeRootIdStore("buzz-thread-participation.v1");
 const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
+const mentionedStore = makeRootIdStore("buzz-thread-mentioned.v1");
 const mutedRootsStore = makeRootIdStore("buzz-thread-muted.v1");
 const FOLLOWS_STORAGE_KEY_PREFIX = "buzz-thread-follows.v1";
 
@@ -46,6 +52,7 @@ export type ThreadRelationships = {
   participatedRootIds: ReadonlySet<string>;
   followedRootIds: ReadonlySet<string>;
   authoredRootIds: ReadonlySet<string>;
+  mentionedRootIds: ReadonlySet<string>;
   mutedRootIds: ReadonlySet<string>;
 };
 
@@ -78,6 +85,9 @@ function defaultReadThreadRelationships(pubkey: string): ThreadRelationships {
     participatedRootIds: participationStore.read(pubkey),
     followedRootIds: readFollowedRootIds(pubkey),
     authoredRootIds: authoredStore.read(pubkey),
+    // Same key `useUnreadChannels` persists to. Read here so this community's
+    // sidebar dot cannot disagree with the in-app gate about the same thread.
+    mentionedRootIds: mentionedStore.read(pubkey),
     mutedRootIds: mutedRootsStore.read(pubkey),
   };
 }
@@ -215,6 +225,7 @@ export async function fetchCommunityUnread(args: {
     participatedRootIds,
     followedRootIds,
     authoredRootIds,
+    mentionedRootIds,
     mutedRootIds,
   } = readRelationships(normalizedPubkey);
 
@@ -274,6 +285,43 @@ export async function fetchCommunityUnread(args: {
       mentionEventsPromise,
     ]);
 
+    // In a DM the addressing tag is the whole point, so no consumer below reads
+    // the parent's author: `shouldNotifyForEvent` gates `isReplyToCurrentUser`
+    // on `!isDmChannel`, and the mention filter short-circuits on `isDmChannel`
+    // outright. Resolving it anyway costs one REQ per DM channel per poll for an
+    // answer nothing reads — the same round trip `needsResolvedParentAuthor` and
+    // `collectCatchUpParentAuthors` already decline for this exact reason.
+    const isDmChannel = channel.channelType === "dm";
+
+    // Replies p-tag the author they answer, so a reply is indistinguishable
+    // from a mention until the parent's author is known. Every reply left
+    // above needs resolving: an unresolved parent counts as a mention and inflates
+    // the community badge, and `unreadEvents` is empty once an earlier channel
+    // set `hasUnread`, so a mute-only rule would make the count depend on
+    // channel order.
+    // Scoped to this channel: a failure here would otherwise abort the whole
+    // poll, discarding the counts already accumulated from earlier channels
+    // and dropping the community to `state: "error"` — which clears its dot
+    // and badge entirely until the next poll. Undercounting one channel for
+    // 30 seconds is the smaller wrong answer.
+    let authorByEventId: Map<string, string>;
+    try {
+      authorByEventId = await collectReplyParentAuthors({
+        events: [...unreadEvents, ...mentionEvents],
+        fetchEvents: (filter) => client.fetchEvents(filter),
+        // Parent lookup, not an unread query — see REPLY_PARENT_EVENT_KINDS. The
+        // channel's own unread kinds would miss a diff-message parent and let
+        // the reply count as a mention.
+        kinds: REPLY_PARENT_EVENT_KINDS,
+        shouldResolveParent: () => !isDmChannel,
+      });
+    } catch {
+      continue;
+    }
+    const parentAuthorOf = (event: RelayEvent) =>
+      authorByEventId.get(getThreadReference(event.tags).parentId ?? "") ??
+      null;
+
     if (!hasUnread) {
       hasUnread = unreadEvents.some(
         (event) =>
@@ -282,15 +330,33 @@ export async function fetchCommunityUnread(args: {
             participatedRootIds,
             followedRootIds,
             authoredRootIds,
+            mentionedRootIds,
             mutedRootIds,
             mutedChannelIds: mutedIds,
             channelId: channel.id,
+            parentAuthorPubkey: parentAuthorOf(event),
+            isDmChannel,
           }),
       );
     }
 
-    mentionCount += mentionEvents.filter((event) =>
-      isUnreadExternalEvent(event, readState, readAt, normalizedPubkey),
+    // Count only events that genuinely mention the user — a reply's addressing
+    // `p` tag would otherwise inflate the community mention badge with every
+    // answer to one of the user's messages.
+    //
+    // DMs are the exception: every message in a DM `p`-tags both participants
+    // by construction, so that test would throw away exactly the messages the
+    // badge exists for — someone answering you in a one-to-one conversation.
+    // In a DM the addressing tag *is* the point.
+    mentionCount += mentionEvents.filter(
+      (event) =>
+        isUnreadExternalEvent(event, readState, readAt, normalizedPubkey) &&
+        (isDmChannel ||
+          hasAuthoredMentionForEvent(
+            event,
+            normalizedPubkey,
+            parentAuthorOf(event),
+          )),
     ).length;
   }
 

@@ -4560,6 +4560,9 @@ pub(crate) async fn post_failure_notice(
         Some(buzz_sdk::ThreadRef {
             root_event_id: root_id,
             parent_event_id: parent_id,
+            // A failure notice addresses the channel, not a person, and the
+            // parsed thread tags do not carry the parent's author anyway.
+            parent_author: None,
         })
     });
     let builder =

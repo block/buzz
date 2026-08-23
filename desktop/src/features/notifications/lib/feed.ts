@@ -71,7 +71,11 @@ export function eligibleFeedNotificationItems(
     items.push(
       ...feed.feed.mentions
         .map((item) => enrichFeedItemChannel(item, channels))
-        .filter((item) => item.channelType !== "dm"),
+        .filter((item) => item.channelType !== "dm")
+        // A reply reaches the mention feed only because it p-tags the author
+        // it answers. The live thread-reply path owns those, so notifying
+        // here too would toast and sound twice for one event.
+        .filter((item) => item.replyToSelf !== true),
     );
   }
 
