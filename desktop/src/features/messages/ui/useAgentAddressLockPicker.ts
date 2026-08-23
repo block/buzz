@@ -57,6 +57,7 @@ export function useAgentAddressLockPicker({
   audience,
   audienceScope,
   mentions,
+  onAutoPinAgentMention,
   onPulseAddressLock,
   profiles,
   richText,
@@ -65,6 +66,7 @@ export function useAgentAddressLockPicker({
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
+  onAutoPinAgentMention?: (suggestion: MentionSuggestion) => void;
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
@@ -202,6 +204,8 @@ export function useAgentAddressLockPicker({
           unpinnedAgentPubkeysRef.current.has(pubkey);
         if (mentions.isInlineMentionSelection() || wasUnpinned) {
           applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+          if (wasUnpinned) unpinnedAgentPubkeysRef.current.delete(pubkey);
+          onAutoPinAgentMention?.(suggestion);
           return;
         }
 
@@ -224,6 +228,7 @@ export function useAgentAddressLockPicker({
       lockedAgentPubkeys,
       mentions.isInlineMentionSelection,
       mentions.insertMention,
+      onAutoPinAgentMention,
       onPulseAddressLock,
       richText.getPlainTextAndCursor,
     ],

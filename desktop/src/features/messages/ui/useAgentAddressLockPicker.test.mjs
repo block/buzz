@@ -220,11 +220,12 @@ test("selecting an already addressed agent from the explicit picker pulses its b
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
 });
 
-test("selecting an agent from a typed query leaves the inline mention for send", async () => {
+test("selecting an agent from a typed query immediately auto-addresses it", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
   );
+  const autoPinnedSuggestions = [];
   const appliedEdits = [];
   const addedPubkeys = [];
   const pulsedPubkeys = [];
@@ -256,18 +257,19 @@ test("selecting an agent from a typed query leaves the inline mention for send",
       audience,
       audienceScope: "channel-scope",
       mentions,
+      onAutoPinAgentMention: (suggestion) =>
+        autoPinnedSuggestions.push(suggestion),
       onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
       richText,
     }),
   );
 
-  act(() => {
-    result.current.selectMentionSuggestion({
-      pubkey: "agent-pubkey",
-      displayName: "Agent Ada",
-      isAgent: true,
-    });
-  });
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  act(() => result.current.selectMentionSuggestion(suggestion));
 
   assert.deepEqual(appliedEdits, [
     {
@@ -276,9 +278,57 @@ test("selecting an agent from a typed query leaves the inline mention for send",
       insertText: "@Agent Ada ",
     },
   ]);
+  assert.deepEqual(autoPinnedSuggestions, [suggestion]);
   assert.deepEqual(addedPubkeys, []);
   assert.deepEqual(pulsedPubkeys, []);
   assert.equal(result.current.announcement, "");
+});
+
+test("selecting a human mention never changes automatic addressing", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const autoPinnedSuggestions = [];
+  const appliedEdits = [];
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+      audience: { pubkeys: [], addPubkey: () => {} },
+      audienceScope: "channel-scope",
+      mentions: {
+        getMentionDisplayName: () => "Alice",
+        insertMention: () => ({
+          replaceFromOffset: 0,
+          replaceToOffset: 3,
+          insertText: "@Alice ",
+        }),
+      },
+      onAutoPinAgentMention: (suggestion) =>
+        autoPinnedSuggestions.push(suggestion),
+      onPulseAddressLock: () => {},
+      richText: {
+        getPlainTextAndCursor: () => ({ text: "@Al", cursor: 3 }),
+      },
+    }),
+  );
+
+  act(() =>
+    result.current.selectMentionSuggestion({
+      pubkey: "human-pubkey",
+      displayName: "Alice",
+      isAgent: false,
+    }),
+  );
+
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 3,
+      insertText: "@Alice ",
+    },
+  ]);
+  assert.deepEqual(autoPinnedSuggestions, []);
 });
 
 test("selecting an agent from the explicit picker auto-addresses it", async () => {

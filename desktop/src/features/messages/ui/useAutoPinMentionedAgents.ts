@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  getPersistentAgentAudienceRevision,
   promotePersistentAgentAudienceIfUnchanged,
   removePersistentAgentAudienceMembersIfUnchanged,
 } from "@/features/messages/lib/persistentAgentAudience";
@@ -24,10 +25,12 @@ export function useAutoPinMentionedAgents({
 }: Options) {
   return React.useCallback(
     ({
-      expectedRevision,
+      expectedRevision = audienceScope
+        ? getPersistentAgentAudienceRevision(audienceScope)
+        : 0,
       pubkeys,
     }: {
-      expectedRevision: number;
+      expectedRevision?: number;
       pubkeys: readonly string[];
     }) => {
       if (!audienceScope || !enabled) return;

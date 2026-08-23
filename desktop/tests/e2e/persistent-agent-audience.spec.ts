@@ -174,9 +174,7 @@ test("automatically mentions multiple agents from the mention picker", async ({
   ).toBeVisible();
 });
 
-test("Tab keeps a manually selected agent as an inline mention", async ({
-  page,
-}) => {
+test("Tab immediately selects a manually mentioned agent", async ({ page }) => {
   await installAudienceFixtures(page);
   await openGeneral(page);
 
@@ -191,7 +189,7 @@ test("Tab keeps a manually selected agent as an inline mention", async ({
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 });
 
 test("primary+Shift+M addresses the default agent, then selects the highlighted agent", async ({
@@ -228,12 +226,12 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   await expect(input).toHaveText("@Vogue ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_B}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     composer
       .getByTestId("composer-address-locks")
       .getByRole("button", { name: /^Stop automatically mentioning / }),
-  ).toHaveCount(1);
+  ).toHaveCount(2);
 });
 
 test("primary+Shift+M favors the most recently mentioned eligible agent", async ({
@@ -324,7 +322,7 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(input).toHaveText("@Morgarita ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 
   await input.type("later");
   await input.press("Enter");
@@ -454,7 +452,7 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
   await expect(avatar).toHaveAttribute("data-shake-version", "1");
 });
 
-test("a manually mentioned agent becomes selected after the message sends", async ({
+test("a manually mentioned agent becomes selected immediately", async ({
   page,
 }) => {
   await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
@@ -468,7 +466,7 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
   await expect(input).toHaveText("@Morgarita ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 
   await input.type("hello");
   await input.press("Enter");

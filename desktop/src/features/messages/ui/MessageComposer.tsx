@@ -427,6 +427,10 @@ function MessageComposerImpl({
     audience: persistentAudience,
     audienceScope,
     mentions,
+    onAutoPinAgentMention: (suggestion) =>
+      addInlineAgentMentionsToAudience({
+        pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
+      }),
     onPulseAddressLock: addressPulse.pulseOne,
     profiles,
     richText,
