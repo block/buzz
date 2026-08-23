@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import 'ios_profile_text_editor.dart';
@@ -15,12 +16,16 @@ import 'profile_provider.dart';
 Future<void> showProfileDisplayNameEditor(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final profile = container.read(profileProvider).asData?.value;
+  final onSave = _bindSaveToOpeningContext(
+    container,
+    container.read(profileProvider.notifier).updateDisplayName,
+  );
   await _showProfileTextEditor(
     context: context,
     title: 'Display name',
     initialValue: profile?.displayName ?? '',
     hintText: 'Display name',
-    onSave: container.read(profileProvider.notifier).updateDisplayName,
+    onSave: onSave,
   );
 }
 
@@ -28,14 +33,40 @@ Future<void> showProfileDisplayNameEditor(BuildContext context) async {
 Future<void> showProfileDescriptionEditor(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final profile = container.read(profileProvider).asData?.value;
+  final onSave = _bindSaveToOpeningContext(
+    container,
+    container.read(profileProvider.notifier).updateAbout,
+  );
   await _showProfileTextEditor(
     context: context,
     title: 'Profile description',
     initialValue: profile?.about ?? '',
     hintText: 'Profile description',
     multiline: true,
-    onSave: container.read(profileProvider.notifier).updateAbout,
+    onSave: onSave,
   );
+}
+
+Future<void> Function(String) _bindSaveToOpeningContext(
+  ProviderContainer container,
+  Future<void> Function(String value) onSave,
+) {
+  final openingConfig = container.read(relayConfigProvider);
+  final openingPubkey = container.read(myPubkeyProvider);
+  final openingSession = container.read(relaySessionProvider.notifier);
+  return (value) {
+    final currentConfig = container.read(relayConfigProvider);
+    final isCurrent =
+        currentConfig.storedOrigin == openingConfig.storedOrigin &&
+        currentConfig.nsec == openingConfig.nsec &&
+        container.read(myPubkeyProvider) == openingPubkey &&
+        identical(
+          container.read(relaySessionProvider.notifier),
+          openingSession,
+        );
+    if (!isCurrent) throw ProfileCommunityChangedException();
+    return onSave(value);
+  };
 }
 
 Future<void> _showProfileTextEditor({

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/features/profile/profile_edit_page.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/profile_text_editor.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -89,6 +91,57 @@ void main() {
 
     expect(presentations, 1);
     expect(notifier.displayNameAttempts, ['Old community draft']);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('native text editor rejects its first save after a switch', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/profile_text_editor');
+    final submission = Completer<String?>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) => submission.future);
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    final notifier = _RetryProfileNotifier();
+    final config = _MutableRelayConfigNotifier();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          relayConfigProvider.overrideWith(() => config),
+        ],
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => unawaited(showProfileDisplayNameEditor(context)),
+            child: const Text('Open editor'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(TextButton)),
+    );
+    final configSubscription = container.listen(
+      relayConfigProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(configSubscription.close);
+    await tester.tap(find.text('Open editor'));
+    await tester.pump();
+
+    config.update(baseUrl: 'https://second.example', nsec: 'second-identity');
+    submission.complete('Old community draft');
+    await tester.pumpAndSettle();
+
+    expect(notifier.displayNameAttempts, isEmpty);
     debugDefaultTargetPlatformOverride = null;
   });
 

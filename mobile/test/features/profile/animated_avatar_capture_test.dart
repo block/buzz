@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:buzz/features/profile/animated_avatar_orientation.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
@@ -11,6 +13,21 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image/image.dart' as image;
 
 void main() {
+  test('capture frame workspaces are isolated', () async {
+    final first = await createAnimatedAvatarFrameDirectory(
+      parent: Directory.systemTemp,
+    );
+    final second = await createAnimatedAvatarFrameDirectory(
+      parent: Directory.systemTemp,
+    );
+    addTearDown(() async {
+      if (await first.exists()) await first.delete(recursive: true);
+      if (await second.exists()) await second.delete(recursive: true);
+    });
+
+    expect(first.path, isNot(second.path));
+  });
+
   group('animatedAvatarFrameRotationDegrees', () {
     test('compensates front camera frames for every device orientation', () {
       const expected = {

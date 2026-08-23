@@ -24,6 +24,7 @@ import 'profile_avatar_draft.dart';
 
 part 'animated_avatar_capture/review_controls.dart';
 part 'animated_avatar_capture/capture_controls.dart';
+part 'animated_avatar_capture/frame_processing.dart';
 
 const _captureDuration = Duration(seconds: 3);
 const _captureFrameInterval = Duration(milliseconds: 125);
@@ -588,48 +589,6 @@ List<Uint8List> _resampleCapturedFrames(
   }, growable: false);
 }
 
-Future<List<Uint8List>> _removeBackgrounds(List<Uint8List> frames) async {
-  final segmenter = SelfieSegmenter(
-    mode: SegmenterMode.stream,
-    enableRawSizeMask: false,
-  );
-  final directory = await getTemporaryDirectory();
-  final results = <Uint8List>[];
-  try {
-    for (var index = 0; index < frames.length; index++) {
-      final file = File('${directory.path}/buzz-avatar-frame-$index.png');
-      try {
-        await file.writeAsBytes(frames[index], flush: false);
-        final mask = await segmenter.processImage(
-          InputImage.fromFilePath(file.path),
-        );
-        if (mask == null) {
-          results.add(frames[index]);
-          continue;
-        }
-        results.add(
-          await compute(
-            _applySegmentationMask,
-            _MaskRequest(
-              frame: frames[index],
-              maskWidth: mask.width,
-              maskHeight: mask.height,
-              confidences: Float32List.fromList(mask.confidences),
-            ),
-          ),
-        );
-      } finally {
-        if (await file.exists()) {
-          await file.delete().catchError((_) => file);
-        }
-      }
-    }
-  } finally {
-    await segmenter.close();
-  }
-  return results;
-}
-
 class _ErrorText extends StatelessWidget {
   const _ErrorText(this.message);
 
@@ -660,42 +619,6 @@ class _FramePlane {
   final Uint8List bytes;
   final int bytesPerRow;
   final int bytesPerPixel;
-}
-
-@immutable
-class _MaskRequest {
-  const _MaskRequest({
-    required this.frame,
-    required this.maskWidth,
-    required this.maskHeight,
-    required this.confidences,
-  });
-
-  final Uint8List frame;
-  final int maskWidth;
-  final int maskHeight;
-  final Float32List confidences;
-}
-
-Uint8List _applySegmentationMask(_MaskRequest request) {
-  final result = image.decodePng(request.frame)!.convert(numChannels: 4);
-  for (var y = 0; y < result.height; y++) {
-    final maskY = (y * request.maskHeight / result.height).floor().clamp(
-      0,
-      request.maskHeight - 1,
-    );
-    for (var x = 0; x < result.width; x++) {
-      final maskX = (x * request.maskWidth / result.width).floor().clamp(
-        0,
-        request.maskWidth - 1,
-      );
-      final confidence = request.confidences[maskY * request.maskWidth + maskX];
-      final alpha = ((confidence - 0.28) / (0.72 - 0.28)).clamp(0, 1);
-      final pixel = result.getPixel(x, y);
-      pixel.a = (alpha * 255).round();
-    }
-  }
-  return image.encodePng(result, level: 4);
 }
 
 @immutable
