@@ -852,11 +852,17 @@ pub enum UsersCmd {
         owner: Option<String>,
     },
     /// Update the current identity's profile
+    ///
+    /// Fields you do not pass are left untouched, including profile keys Buzz
+    /// does not model.
     #[command(name = "set-profile")]
     SetProfile {
-        /// Display name
+        /// Display name (the `display_name` profile field)
         #[arg(long)]
         name: Option<String>,
+        /// Short username handle (the `name` profile field)
+        #[arg(long)]
+        username: Option<String>,
         /// Avatar URL
         #[arg(long)]
         avatar: Option<String>,
@@ -866,6 +872,12 @@ pub enum UsersCmd {
         /// NIP-05 identifier (e.g. user@example.com)
         #[arg(long)]
         nip05: Option<String>,
+        /// Homepage URL
+        #[arg(long)]
+        website: Option<String>,
+        /// NIP-24 automated-account flag
+        #[arg(long)]
+        bot: Option<bool>,
     },
     /// Get presence status for users
     Presence {
