@@ -2219,6 +2219,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        status_reactions_enabled: config.status_reactions_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     });
@@ -2725,7 +2726,7 @@ async fn tokio_main() -> Result<()> {
                                     // 403 on non-open channels. Stale 👀 in that
                                     // case is a known limitation — fix belongs in
                                     // the relay (clean up bot reactions on removal).
-                                    if !drained_ids.is_empty() {
+                                    if !drained_ids.is_empty() && config.status_reactions_enabled {
                                         let rc = ctx.rest_client.clone();
                                         let ids = drained_ids.clone();
                                         tokio::spawn(async move {
@@ -2928,7 +2929,7 @@ async fn tokio_main() -> Result<()> {
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            if accepted && config.status_reactions_enabled {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -3753,6 +3754,10 @@ fn dispatch_pending(
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
         };
+        // Captured for the terminal lifecycle reaction (✅/❌) published when
+        // this turn's PromptResult lands in handle_prompt_result.
+        let triggering_event_ids: Vec<String> =
+            batch.events.iter().map(|be| be.event.id.to_hex()).collect();
 
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
@@ -3800,6 +3805,7 @@ fn dispatch_pending(
                 control_tx: Some(control_tx),
                 steer_tx,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids,
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -3860,7 +3866,7 @@ fn spawn_failure_notice(
         let rest = rest.clone();
         let channel_id = batch.channel_id;
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+            pool::post_thread_notice(&rest, channel_id, &thread_tags, &content).await;
         });
     }
 }
@@ -3881,11 +3887,16 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
-    let successful_steer_deliveries = pool
+    let (successful_steer_deliveries, triggering_event_ids) = pool
         .task_map()
         .values()
         .find(|meta| meta.agent_index == agent_index)
-        .map(|meta| meta.successful_steer_deliveries.clone())
+        .map(|meta| {
+            (
+                meta.successful_steer_deliveries.clone(),
+                meta.triggering_event_ids.clone(),
+            )
+        })
         .unwrap_or_default();
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
@@ -4033,6 +4044,23 @@ fn handle_prompt_result(
     // only touches idle agents.
     for ch in removed_channels {
         result.agent.state.invalidate_channel(ch);
+    }
+
+    // Terminal lifecycle reaction (✅/❌) on the triggering events. Spawned
+    // best-effort — a failed reaction must never affect turn handling. A
+    // requeued batch keeps its ❌ until the retry's turn either clears it on
+    // success or fails again.
+    if config.status_reactions_enabled && !triggering_event_ids.is_empty() {
+        if let (Some(rest), Some(emoji)) = (
+            rest_client,
+            pool::terminal_reaction_for_outcome(&result.outcome),
+        ) {
+            tokio::spawn(pool::react_terminal(
+                rest.clone(),
+                triggering_event_ids,
+                emoji,
+            ));
+        }
     }
 
     let outcome_label = match &result.outcome {
@@ -4436,6 +4464,7 @@ fn dispatch_heartbeat(
             control_tx: None,
             steer_tx: None,
             successful_steer_deliveries: HashSet::new(),
+            triggering_event_ids: Vec::new(),
         },
     );
     *heartbeat_in_flight = true;
@@ -5232,6 +5261,7 @@ mod owner_control_command_tests {
                 control_tx: Some(control_tx),
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
 
@@ -6781,6 +6811,7 @@ mod build_mcp_servers_tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            status_reactions_enabled: true,
             memory_enabled: false,
             model: None,
             effort_level: None,
@@ -7005,6 +7036,7 @@ mod error_outcome_emission_tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            status_reactions_enabled: true,
             memory_enabled: false,
             model: None,
             effort_level: None,
@@ -7096,6 +7128,7 @@ mod error_outcome_emission_tests {
                         session_id: "live-session".into(),
                     },
                 ]),
+                triggering_event_ids: vec![],
             },
         );
 
@@ -7168,6 +7201,7 @@ mod error_outcome_emission_tests {
                         session_id: "old-session".into(),
                     },
                 ]),
+                triggering_event_ids: vec![],
             },
         );
 
@@ -7283,6 +7317,7 @@ mod error_outcome_emission_tests {
                         session_id: "invalidated-session".into(),
                     },
                 ]),
+                triggering_event_ids: vec![],
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7343,6 +7378,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
 
@@ -7420,6 +7456,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         started_rx.await.unwrap();
@@ -7513,6 +7550,7 @@ mod error_outcome_emission_tests {
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
+                    triggering_event_ids: vec![],
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7605,6 +7643,7 @@ mod error_outcome_emission_tests {
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
+                    triggering_event_ids: vec![],
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7711,6 +7750,7 @@ mod error_outcome_emission_tests {
                     control_tx: None,
                     steer_tx: None,
                     successful_steer_deliveries: HashSet::new(),
+                    triggering_event_ids: vec![],
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7788,6 +7828,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7883,6 +7924,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         let config = test_config();
@@ -8000,6 +8042,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8140,6 +8183,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8329,6 +8373,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -8415,6 +8460,7 @@ mod error_outcome_emission_tests {
                 control_tx: None,
                 steer_tx: None,
                 successful_steer_deliveries: HashSet::new(),
+                triggering_event_ids: vec![],
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);

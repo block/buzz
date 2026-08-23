@@ -134,6 +134,24 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+/// Tool-call lifecycle signal emitted from the ACP session-update stream to
+/// the per-turn status watcher in `pool::run_prompt_task`.
+///
+/// `Started` carries the tool title advertised by the agent so the watcher
+/// can name the tool in a long-runner status post. `Finished` fires when a
+/// `tool_call_update` reports a terminal status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallSignal {
+    /// A `tool_call` session update arrived — a tool call began.
+    Started {
+        /// Human-readable tool title from the update (`"unknown"` if absent).
+        title: String,
+    },
+    /// A `tool_call_update` reported a terminal status
+    /// (`completed`/`failed`/`cancelled`).
+    Finished,
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -214,6 +232,12 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Per-turn sender for tool-call lifecycle signals, installed by
+    /// `pool::run_prompt_task` when status reactions are enabled. Sends are
+    /// best-effort: the watcher may already be gone (turn ended), in which
+    /// case the send error is ignored. Replaced (or cleared) at each turn
+    /// boundary via [`set_turn_status_tx`](Self::set_turn_status_tx).
+    turn_status_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolCallSignal>>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +587,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_status_tx: None,
         })
     }
 
@@ -575,6 +600,18 @@ impl AcpClient {
     /// Update metadata that will be attached to subsequent raw wire events.
     pub fn set_observer_context(&mut self, context: ObserverContext) {
         self.observer_context = context;
+    }
+
+    /// Install (or clear, with `None`) the per-turn tool-call status sender.
+    ///
+    /// Installed by `pool::run_prompt_task` before the prompt fires and
+    /// cleared by `send_prompt_result` at every turn exit, so a stale sender
+    /// never outlives the turn it served.
+    pub fn set_turn_status_tx(
+        &mut self,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<ToolCallSignal>>,
+    ) {
+        self.turn_status_tx = tx;
     }
 
     /// Return a clone of the observer handle, if attached.
@@ -1769,6 +1806,11 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if let Some(tx) = &self.turn_status_tx {
+                    let _ = tx.send(ToolCallSignal::Started {
+                        title: title.to_string(),
+                    });
+                }
                 true
             }
             "tool_call_update" => {
@@ -1778,6 +1820,11 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                if matches!(status, "completed" | "failed" | "cancelled") {
+                    if let Some(tx) = &self.turn_status_tx {
+                        let _ = tx.send(ToolCallSignal::Finished);
+                    }
+                }
                 false
             }
             "plan" => {
@@ -3747,6 +3794,80 @@ mod tests {
                 },
             }
         })
+    }
+
+    /// Build a `session/update` notification carrying a `tool_call` update.
+    fn tool_call_msg(title: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": title,
+                    "kind": "execute",
+                },
+            }
+        })
+    }
+
+    /// Build a `session/update` notification carrying a `tool_call_update`
+    /// with the given status.
+    fn tool_call_update_msg(status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tool-1",
+                    "status": status,
+                },
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn tool_call_updates_forward_turn_status_signals() {
+        let mut client = spawn_inert_client().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client.set_turn_status_tx(Some(tx));
+
+        let _ = client.handle_session_update(&tool_call_msg("cargo build"));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(ToolCallSignal::Started {
+                title: "cargo build".into()
+            })
+        );
+
+        // Non-terminal statuses must not signal completion.
+        let _ = client.handle_session_update(&tool_call_update_msg("in_progress"));
+        assert!(rx.try_recv().is_err());
+
+        let _ = client.handle_session_update(&tool_call_update_msg("completed"));
+        assert_eq!(rx.try_recv().ok(), Some(ToolCallSignal::Finished));
+
+        let _ = client.handle_session_update(&tool_call_update_msg("failed"));
+        assert_eq!(rx.try_recv().ok(), Some(ToolCallSignal::Finished));
+    }
+
+    #[tokio::test]
+    async fn tool_call_updates_without_status_tx_are_ignored() {
+        // No sender installed (status reactions disabled / heartbeat turn):
+        // the updates must be handled without error.
+        let mut client = spawn_inert_client().await;
+        let _ = client.handle_session_update(&tool_call_msg("cargo build"));
+        let _ = client.handle_session_update(&tool_call_update_msg("completed"));
+
+        // Clearing an installed sender stops signal delivery mid-stream.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client.set_turn_status_tx(Some(tx));
+        client.set_turn_status_tx(None);
+        let _ = client.handle_session_update(&tool_call_msg("cargo build"));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
