@@ -347,10 +347,7 @@ void main() {
       closeTo(expectedY, 0.01),
     );
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 200)),
-    );
-    await tester.pumpAndSettle();
+    await _waitForAvatarCropToClose(tester);
     expect(notifier.savedAvatarUrls, isEmpty);
     expect(uploadService.uploadCount, 0);
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
@@ -381,10 +378,7 @@ void main() {
     await tester.tap(find.text('Photo Library'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 200)),
-    );
-    await tester.pumpAndSettle();
+    await _waitForAvatarCropToClose(tester);
 
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
     await tester.pumpAndSettle();
@@ -994,6 +988,21 @@ void main() {
     final firstColor = find.byKey(const ValueKey('emoji-avatar-color-0'));
     expect(tester.getSize(firstColor), const Size.square(52));
   });
+}
+
+Future<void> _waitForAvatarCropToClose(WidgetTester tester) async {
+  final cropPage = find.byKey(const ValueKey('avatar-crop-viewer'));
+  for (var attempt = 0; attempt < 100; attempt += 1) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 25)),
+    );
+    await tester.pump(const Duration(milliseconds: 25));
+    if (cropPage.evaluate().isEmpty) {
+      await tester.pump(const Duration(milliseconds: 250));
+      return;
+    }
+  }
+  fail('Avatar crop did not complete within 5 seconds.');
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {
