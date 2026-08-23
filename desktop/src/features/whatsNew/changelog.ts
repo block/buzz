@@ -176,6 +176,13 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Faster message rendering, and several fixes: recent-channel ordering, emoji recents, and archived channels no longer appearing in # autocomplete",
     ],
   },
+  {
+    version: "0.5.18-1",
+    date: "2026-08-21",
+    bullets: [
+      "Programs (.exe, .dll and similar) can now be shared — they go to your Google Drive instead of failing to upload",
+    ],
+  },
 ];
 
 /**

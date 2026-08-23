@@ -178,8 +178,56 @@ At attach time in the composer:
 | File | Route |
 |---|---|
 | Video or audio, any size | **Drive, always.** Never the relay. |
+| Anything the relay refuses outright, any size | **Drive.** See below. |
 | Anything else over `DRIVE_UPLOAD_THRESHOLD_BYTES` (5 MB) | **Drive.** |
 | Everything else | Relay upload, unchanged. |
+
+### Executables, added `0.5.18-1`
+
+Native executables — PE (`.exe`, `.dll`), ELF (`.so`, `.o`) and Mach-O
+(`.dylib`) — are refused by the relay and now route to Drive instead of failing.
+
+**The block exists because the relay serves the bytes**, and hosting a program
+that Buzz then hands to colleagues is a malware-distribution risk. On the Drive
+path Buzz posts a link and nothing is served from our origin. Drive additionally
+virus-scans files under 100 MB and shows a download interstitial, neither of
+which the relay does. Note this **relocates** that risk rather than eliminating
+it — the file is still shared, just from Drive. For an internal team that is an
+acceptable trade; it is not a security improvement, only a security-neutral
+unblocking.
+
+#### The frontend list is deliberately NOT a copy of the Rust one
+
+`BLOCKED_FILE_MIME_TYPES` in `crates/buzz-media/src/validation.rs` lists 13 MIME
+types, but the relay reaches that list only **after sniffing the bytes** with
+the `infer` crate — and `infer` has no matcher for most of them. Verified
+against the pinned `infer` version:
+
+| Listed as blocked | Actually reachable? |
+|---|---|
+| PE, ELF, Mach-O | **yes** — real magic bytes |
+| SVG | no — sniffs as `text/xml`, accepted |
+| JavaScript, XHTML | no — no magic bytes at all |
+| `.msi` | no — sniffs as `application/x-ole-storage` |
+| `.apk` | no — sniffs as `application/zip` |
+| `.dmg` | no — no matcher, accepted as `octet-stream` |
+
+So **SVG, JS, XHTML, `.msi`, `.apk` and `.dmg` upload fine today.** An earlier
+draft of this feature routed them to Drive on the assumption they were blocked,
+which would have taken a working flow and broken it for anyone without a Google
+account connected — the Drive path refuses rather than falling back.
+`driveUploadRouting.mjs` therefore mirrors *reachable* rejections only, and its
+comment says so at length. **Do not "fix" it to match the Rust list.**
+
+`text/html` is absent for a different reason again: the relay accepts it as an
+inert download by explicit decision, documented in `validation.rs`.
+
+#### Known gap
+
+An **extensionless** ELF or Mach-O binary is invisible to us — browsers give it
+no MIME type and there is no extension to read — so it takes the relay path and
+is rejected. Pre-existing behaviour, not a regression, and not worth sniffing
+magic bytes in the renderer to solve.
 
 Video and audio detection reuses `features/messages/lib/videoFileType.ts`,
 which already maps extensions to mime types.

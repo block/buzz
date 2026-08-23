@@ -370,6 +370,11 @@ pub(crate) fn get_google_meet_connection_status() -> Result<bool, String> {
 
 #[tauri::command]
 pub(crate) fn disconnect_google_meet_account() -> Result<(), String> {
+    // The Drive uploads folder belongs to the account being disconnected.
+    // Leaving its id cached means a reconnect as a *different* account would
+    // upload into a folder the new token cannot write to (`drive.file` only
+    // grants access to files the app itself created).
+    drive::forget_uploads_folder();
     SecretStore::shared(keyring_service())
         .delete(GOOGLE_MEET_REFRESH_TOKEN_KEY)
         .map_err(|error| format!("could not disconnect Google account: {error}"))
@@ -403,13 +408,24 @@ pub(crate) async fn google_access_token(
     let token = match refreshed {
         Ok(token) => token,
         Err(error) => {
-            // A revoked/expired refresh token is the likeliest cause. Clear
-            // the stale one so the UI cleanly falls back to "connect your
-            // account" instead of retrying a token that will never work.
-            let _ = store.delete(GOOGLE_MEET_REFRESH_TOKEN_KEY);
-            return Err(format!(
-                "Your Google account connection expired — reconnect it and try again ({error})"
-            ));
+            // Only discard the stored token when Google says the *grant* is
+            // dead. `invalid_grant` is its standard code for a revoked or
+            // expired refresh token, and clearing it lets the UI fall back to
+            // "connect your account" instead of retrying something that will
+            // never work.
+            //
+            // Anything else — a DNS hiccup, a captive portal, a 500 — is
+            // transient, and deleting on those would silently disconnect the
+            // user's whole Google account (Meet included) because their Wi-Fi
+            // blinked. That matters more since `0.5.18-1`: every executable
+            // attachment now calls this to check the Drive scope.
+            if error.contains("invalid_grant") {
+                let _ = store.delete(GOOGLE_MEET_REFRESH_TOKEN_KEY);
+                return Err(format!(
+                    "Your Google account connection expired — reconnect it and try again ({error})"
+                ));
+            }
+            return Err(format!("Could not reach Google — try again ({error})"));
         }
     };
 

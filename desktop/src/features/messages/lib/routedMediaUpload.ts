@@ -77,7 +77,7 @@ export async function uploadMediaFile(
   // fail anyway — the transcode needs ffmpeg on this machine.
   if (!(await getGoogleDriveStatus())) {
     throw new Error(
-      "Video, audio and files over 5 MB are shared through your Google Drive. Connect your Google account under Settings → Voice to send this.",
+      "Video, audio, programs, and files over 5 MB are shared through your Google Drive. Connect your Google account under Settings → Voice to send this.",
     );
   }
 

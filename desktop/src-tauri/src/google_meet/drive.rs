@@ -82,6 +82,14 @@ pub(crate) struct DriveUpload {
     pub web_view_link: String,
 }
 
+/// Drop the cached folder id. Called on disconnect, because the folder belongs
+/// to the account that is going away.
+pub(crate) fn forget_uploads_folder() {
+    if let Ok(mut cached) = UPLOADS_FOLDER_ID.lock() {
+        *cached = None;
+    }
+}
+
 fn decode_header(value: &str) -> Result<String, String> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)

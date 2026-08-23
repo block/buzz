@@ -12,7 +12,7 @@ edit, or the bot keeps answering from the old text.
 Maintenance: this file is the agent's entire knowledge of the product. When a
 release changes user-facing behaviour, update the Features section in the same
 commit — an out-of-date entry here becomes a confident wrong answer in `#help`.
-Last checked against: **0.5.17-1**.
+Last checked against: **0.5.18-1**.
 
 ---
 
@@ -167,10 +167,24 @@ opening it.
 To remove a link from the Files tab, delete the message that carries it — the
 same as for a file.
 
-**Large files, video and audio go to your Google Drive.** Three kinds of
-attachment take this route instead of being uploaded to Buzz: any file over
-5 MB, any video, and any audio file — video and audio regardless of how small
-they are.
+**Large files, video, audio and programs go to your Google Drive.** Three kinds
+of attachment take this route instead of being uploaded to Buzz:
+
+- any file over 5 MB
+- any video, and any audio file, regardless of how small
+- **programs** — `.exe`, `.dll`, `.so`, `.dylib` and similar
+
+Programs used to fail with an upload error, because Buzz will not host a file it
+would then be serving to people. Sending them through Drive avoids that: Buzz
+only ever posts a link, and the file is opened from Drive.
+
+Everything else uploads to Buzz as before, including SVG images, JavaScript
+files and web pages — those are not blocked and never were. A large one still
+goes to Drive, but only because of its size.
+
+A program with no file extension may still fail to upload; Buzz cannot tell what
+it is before sending it. Renaming it, zipping it, or putting it in Drive
+yourself and sharing the link all work.
 
 Buzz uploads the file to a "Buzz uploads" folder in your own Google Drive and
 posts it in the channel as a link named after the file. Everyone at k2alpha.ai
@@ -248,6 +262,8 @@ Desktop notifications for messages. Channels and DMs can be muted. A muted
 channel still shows an unread indicator, just no notification. The exception is
 `@channel`, which reaches you even in a muted channel.
 
+Desktop notifications name the person who sent the message.
+
 **Sidebar sections** — channels can be grouped into your own named, collapsible
 sections, with an icon each. Right-click a channel in the sidebar to create a
 section or move the channel into one. Sections sync across your devices.
@@ -289,6 +305,9 @@ Buzz and open it again.
 - **Local archive** — settings exist for archiving content locally.
 - **Mobile pairing** — a Buzz mobile client can be paired from settings.
 - **Themes** — many themes are available, light and dark.
+- **Text size and conversation density** can be adjusted under Settings, with a
+  live preview of how messages will look.
+- **Ctrl+W** closes the Buzz window.
 - **Buzz Term** — a terminal inside Buzz.
 
 If someone asks for detail on these last items beyond what is written here, say
