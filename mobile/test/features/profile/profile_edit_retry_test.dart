@@ -46,6 +46,16 @@ void main() {
       (calls.last.arguments as Map<Object?, Object?>)['initialValue'],
       'Alice Retained',
     );
+    expect(
+      (calls.first.arguments
+          as Map<Object?, Object?>)['allowUnchangedSubmission'],
+      isFalse,
+    );
+    expect(
+      (calls.last.arguments
+          as Map<Object?, Object?>)['allowUnchangedSubmission'],
+      isTrue,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 

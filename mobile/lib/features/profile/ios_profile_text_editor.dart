@@ -6,16 +6,20 @@ class IosProfileTextEditor {
 
   static const _channel = MethodChannel('buzz/profile_text_editor');
 
+  /// Presents the native editor and returns its submitted value, or null when
+  /// the user cancels.
   static Future<String?> present({
     required String title,
     required String initialValue,
     required String placeholder,
     required bool multiline,
+    bool allowUnchangedSubmission = false,
   }) => _channel.invokeMethod<String>('present', {
     'title': title,
     'initialValue': initialValue,
     'placeholder': placeholder,
     'multiline': multiline,
+    'allowUnchangedSubmission': allowUnchangedSubmission,
   });
 
   /// Keeps the native editor's latest value available until it saves or the
@@ -31,6 +35,7 @@ class IosProfileTextEditor {
     bool Function()? canPresent,
   }) async {
     var draft = initialValue;
+    var isRetry = false;
     while (true) {
       if (canPresent?.call() == false) return;
       final value = await present(
@@ -38,6 +43,7 @@ class IosProfileTextEditor {
         initialValue: draft,
         placeholder: placeholder,
         multiline: multiline,
+        allowUnchangedSubmission: isRetry,
       );
       if (value == null) return;
       try {
@@ -49,6 +55,7 @@ class IosProfileTextEditor {
           return;
         }
         draft = value;
+        isRetry = true;
         onSaveError();
       }
     }

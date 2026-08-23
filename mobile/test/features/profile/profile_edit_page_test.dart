@@ -220,6 +220,7 @@ void main() {
       'initialValue': 'Alice',
       'placeholder': 'Display name',
       'multiline': false,
+      'allowUnchangedSubmission': false,
     });
     expect(notifier.savedDisplayNames, ['Alice Native']);
     debugDefaultTargetPlatformOverride = null;
