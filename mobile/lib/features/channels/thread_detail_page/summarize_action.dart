@@ -11,6 +11,7 @@ class _SummarizeThreadButton extends ConsumerWidget {
     required this.channelId,
     required this.messages,
     required this.sourceRef,
+    this.onClosed,
   });
 
   final String channelId;
@@ -22,6 +23,14 @@ class _SummarizeThreadButton extends ConsumerWidget {
   /// composer writes as a task's `source_ref`, so the reverse lookup matches
   /// by construction rather than by heuristic.
   final String? sourceRef;
+
+  /// Fired once the summary sheet is dismissed.
+  ///
+  /// The sheet returns `void`, so it reports no create outcome; re-running the
+  /// reverse lookup unconditionally on close is the cheap, honest option — one
+  /// extra GET on a dismissed sheet versus a stale thread that silently hides
+  /// the task it just produced.
+  final VoidCallback? onClosed;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -42,7 +51,7 @@ class _SummarizeThreadButton extends ConsumerWidget {
             // trickles in from the kind:0 batch fetch.
             profiles: ref.read(userCacheProvider),
           ),
-        ),
+        ).then((_) => onClosed?.call()),
       ),
       icon: const Icon(LucideIcons.sparkles, size: 22),
     );

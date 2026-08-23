@@ -18,8 +18,11 @@ import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
+import '../../shared/tasks/task.dart';
+import '../../shared/tasks/tasks_api.dart';
 import '../../shared/tasks/thread_summary.dart';
 import '../../shared/tasks/thread_summary_sheet.dart';
+import 'thread_detail_page/thread_task_chip.dart';
 import 'android_ime_lift.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
@@ -721,6 +724,37 @@ class ThreadDetailPage extends HookConsumerWidget {
     // itself a root message its rootId is null, so fall back to its own id.
     final effectiveRootId = threadHead.rootId ?? threadHead.id;
 
+    // HW-004: reverse-lookup the task this thread already produced.
+    //
+    // Bumped after the summary sheet closes so a task created without leaving
+    // the thread shows up in place. It is a tick rather than a timer on
+    // purpose: one fetch on open plus one after a create, no polling and no
+    // live subscription.
+    final taskChipRefreshTick = useState(0);
+    final linkedTaskSnapshot = useFuture(
+      useMemoized(() async {
+        try {
+          return await ref
+              .read(tasksApiProvider)
+              .listTasks(channelId: channelId, sourceRef: threadHead.id);
+        } catch (_) {
+          // Degrade to NO chip. A failed lookup must never render a positive
+          // "no task" claim, and this is a passive signal, so it earns no
+          // error toast either.
+          return const <Task>[];
+        }
+        // The same `threadHeadId ?? rootId` expression the composer writes as
+        // `source_ref` and the summarize button already passes below, so the
+        // match is exact by construction rather than heuristic.
+      }, [channelId, threadHead.id, taskChipRefreshTick.value]),
+    );
+    // An inaccessible channel returns [] from the relay's accessible-channel
+    // post-filter, which renders identically to "no task" — the chip must not
+    // become an existence oracle.
+    final linkedTasks = [...?linkedTaskSnapshot.data]
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final linkedTask = linkedTasks.firstOrNull;
+
     // Composer size changes and keyboard metrics changes are independent:
     // the dock grows first, then the Scaffold's viewport shrinks once the
     // keyboard appears. Re-align after that latter layout pass too, but only
@@ -865,6 +899,9 @@ class ThreadDetailPage extends HookConsumerWidget {
             // `threadHeadId ?? rootId`; pass the identical expression so the
             // reverse lookup is exact rather than heuristic.
             sourceRef: threadHead.id,
+            // Re-run the reverse lookup once the sheet closes, so a task
+            // created in there surfaces without leaving the thread.
+            onClosed: () => taskChipRefreshTick.value++,
           ),
         ],
       ),
@@ -873,6 +910,12 @@ class ThreadDetailPage extends HookConsumerWidget {
         children: [
           Column(
             children: [
+              if (linkedTask != null)
+                ThreadTaskChip(
+                  key: const ValueKey('thread-task-chip'),
+                  task: linkedTask,
+                  additionalCount: linkedTasks.length - 1,
+                ),
               Expanded(
                 child: _ThreadMessageList(
                   viewport: listViewport,
