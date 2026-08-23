@@ -6,6 +6,10 @@ import {
   resolveAgentCardAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import {
+  pickProjectionOverriddenTitle,
+  useCanonicalProjectionOverrides,
+} from "@/features/agents/lib/useCanonicalProjectionOverrides";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
@@ -252,7 +256,12 @@ function AgentPersonaCard({
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
-  const title = persona.displayName;
+  const projectionOverrides = useCanonicalProjectionOverrides();
+  const title = pickProjectionOverriddenTitle(
+    projectionOverrides,
+    agent?.pubkey,
+    persona.displayName,
+  );
   const modelLabel = resolveAgentCardModelLabel({
     agent,
     personaModel: persona.model,
@@ -357,7 +366,12 @@ function StandaloneAgentCard({
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
 }) {
-  const title = agent.name;
+  const projectionOverrides = useCanonicalProjectionOverrides();
+  const title = pickProjectionOverriddenTitle(
+    projectionOverrides,
+    agent.pubkey,
+    agent.name,
+  );
   const profileQuery = useUserProfileQuery(agent.pubkey);
   const friendlyError = friendlyAgentLastError(
     agent.lastError,

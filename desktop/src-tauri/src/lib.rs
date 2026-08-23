@@ -80,6 +80,7 @@ use managed_agents::{
     restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
     try_regenerate_nest,
 };
+use managed_agents::projection::get_canonical_projection_config;
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
@@ -691,6 +692,7 @@ pub fn run() {
             revalidate_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
+            get_canonical_projection_config,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
             restart_managed_agent_runtime,

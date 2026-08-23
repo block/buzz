@@ -30,6 +30,13 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "canonicalRosterProjection",
+      "name": "Canonical Roster Projection",
+      "description": "Group the roster into Local Primary / Remote / Unverified using pubkey-pinned canonical identities.",
+      "defaultEnabled": false,
+      "platforms": ["desktop"]
     }
   ]
 }
