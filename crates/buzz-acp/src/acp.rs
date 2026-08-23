@@ -213,6 +213,11 @@ pub struct AcpClient {
     /// `initialize`. Gates [`session_load`](Self::session_load): a harness
     /// restart resumes a channel's remembered session only when the agent can.
     load_session_supported: bool,
+    /// True only while a `session/load` is outstanding. ACP has the agent
+    /// replay the whole conversation as `session/update` notifications before
+    /// it answers, and those are *history*, not new output — see
+    /// [`observe_read`](Self::observe_read).
+    replaying_session: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -573,6 +578,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             load_session_supported: false,
+            replaying_session: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -602,6 +608,25 @@ impl AcpClient {
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
+    /// Emit an `acp_read` observer frame for an inbound line, except for the
+    /// `session/update` notifications an agent replays while answering
+    /// `session/load`.
+    ///
+    /// Those updates are the conversation the harness already had before it
+    /// restarted. They never become channel messages (`handle_session_update`
+    /// only logs), but without this they reach the owner-only observer feed —
+    /// desktop Activity — as though the agent had just said all of it again.
+    /// Everything else on the wire during a load, including the response
+    /// itself and any agent-initiated request, is still observed.
+    fn observe_read(&self, msg: &serde_json::Value) {
+        if self.replaying_session
+            && msg.get("method").and_then(|m| m.as_str()) == Some("session/update")
+        {
+            return;
+        }
+        self.observe("acp_read", msg.clone());
+    }
+
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         if let Some(observer) = &self.observer {
             observer.emit(
@@ -668,7 +693,13 @@ impl AcpClient {
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
-        let result = self.send_request("session/load", params).await?;
+        // Keep the replayed history out of the owner's Activity feed for the
+        // duration of the load, and clear the flag on every exit path — an
+        // error must not leave the client permanently deaf to `session/update`.
+        self.replaying_session = true;
+        let result = self.send_request("session/load", params).await;
+        self.replaying_session = false;
+        let result = result?;
         tracing::info!(target: "acp::session", "session resumed: {session_id}");
         Ok(result)
     }
@@ -1314,7 +1345,7 @@ impl AcpClient {
                     continue;
                 }
             };
-            self.observe("acp_read", msg.clone());
+            self.observe_read(&msg);
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1637,7 +1668,7 @@ impl AcpClient {
                             continue;
                         }
                     };
-                    self.observe("acp_read", msg.clone());
+                    self.observe_read(&msg);
 
                     let activity_now = Instant::now();
                     idle_deadline = activity_now + idle_timeout;
@@ -3734,6 +3765,81 @@ mod tests {
         assert_eq!(received["params"]["sessionId"].as_str(), Some("ses_old"));
         assert_eq!(received["params"]["cwd"].as_str(), Some("/work"));
         assert!(received["params"]["mcpServers"].is_array());
+    }
+
+    /// The `session/update`s an agent replays while answering `session/load`
+    /// are the conversation the harness already had. They must not reach the
+    /// owner's Activity feed as though the agent had just said all of it again
+    /// — while everything else on the wire during a load still does.
+    #[tokio::test]
+    async fn replayed_session_updates_are_kept_out_of_the_observer_feed() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 _load
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_old","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replayed"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+            read -t 2 _prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_old","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"live"}}}}'
+            echo '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let observer = crate::observer::ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        client
+            .session_load("ses_old", "/work", vec![])
+            .await
+            .expect("session_load should succeed");
+
+        let replayed_texts = |observer: &crate::observer::ObserverHandle| -> Vec<String> {
+            observer
+                .snapshot()
+                .into_iter()
+                .filter(|e| e.kind == "acp_read")
+                .filter(|e| {
+                    e.payload.get("method").and_then(|m| m.as_str()) == Some("session/update")
+                })
+                .filter_map(|e| {
+                    e.payload
+                        .pointer("/params/update/content/text")
+                        .and_then(|t| t.as_str().map(str::to_owned))
+                })
+                .collect()
+        };
+        assert!(
+            replayed_texts(&observer).is_empty(),
+            "history replayed during session/load must not surface as fresh output"
+        );
+        // The load's own response is still observed — only the replay is muted.
+        assert!(
+            observer
+                .snapshot()
+                .iter()
+                .any(|e| e.kind == "acp_read" && e.payload.get("id").is_some()),
+            "the session/load response itself must still reach the feed"
+        );
+
+        // And the flag is cleared: real output after the load is observed.
+        client
+            .session_prompt_with_idle_timeout(
+                "ses_old",
+                "hi",
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .expect("prompt should succeed");
+        assert_eq!(
+            replayed_texts(&observer),
+            vec!["live".to_string()],
+            "session/update after the load must be observed normally"
+        );
     }
 
     #[tokio::test]

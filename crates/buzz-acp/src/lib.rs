@@ -1070,6 +1070,7 @@ fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
+    session_store: &session_store::SessionStore,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
     event_publisher: RelayEventPublisher,
@@ -1116,7 +1117,7 @@ fn handle_relay_observer_control_event(
             handle_cancel_turn_control(&payload, pool, observer);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(&payload, pool, session_store, observer);
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -1323,6 +1324,7 @@ fn handle_cancel_turn_control(
 fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
+    session_store: &session_store::SessionStore,
     observer: Option<&observer::ObserverHandle>,
 ) {
     let Some(channel_id) = payload
@@ -1362,7 +1364,14 @@ fn handle_switch_model_control(
     } else {
         // Idle path: validate against the cached catalog before invalidating.
         match pool.switch_idle_agent_model(channel_id, model_id) {
-            IdleSwitchResult::Switched => "switched",
+            IdleSwitchResult::Switched => {
+                // The session was invalidated so the next turn re-creates it
+                // under the new model. `session/load` cannot apply a model, so
+                // the durable receipt must go with it — otherwise the next turn
+                // resumes the old session and the switch silently no-ops.
+                session_store.remove(channel_id);
+                "switched"
+            }
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
         }
@@ -2209,9 +2218,18 @@ async fn tokio_main() -> Result<()> {
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
         session_store: Arc::new(match &config.state_dir {
-            Some(dir) => {
-                session_store::SessionStore::open(dir.join(format!("sessions-{pubkey_hex}.json")))
-            }
+            Some(dir) => session_store::SessionStore::open(
+                dir.join(format!("sessions-{pubkey_hex}.json")),
+                // One agent identity can serve several communities. Without the
+                // relay in scope, a shared state directory would let one
+                // community select another's remembered session — and
+                // `session/load` carries only an opaque id, so the agent has
+                // nothing to reject it with.
+                session_store::StoreScope {
+                    relay: config.relay_url.clone(),
+                    agent_pubkey: pubkey_hex.clone(),
+                },
+            ),
             None => session_store::SessionStore::disabled(),
         }),
     });
@@ -2605,6 +2623,7 @@ async fn tokio_main() -> Result<()> {
                                     &config.keys,
                                     event,
                                     &mut pool,
+                                    &ctx.session_store,
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
@@ -2834,6 +2853,15 @@ async fn tokio_main() -> Result<()> {
                                             buzz_event.channel_id,
                                             ControlSignal::Rotate,
                                         );
+                                        // Either way the owner asked for a fresh
+                                        // session, so the durable receipt goes too —
+                                        // otherwise the next turn resumes the very
+                                        // session they rotated away from. (The busy
+                                        // path also forgets it when the cancelled turn
+                                        // lands in `invalidate_for_fresh_session`; doing
+                                        // it here as well covers the turn ending by
+                                        // another route first.)
+                                        ctx.session_store.remove(buzz_event.channel_id);
                                         if fired {
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
@@ -2841,8 +2869,6 @@ async fn tokio_main() -> Result<()> {
                                             );
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
-                                            // The owner asked for a fresh session; do not bring the old one back.
-                                            ctx.session_store.remove(buzz_event.channel_id);
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,

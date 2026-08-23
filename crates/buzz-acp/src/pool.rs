@@ -23,7 +23,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use crate::acp::SessionOrigin;
-use crate::session_store::SessionStore;
+use crate::session_store::{SessionRecord, SessionStore};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -132,7 +132,21 @@ pub struct SessionState {
     /// Per-channel successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<Uuid, ChannelDeliveryState>,
+    /// channel_id → consecutive *indeterminate* `session/load` failures.
+    ///
+    /// An indeterminate failure (a timeout, a broken pipe, an agent that died
+    /// mid-load) is not evidence the remembered session is gone, so the receipt
+    /// survives it — but a channel whose load can never finish must not stall
+    /// forever, so after [`MAX_INDETERMINATE_RESUMES`] the receipt is treated as
+    /// definitively gone and the channel starts fresh. In-memory only: a restart
+    /// is a fresh chance to reach the session.
+    pub resume_failures: HashMap<Uuid, u32>,
 }
+
+/// Consecutive indeterminate `session/load` failures a channel may accumulate
+/// before its receipt is discarded and a fresh session opened. See
+/// [`SessionState::resume_failures`].
+const MAX_INDETERMINATE_RESUMES: u32 = 3;
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
@@ -156,6 +170,7 @@ impl SessionState {
         self.core_sections.remove(channel_id);
         self.canvas_sections.remove(channel_id);
         self.deliveries.remove(channel_id);
+        self.resume_failures.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -169,6 +184,7 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        self.resume_failures.clear();
     }
 
     pub(crate) fn mark_channel_delivery_success(
@@ -299,17 +315,21 @@ pub enum PromptSource {
 /// honoring any load-bearing control signal semantics.
 fn apply_completed_before_control_signal(
     state: &mut SessionState,
+    store: &SessionStore,
     source: &PromptSource,
     control_signal: &ControlSignal,
 ) {
     // Rotate and SwitchModel both invalidate so the next turn creates a fresh
     // session. For SwitchModel the caller has already set `desired_model`, so
-    // the fresh session applies the new model on its next creation.
+    // the fresh session applies the new model on its next creation. Both go
+    // through the lifecycle seam: the owner asked for a new session, so the
+    // durable receipt must not bring the old one back after a restart — or,
+    // for SwitchModel, on the very next turn.
     if matches!(
         control_signal,
         ControlSignal::Rotate | ControlSignal::SwitchModel(_)
     ) {
-        state.invalidate(source);
+        invalidate_for_fresh_session(state, store, source);
     }
 }
 
@@ -961,53 +981,134 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel, Some(info.channel_type))
 }
 
-/// Resume the session the store remembers for `channel_id`, if there is one and
-/// the agent can. Returns the live session id on success.
+/// Invalidate a source's session in RAM **and** forget its durable receipt.
 ///
-/// Every failure path returns `None` and forgets the remembered id, so the
-/// caller opens a fresh session and the same dead id is not retried on every
-/// mention: an agent that did not advertise `loadSession`, a `session/load`
-/// error (the agent no longer has it — a sandbox reclaimed, a machine change),
-/// or an agent that exited (surfaced separately by the create path).
+/// The single lifecycle seam for "the next turn must not reuse this session".
+/// [`SessionStore`] exists to survive a *process restart*, never an in-process
+/// decision to abandon a session — so `!rotate`, a model switch, a token/turn
+/// rotation, a cancel, and a failed cleanup all go through here, and RAM and
+/// disk cannot disagree about whether the next turn starts over.
+///
+/// The agent-death paths ([`SessionState::invalidate_all`]) deliberately do
+/// *not*: the harness still wants the conversation back when the agent
+/// respawns, and a session the agent truly lost is forgotten by `session/load`
+/// failing definitively.
+fn invalidate_for_fresh_session(
+    state: &mut SessionState,
+    store: &SessionStore,
+    source: &PromptSource,
+) {
+    state.invalidate(source);
+    if let PromptSource::Channel(channel_id) = source {
+        store.remove(*channel_id);
+    }
+}
+
+/// What one attempt at resuming a channel's remembered session concluded.
+enum ResumeAttempt {
+    /// Live again under the same id.
+    Resumed(String),
+    /// Nothing to resume, or the agent answered and the answer was no. The
+    /// receipt has been forgotten; open a fresh session.
+    StartFresh,
+    /// We never learned whether the session is still there — a timeout, a
+    /// broken pipe, an agent that exited mid-load. The receipt is kept, and the
+    /// caller must **not** open a competing session: the load may even have
+    /// succeeded on the agent's side while we gave up locally.
+    Indeterminate(AcpError),
+}
+
+/// Resume the session the store remembers for `channel_id`, if there is one,
+/// the agent can load it, and it was created under the configuration this turn
+/// wants.
+///
+/// Failures are classified rather than lumped together, because "forget it" and
+/// "try again later" have opposite costs. A JSON-RPC error is the agent
+/// *answering*: it no longer has that session (a reclaimed sandbox, a machine
+/// change), so the receipt is worthless and is dropped. A timeout or a dead pipe
+/// is not an answer, and dropping the receipt there would destroy a perfectly
+/// good session — and risk a second, competing one — over a transient blip. A
+/// channel that keeps failing indeterminately is bounded by
+/// [`MAX_INDETERMINATE_RESUMES`] so it cannot stall forever.
 async fn resume_remembered_session(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     channel_id: Uuid,
-) -> Option<String> {
-    let remembered = ctx.session_store.get(channel_id)?;
-    if !agent.acp.load_session_supported() {
+    channel_type: Option<&str>,
+) -> ResumeAttempt {
+    let Some(remembered) = ctx.session_store.get(channel_id) else {
+        return ResumeAttempt::StartFresh;
+    };
+    let forget = |reason: &str| {
         tracing::info!(
             target: "pool::session",
-            "channel {channel_id} remembers session {remembered} but the agent does not support session/load; starting fresh"
+            "channel {channel_id} remembers session {} but {reason}; starting fresh",
+            remembered.session_id
         );
         ctx.session_store.remove(channel_id);
-        return None;
+        ResumeAttempt::StartFresh
+    };
+
+    if !agent.acp.load_session_supported() {
+        return forget("the agent does not support session/load");
     }
+    // `model` and `permission_mode` are applied from the `session/new`
+    // *response* (its `configOptions` / `models` / `modes`), which
+    // `session/load` does not return — a resumed session silently keeps what it
+    // was created with. Resuming across a change to either would therefore run
+    // the old configuration while the operator believes the new one is live.
+    let desired_model = agent.desired_model.as_deref();
+    let desired_mode = ctx.permission_mode.as_wire_str();
+    if !remembered.matches(desired_model, desired_mode) {
+        return forget(&format!(
+            "it was created under model {:?} / permission mode {} and this turn wants {:?} / {}",
+            remembered.model, remembered.permission_mode, desired_model, desired_mode
+        ));
+    }
+
+    // Same origin context as the fresh path: a public stream must keep
+    // `BUZZ_GIT_ORIGIN_CHANNEL_ID` across a restart, or git issues, patches and
+    // PR metadata created afterwards lose the link back to their channel.
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
         Some(channel_id),
-        None,
+        channel_type,
         ctx.session_title.as_deref(),
     );
     match agent
         .acp
-        .session_load(&remembered, &ctx.cwd, mcp_servers)
+        .session_load(&remembered.session_id, &ctx.cwd, mcp_servers)
         .await
     {
         Ok(_) => {
             tracing::info!(
                 target: "pool::session",
-                "resumed session {remembered} for channel {channel_id} after restart"
+                "resumed session {} for channel {channel_id} after restart",
+                remembered.session_id
             );
-            Some(remembered)
+            agent.state.resume_failures.remove(&channel_id);
+            ResumeAttempt::Resumed(remembered.session_id)
         }
-        Err(e) => {
+        // The agent answered: it does not have this session (or cannot load
+        // it). Definitive — the receipt is worthless.
+        Err(error @ AcpError::AgentError { .. }) => {
+            forget(&format!("the agent rejected session/load ({error})"))
+        }
+        Err(error) => {
+            let failures = agent.state.resume_failures.entry(channel_id).or_insert(0);
+            *failures += 1;
+            if *failures >= MAX_INDETERMINATE_RESUMES {
+                agent.state.resume_failures.remove(&channel_id);
+                return forget(&format!(
+                    "session/load failed {MAX_INDETERMINATE_RESUMES} times without a verdict (last: {error})"
+                ));
+            }
             tracing::warn!(
                 target: "pool::session",
-                "could not resume session {remembered} for channel {channel_id} ({e}); starting fresh"
+                "session/load for channel {channel_id} gave no verdict ({error}); keeping session {} and retrying (attempt {failures}/{MAX_INDETERMINATE_RESUMES})",
+                remembered.session_id
             );
-            ctx.session_store.remove(channel_id);
-            None
+            ResumeAttempt::Indeterminate(error)
         }
     }
 }
@@ -1753,60 +1854,23 @@ pub async fn run_prompt_task(
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
-            } else if let Some(sid) = resume_remembered_session(&mut agent, &ctx, *cid).await {
-                // A session this harness opened before it last restarted, live
-                // again under the same id. Delivery state starts fresh — it is
-                // per-process bookkeeping — and no usage baseline is seeded,
-                // because a resumed session's prior usage is not zero.
-                agent.state.sessions.insert(*cid, sid.clone());
-                agent
-                    .state
-                    .deliveries
-                    .insert(*cid, ChannelDeliveryState::default());
-                if let Some((pending_cid, section)) = pending_canvas.take() {
-                    agent.state.canvas_sections.insert(pending_cid, section);
-                }
-                (sid, false)
             } else {
-                // The title is channel-qualified (`Agent · #channel`) so one
-                // agent in several channels doesn't produce identical session
-                // rows; `title_channel` comes from the single resolve above and
-                // is `None` for DM, unresolved, and unnamed channels.
-                match create_session_and_apply_model(
+                let resumed = match resume_remembered_session(
                     &mut agent,
                     &ctx,
-                    agent_core.as_deref(),
-                    NewSessionChannelContext {
-                        huddle_instructions: huddle_instructions.as_deref(),
-                        canvas: agent_canvas.as_deref(),
-                        name: title_channel.as_deref(),
-                        id: Some(*cid),
-                        channel_type: origin_channel_type.as_deref(),
-                    },
+                    *cid,
+                    origin_channel_type.as_deref(),
                 )
                 .await
                 {
-                    Ok(sid) => {
-                        tracing::info!(
-                            target: "pool::session",
-                            "created session {sid} for channel {cid}"
-                        );
-                        agent.state.sessions.insert(*cid, sid.clone());
-                        ctx.session_store.put(*cid, &sid);
-                        agent
-                            .state
-                            .deliveries
-                            .insert(*cid, ChannelDeliveryState::default());
-                        // Seed a zero usage baseline: buzz-acp spawned this session
-                        // so prior usage is zero by definition — first turn is reliable.
-                        agent.acp.notify_session_spawned(&sid);
-                        // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
-                        }
-                        (sid, true)
-                    }
-                    Err(AcpError::AgentExited) => {
+                    ResumeAttempt::Resumed(sid) => Some(sid),
+                    ResumeAttempt::StartFresh => None,
+                    // We do not know whether the remembered session is still
+                    // there, so opening a fresh one could leave two live
+                    // sessions for this channel. Fail the turn retryably
+                    // instead: the batch is requeued and the next attempt
+                    // re-tries the load.
+                    ResumeAttempt::Indeterminate(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
                         send_prompt_result(
                             &result_tx,
@@ -1818,18 +1882,107 @@ pub async fn run_prompt_task(
                         );
                         return;
                     }
-                    Err(e) => {
-                        // Session creation failed; pending canvas was never committed,
-                        // so the next retry will re-fetch a fresh revision.
+                    ResumeAttempt::Indeterminate(error) => {
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
                             agent,
                             source,
-                            PromptOutcome::Error(e),
+                            PromptOutcome::Error(error),
                             requeue_batch_if_queue(&ctx, batch),
                         );
                         return;
+                    }
+                };
+                if let Some(sid) = resumed {
+                    // A session this harness opened before it last restarted,
+                    // live again under the same id. Delivery state starts fresh
+                    // — it is per-process bookkeeping — and no usage baseline is
+                    // seeded, because a resumed session's prior usage is not zero.
+                    agent.state.sessions.insert(*cid, sid.clone());
+                    agent
+                        .state
+                        .deliveries
+                        .insert(*cid, ChannelDeliveryState::default());
+                    if let Some((pending_cid, section)) = pending_canvas.take() {
+                        agent.state.canvas_sections.insert(pending_cid, section);
+                    }
+                    (sid, false)
+                } else {
+                    // The title is channel-qualified (`Agent · #channel`) so one
+                    // agent in several channels doesn't produce identical session
+                    // rows; `title_channel` comes from the single resolve above and
+                    // is `None` for DM, unresolved, and unnamed channels.
+                    match create_session_and_apply_model(
+                        &mut agent,
+                        &ctx,
+                        agent_core.as_deref(),
+                        NewSessionChannelContext {
+                            huddle_instructions: huddle_instructions.as_deref(),
+                            canvas: agent_canvas.as_deref(),
+                            name: title_channel.as_deref(),
+                            id: Some(*cid),
+                            channel_type: origin_channel_type.as_deref(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(sid) => {
+                            tracing::info!(
+                                target: "pool::session",
+                                "created session {sid} for channel {cid}"
+                            );
+                            agent.state.sessions.insert(*cid, sid.clone());
+                            // Record the configuration the session was created
+                            // under: `session/load` cannot re-apply either field,
+                            // so a later turn that wants a different one must not
+                            // resume this session. See `session_store`.
+                            ctx.session_store.put(
+                                *cid,
+                                SessionRecord {
+                                    session_id: sid.clone(),
+                                    model: agent.desired_model.clone(),
+                                    permission_mode: ctx.permission_mode.as_wire_str().to_string(),
+                                },
+                            );
+                            agent
+                                .state
+                                .deliveries
+                                .insert(*cid, ChannelDeliveryState::default());
+                            // Seed a zero usage baseline: buzz-acp spawned this session
+                            // so prior usage is zero by definition — first turn is reliable.
+                            agent.acp.notify_session_spawned(&sid);
+                            // Commit canvas only after session creation succeeds (I3).
+                            if let Some((pending_cid, section)) = pending_canvas.take() {
+                                agent.state.canvas_sections.insert(pending_cid, section);
+                            }
+                            (sid, true)
+                        }
+                        Err(AcpError::AgentExited) => {
+                            agent.state.invalidate_all();
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::AgentExited,
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            // Session creation failed; pending canvas was never committed,
+                            // so the next retry will re-fetch a fresh revision.
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(e),
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -2017,7 +2170,11 @@ pub async fn run_prompt_task(
                                 Some(acp_stop_to_core(&stop_reason)),
                             )
                             .await;
-                            agent.state.invalidate(&source);
+                            invalidate_for_fresh_session(
+                                &mut agent.state,
+                                &ctx.session_store,
+                                &source,
+                            );
                         }
                         Err(AcpError::AgentExited) => {
                             agent.state.invalidate_all();
@@ -2036,7 +2193,11 @@ pub async fn run_prompt_task(
                                 target: "pool::session",
                                 "cancel_with_cleanup failed during initial_message timeout: {e}"
                             );
-                            agent.state.invalidate(&source);
+                            invalidate_for_fresh_session(
+                                &mut agent.state,
+                                &ctx.session_store,
+                                &source,
+                            );
                         }
                     }
                     send_prompt_result(
@@ -2072,7 +2233,7 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    invalidate_for_fresh_session(&mut agent.state, &ctx.session_store, &source);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2310,7 +2471,7 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.state.invalidate(&source);
+                                invalidate_for_fresh_session(&mut agent.state, &ctx.session_store, &source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2347,7 +2508,7 @@ pub async fn run_prompt_task(
                                 if failure.invalidate_all {
                                     agent.state.invalidate_all();
                                 } else {
-                                    agent.state.invalidate(&source);
+                                    invalidate_for_fresh_session(&mut agent.state, &ctx.session_store, &source);
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2410,6 +2571,7 @@ pub async fn run_prompt_task(
                         }
                         apply_completed_before_control_signal(
                             &mut agent.state,
+                            &ctx.session_store,
                             &source,
                             &control_signal,
                         );
@@ -2482,7 +2644,7 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.state.invalidate(&source);
+                invalidate_for_fresh_session(&mut agent.state, &ctx.session_store, &source);
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -2593,7 +2755,7 @@ pub async fn run_prompt_task(
                         target: "pool::prompt",
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    invalidate_for_fresh_session(&mut agent.state, &ctx.session_store, &source);
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -2648,7 +2810,7 @@ pub async fn run_prompt_task(
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
             if !matches!(e, AcpError::AgentError { .. }) {
-                agent.state.invalidate(&source);
+                invalidate_for_fresh_session(&mut agent.state, &ctx.session_store, &source);
             }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -4478,6 +4640,7 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_store::StoreScope;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
@@ -6401,6 +6564,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         apply_completed_before_control_signal(
             &mut s,
+            &SessionStore::disabled(),
             &PromptSource::Channel(ch_a),
             &ControlSignal::Rotate,
         );
@@ -6422,6 +6586,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         apply_completed_before_control_signal(
             &mut s,
+            &SessionStore::disabled(),
             &PromptSource::Channel(ch_a),
             &ControlSignal::Cancel,
         );
@@ -6558,6 +6723,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         // re-creates a fresh session that re-applies the new desired_model.
         apply_completed_before_control_signal(
             &mut s,
+            &SessionStore::disabled(),
             &PromptSource::Channel(ch_a),
             &ControlSignal::SwitchModel("gpt-5".into()),
         );
@@ -7624,6 +7790,473 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cum2.cache_write_tokens.is_none(),
             "cache_write_tokens must be None on cumulative too"
         );
+    }
+
+    // ── restart continuity: session/new → persist → restart → session/load ──
+    //
+    // These drive the real `run_prompt_task` against a scripted ACP agent and a
+    // real on-disk `SessionStore`, so removing the production persistence,
+    // resume, or origin wiring makes them fail. The `SessionStore` unit tests
+    // cannot: they never cross the pool.
+
+    /// A scripted agent that answers `initialize`, `session/new`,
+    /// `session/load` and `session/prompt`, appending every request it receives
+    /// to `capture`.
+    ///
+    /// `load_reply` is spliced in verbatim as the `session/load` reply body, so
+    /// a test can make the load succeed (`"result":{}`), fail definitively
+    /// (`"error":{...}`), or — with an empty string — never answer at all.
+    fn restart_script(capture: &std::path::Path, session_id: &str, load_reply: &str) -> String {
+        let quoted = capture.to_string_lossy().replace('\'', "'\\''");
+        let load_arm = if load_reply.is_empty() {
+            // No reply, and no further reads: the agent goes away mid-load,
+            // which is exactly the indeterminate case.
+            "exit 0".to_string()
+        } else {
+            format!(r#"printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,{load_reply}}}""#)
+        };
+        format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted}'
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":1,\"agentCapabilities\":{{\"loadSession\":true}}}}}}" ;;
+    *'"method":"session/new"'*)
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"{session_id}\"}}}}" ;;
+    *'"method":"session/load"'*)
+      {load_arm} ;;
+    *)
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"stopReason\":\"end_turn\"}}}}" ;;
+  esac
+done"#
+        )
+    }
+
+    /// Spawn one "harness process": a scripted agent, initialized (so the
+    /// `loadSession` capability is recorded) and wrapped in an `OwnedAgent`
+    /// with **empty** `SessionState` — the restart the feature exists for.
+    async fn restart_agent(
+        capture: &std::path::Path,
+        session_id: &str,
+        load_reply: &str,
+    ) -> OwnedAgent {
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                restart_script(capture, session_id, load_reply),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn restart ACP script");
+        acp.initialize().await.expect("initialize");
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "restart-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    fn restart_batch(channel_id: Uuid, body: &str) -> FlushBatch {
+        FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: EventBuilder::new(Kind::Custom(9), body)
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    /// One turn on `channel_id`, returning the agent and the outcome.
+    async fn restart_turn(
+        agent: OwnedAgent,
+        ctx: &Arc<PromptContext>,
+        channel_id: Uuid,
+        turn_id: &str,
+    ) -> PromptResult {
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(restart_batch(channel_id, turn_id)),
+            None,
+            Arc::clone(ctx),
+            result_tx,
+            None,
+            turn_id.to_string(),
+        )
+        .await;
+        result_rx.recv().await.expect("prompt result")
+    }
+
+    fn captured_methods(capture: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(capture)
+            .expect("read captured ACP requests")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect()
+    }
+
+    /// A `PromptContext` with a real store, and `channel_id` known to be a
+    /// public stream so the git-origin env var is in play.
+    fn restart_ctx(store_path: &std::path::Path, channel_id: Uuid) -> PromptContext {
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.channel_info = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "engineering".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        ctx.session_title = Some("Fizz".into());
+        // Git origin lands on MCP server env, so there has to be one.
+        ctx.mcp_servers = vec![crate::acp::McpServer {
+            name: "buzz-dev".into(),
+            command: "true".into(),
+            args: vec![],
+            env: vec![],
+        }];
+        ctx.session_store = Arc::new(SessionStore::open(
+            store_path,
+            StoreScope {
+                relay: "ws://127.0.0.1:3000".into(),
+                agent_pubkey: "a".repeat(64),
+            },
+        ));
+        ctx
+    }
+
+    fn restart_store_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("buzz-acp-restart-{name}-{}.json", Uuid::new_v4()))
+    }
+
+    /// The whole point of the feature, end to end through production code:
+    /// process 1 creates a session and persists it; process 2 starts with an
+    /// empty `SessionState`, loads that exact id, and never opens a second one.
+    ///
+    /// Also pins the git origin: a resumed public stream must carry
+    /// `BUZZ_GIT_ORIGIN_CHANNEL_ID` exactly as the fresh path does, or issues
+    /// and patches created after a restart lose the link back to their channel.
+    #[tokio::test]
+    async fn channel_session_resumes_across_a_restart_with_its_origin_intact() {
+        let store_path = restart_store_path("happy");
+        let channel_id = Uuid::new_v4();
+        let ctx = Arc::new(restart_ctx(&store_path, channel_id));
+
+        // ── process 1 ──
+        let capture_one = restart_store_path("happy-capture-1").with_extension("ndjson");
+        let agent = restart_agent(&capture_one, "ses-restart", r#"\"result\":{}"#).await;
+        let mut result = restart_turn(agent, &ctx, channel_id, "turn-1").await;
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("ses-restart")
+        );
+        result.agent.acp.shutdown().await;
+
+        let persisted = ctx
+            .session_store
+            .get(channel_id)
+            .expect("the created session must be persisted");
+        assert_eq!(persisted.session_id, "ses-restart");
+
+        // ── the restart: a brand new store reading the same file, and an
+        //    agent whose SessionState knows nothing. ──
+        let ctx = Arc::new(restart_ctx(&store_path, channel_id));
+        let capture_two = restart_store_path("happy-capture-2").with_extension("ndjson");
+        let agent = restart_agent(&capture_two, "ses-should-not-be-used", r#"\"result\":{}"#).await;
+        assert!(agent.state.sessions.is_empty(), "restart means empty RAM");
+        let mut result = restart_turn(agent, &ctx, channel_id, "turn-2").await;
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("ses-restart"),
+            "the second process must continue the first process's session"
+        );
+        result.agent.acp.shutdown().await;
+
+        let requests = captured_methods(&capture_two);
+        let methods: Vec<&str> = requests
+            .iter()
+            .filter_map(|r| r["method"].as_str())
+            .collect();
+        assert_eq!(
+            methods.iter().filter(|m| **m == "session/load").count(),
+            1,
+            "exactly one session/load: {methods:?}"
+        );
+        assert_eq!(
+            methods.iter().filter(|m| **m == "session/new").count(),
+            0,
+            "a resumed channel must not also open a fresh session: {methods:?}"
+        );
+
+        let load = requests
+            .iter()
+            .find(|r| r["method"] == "session/load")
+            .expect("session/load request");
+        assert_eq!(load["params"]["sessionId"].as_str(), Some("ses-restart"));
+
+        // Origin parity with the fresh path.
+        let origin_env = |request: &serde_json::Value, key: &str| -> Option<String> {
+            request["params"]["mcpServers"]
+                .as_array()?
+                .iter()
+                .flat_map(|s| s["env"].as_array().cloned().unwrap_or_default())
+                .find(|e| e["name"] == key)
+                .and_then(|e| e["value"].as_str().map(str::to_owned))
+        };
+        let fresh = captured_methods(&capture_one);
+        let fresh_new = fresh
+            .iter()
+            .find(|r| r["method"] == "session/new")
+            .expect("session/new request");
+        assert_eq!(
+            origin_env(load, "BUZZ_GIT_ORIGIN_CHANNEL_ID"),
+            origin_env(fresh_new, "BUZZ_GIT_ORIGIN_CHANNEL_ID"),
+            "a resumed stream must carry the same git origin as a fresh one"
+        );
+
+        for path in [&store_path, &capture_one, &capture_two] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// A JSON-RPC error is the agent *answering*: it does not have that
+    /// session. Forget the receipt and open a fresh one — the resume must
+    /// never cost the turn.
+    #[tokio::test]
+    async fn a_definitive_load_failure_forgets_the_receipt_and_starts_fresh() {
+        let store_path = restart_store_path("definitive");
+        let channel_id = Uuid::new_v4();
+        let ctx = Arc::new(restart_ctx(&store_path, channel_id));
+        ctx.session_store.put(
+            channel_id,
+            SessionRecord {
+                session_id: "ses-reclaimed".into(),
+                model: None,
+                permission_mode: "default".into(),
+            },
+        );
+
+        let capture = restart_store_path("definitive-capture").with_extension("ndjson");
+        let agent = restart_agent(
+            &capture,
+            "ses-replacement",
+            r#"\"error\":{\"code\":-32602,\"message\":\"no such session\"}"#,
+        )
+        .await;
+        let mut result = restart_turn(agent, &ctx, channel_id, "turn-1").await;
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("ses-replacement")
+        );
+        result.agent.acp.shutdown().await;
+
+        assert_eq!(
+            ctx.session_store.get(channel_id).map(|r| r.session_id),
+            Some("ses-replacement".to_string()),
+            "the replacement is committed only after session/new succeeds"
+        );
+        let methods: Vec<String> = captured_methods(&capture)
+            .iter()
+            .filter_map(|r| r["method"].as_str().map(str::to_owned))
+            .collect();
+        assert!(methods.iter().any(|m| m == "session/load"));
+        assert!(methods.iter().any(|m| m == "session/new"));
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    /// An agent that dies mid-load told us nothing. The session may still be
+    /// there — and the load may even have landed on the agent's side — so the
+    /// receipt survives and no competing session is opened. The turn fails
+    /// retryably instead.
+    #[tokio::test]
+    async fn an_indeterminate_load_failure_keeps_the_receipt_and_opens_no_session() {
+        let store_path = restart_store_path("indeterminate");
+        let channel_id = Uuid::new_v4();
+        let ctx = Arc::new(restart_ctx(&store_path, channel_id));
+        ctx.session_store.put(
+            channel_id,
+            SessionRecord {
+                session_id: "ses-still-valid".into(),
+                model: None,
+                permission_mode: "default".into(),
+            },
+        );
+
+        let capture = restart_store_path("indeterminate-capture").with_extension("ndjson");
+        // Empty reply body → the scripted agent exits without answering.
+        let agent = restart_agent(&capture, "ses-competing", "").await;
+        let mut result = restart_turn(agent, &ctx, channel_id, "turn-1").await;
+        assert!(
+            !matches!(result.outcome, PromptOutcome::Ok(_)),
+            "an unresolved load must not report success"
+        );
+        result.agent.acp.shutdown().await;
+
+        assert_eq!(
+            ctx.session_store.get(channel_id).map(|r| r.session_id),
+            Some("ses-still-valid".to_string()),
+            "a transient failure must not destroy a valid receipt"
+        );
+        let methods: Vec<String> = captured_methods(&capture)
+            .iter()
+            .filter_map(|r| r["method"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !methods.iter().any(|m| m == "session/new"),
+            "must not open a session that could compete with the loading one: {methods:?}"
+        );
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    /// `session/load` cannot apply a model or a permission mode — both come
+    /// from the `session/new` response. Resuming across a change to either
+    /// would silently run the old configuration, so it must start fresh.
+    #[tokio::test]
+    async fn a_configuration_change_refuses_the_remembered_session() {
+        let store_path = restart_store_path("config");
+        let channel_id = Uuid::new_v4();
+        let ctx = Arc::new(restart_ctx(&store_path, channel_id));
+        ctx.session_store.put(
+            channel_id,
+            SessionRecord {
+                session_id: "ses-old-model".into(),
+                model: Some("gpt-4".into()),
+                permission_mode: "default".into(),
+            },
+        );
+
+        let capture = restart_store_path("config-capture").with_extension("ndjson");
+        let mut agent = restart_agent(&capture, "ses-new-model", r#"\"result\":{}"#).await;
+        agent.desired_model = Some("gpt-5".into());
+        let mut result = restart_turn(agent, &ctx, channel_id, "turn-1").await;
+        result.agent.acp.shutdown().await;
+
+        let methods: Vec<String> = captured_methods(&capture)
+            .iter()
+            .filter_map(|r| r["method"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !methods.iter().any(|m| m == "session/load"),
+            "a session built for another model must not even be loaded: {methods:?}"
+        );
+        assert!(methods.iter().any(|m| m == "session/new"));
+
+        let _ = std::fs::remove_file(&store_path);
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    /// Every intentional fresh-session transition must clear RAM *and* disk
+    /// together, or the next turn resumes the session that was just discarded.
+    #[test]
+    fn the_lifecycle_seam_clears_ram_and_disk_together() {
+        let path = restart_store_path("seam");
+        let channel_id = Uuid::new_v4();
+        let store = SessionStore::open(
+            &path,
+            StoreScope {
+                relay: "ws://127.0.0.1:3000".into(),
+                agent_pubkey: "a".repeat(64),
+            },
+        );
+        let record = SessionRecord {
+            session_id: "ses-discarded".into(),
+            model: None,
+            permission_mode: "default".into(),
+        };
+
+        // The rotate/switch seam (`!rotate` racing a completing turn).
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "ses-discarded".into());
+        store.put(channel_id, record.clone());
+        apply_completed_before_control_signal(
+            &mut state,
+            &store,
+            &PromptSource::Channel(channel_id),
+            &ControlSignal::Rotate,
+        );
+        assert!(state.sessions.is_empty());
+        assert_eq!(
+            store.get(channel_id),
+            None,
+            "!rotate must forget the receipt"
+        );
+
+        // A token/turn-limit rotation, a cancel, a failed cleanup.
+        state.sessions.insert(channel_id, "ses-discarded".into());
+        store.put(channel_id, record);
+        invalidate_for_fresh_session(&mut state, &store, &PromptSource::Channel(channel_id));
+        assert!(state.sessions.is_empty());
+        assert_eq!(store.get(channel_id), None);
+
+        // Agent death is the opposite case: the harness still wants the
+        // conversation back when the agent respawns.
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "ses-alive".into());
+        store.put(
+            channel_id,
+            SessionRecord {
+                session_id: "ses-alive".into(),
+                model: None,
+                permission_mode: "default".into(),
+            },
+        );
+        state.invalidate_all();
+        assert_eq!(
+            store.get(channel_id).map(|r| r.session_id),
+            Some("ses-alive".to_string()),
+            "an agent crash must not discard the conversation"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     fn make_prompt_context_no_owner() -> PromptContext {
