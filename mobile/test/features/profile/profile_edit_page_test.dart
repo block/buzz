@@ -572,6 +572,13 @@ void main() {
       tester.getSize(recordButton).width,
       closeTo(expectedContentWidth, 0.01),
     );
+    final recordMaterial = tester.widget<Material>(
+      find.descendant(of: recordButton, matching: find.byType(Material)).first,
+    );
+    expect(
+      recordMaterial.borderRadius,
+      const BorderRadius.all(Radius.circular(Radii.full)),
+    );
     expect(
       screenSize.height - tester.getRect(recordButton).bottom,
       _editorControlBottomForTest,

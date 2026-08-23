@@ -20,6 +20,8 @@ class _EmojiMode extends HookConsumerWidget {
     required this.dataset,
     required this.selectedEmoji,
     required this.selectedColor,
+    required this.transitionProgress,
+    required this.transitionDirection,
     required this.onSectionChanged,
     required this.onEmojiSelected,
     required this.onColorSelected,
@@ -30,12 +32,21 @@ class _EmojiMode extends HookConsumerWidget {
   final EmojiDataset dataset;
   final String selectedEmoji;
   final int selectedColor;
+  final double transitionProgress;
+  final double transitionDirection;
   final ValueChanged<_EmojiEditorSection> onSectionChanged;
   final ValueChanged<String> onEmojiSelected;
   final ValueChanged<int> onColorSelected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final trayOffset = reduceMotion ? 0.0 : 16 * (1 - transitionProgress);
+    final actionOffset = reduceMotion
+        ? 0.0
+        : transitionDirection *
+              _modeTransitionDistance *
+              (1 - transitionProgress);
     final skinTone = useState(_skinToneForEmoji(dataset, selectedEmoji));
     final seededSkinTone = useRef(false);
     useEffect(() {
@@ -65,148 +76,178 @@ class _EmojiMode extends HookConsumerWidget {
       child: Column(
         children: [
           Expanded(
-            child: activeSection == _EmojiEditorSection.background
-                ? AvatarBackgroundGrid(
-                    key: const ValueKey('emoji-background-editor'),
-                    selectedColor: selectedColor,
-                    onColorSelected: onColorSelected,
-                    colorKeyPrefix: 'emoji-avatar-color',
-                  )
-                : Column(
-                    key: const ValueKey('emoji-glyph-editor'),
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              key: const ValueKey('emoji-avatar-search'),
-                              controller: searchController,
-                              textInputAction: TextInputAction.search,
-                              decoration: InputDecoration(
-                                hintText: 'Search emoji',
-                                filled: true,
-                                fillColor:
-                                    context.colors.surfaceContainerHighest,
-                                contentPadding: const EdgeInsets.symmetric(
-                                  vertical: 10,
-                                ),
-                                border: const OutlineInputBorder(
-                                  borderRadius: BorderRadius.all(
-                                    Radius.circular(Radii.full),
-                                  ),
-                                  borderSide: BorderSide.none,
-                                ),
-                                enabledBorder: const OutlineInputBorder(
-                                  borderRadius: BorderRadius.all(
-                                    Radius.circular(Radii.full),
-                                  ),
-                                  borderSide: BorderSide.none,
-                                ),
-                                focusedBorder: const OutlineInputBorder(
-                                  borderRadius: BorderRadius.all(
-                                    Radius.circular(Radii.full),
-                                  ),
-                                  borderSide: BorderSide.none,
-                                ),
-                                prefixIcon: const Icon(
-                                  LucideIcons.search,
-                                  size: 20,
-                                ),
-                                suffixIcon: searchController.text.isEmpty
-                                    ? null
-                                    : IconButton(
-                                        tooltip: 'Clear search',
-                                        onPressed: searchController.clear,
-                                        icon: const Icon(
-                                          LucideIcons.x,
-                                          size: 18,
+            child: ClipRect(
+              child: Transform.translate(
+                key: const ValueKey('avatar-mode-tray-transition-transform'),
+                offset: Offset(0, trayOffset),
+                child: Opacity(
+                  opacity: transitionProgress,
+                  child: activeSection == _EmojiEditorSection.background
+                      ? AvatarBackgroundGrid(
+                          key: const ValueKey('emoji-background-editor'),
+                          selectedColor: selectedColor,
+                          onColorSelected: onColorSelected,
+                          colorKeyPrefix: 'emoji-avatar-color',
+                        )
+                      : Column(
+                          key: const ValueKey('emoji-glyph-editor'),
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    key: const ValueKey('emoji-avatar-search'),
+                                    controller: searchController,
+                                    textInputAction: TextInputAction.search,
+                                    decoration: InputDecoration(
+                                      hintText: 'Search emoji',
+                                      filled: true,
+                                      fillColor: context
+                                          .colors
+                                          .surfaceContainerHighest,
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                            vertical: 10,
+                                          ),
+                                      border: const OutlineInputBorder(
+                                        borderRadius: BorderRadius.all(
+                                          Radius.circular(Radii.full),
                                         ),
+                                        borderSide: BorderSide.none,
                                       ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: Grid.xxs),
-                          _AvatarSkinToneSelector(
-                            value: skinTone.value,
-                            onChanged: selectSkinTone,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: Grid.xxs),
-                      Expanded(
-                        child: dataset.isEmpty
-                            ? const Center(child: CircularProgressIndicator())
-                            : visibleEmoji.isEmpty
-                            ? Center(
-                                child: Text(
-                                  'No emoji found',
-                                  style: context.textTheme.bodyMedium?.copyWith(
-                                    color: context.colors.onSurfaceVariant,
+                                      enabledBorder: const OutlineInputBorder(
+                                        borderRadius: BorderRadius.all(
+                                          Radius.circular(Radii.full),
+                                        ),
+                                        borderSide: BorderSide.none,
+                                      ),
+                                      focusedBorder: const OutlineInputBorder(
+                                        borderRadius: BorderRadius.all(
+                                          Radius.circular(Radii.full),
+                                        ),
+                                        borderSide: BorderSide.none,
+                                      ),
+                                      prefixIcon: const Icon(
+                                        LucideIcons.search,
+                                        size: 20,
+                                      ),
+                                      suffixIcon: searchController.text.isEmpty
+                                          ? null
+                                          : IconButton(
+                                              tooltip: 'Clear search',
+                                              onPressed: searchController.clear,
+                                              icon: const Icon(
+                                                LucideIcons.x,
+                                                size: 18,
+                                              ),
+                                            ),
+                                    ),
                                   ),
                                 ),
-                              )
-                            : GridView.builder(
-                                key: const ValueKey('emoji-avatar-grid'),
-                                padding: EdgeInsets.zero,
-                                gridDelegate:
-                                    SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount:
-                                          defaultTargetPlatform ==
-                                              TargetPlatform.iOS
-                                          ? 8
-                                          : 7,
-                                    ),
-                                itemCount: visibleEmoji.length,
-                                itemBuilder: (context, index) {
-                                  final entry = visibleEmoji[index];
-                                  final isSelected =
-                                      entry.native == selectedEmoji;
-                                  void selectEmoji() {
-                                    unawaited(HapticFeedback.selectionClick());
-                                    onEmojiSelected(entry.native);
-                                  }
+                                const SizedBox(width: Grid.xxs),
+                                _AvatarSkinToneSelector(
+                                  value: skinTone.value,
+                                  onChanged: selectSkinTone,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: Grid.xxs),
+                            Expanded(
+                              child: dataset.isEmpty
+                                  ? const Center(
+                                      child: CircularProgressIndicator(),
+                                    )
+                                  : visibleEmoji.isEmpty
+                                  ? Center(
+                                      child: Text(
+                                        'No emoji found',
+                                        style: context.textTheme.bodyMedium
+                                            ?.copyWith(
+                                              color: context
+                                                  .colors
+                                                  .onSurfaceVariant,
+                                            ),
+                                      ),
+                                    )
+                                  : GridView.builder(
+                                      key: const ValueKey('emoji-avatar-grid'),
+                                      padding: EdgeInsets.zero,
+                                      gridDelegate:
+                                          SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount:
+                                                defaultTargetPlatform ==
+                                                    TargetPlatform.iOS
+                                                ? 8
+                                                : 7,
+                                          ),
+                                      itemCount: visibleEmoji.length,
+                                      itemBuilder: (context, index) {
+                                        final entry = visibleEmoji[index];
+                                        final isSelected =
+                                            entry.native == selectedEmoji;
+                                        void selectEmoji() {
+                                          unawaited(
+                                            HapticFeedback.selectionClick(),
+                                          );
+                                          onEmojiSelected(entry.native);
+                                        }
 
-                                  return EmojiAvatarTile(
-                                    emoji: entry.native,
-                                    label: entry.name,
-                                    tileId: entry.tileId,
-                                    isSelected: isSelected,
-                                    onTap: selectEmoji,
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
-                  ),
+                                        return EmojiAvatarTile(
+                                          emoji: entry.native,
+                                          label: entry.name,
+                                          tileId: entry.tileId,
+                                          isSelected: isSelected,
+                                          onTap: selectEmoji,
+                                        );
+                                      },
+                                    ),
+                            ),
+                          ],
+                        ),
+                ),
+              ),
+            ),
           ),
           const SizedBox(height: Grid.xs),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Spacer(),
-              Expanded(
-                child: AvatarEditorOptionButton(
-                  key: const ValueKey('emoji-editor-background'),
-                  icon: LucideIcons.palette,
-                  label: 'Background',
-                  selected: activeSection == _EmojiEditorSection.background,
-                  onTap: () => onSectionChanged(_EmojiEditorSection.background),
-                  labelMaxWidth: 96,
+          ClipRect(
+            child: Transform.translate(
+              key: const ValueKey('avatar-mode-transition-transform'),
+              offset: Offset(actionOffset, 0),
+              child: Opacity(
+                opacity: transitionProgress,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Spacer(),
+                    Expanded(
+                      child: AvatarEditorOptionButton(
+                        key: const ValueKey('emoji-editor-background'),
+                        icon: LucideIcons.palette,
+                        label: 'Background',
+                        selected:
+                            activeSection == _EmojiEditorSection.background,
+                        onTap: () =>
+                            onSectionChanged(_EmojiEditorSection.background),
+                        labelMaxWidth: 96,
+                      ),
+                    ),
+                    const SizedBox(width: Grid.half),
+                    Expanded(
+                      child: AvatarEditorOptionButton(
+                        key: const ValueKey('emoji-editor-emoji'),
+                        icon: LucideIcons.smile,
+                        label: 'Emoji',
+                        selected: activeSection == _EmojiEditorSection.emoji,
+                        onTap: () =>
+                            onSectionChanged(_EmojiEditorSection.emoji),
+                        labelMaxWidth: 80,
+                      ),
+                    ),
+                    const Spacer(),
+                  ],
                 ),
               ),
-              const SizedBox(width: Grid.half),
-              Expanded(
-                child: AvatarEditorOptionButton(
-                  key: const ValueKey('emoji-editor-emoji'),
-                  icon: LucideIcons.smile,
-                  label: 'Emoji',
-                  selected: activeSection == _EmojiEditorSection.emoji,
-                  onTap: () => onSectionChanged(_EmojiEditorSection.emoji),
-                  labelMaxWidth: 80,
-                ),
-              ),
-              const Spacer(),
-            ],
+            ),
           ),
         ],
       ),

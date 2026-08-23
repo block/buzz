@@ -50,7 +50,7 @@ typedef AnimatedAvatarCaptureBuilder =
     });
 
 const _previewSize = 220.0;
-const _motionDuration = Duration(milliseconds: 240);
+const _motionDuration = Duration(milliseconds: 150);
 const _previewSquishDuration = Duration(milliseconds: 200);
 const Curve _entranceCurve = Curves.easeOutCubic;
 const Curve _exitCurve = Curves.easeInCubic;
@@ -133,6 +133,8 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final error = useState<String?>(null);
     final dataset = ref.watch(emojiDatasetOrEmptyProvider);
     final modeTransitionDirection = useRef(1.0);
+    final retainedPreview = useRef<Widget?>(null);
+    final retainedPreviewTop = useRef(0.0);
     final modeTransitionController = useAnimationController(
       duration: _motionDuration,
       initialValue: 1,
@@ -269,6 +271,16 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 ),
             ],
           );
+    if (mode != ProfileAvatarMode.animated && fixedPreview != null) {
+      retainedPreview.value = mode == ProfileAvatarMode.emoji
+          ? _EmojiAvatarPreview(
+              emoji: selectedEmoji.value,
+              color: Color(selectedColor.value),
+              animationKey: emojiPreviewKey.value,
+              reduceMotion: true,
+            )
+          : fixedPreview;
+    }
 
     final curvedEntrance = CurvedAnimation(
       parent: transition,
@@ -296,6 +308,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             : avatarBackgroundPreviewShift;
         final previewShift = min(requestedShift, maximumShift);
         final previewTop = basePreviewTop - previewShift;
+        if (mode != ProfileAvatarMode.animated) {
+          retainedPreviewTop.value = previewTop;
+        }
         final fixedContentTop =
             previewTop + _previewBlockSize + _previewControlGap;
         final modeTop = mode == ProfileAvatarMode.animated
@@ -320,6 +335,8 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             dataset: dataset,
             selectedEmoji: selectedEmoji.value,
             selectedColor: selectedColor.value,
+            transitionProgress: modeTransitionProgress,
+            transitionDirection: modeTransitionDirection.value,
             onSectionChanged: (section) => emojiSection.value = section,
             onEmojiSelected: (emoji) {
               selectedEmoji.value = emoji;
@@ -347,7 +364,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             appBarHeight +
             _settingsAvatarCenterBelowAppBar -
             (previewTop + _previewBlockSize / 2);
-        final transitionedModeContent = mode == ProfileAvatarMode.animated
+        final transitionedModeContent =
+            mode == ProfileAvatarMode.animated ||
+                mode == ProfileAvatarMode.emoji
             ? modeContent
             : ClipRect(
                 child: Transform.translate(
@@ -452,6 +471,26 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 child: transitionedModeContent,
               ),
             ),
+            if (mode == ProfileAvatarMode.animated &&
+                !reduceMotion &&
+                modeTransitionProgress < 1 &&
+                retainedPreview.value != null)
+              Positioned(
+                key: const ValueKey('avatar-mode-retained-preview'),
+                left: Grid.gutter,
+                right: Grid.gutter,
+                top:
+                    retainedPreviewTop.value +
+                    (basePreviewTop - retainedPreviewTop.value) *
+                        modeTransitionProgress,
+                height: _previewBlockSize,
+                child: IgnorePointer(
+                  child: Opacity(
+                    opacity: 1 - modeTransitionProgress,
+                    child: Center(child: retainedPreview.value),
+                  ),
+                ),
+              ),
             if (error.value != null)
               Positioned(
                 left: Grid.gutter,

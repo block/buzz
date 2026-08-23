@@ -113,6 +113,11 @@ void runProfileEditMotionAndAccessibilityTests() {
 
     await tester.tap(find.text('Emoji'));
     await tester.pump();
+    final trayTransform = tester.widget<Transform>(
+      find.byKey(const ValueKey('avatar-mode-tray-transition-transform')),
+    );
+    expect(trayTransform.transform.getTranslation().x, 0);
+    expect(trayTransform.transform.getTranslation().y, greaterThan(0));
     final forwardTransform = tester.widget<Transform>(
       find.byKey(const ValueKey('avatar-mode-transition-transform')),
     );
@@ -128,6 +133,16 @@ void runProfileEditMotionAndAccessibilityTests() {
           .x,
       closeTo(0, 0.01),
     );
+    expect(
+      tester
+          .widget<Transform>(
+            find.byKey(const ValueKey('avatar-mode-tray-transition-transform')),
+          )
+          .transform
+          .getTranslation()
+          .y,
+      closeTo(0, 0.01),
+    );
 
     await tester.tap(find.text('Image'));
     await tester.pump();
@@ -135,6 +150,37 @@ void runProfileEditMotionAndAccessibilityTests() {
       find.byKey(const ValueKey('avatar-mode-transition-transform')),
     );
     expect(reverseTransform.transform.getTranslation().x, lessThan(0));
+  });
+
+  testWidgets('retains the preview while animated mode initializes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Emoji'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    final emojiCenter = tester
+        .getCenter(find.byKey(const ValueKey('emoji-avatar-preview')))
+        .dy;
+
+    await tester.tap(find.text('Animated'));
+    await tester.pump();
+    final retained = find.byKey(const ValueKey('avatar-mode-retained-preview'));
+    expect(retained, findsOneWidget);
+    expect(tester.getCenter(retained).dy, closeTo(emojiCenter, 0.01));
+
+    await tester.pump(const Duration(milliseconds: 75));
+    expect(tester.getCenter(retained).dy, greaterThan(emojiCenter));
+    await tester.pump(const Duration(milliseconds: 75));
+    expect(retained, findsNothing);
   });
 
   testWidgets('plays an animated avatar on the profile and image editor', (
