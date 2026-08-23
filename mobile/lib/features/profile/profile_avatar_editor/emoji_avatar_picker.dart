@@ -36,7 +36,15 @@ class _EmojiMode extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final skinTone = useState(0);
+    final skinTone = useState(_skinToneForEmoji(dataset, selectedEmoji));
+    final seededSkinTone = useRef(false);
+    useEffect(() {
+      if (seededSkinTone.value || dataset.isEmpty) return null;
+      seededSkinTone.value = true;
+      final initialTone = _skinToneForEmoji(dataset, selectedEmoji);
+      if (skinTone.value != initialTone) skinTone.value = initialTone;
+      return null;
+    }, [dataset]);
     final searchController = useTextEditingController();
     useListenable(searchController);
     final visibleEmoji = useMemoized(() {
@@ -319,6 +327,13 @@ class _SkinToneDot extends StatelessWidget {
 
 int _validSkinTone(int? value) =>
     value != null && value >= 0 && value < _skinTones.length ? value : 0;
+
+int _skinToneForEmoji(EmojiDataset dataset, String emoji) =>
+    dataset.all
+        .where((entry) => entry.native == emoji)
+        .map((entry) => _validSkinTone(entry.skinIndex))
+        .firstOrNull ??
+    0;
 
 List<EmojiEntry> _emojiForSkinTone(EmojiDataset dataset, int skinTone) {
   final variantsById = <String, List<EmojiEntry>>{};

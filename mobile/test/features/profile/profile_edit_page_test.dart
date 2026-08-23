@@ -9,6 +9,8 @@ import 'package:buzz/features/profile/emoji_avatar_tile.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
+import 'package:buzz/shared/emoji/emoji_data.dart';
+import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';

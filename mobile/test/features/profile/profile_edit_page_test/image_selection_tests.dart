@@ -45,6 +45,93 @@ void runProfileEditImageSelectionTests() {
     expect(notifier.savedAvatarUrls, [avatarUrl]);
   });
 
+  testWidgets('seeds the skin-tone filter from the current emoji', (
+    tester,
+  ) async {
+    const variants = [
+      EmojiEntry(
+        id: '+1',
+        name: 'Thumbs Up',
+        keywords: ['thumb'],
+        native: '👍',
+        categoryId: 'people',
+      ),
+      EmojiEntry(
+        id: '+1',
+        name: 'Thumbs Up',
+        keywords: ['thumb'],
+        native: '👍🏻',
+        categoryId: 'people',
+        skinIndex: 1,
+      ),
+      EmojiEntry(
+        id: '+1',
+        name: 'Thumbs Up',
+        keywords: ['thumb'],
+        native: '👍🏼',
+        categoryId: 'people',
+        skinIndex: 2,
+      ),
+      EmojiEntry(
+        id: '+1',
+        name: 'Thumbs Up',
+        keywords: ['thumb'],
+        native: '👍🏽',
+        categoryId: 'people',
+        skinIndex: 3,
+      ),
+      EmojiEntry(
+        id: '+1',
+        name: 'Thumbs Up',
+        keywords: ['thumb'],
+        native: '👍🏾',
+        categoryId: 'people',
+        skinIndex: 4,
+      ),
+      EmojiEntry(
+        id: '+1',
+        name: 'Thumbs Up',
+        keywords: ['thumb'],
+        native: '👍🏿',
+        categoryId: 'people',
+        skinIndex: 5,
+      ),
+    ];
+    const dataset = EmojiDataset(
+      categories: [EmojiCategory(id: 'people', emoji: variants)],
+      all: variants,
+      nativeToShortcode: {'👍🏽': ':+1:'},
+    );
+    final avatarUrl = emojiAvatarDataUrl('👍🏽', emojiAvatarColors[11]);
+    final notifier = _FakeProfileNotifier(
+      profile: UserProfile(pubkey: 'aabb', avatarUrl: avatarUrl),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
+        ],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Emoji'));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      tester
+          .widget<PopupMenuButton<int>>(
+            find.byKey(const ValueKey('emoji-avatar-skin-tone')),
+          )
+          .initialValue,
+      3,
+    );
+  });
+
   testWidgets('discards a delayed image after switching avatar modes', (
     tester,
   ) async {

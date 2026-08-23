@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -346,78 +347,84 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
               top: previewTop,
               height: 220,
               child: Center(
-                child: GestureDetector(
-                  key: const ValueKey('animated-avatar-review-preview'),
-                  behavior: HitTestBehavior.opaque,
-                  onScaleStart: (_) => gestureStartScale.value = scale.value,
-                  onScaleUpdate: (details) {
-                    final next = Offset(
-                      (offset.value.dx + details.focalPointDelta.dx / 96).clamp(
-                        -1,
-                        1,
-                      ),
-                      (offset.value.dy + details.focalPointDelta.dy / 96).clamp(
-                        -1,
-                        1,
-                      ),
+                child: _RepositionablePreviewSemantics(
+                  offset: offset.value,
+                  onMove: (delta) {
+                    unawaited(HapticFeedback.selectionClick());
+                    offset.value = Offset(
+                      (offset.value.dx + delta.dx).clamp(-1.0, 1.0),
+                      (offset.value.dy + delta.dy).clamp(-1.0, 1.0),
                     );
-                    offset.value = next;
-                    scale.value = (gestureStartScale.value * details.scale)
-                        .clamp(0.7, 2.0)
-                        .toDouble();
                   },
-                  child: SizedBox.square(
-                    dimension: 220,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        ClipOval(
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              Center(
-                                child: Transform.translate(
-                                  offset:
-                                      const Offset(0, 20.625) +
-                                      shapeOffset.value * 51.5625,
-                                  child: Transform.scale(
-                                    scale: shapeScale.value,
-                                    child: Container(
-                                      width: 172,
-                                      height: 172,
-                                      decoration: BoxDecoration(
-                                        color: Color(backdropColor.value),
-                                        shape: BoxShape.circle,
+                  child: GestureDetector(
+                    key: const ValueKey('animated-avatar-review-preview'),
+                    behavior: HitTestBehavior.opaque,
+                    onScaleStart: (_) => gestureStartScale.value = scale.value,
+                    onScaleUpdate: (details) {
+                      final next = Offset(
+                        (offset.value.dx + details.focalPointDelta.dx / 96)
+                            .clamp(-1, 1),
+                        (offset.value.dy + details.focalPointDelta.dy / 96)
+                            .clamp(-1, 1),
+                      );
+                      offset.value = next;
+                      scale.value = (gestureStartScale.value * details.scale)
+                          .clamp(0.7, 2.0)
+                          .toDouble();
+                    },
+                    child: SizedBox.square(
+                      dimension: 220,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          ClipOval(
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Center(
+                                  child: Transform.translate(
+                                    offset:
+                                        const Offset(0, 20.625) +
+                                        shapeOffset.value * 51.5625,
+                                    child: Transform.scale(
+                                      scale: shapeScale.value,
+                                      child: Container(
+                                        width: 172,
+                                        height: 172,
+                                        decoration: BoxDecoration(
+                                          color: Color(backdropColor.value),
+                                          shape: BoxShape.circle,
+                                        ),
                                       ),
                                     ),
                                   ),
                                 ),
-                              ),
-                              _AnimatedPersonPreview(
-                                bytes: selectedFrame,
-                                offset: offset.value * 48,
-                                scale: scale.value,
-                                outline: personOutline.value,
-                                outlineColor: _personOutlineColor(
-                                  backdropColor.value,
+                                _AnimatedPersonPreview(
+                                  bytes: selectedFrame,
+                                  offset: offset.value * 48,
+                                  scale: scale.value,
+                                  outline: personOutline.value,
+                                  outlineColor: _personOutlineColor(
+                                    backdropColor.value,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        IgnorePointer(
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: context.colors.onSurface.withValues(
-                                  alpha: 0.1,
+                          IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: context.colors.onSurface.withValues(
+                                    alpha: 0.1,
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),

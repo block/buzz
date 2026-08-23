@@ -176,6 +176,48 @@ void main() {
     expect(tester.getSemantics(scrubber).value, '2 of 3');
     semantics.dispose();
   });
+
+  testWidgets('review preview exposes accessible repositioning actions', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final frame = image.encodePng(image.Image(width: 2, height: 2));
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: AnimatedAvatarCapture(
+              height: 600,
+              initialFrames: [frame],
+              onPrepareChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final position = find.bySemanticsLabel('Avatar position');
+    expect(position, findsOneWidget);
+    final positionWidget = tester.widget<Semantics>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == 'Avatar position',
+      ),
+    );
+    final actions = positionWidget.properties.customSemanticsActions!;
+    expect(
+      actions.keys.map((action) => action.label),
+      containsAll(['Move left', 'Move right', 'Move up', 'Move down']),
+    );
+    actions.entries
+        .firstWhere((entry) => entry.key.label == 'Move right')
+        .value();
+    await tester.pump();
+    expect(tester.getSemantics(position).value, '10 horizontal, 0 vertical');
+    semantics.dispose();
+  });
 }
 
 class _TestLifecycleNotifier extends AppLifecycleNotifier {
