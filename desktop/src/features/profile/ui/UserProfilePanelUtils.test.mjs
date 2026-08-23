@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deriveProfileChannels,
   parseProfilePanelTab,
   parseProfilePanelView,
   personaManagedAgentUpdate,
@@ -243,4 +244,72 @@ test("profile target identity stays stable while a requested pubkey is canonical
     profilePanelTargetKey(undefined, "requested-persona"),
     "persona:requested-persona",
   );
+});
+
+const CHANNEL_A = "11111111-1111-4111-8111-111111111111";
+const CHANNEL_B = "22222222-2222-4222-8222-222222222222";
+
+function relayAgent(overrides = {}) {
+  return {
+    pubkey: "aa".repeat(32),
+    ownerPubkey: null,
+    name: "Fizz",
+    agentType: "agent",
+    channels: [],
+    channelIds: [],
+    capabilities: [],
+    status: "offline",
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    ...overrides,
+  };
+}
+
+const COMMUNITY_CHANNELS = [
+  { id: CHANNEL_A, name: "general" },
+  { id: CHANNEL_B, name: "random" },
+];
+
+test("deriveProfileChannels does not pair names with ids by index", () => {
+  // `channelIds` arrives in channel-id order from relay membership while
+  // `channels` keeps whatever order the kind:10100 author wrote. Pairing by
+  // index here labelled a row "general" and opened #random.
+  const links = deriveProfileChannels(
+    "ff".repeat(32),
+    relayAgent({
+      channels: ["random", "general"],
+      channelIds: [CHANNEL_A, CHANNEL_B],
+    }),
+    undefined,
+    COMMUNITY_CHANNELS,
+  );
+
+  assert.deepEqual(links, [
+    { id: CHANNEL_A, name: "general" },
+    { id: CHANNEL_B, name: "random" },
+  ]);
+});
+
+test("deriveProfileChannels surfaces a channel id the profile never named", () => {
+  // `buzz-acp` appends to `channel_ids` without naming the channel, so an id
+  // with no matching name still has to resolve.
+  const links = deriveProfileChannels(
+    "ff".repeat(32),
+    relayAgent({ channels: [], channelIds: [CHANNEL_B] }),
+    undefined,
+    COMMUNITY_CHANNELS,
+  );
+
+  assert.deepEqual(links, [{ id: CHANNEL_B, name: "random" }]);
+});
+
+test("deriveProfileChannels keeps a named channel the viewer cannot resolve", () => {
+  const links = deriveProfileChannels(
+    "ff".repeat(32),
+    relayAgent({ channels: ["private-room"], channelIds: [] }),
+    undefined,
+    COMMUNITY_CHANNELS,
+  );
+
+  assert.deepEqual(links, [{ id: "private-room", name: "private-room" }]);
 });

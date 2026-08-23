@@ -539,9 +539,9 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
 
-test("relayAgentCanRespondInChannel: relay membership stands in for a stale channelIds", () => {
-  // The agent was invited to "fresh" but its kind:10100 still lists only
-  // "general" — nothing republishes that array when membership changes.
+test("relayAgentCanRespondInChannel: the live roster beats a not-yet-polled channelIds", () => {
+  // The agent was invited to "fresh", but the relay-agents query last ran
+  // before that and still reports only "general". The roster is live.
   const agent = {
     pubkey: PUB_A,
     respondTo: "anyone",
@@ -583,7 +583,7 @@ test("relayAgentCanRespondInChannel: membership does not bypass an allowlist", (
   );
 });
 
-test("getMentionableAgentPubkeys: channel scope accepts a member with stale channelIds", () => {
+test("getMentionableAgentPubkeys: channel scope accepts a member the agents poll has not caught up to", () => {
   const agent = {
     pubkey: PUB_A,
     respondTo: "anyone",

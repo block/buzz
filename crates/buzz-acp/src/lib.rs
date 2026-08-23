@@ -207,8 +207,22 @@ impl ProfileChannelUpdater {
 
 /// How far ahead of local time a republish may stamp its `created_at`.
 ///
-/// Bounds how much peer clock skew we will out-bid before giving up loudly.
-const MAX_PROFILE_PUBLISH_SKEW_SECS: u64 = 5;
+/// Matches the relay's own ingest window (`MAX_TIMESTAMP_DRIFT_SECS`, ±900s):
+/// a stamp inside it lands, so refusing one is pure loss — the worker would
+/// retry it forever at the backoff ceiling and leave `channel_ids` stale for
+/// the life of the process. Past the window the relay rejects the event
+/// outright, so a peer skewed further than this is unwinnable and failing
+/// loudly is the only honest outcome.
+const MAX_PROFILE_PUBLISH_SKEW_SECS: u64 = 900;
+
+/// Longest wall-clock wait before signing a republish.
+///
+/// Only this harness's own previous publish can require a wait, and it can only
+/// ever be the single second the distinct-`created_at` rule costs. A peer's
+/// future timestamp is out-bid by stamping past it, never by sleeping through
+/// it: sleeping would park the single worker — and grow its unbounded queue —
+/// for the whole skew, up to `MAX_PROFILE_PUBLISH_SKEW_SECS`.
+const MAX_PROFILE_PUBLISH_SLEEP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// First retry delay after a failed profile republish.
 const BASE_PROFILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
@@ -225,12 +239,224 @@ fn unix_secs_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Apply one membership change to this agent's self-declared `channel_ids`.
+/// Apply queued membership deltas to a profile's `channel_ids`, in queue order.
 ///
-/// `channel_ids` is a field desktop's @mention picker reads to decide whether
-/// an agent is invocable in a channel, and nothing kept it in sync. An agent
-/// invited to a new channel subscribed immediately but stayed absent from that
-/// channel's picker until an operator republished the profile by hand.
+/// Order matters: a join/leave/rejoin of one channel settles on the last
+/// observed state rather than on whichever delta happens to win. Returns
+/// whether the array actually ended up different — an add for a channel already
+/// listed, a remove for one never listed, or a burst that nets to nothing must
+/// not cost a replaceable write.
+///
+/// Adds append and removes delete in place; the array is never sorted.
+/// `channel_ids` is paired with the profile's human-readable `channels` array by
+/// index in at least one client, so a wholesale reorder relabels rows that were
+/// correct before.
+fn apply_channel_id_deltas(ids: &mut Vec<String>, deltas: &[(Uuid, bool)]) -> bool {
+    let before = ids.clone();
+    for (channel_id, joined) in deltas {
+        let target = channel_id.to_string();
+        let had = ids.iter().any(|id| id == &target);
+        if *joined == had {
+            tracing::debug!(channel_id = %channel_id, "profile channel_ids already current");
+            continue;
+        }
+        if *joined {
+            ids.push(target);
+        } else {
+            ids.retain(|id| id != &target);
+        }
+    }
+    // Duplicates can only arrive from the stored profile — the `had` check never
+    // adds one. Order-preserving, for the same reason the array is not sorted.
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    *ids != before
+}
+
+/// `created_at` for the next republish, and how far ahead of `now` it lands.
+///
+/// Never stamps two of these in the same second: the relay breaks a same-second
+/// replaceable tie by lowest event id and rolls the loser back while still
+/// reporting the write as accepted. `floor` is the newest `created_at` known to
+/// be in play — this harness's last publish, or the stored profile's, whichever
+/// is later. Stamping past the floor wins the LWW compare without waiting for
+/// the wall clock to catch up to a peer's skew.
+fn profile_publish_stamp(now: u64, floor: u64) -> (u64, u64) {
+    let created_at = now.max(floor.saturating_add(1));
+    (created_at, created_at.saturating_sub(now))
+}
+
+/// Whether a `POST /events` response means the republish actually landed.
+///
+/// A 2xx does not mean the profile changed. Three distinct failures hide behind
+/// one:
+///
+/// - `accepted: false` — the relay refused the event outright.
+/// - `accepted: true` with a `duplicate` message — the write was stored and then
+///   rolled back because a peer's copy won the replaceable compare
+///   (`Db::replace_addressable_event` reports `was_inserted = false`, and the
+///   ingest path maps that to accepted-plus-duplicate).
+/// - no readable `accepted` field — an empty or unexpected body, which
+///   `RestClient::submit_event` surfaces as `Value::Null`.
+///
+/// All three fail closed. The queue is the worker's only copy of these deltas,
+/// so reading an unreadable response as success would drop them silently.
+fn profile_write_landed(response: &serde_json::Value) -> Result<(), String> {
+    let accepted = response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let message = response
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // The relay emits both bare `duplicate` and `duplicate: <detail>`; the CLI's
+    // write path matches the same two forms.
+    let superseded = message == "duplicate" || message.starts_with("duplicate:");
+    if accepted && !superseded {
+        return Ok(());
+    }
+    Err(if message.is_empty() {
+        "relay did not accept the profile update".to_string()
+    } else {
+        message.to_string()
+    })
+}
+
+#[cfg(test)]
+mod profile_channel_tests {
+    use super::*;
+
+    fn channel(byte: u8) -> Uuid {
+        Uuid::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn add_appends_instead_of_sorting() {
+        let first = channel(0xaa).to_string();
+        let mut ids = vec![first.clone()];
+
+        assert!(apply_channel_id_deltas(&mut ids, &[(channel(0x11), true)]));
+
+        // 0x11… sorts before 0xaa… but must stay second: the profile's
+        // index-paired `channels` names still point at their own ids.
+        assert_eq!(ids, vec![first, channel(0x11).to_string()]);
+    }
+
+    #[test]
+    fn remove_drops_only_its_own_channel() {
+        let kept = channel(0xaa).to_string();
+        let mut ids = vec![kept.clone(), channel(0xbb).to_string()];
+
+        assert!(apply_channel_id_deltas(&mut ids, &[(channel(0xbb), false)]));
+
+        assert_eq!(ids, vec![kept]);
+    }
+
+    #[test]
+    fn already_current_deltas_cost_no_write() {
+        let mut ids = vec![channel(0xaa).to_string()];
+
+        // Add of a listed channel, remove of an unlisted one.
+        assert!(!apply_channel_id_deltas(
+            &mut ids,
+            &[(channel(0xaa), true), (channel(0xbb), false)]
+        ));
+        assert_eq!(ids, vec![channel(0xaa).to_string()]);
+    }
+
+    #[test]
+    fn a_burst_that_nets_to_nothing_costs_no_write() {
+        let mut ids = Vec::new();
+
+        // Retried deltas from a failed publish can carry an add and its own
+        // later remove. Applied in order they settle on "not a member", which
+        // is what the stored profile already says.
+        assert!(!apply_channel_id_deltas(
+            &mut ids,
+            &[(channel(0x22), true), (channel(0x22), false)]
+        ));
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn later_delta_wins_for_the_same_channel() {
+        let mut ids = Vec::new();
+
+        assert!(apply_channel_id_deltas(
+            &mut ids,
+            &[(channel(0x33), false), (channel(0x33), true)]
+        ));
+
+        assert_eq!(ids, vec![channel(0x33).to_string()]);
+    }
+
+    #[test]
+    fn stamp_never_reuses_the_floor_second() {
+        // Same second as the floor: step past it rather than tie and lose.
+        assert_eq!(profile_publish_stamp(100, 100), (101, 1));
+        // Nothing in play: stamp now, wait for nothing.
+        assert_eq!(profile_publish_stamp(100, 0), (100, 0));
+    }
+
+    #[test]
+    fn peer_skew_is_out_bid_not_slept_through() {
+        let (created_at, lead) = profile_publish_stamp(1_000, 1_800);
+
+        assert_eq!(created_at, 1_801);
+        assert_eq!(lead, 801);
+        // Inside the relay's ingest window, so this publishes; the worker waits
+        // at most MAX_PROFILE_PUBLISH_SLEEP regardless of the lead.
+        assert!(lead <= MAX_PROFILE_PUBLISH_SKEW_SECS);
+    }
+
+    #[test]
+    fn unwinnable_skew_is_reported_not_published() {
+        let (_, lead) = profile_publish_stamp(1_000, 1_000 + MAX_PROFILE_PUBLISH_SKEW_SECS);
+
+        assert!(lead > MAX_PROFILE_PUBLISH_SKEW_SECS);
+    }
+
+    #[test]
+    fn only_an_explicit_accept_counts_as_landed() {
+        assert!(profile_write_landed(&serde_json::json!({"accepted": true})).is_ok());
+        assert!(
+            profile_write_landed(&serde_json::json!({"accepted": true, "message": "ok"})).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_lost_replaceable_compare_is_not_landed() {
+        // `accepted: true` plus a duplicate message: stored, then rolled back.
+        for message in ["duplicate", "duplicate:", "duplicate: superseded"] {
+            assert!(
+                profile_write_landed(&serde_json::json!({"accepted": true, "message": message}))
+                    .is_err(),
+                "{message} must not read as landed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_response_fails_closed() {
+        // The queue is the only copy of the deltas, so anything we cannot read
+        // as an accept has to be retried rather than cleared.
+        assert!(profile_write_landed(&serde_json::Value::Null).is_err());
+        assert!(profile_write_landed(&serde_json::json!({})).is_err());
+        assert!(profile_write_landed(&serde_json::json!({"accepted": "yes"})).is_err());
+        assert!(profile_write_landed(&serde_json::json!({"accepted": false})).is_err());
+    }
+}
+
+/// Apply observed membership changes to this agent's self-declared `channel_ids`.
+///
+/// kind:10100's `channel_ids` is what mobile's mention picker consults to decide
+/// whether a *non-member* relay agent is mentionable
+/// (`agentIsSharedWithUser` in `mention_candidates.dart`), and nothing kept it
+/// in sync: `buzz-acp` only read channels, and the relay never authors a 10100.
+/// Desktop reads relay membership instead — its Tauri directory replaces this
+/// field before the frontend sees it (`relay_directory.rs`) — so desktop is not
+/// what this repairs.
 ///
 /// The update is a delta, not a rewrite from this harness's subscription set.
 /// That set is narrowed by `channels_override`, by rule matching, and by any
@@ -243,8 +469,11 @@ fn unix_secs_now() -> u64 {
 /// (`display_name`, `capabilities`, `channel_add_policy`) survive. A missing
 /// profile is left missing: creating one is the deploy tooling's job, and a
 /// partial profile invented here would read as a downgrade to clients. The
-/// human-readable `channels` array is deliberately untouched — nothing gates on
-/// it, and naming a just-joined channel would cost another round trip.
+/// human-readable `channels` array is left alone, because naming a just-joined
+/// channel would cost another round trip — which is also why `channel_ids`
+/// keeps its existing order instead of being sorted: clients that pair the two
+/// arrays by index would otherwise relabel rows that were correct before.
+///
 /// Returns the second the new profile was published in, or `None` when nothing
 /// needed publishing.
 async fn apply_profile_channel_delta(
@@ -293,28 +522,9 @@ async fn apply_profile_channel_delta(
                 .collect()
         })
         .unwrap_or_default();
-    // Applied in queue order, so a join/leave/rejoin of one channel settles on
-    // the last observed state rather than on whichever delta happens to win.
-    let mut changed = false;
-    for (channel_id, joined) in deltas {
-        let target = channel_id.to_string();
-        let had = ids.iter().any(|id| id == &target);
-        if *joined == had {
-            tracing::debug!(channel_id = %channel_id, "profile channel_ids already current");
-            continue;
-        }
-        if *joined {
-            ids.push(target);
-        } else {
-            ids.retain(|id| id != &target);
-        }
-        changed = true;
-    }
-    if !changed {
+    if !apply_channel_id_deltas(&mut ids, deltas) {
         return Ok(None);
     }
-    ids.sort();
-    ids.dedup();
     profile.insert(
         "channel_ids".to_string(),
         serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()),
@@ -324,33 +534,30 @@ async fn apply_profile_channel_delta(
     //
     // The floor is seeded from the stored profile's `created_at`, which any
     // peer can set: deploy tooling, `buzz channels set-add-policy`, or another
-    // harness on a skewed clock. Sleeping until the wall clock passes it would
-    // park the single worker — and grow its unbounded queue — for the whole
-    // skew, and giving up on that sleep would silently sign a losing
-    // `created_at` with nothing to requeue the delta. Stamp the timestamp past
-    // the floor instead: it wins the LWW compare without waiting at all.
+    // harness on a skewed clock.
     let now = unix_secs_now();
-    let created_at = now.max(last_published_secs + 1);
-    let lead = created_at.saturating_sub(now);
-    // Relays reject timestamps too far in the future, so a wildly skewed peer
-    // is unwinnable. Fail loudly rather than publishing an event that cannot
-    // land — the worker logs it and leaves its own clock untouched.
-    //
-    // Only a peer can reach this. Our own writes cannot, because of the sleep
-    // below: it hands the lead back before returning, so each publish starts
-    // from `now` again instead of the stamps ratcheting a second higher every
-    // time and eventually tripping this guard on the harness's own traffic.
+    let (created_at, lead) = profile_publish_stamp(now, last_published_secs);
+    // Past the relay's ingest window the event cannot land at all, so a peer
+    // skewed further than this is unwinnable. Fail loudly: the worker logs it,
+    // keeps the deltas, and retries with backoff.
     if lead > MAX_PROFILE_PUBLISH_SKEW_SECS {
         return Err(relay::RelayError::Http(format!(
             "stored agent profile is timestamped {lead}s ahead of local time; refusing to republish"
         )));
     }
-    // Publishing is capped at one per second by the distinct-`created_at`
-    // requirement. Sleeping here rather than returning an error is what keeps
-    // that a rate limit instead of a data loss: the queue is the only copy of
-    // these deltas, and the worker has no requeue path.
+    // Two different leads land here and only one is worth waiting out:
+    //
+    // - Our own previous publish, one second back. Sleeping through it is what
+    //   keeps the one-per-second cap a rate limit instead of data loss — the
+    //   queue is the only copy of these deltas and the worker has no requeue
+    //   path — and it hands the second back before returning, so stamps never
+    //   ratchet away from the wall clock.
+    // - A peer's future timestamp, up to the whole ingest window. That one is
+    //   out-bid by the stamp above, not slept through: parking the single
+    //   worker for minutes would stall every later delta behind it.
     if lead > 0 {
-        tokio::time::sleep(std::time::Duration::from_secs(lead)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(lead).min(MAX_PROFILE_PUBLISH_SLEEP))
+            .await;
     }
 
     let event = EventBuilder::new(
@@ -365,36 +572,9 @@ async fn apply_profile_channel_delta(
     // which returns as soon as the command is queued. The next delta reads the
     // profile back, so the write has to be durable before this returns.
     let response = rest_client.submit_event(&event).await?;
-    // A 200 does not mean the profile changed. Two distinct failures hide
-    // behind one:
-    //
-    // - `accepted: false` — the relay refused the event outright.
-    // - `accepted: true` with a `duplicate:` message — the write was stored
-    //   and then rolled back because a peer's copy won the replaceable
-    //   compare (`Db::replace_addressable_event` reports `was_inserted =
-    //   false`, and the ingest path maps that to accepted-plus-duplicate).
-    //
-    // The second is the one this design actually invites, and reading only
-    // `accepted` misses it: the worker would record a publish that never
-    // landed and clear the deltas, which are its only copy.
-    let accepted = response
-        .get("accepted")
-        .and_then(serde_json::Value::as_bool)
-        != Some(false);
-    let message = response
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if !accepted || message.starts_with("duplicate:") {
-        let detail = if message.is_empty() {
-            "relay did not accept the profile update"
-        } else {
-            message
-        };
-        return Err(relay::RelayError::Http(format!(
-            "profile channel_ids update did not land: {detail}"
-        )));
-    }
+    profile_write_landed(&response).map_err(|detail| {
+        relay::RelayError::Http(format!("profile channel_ids update did not land: {detail}"))
+    })?;
     Ok(Some(created_at))
 }
 

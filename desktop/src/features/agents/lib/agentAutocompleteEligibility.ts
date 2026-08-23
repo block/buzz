@@ -10,12 +10,17 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 }
 
 /**
- * `sharesChannel` lets a caller assert the shared channel from authoritative
- * state — relay membership — instead of the agent's self-declared
- * `channelIds`. That array is a kind:10100 field nothing republishes when
- * membership changes, so an agent invited to a new channel stays absent from
- * its picker until someone reissues the profile by hand. Membership is
- * maintained by the relay and cannot drift. `respondTo` is still enforced.
+ * `sharesChannel` lets a caller assert the shared channel from the live channel
+ * roster instead of `agent.channelIds`.
+ *
+ * Both are relay membership — `list_relay_agents` replaces `channelIds` with
+ * the membership it reads from relay-signed kind:39002 before the frontend sees
+ * it — but they refresh on different clocks. `useRelayAgentsQuery` polls every
+ * `AGENTS_FOCUS_STALE_TIME_MS` (5 min) with `refetchOnWindowFocus: false`,
+ * while the roster updates live. An agent invited to the channel you are
+ * looking at is therefore missing from the picker until the next poll tick.
+ * The roster closes that window. `respondTo` is still enforced, so this widens
+ * discovery, not authority.
  */
 export function relayAgentIsSharedWithUser(
   agent: Pick<

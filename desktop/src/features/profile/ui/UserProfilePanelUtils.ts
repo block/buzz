@@ -129,11 +129,28 @@ export function deriveProfileChannels(
   const channelsByName = new Map(
     channels?.map((channel) => [channel.name, channel]) ?? [],
   );
+  const channelsById = new Map(
+    channels?.map((channel) => [channel.id, channel]) ?? [],
+  );
 
-  relayAgent?.channels.forEach((name, index) => {
-    const channel = channelsByName.get(name);
-    const id = relayAgent.channelIds[index] ?? channel?.id ?? name;
-    links.set(id, { id, name });
+  // `channels` (names) and `channelIds` are independent arrays, so they cannot
+  // be paired by index. The backend replaces `channelIds` with relay membership
+  // in channel-id order before this sees it, and `buzz-acp` appends to the
+  // profile's copy without touching the names — either one makes position N of
+  // one array a different channel from position N of the other. Pairing them
+  // anyway labelled a row with another channel's name and navigated to that
+  // other channel. Resolve each side against the community's channel list.
+  for (const id of relayAgent?.channelIds ?? []) {
+    const channel = channelsById.get(id);
+    if (channel) {
+      links.set(channel.id, { id: channel.id, name: channel.name });
+    }
+  }
+  relayAgent?.channels.forEach((name) => {
+    const id = channelsByName.get(name)?.id ?? name;
+    if (!links.has(id)) {
+      links.set(id, { id, name });
+    }
   });
 
   if (managedAgent && channels) {
