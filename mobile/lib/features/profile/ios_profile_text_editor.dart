@@ -28,9 +28,11 @@ class IosProfileTextEditor {
     required Future<void> Function(String value) onSave,
     required void Function() onSaveError,
     bool Function(Object error)? shouldRetryOnError,
+    bool Function()? canPresent,
   }) async {
     var draft = initialValue;
     while (true) {
+      if (canPresent?.call() == false) return;
       final value = await present(
         title: title,
         initialValue: draft,
@@ -42,7 +44,10 @@ class IosProfileTextEditor {
         await onSave(value);
         return;
       } catch (error) {
-        if (shouldRetryOnError?.call(error) == false) return;
+        if (shouldRetryOnError?.call(error) == false ||
+            canPresent?.call() == false) {
+          return;
+        }
         draft = value;
         onSaveError();
       }

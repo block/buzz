@@ -82,6 +82,43 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('native text retry stops when its owner unmounts', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/profile_text_editor');
+    var presentations = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async {
+          presentations++;
+          return 'Pending draft';
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    final notifier = _DeferredFailureProfileNotifier();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(() => notifier)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('profile-display-name-row')));
+    await tester.pump();
+    expect(notifier.displayNameAttempts, ['Pending draft']);
+
+    await tester.pumpWidget(const SizedBox());
+    notifier.failSave();
+    await tester.pump();
+
+    expect(presentations, 1);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('Flutter text editor closes after a community switch', (
     tester,
   ) async {
@@ -300,6 +337,26 @@ class _CommunityChangedProfileNotifier extends ProfileNotifier {
     displayNameAttempts.add(displayName);
     throw ProfileCommunityChangedException();
   }
+}
+
+class _DeferredFailureProfileNotifier extends ProfileNotifier {
+  final displayNameAttempts = <String>[];
+  final _save = Completer<void>();
+
+  @override
+  Future<UserProfile?> build() async => const UserProfile(
+    pubkey: 'aabb',
+    displayName: 'Alice',
+    about: 'Building Buzz',
+  );
+
+  @override
+  Future<void> updateDisplayName(String displayName) {
+    displayNameAttempts.add(displayName);
+    return _save.future;
+  }
+
+  void failSave() => _save.completeError(Exception('profile publish failed'));
 }
 
 class _RetryMediaUploadService extends MediaUploadService {
