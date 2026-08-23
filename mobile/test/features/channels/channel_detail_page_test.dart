@@ -11990,70 +11990,72 @@ void main() {
       expect(find.byKey(const ValueKey('reaction-pill-👍')), findsOneWidget);
     });
 
-    testWidgets('a live deletion does not restore the routed thread head', (
-      tester,
-    ) async {
-      final rootEvent = _textMsg(
-        id: 'thread-root',
-        pubkey: 'alice',
-        content: 'Thread root',
-        createdAt: 1000,
-      );
-      final reply = _textMsg(
-        id: 'reply-1',
-        pubkey: 'bob',
-        content: 'A reply',
-        createdAt: 1100,
-        extraTags: const [
-          ['e', 'thread-root', '', 'reply'],
-        ],
-      );
-      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+    testWidgets(
+      'a live deletion hides the routed thread head without a tombstone',
+      (tester) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final reply = _textMsg(
+          id: 'reply-1',
+          pubkey: 'bob',
+          content: 'A reply',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
 
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          messagesNotifier: messagesNotifier,
-          threadReplies: {
-            'thread-root': [reply],
-          },
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final threadHead = formatTimeline([rootEvent]).single;
-      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: [threadHead],
-            channelId: _channelId,
-            currentPubkey: 'self',
-            isMember: true,
-            isArchived: false,
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            threadReplies: {
+              'thread-root': [reply],
+            },
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Thread root'), findsOneWidget);
+        );
+        await tester.pumpAndSettle();
 
-      messagesNotifier.setMessages([
-        rootEvent,
-        _deletion(id: 'delete-root', targetIds: ['thread-root']),
-      ]);
-      await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Thread root'), findsOneWidget);
 
-      expect(find.text('Thread root'), findsNothing);
-      expect(
-        find.byKey(const ValueKey('thread-message-deleted')),
-        findsOneWidget,
-      );
-      expect(find.text('This message was deleted'), findsOneWidget);
-    });
+        messagesNotifier.setMessages([
+          rootEvent,
+          _deletion(id: 'delete-root', targetIds: ['thread-root']),
+        ]);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Thread root'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('thread-message-deleted')),
+          findsNothing,
+        );
+        expect(find.text('This message was deleted'), findsNothing);
+        expect(find.text('A reply'), findsOneWidget);
+      },
+    );
 
     testWidgets('thread replies earn the + only once they carry a reaction', (
       tester,

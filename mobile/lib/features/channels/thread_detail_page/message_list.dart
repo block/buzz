@@ -96,13 +96,7 @@ class _ThreadMessageList extends StatelessWidget {
                 }
                 if (index == headIndex) {
                   if (headIsDeleted) {
-                    return trackActiveScrollPosition(
-                      const Padding(
-                        key: ValueKey('thread-message-deleted'),
-                        padding: EdgeInsets.only(bottom: Grid.xs),
-                        child: Text('This message was deleted'),
-                      ),
-                    );
+                    return trackActiveScrollPosition(const SizedBox.shrink());
                   }
                   return trackActiveScrollPosition(
                     Padding(
