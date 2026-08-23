@@ -240,16 +240,20 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('Flutter text editor closes after a community switch', (
+  testWidgets('in-page text editor rejects its first save after a switch', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    final notifier = _CommunityChangedProfileNotifier();
+    final notifier = _RetryProfileNotifier();
+    final config = _MutableRelayConfigNotifier();
 
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(() => notifier)],
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          relayConfigProvider.overrideWith(() => config),
+        ],
         child: const ProfileEditPage(),
       ),
     );
@@ -261,11 +265,12 @@ void main() {
       'Old community draft',
     );
     await tester.pump();
+    config.update(baseUrl: 'https://second.example', nsec: 'second-identity');
     await tester.tap(find.byKey(const ValueKey('profile-field-save')));
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('profile-field-input')), findsNothing);
-    expect(notifier.displayNameAttempts, ['Old community draft']);
+    expect(notifier.displayNameAttempts, isEmpty);
     debugDefaultTargetPlatformOverride = null;
   });
 

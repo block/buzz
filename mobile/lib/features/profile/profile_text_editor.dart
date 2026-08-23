@@ -16,7 +16,7 @@ import 'profile_provider.dart';
 Future<void> showProfileDisplayNameEditor(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final profile = container.read(profileProvider).asData?.value;
-  final onSave = _bindSaveToOpeningContext(
+  final onSave = bindProfileSaveToOpeningContext(
     container,
     container.read(profileProvider.notifier).updateDisplayName,
   );
@@ -33,7 +33,7 @@ Future<void> showProfileDisplayNameEditor(BuildContext context) async {
 Future<void> showProfileDescriptionEditor(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final profile = container.read(profileProvider).asData?.value;
-  final onSave = _bindSaveToOpeningContext(
+  final onSave = bindProfileSaveToOpeningContext(
     container,
     container.read(profileProvider.notifier).updateAbout,
   );
@@ -47,7 +47,8 @@ Future<void> showProfileDescriptionEditor(BuildContext context) async {
   );
 }
 
-Future<void> Function(String) _bindSaveToOpeningContext(
+/// Prevents a profile draft from being published after its community changes.
+Future<void> Function(String) bindProfileSaveToOpeningContext(
   ProviderContainer container,
   Future<void> Function(String value) onSave,
 ) {

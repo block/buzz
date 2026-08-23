@@ -521,23 +521,35 @@ class _AvatarModeControl extends StatelessWidget {
                 children: [
                   for (final mode in ProfileAvatarMode.values)
                     Expanded(
-                      child: InkWell(
-                        key: ValueKey('avatar-mode-${mode.name}'),
-                        borderRadius: BorderRadius.circular(Radii.full),
+                      child: Semantics(
+                        label: switch (mode) {
+                          ProfileAvatarMode.image => 'Image',
+                          ProfileAvatarMode.emoji => 'Emoji',
+                          ProfileAvatarMode.animated => 'Animated',
+                        },
+                        button: true,
+                        selected: mode == selected,
                         onTap: () => onSelected(mode),
-                        child: SizedBox(
-                          height: 36,
-                          child: Center(
-                            child: Text(
-                              switch (mode) {
-                                ProfileAvatarMode.image => 'Image',
-                                ProfileAvatarMode.emoji => 'Emoji',
-                                ProfileAvatarMode.animated => 'Animated',
-                              },
-                              style: context.textTheme.labelLarge?.copyWith(
-                                fontWeight: mode == selected
-                                    ? FontWeight.w600
-                                    : FontWeight.w500,
+                        child: ExcludeSemantics(
+                          child: InkWell(
+                            key: ValueKey('avatar-mode-${mode.name}'),
+                            borderRadius: BorderRadius.circular(Radii.full),
+                            onTap: () => onSelected(mode),
+                            child: SizedBox(
+                              height: 36,
+                              child: Center(
+                                child: Text(
+                                  switch (mode) {
+                                    ProfileAvatarMode.image => 'Image',
+                                    ProfileAvatarMode.emoji => 'Emoji',
+                                    ProfileAvatarMode.animated => 'Animated',
+                                  },
+                                  style: context.textTheme.labelLarge?.copyWith(
+                                    fontWeight: mode == selected
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                  ),
+                                ),
                               ),
                             ),
                           ),

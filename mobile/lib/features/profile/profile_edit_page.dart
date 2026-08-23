@@ -24,6 +24,7 @@ import 'ios_profile_text_editor.dart';
 import 'profile_avatar_editor.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_provider.dart';
+import 'profile_text_editor.dart';
 
 /// Edits the current user's public profile metadata.
 class ProfileEditPage extends HookConsumerWidget {
@@ -396,16 +397,25 @@ class ProfileEditPage extends HookConsumerWidget {
                         trailing: const _EditChevron(),
                         onTap: !profileHydrated
                             ? null
-                            : () => unawaited(
-                                editField(
-                                  title: 'Display name',
-                                  initialValue: profile?.displayName ?? '',
-                                  hintText: 'Display name',
-                                  onSave: ref
-                                      .read(profileProvider.notifier)
-                                      .updateDisplayName,
-                                ),
-                              ),
+                            : () {
+                                final container = ProviderScope.containerOf(
+                                  context,
+                                  listen: false,
+                                );
+                                unawaited(
+                                  editField(
+                                    title: 'Display name',
+                                    initialValue: profile?.displayName ?? '',
+                                    hintText: 'Display name',
+                                    onSave: bindProfileSaveToOpeningContext(
+                                      container,
+                                      container
+                                          .read(profileProvider.notifier)
+                                          .updateDisplayName,
+                                    ),
+                                  ),
+                                );
+                              },
                       ),
                       AppListRow(
                         key: const ValueKey('profile-description-row'),
@@ -415,17 +425,26 @@ class ProfileEditPage extends HookConsumerWidget {
                         trailing: const _EditChevron(),
                         onTap: !profileHydrated
                             ? null
-                            : () => unawaited(
-                                editField(
-                                  title: 'Profile description',
-                                  initialValue: profile?.about ?? '',
-                                  hintText: 'Profile description',
-                                  multiline: true,
-                                  onSave: ref
-                                      .read(profileProvider.notifier)
-                                      .updateAbout,
-                                ),
-                              ),
+                            : () {
+                                final container = ProviderScope.containerOf(
+                                  context,
+                                  listen: false,
+                                );
+                                unawaited(
+                                  editField(
+                                    title: 'Profile description',
+                                    initialValue: profile?.about ?? '',
+                                    hintText: 'Profile description',
+                                    multiline: true,
+                                    onSave: bindProfileSaveToOpeningContext(
+                                      container,
+                                      container
+                                          .read(profileProvider.notifier)
+                                          .updateAbout,
+                                    ),
+                                  ),
+                                );
+                              },
                       ),
                     ],
                   ),

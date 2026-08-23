@@ -1,6 +1,51 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditMotionAndAccessibilityTests() {
+  testWidgets('exposes the selected avatar mode on Android', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+
+    Iterable<Semantics> modeSemantics(String label) =>
+        tester.widgetList<Semantics>(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == label &&
+                widget.child is ExcludeSemantics,
+          ),
+        );
+
+    expect(modeSemantics('Image'), isNotEmpty);
+    expect(
+      modeSemantics('Image').every((node) => node.properties.selected == true),
+      isTrue,
+    );
+    expect(
+      modeSemantics('Emoji').every((node) => node.properties.selected == false),
+      isTrue,
+    );
+    await tester.tap(find.byKey(const ValueKey('avatar-mode-emoji')));
+    await tester.pump();
+    expect(
+      modeSemantics('Image').every((node) => node.properties.selected == false),
+      isTrue,
+    );
+    expect(
+      modeSemantics('Emoji').every((node) => node.properties.selected == true),
+      isTrue,
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('moves segment content in the selected direction', (
     tester,
   ) async {
