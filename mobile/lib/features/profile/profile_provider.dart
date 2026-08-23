@@ -11,6 +11,7 @@ import '../../shared/theme/theme.dart';
 
 /// Signals that a profile write no longer belongs to the active community.
 class ProfileCommunityChangedException extends StateError {
+  /// Creates an error for a profile write invalidated by a community switch.
   ProfileCommunityChangedException()
     : super('Profile update cancelled because the active community changed.');
 }

@@ -27,6 +27,7 @@ import 'profile_provider.dart';
 
 /// Edits the current user's public profile metadata.
 class ProfileEditPage extends HookConsumerWidget {
+  /// Creates the profile details and avatar editing page.
   const ProfileEditPage({
     super.key,
     this.startInPhotoEditor = false,

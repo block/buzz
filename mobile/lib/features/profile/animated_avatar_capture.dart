@@ -37,13 +37,18 @@ enum _AnimatedReviewSection { person, color, poster }
 
 /// Records and prepares a short camera animation for a profile avatar.
 class AnimatedAvatarCapture extends HookConsumerWidget {
+  /// Creates an animated-avatar capture and review surface.
   const AnimatedAvatarCapture({
     super.key,
     required this.height,
     required this.onPrepareChanged,
     this.initialFrames = const [],
   });
+
+  /// The vertical space available to the capture surface.
   final double height;
+
+  /// Reports the current deferred draft-preparation callback to the parent.
   final ValueChanged<Future<ProfileAvatarDraft?> Function()?> onPrepareChanged;
 
   /// Seeds processed frames in lifecycle-focused widget tests.

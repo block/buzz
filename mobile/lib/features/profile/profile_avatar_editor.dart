@@ -29,7 +29,16 @@ import 'profile_avatar_draft.dart';
 part 'profile_avatar_editor/emoji_avatar_picker.dart';
 
 /// Avatar kinds shared with the desktop profile editor.
-enum ProfileAvatarMode { image, emoji, animated }
+enum ProfileAvatarMode {
+  /// A still image selected from the camera or photo library.
+  image,
+
+  /// A system emoji composited over a selected background color.
+  emoji,
+
+  /// A short camera animation with framing and background controls.
+  animated,
+}
 
 /// Builds the animated capture surface for the profile avatar editor.
 typedef AnimatedAvatarCaptureBuilder =
