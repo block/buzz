@@ -56,6 +56,7 @@ class ProfileEditPage extends HookConsumerWidget {
       startInPhotoEditor ? ref.read(relayConfigProvider) : null,
     );
     final isSavingAvatar = useState(false);
+    final isClosingAvatar = useState(false);
     final prepareAnimatedAvatar =
         useRef<Future<ProfileAvatarDraft?> Function()?>(null);
     final avatarSaveError = useState<String?>(null);
@@ -153,7 +154,10 @@ class ProfileEditPage extends HookConsumerWidget {
     }
 
     Future<void> closeAvatarEditor({bool whileSaving = false}) async {
-      if (isSavingAvatar.value && !whileSaving) return;
+      if ((isSavingAvatar.value && !whileSaving) || isClosingAvatar.value) {
+        return;
+      }
+      isClosingAvatar.value = true;
       await avatarTransition.reverse();
       if (!context.mounted) return;
       if (startInPhotoEditor) {
@@ -167,10 +171,11 @@ class ProfileEditPage extends HookConsumerWidget {
       prepareAnimatedAvatar.value = null;
       canPrepareAnimatedAvatar.value = false;
       avatarMode.value = ProfileAvatarMode.image;
+      isClosingAvatar.value = false;
     }
 
     Future<void> saveAvatar() async {
-      if (isSavingAvatar.value) return;
+      if (isSavingAvatar.value || isClosingAvatar.value) return;
       final openingConfig = avatarEditConfig.value;
       if (openingConfig == null) return;
       final saveConfig = ref.read(relayConfigProvider);
@@ -185,6 +190,14 @@ class ProfileEditPage extends HookConsumerWidget {
             !identical(ref.read(mediaUploadServiceProvider), uploadService)) {
           throw ProfileCommunityChangedException();
         }
+      }
+
+      Future<void> discardStaleEditor() async {
+        avatarDraft.value = null;
+        avatarDraftMode.value = null;
+        prepareAnimatedAvatar.value = null;
+        canPrepareAnimatedAvatar.value = false;
+        if (context.mounted) await closeAvatarEditor(whileSaving: true);
       }
 
       isSavingAvatar.value = true;
@@ -211,12 +224,14 @@ class ProfileEditPage extends HookConsumerWidget {
         requireCurrentCommunity();
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
       } on ProfileCommunityChangedException {
-        avatarDraft.value = null;
-        avatarDraftMode.value = null;
-        prepareAnimatedAvatar.value = null;
-        canPrepareAnimatedAvatar.value = false;
-        if (context.mounted) await closeAvatarEditor(whileSaving: true);
+        await discardStaleEditor();
       } catch (_) {
+        try {
+          requireCurrentCommunity();
+        } on ProfileCommunityChangedException {
+          await discardStaleEditor();
+          return;
+        }
         avatarSaveError.value =
             "We couldn't save your profile photo. Try again.";
       } finally {
@@ -261,12 +276,16 @@ class ProfileEditPage extends HookConsumerWidget {
                         key: const ValueKey('avatar-editor-back'),
                         icon: IosGlassNavigationIcon.back,
                         semanticLabel: 'Back to profile',
-                        onPressed: () => unawaited(closeAvatarEditor()),
+                        onPressed: isClosingAvatar.value
+                            ? null
+                            : () => unawaited(closeAvatarEditor()),
                       )
                     : IconButton(
                         key: const ValueKey('avatar-editor-back'),
                         tooltip: 'Back to profile',
-                        onPressed: () => unawaited(closeAvatarEditor()),
+                        onPressed: isClosingAvatar.value
+                            ? null
+                            : () => unawaited(closeAvatarEditor()),
                         icon: const Icon(LucideIcons.arrowLeft),
                       )
               : null,
@@ -278,7 +297,10 @@ class ProfileEditPage extends HookConsumerWidget {
                       label: 'Save',
                       width: 72,
                       isBusy: isSavingAvatar.value,
-                      onPressed: canSaveAvatar && !isSavingAvatar.value
+                      onPressed:
+                          canSaveAvatar &&
+                              !isSavingAvatar.value &&
+                              !isClosingAvatar.value
                           ? () {
                               unawaited(HapticFeedback.lightImpact());
                               unawaited(saveAvatar());
@@ -292,7 +314,10 @@ class ProfileEditPage extends HookConsumerWidget {
                         key: const ValueKey('avatar-save'),
                         label: 'Save',
                         isBusy: isSavingAvatar.value,
-                        onTap: canSaveAvatar && !isSavingAvatar.value
+                        onTap:
+                            canSaveAvatar &&
+                                !isSavingAvatar.value &&
+                                !isClosingAvatar.value
                             ? () {
                                 unawaited(HapticFeedback.lightImpact());
                                 unawaited(saveAvatar());

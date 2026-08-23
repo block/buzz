@@ -495,6 +495,71 @@ void main() {
     expect(find.byKey(const ValueKey('avatar-save')), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('avatar editor closes when a switched upload throws', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final notifier = _RetryProfileNotifier();
+    final config = _MutableRelayConfigNotifier();
+    final firstUpload = _RetryMediaUploadService(
+      baseUrl: 'https://first.example',
+      delayUpload: true,
+    );
+    final secondUpload = _RetryMediaUploadService(
+      baseUrl: 'https://second.example',
+    );
+    addTearDown(firstUpload.dispose);
+    addTearDown(secondUpload.dispose);
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          relayConfigProvider.overrideWith(() => config),
+          mediaUploadServiceProvider.overrideWith((ref) {
+            final current = ref.watch(relayConfigProvider);
+            return current.baseUrl == 'https://first.example'
+                ? firstUpload
+                : secondUpload;
+          }),
+        ],
+        child: ProfileEditPage(
+          startInPhotoEditor: true,
+          animatedAvatarCaptureBuilder:
+              ({required height, required onPrepareChanged}) => HookBuilder(
+                builder: (context) {
+                  useEffect(() {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      onPrepareChanged(
+                        () async => ProfileImageAvatarDraft(
+                          Uint8List.fromList([1, 2, 3]),
+                        ),
+                      );
+                    });
+                    return null;
+                  }, const []);
+                  return SizedBox(height: height);
+                },
+              ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Animated'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pump();
+    config.update(baseUrl: 'https://second.example', nsec: 'second-identity');
+    firstUpload.failUpload();
+    await tester.pumpAndSettle();
+
+    expect(notifier.savedAvatarUrls, isEmpty);
+    expect(find.byKey(const ValueKey('avatar-save')), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }
 
 class _MutableRelayConfigNotifier extends RelayConfigNotifier {
@@ -605,6 +670,12 @@ class _RetryMediaUploadService extends MediaUploadService {
 
   void completeUpload() {
     if (!_pendingUpload.isCompleted) _pendingUpload.complete();
+  }
+
+  void failUpload() {
+    if (!_pendingUpload.isCompleted) {
+      _pendingUpload.completeError(Exception('upload client closed'));
+    }
   }
 
   @override

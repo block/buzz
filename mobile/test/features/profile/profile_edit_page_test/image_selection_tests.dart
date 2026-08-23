@@ -1,6 +1,40 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditImageSelectionTests() {
+  testWidgets('duplicate avatar Back taps pop only the editor route', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => unawaited(
+                Navigator.of(context).push<void>(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        const ProfileEditPage(startInPhotoEditor: true),
+                  ),
+                ),
+              ),
+              child: const Text('Open profile photo'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open profile photo'));
+    await tester.pumpAndSettle();
+
+    final back = find.byKey(const ValueKey('avatar-editor-back'));
+    await tester.tap(back);
+    await tester.tap(back);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open profile photo'), findsOneWidget);
+  });
+
   testWidgets('photo crop exposes accessible move and zoom actions', (
     tester,
   ) async {
