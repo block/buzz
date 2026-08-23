@@ -435,54 +435,6 @@ void main() {
     expect(uploadService.uploadCount, 1);
   });
 
-  testWidgets('photo modes remain usable on a compact large-type viewport', (
-    tester,
-  ) async {
-    tester.view.devicePixelRatio = 1;
-    tester.view.physicalSize = const Size(320, 568);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    addTearDown(tester.view.resetPhysicalSize);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const MediaQuery(
-          data: MediaQueryData(textScaler: TextScaler.linear(2)),
-          child: ProfileEditPage(startInPhotoEditor: true),
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    expect(
-      find.byKey(const ValueKey('avatar-editor-scroll-view')),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    await tester.ensureVisible(
-      find.byKey(const ValueKey('emoji-editor-background')),
-    );
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(tester.takeException(), isNull);
-
-    await tester.drag(
-      find.byKey(const ValueKey('avatar-editor-scroll-view')),
-      const Offset(0, 1000),
-    );
-    await tester.pump();
-    final animatedMode = find.byKey(const ValueKey('avatar-mode-animated'));
-    await tester.tap(animatedMode);
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    expect(
-      find.byKey(const ValueKey('animated-avatar-capture-preview')),
-      findsOneWidget,
-    );
-  });
-
   testWidgets('centers every preview while controls fill the page gutters', (
     tester,
   ) async {

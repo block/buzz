@@ -1,6 +1,58 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditMotionAndAccessibilityTests() {
+  testWidgets('photo modes remain usable on a compact large-type viewport', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 568);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const MediaQuery(
+          data: MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: ProfileEditPage(startInPhotoEditor: true),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey('avatar-editor-scroll-view')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Emoji'));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('emoji-editor-background')),
+    );
+    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.takeException(), isNull);
+
+    await tester.drag(
+      find.byKey(const ValueKey('avatar-editor-scroll-view')),
+      const Offset(0, 1000),
+    );
+    await tester.pump();
+    final animatedMode = find.byKey(const ValueKey('avatar-mode-animated'));
+    await Scrollable.ensureVisible(
+      animatedMode.evaluate().single,
+      alignment: 0.2,
+    );
+    await tester.tap(animatedMode);
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey('animated-avatar-capture-preview')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('exposes the selected avatar mode on Android', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -283,5 +335,37 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(find.byType(AvatarBackgroundGrid), findsOneWidget);
     final firstColor = find.byKey(const ValueKey('emoji-avatar-color-0'));
     expect(tester.getSize(firstColor), const Size.square(52));
+  });
+
+  testWidgets('background colors remain reachable in compact layouts', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: SizedBox(
+          height: 150,
+          child: AvatarBackgroundGrid(
+            selectedColor: emojiAvatarColors.first,
+            onColorSelected: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = tester.state<ScrollableState>(
+      find.byType(Scrollable).first,
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThan(0));
+
+    await tester.drag(find.byType(AvatarBackgroundGrid), const Offset(0, -400));
+    await tester.pumpAndSettle();
+
+    expect(scrollable.position.pixels, greaterThan(0));
+    expect(
+      find.byKey(
+        ValueKey('avatar-background-color-${emojiAvatarColors.length - 1}'),
+      ),
+      findsOneWidget,
+    );
   });
 }

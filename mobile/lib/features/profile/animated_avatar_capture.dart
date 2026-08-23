@@ -59,6 +59,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
+    final captureEpoch = useRef(0);
     final cameraGeneration = useState(0);
     final isInitializing = useState(true);
     final isRecording = useState(false);
@@ -160,6 +161,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       unawaited(initialize());
       return () {
         disposed = true;
+        captureEpoch.value++;
         final active = controllerRef.value;
         controllerRef.value = null;
         unawaited(active?.dispose() ?? Future<void>.value());
@@ -213,6 +215,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     Future<void> record() async {
       final active = controller.value;
       if (active == null || isRecording.value) return;
+      final currentCapture = ++captureEpoch.value;
       frames.value = const [];
       posterIndex.value = 0;
       previewFrameIndex.value = 0;
@@ -230,7 +233,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       var releasedCamera = false;
 
       Future<void> releaseCamera() async {
-        if (releasedCamera) return;
+        if (releasedCamera || captureEpoch.value != currentCapture) return;
         releasedCamera = true;
         if (identical(controllerRef.value, active)) {
           controllerRef.value = null;
@@ -242,7 +245,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       }
 
       final timer = Timer.periodic(const Duration(milliseconds: 40), (_) {
-        if (!context.mounted) return;
+        if (!context.mounted || captureEpoch.value != currentCapture) return;
         final elapsed = DateTime.now().difference(startedAt);
         progress.value =
             (elapsed.inMilliseconds / _captureDuration.inMilliseconds).clamp(
@@ -254,7 +257,8 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       try {
         await active.startImageStream((cameraImage) async {
           final now = DateTime.now();
-          if (converting ||
+          if (captureEpoch.value != currentCapture ||
+              converting ||
               now.difference(lastFrameAt) < _captureFrameInterval ||
               now.difference(startedAt) >= _captureDuration) {
             return;
@@ -272,27 +276,29 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
               mirror:
                   active.description.lensDirection == CameraLensDirection.front,
             );
-            captured.add(await compute(_convertCameraFrame, request));
+            final frame = await compute(_convertCameraFrame, request);
+            if (captureEpoch.value == currentCapture) captured.add(frame);
           } finally {
             converting = false;
           }
         });
         await Future<void>.delayed(_captureDuration);
+        if (captureEpoch.value != currentCapture || !context.mounted) return;
         await active.stopImageStream();
-        while (converting) {
+        while (converting && captureEpoch.value == currentCapture) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
+        if (captureEpoch.value != currentCapture || !context.mounted) return;
         await releaseCamera();
         if (captured.length < 2) {
           throw StateError('Not enough frames were captured.');
         }
         isRecording.value = false;
         isPreparingFrames.value = true;
-        // Camera image conversion throughput differs by platform. Cut out only
-        // the frames each device captured, then resample the same three-second
-        // window onto one fixed timeline so Android and iOS produce the same
-        // frame count and playback cadence without duplicating segmentation.
+        // Cut out only the frames each device captured, then resample the
+        // three-second window so Android and iOS use the same playback cadence.
         final cutouts = await _removeBackgrounds(captured);
+        if (captureEpoch.value != currentCapture || !context.mounted) return;
         final processed = List<Uint8List>.unmodifiable(
           _resampleCapturedFrames(cutouts, _captureFrameCount),
         );
@@ -303,8 +309,13 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         ]);
         if (context.mounted) frames.value = processed;
       } catch (_) {
-        if (!releasedCamera && active.value.isStreamingImages) {
-          await active.stopImageStream();
+        if (captureEpoch.value != currentCapture || !context.mounted) return;
+        try {
+          if (!releasedCamera && active.value.isStreamingImages) {
+            await active.stopImageStream();
+          }
+        } on CameraException {
+          // The camera can stop independently while the capture is unwinding.
         }
         await releaseCamera();
         if (context.mounted) {
