@@ -1,5 +1,9 @@
 # Changelog
 
+## relay-v0.2.2-rc.1
+
+- Admit and validate BUZZ-native job request, status, result, cancellation, and failure events (kinds 43001–43006).
+
 ## relay-v0.2.1
 
 - fix(sdk): preserve self-mention p tags in message and forum event builders ([#4975](https://github.com/block/buzz/pull/4975)) ([`78c87ae20e`](https://github.com/block/buzz/commit/78c87ae20e182fffdd99744d6c9ff99df82b159c))

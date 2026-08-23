@@ -210,6 +210,10 @@ pub struct AcpClient {
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
     /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
+    /// Bounded assistant messages captured during the current turn. Native
+    /// jobs consume only the final message after ACP returns, so no MCP tool
+    /// result or confirmation prompt is required.
+    assistant_messages: Vec<(Option<String>, String)>,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
@@ -561,6 +565,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            assistant_messages: Vec::new(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
         })
@@ -781,6 +786,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.assistant_messages.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1756,6 +1762,46 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    let message_id = update
+                        .get("messageId")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+                    if let Some((_, accumulated)) = self
+                        .assistant_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|(existing, _)| existing == &message_id)
+                    {
+                        // ACP adapters may emit either deltas or a newer full
+                        // snapshot for the same message id. Re-appending a
+                        // snapshot duplicates terminal JSON.
+                        if text.starts_with(accumulated.as_str()) {
+                            accumulated.clear();
+                            for ch in text.chars() {
+                                if accumulated.len() + ch.len_utf8() > MAX_CAPTURE_BYTES {
+                                    break;
+                                }
+                                accumulated.push(ch);
+                            }
+                        } else if !accumulated.starts_with(text) {
+                            for ch in text.chars() {
+                                if accumulated.len() + ch.len_utf8() > MAX_CAPTURE_BYTES {
+                                    break;
+                                }
+                                accumulated.push(ch);
+                            }
+                        }
+                    } else if self.assistant_messages.len() < 16 {
+                        let mut captured = String::new();
+                        for ch in text.chars() {
+                            if captured.len() + ch.len_utf8() > MAX_CAPTURE_BYTES {
+                                break;
+                            }
+                            captured.push(ch);
+                        }
+                        self.assistant_messages.push((message_id, captured));
+                    }
                 }
                 false
             }
@@ -1875,6 +1921,19 @@ impl AcpClient {
             None => return,
         };
         self.standard_usage.record_cost(session_id, cost);
+    }
+
+    /// Take the final bounded assistant message captured during the last turn.
+    pub(crate) fn take_final_assistant_message(&mut self) -> Option<String> {
+        let final_message = self
+            .assistant_messages
+            .iter()
+            .rev()
+            .map(|(_, text)| text.trim())
+            .find(|text| !text.is_empty())
+            .map(str::to_string);
+        self.assistant_messages.clear();
+        final_message
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -3720,6 +3779,59 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn captures_only_the_final_assistant_message_for_native_terminal_output() {
+        let mut client = spawn_inert_client().await;
+        for (message_id, text) in [
+            ("thinking", "intermediate prose"),
+            ("terminal", "BUZZ_ACTION_V1\n"),
+            ("terminal", "{\"op\":\"complete_task\"}"),
+        ] {
+            let update = serde_json::json!({
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": {"text": text}
+                    }
+                }
+            });
+            assert!(!client.handle_session_update(&update));
+        }
+
+        assert_eq!(
+            client.take_final_assistant_message().as_deref(),
+            Some("BUZZ_ACTION_V1\n{\"op\":\"complete_task\"}")
+        );
+        assert!(client.take_final_assistant_message().is_none());
+    }
+
+    #[tokio::test]
+    async fn replaces_replayed_full_message_snapshot_instead_of_duplicating_it() {
+        let mut client = spawn_inert_client().await;
+        for text in [
+            "BUZZ_ACTION_V1 ",
+            "BUZZ_ACTION_V1 {\"op\":\"complete_task\"}",
+            "BUZZ_ACTION_V1 {\"op\":\"complete_task\"}",
+        ] {
+            let update = serde_json::json!({
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "terminal",
+                        "content": {"text": text}
+                    }
+                }
+            });
+            assert!(!client.handle_session_update(&update));
+        }
+
+        assert_eq!(
+            client.take_final_assistant_message().as_deref(),
+            Some("BUZZ_ACTION_V1 {\"op\":\"complete_task\"}")
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

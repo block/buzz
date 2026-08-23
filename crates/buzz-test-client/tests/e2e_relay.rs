@@ -414,6 +414,253 @@ async fn test_send_event_and_receive_via_subscription() {
     client_b.disconnect().await.expect("disconnect B");
 }
 
+/// Prove the BUZZ-native job lifecycle is admitted, correlated, and delivered
+/// exactly once without polling. These kinds are Buzz protocol events, not
+/// NIP-90 events.
+#[tokio::test]
+#[ignore]
+async fn test_native_job_request_running_result_lifecycle() {
+    use buzz_core::agent_job::{
+        JobBudget, JobRequest, JobResult, JobStatus, JobTerminalStatus, ResultContract,
+        AGENT_JOB_VERSION,
+    };
+    use buzz_core::kind::{KIND_JOB_ACCEPTED, KIND_JOB_REQUEST, KIND_JOB_RESULT};
+
+    fn tag<'a>(event: &'a nostr::Event, name: &str) -> Option<&'a str> {
+        event.tags.iter().find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some(name))
+                .then(|| parts.get(1).map(String::as_str))
+                .flatten()
+        })
+    }
+
+    let url = relay_url();
+    let manager_keys = Keys::generate();
+    let worker_keys = Keys::generate();
+    let channel = create_test_channel(&manager_keys).await;
+    let channel_id = Uuid::parse_str(&channel).expect("channel UUID");
+    let task_id = Uuid::new_v4();
+    let root_task_id = format!("owner-{}", Uuid::new_v4());
+
+    let mut manager = BuzzTestClient::connect(&url, &manager_keys)
+        .await
+        .expect("manager connect");
+    let mut worker = BuzzTestClient::connect(&url, &worker_keys)
+        .await
+        .expect("worker connect");
+
+    let worker_sid = sub_id("native-worker");
+    let worker_filter = Filter::new()
+        .kind(Kind::Custom(KIND_JOB_REQUEST as u16))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [worker_keys.public_key().to_hex()],
+        );
+    worker
+        .subscribe(&worker_sid, vec![worker_filter])
+        .await
+        .expect("worker subscribe");
+    worker
+        .collect_until_eose(&worker_sid, Duration::from_secs(5))
+        .await
+        .expect("worker EOSE");
+
+    let manager_sid = sub_id("native-manager");
+    let manager_filter = Filter::new()
+        .kinds(vec![
+            Kind::Custom(KIND_JOB_ACCEPTED as u16),
+            Kind::Custom(KIND_JOB_RESULT as u16),
+        ])
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [manager_keys.public_key().to_hex()],
+        );
+    manager
+        .subscribe(&manager_sid, vec![manager_filter.clone()])
+        .await
+        .expect("manager subscribe");
+    manager
+        .collect_until_eose(&manager_sid, Duration::from_secs(5))
+        .await
+        .expect("manager EOSE");
+
+    let request = JobRequest {
+        v: AGENT_JOB_VERSION,
+        task_id,
+        root_task_id: root_task_id.clone(),
+        parent_task_id: None,
+        assigned_role: "qa".into(),
+        objective: "Judge one harmless fixture".into(),
+        evidence_refs: vec![],
+        result_contract: ResultContract {
+            kind: "qa_result".into(),
+            required: vec!["summary".into()],
+        },
+        constraints: vec!["read-only".into(), "no delegation".into()],
+        budget: JobBudget {
+            deadline_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            max_model_calls: Some(1),
+            max_output_bytes: 8192,
+        },
+        attempt: 1,
+    };
+    let request_event = buzz_sdk::build_agent_job_request(
+        channel_id,
+        &worker_keys.public_key().to_hex(),
+        &manager_keys.public_key().to_hex(),
+        &request,
+    )
+    .expect("build request")
+    .sign_with_keys(&manager_keys)
+    .expect("sign request");
+    let request_id = request_event.id.to_hex();
+    let request_ok = manager
+        .send_event(request_event.clone())
+        .await
+        .expect("send 43001");
+    assert!(
+        request_ok.accepted,
+        "43001 rejected: {}",
+        request_ok.message
+    );
+
+    let delivered_request = match worker
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("worker receives 43001")
+    {
+        RelayMessage::Event { event, .. } => event,
+        other => panic!("expected worker 43001, got {other:?}"),
+    };
+    assert_eq!(
+        delivered_request.kind,
+        Kind::Custom(KIND_JOB_REQUEST as u16)
+    );
+    assert_eq!(delivered_request.pubkey, manager_keys.public_key());
+    assert_eq!(
+        tag(&delivered_request, "task"),
+        Some(task_id.to_string().as_str())
+    );
+    assert_eq!(tag(&delivered_request, "root"), Some(root_task_id.as_str()));
+
+    let duplicate_ok = manager
+        .send_event(request_event)
+        .await
+        .expect("replay exact 43001");
+    assert!(
+        duplicate_ok.accepted,
+        "idempotent replay acknowledgement failed: {}",
+        duplicate_ok.message
+    );
+    assert!(matches!(
+        worker.recv_event(Duration::from_millis(500)).await,
+        Err(TestClientError::Timeout)
+    ));
+
+    let running = JobStatus {
+        v: AGENT_JOB_VERSION,
+        task_id,
+        status: "running".into(),
+        detail: Some("qa running".into()),
+    };
+    let running_event = buzz_sdk::build_agent_job_status(
+        KIND_JOB_ACCEPTED,
+        channel_id,
+        &manager_keys.public_key().to_hex(),
+        &root_task_id,
+        &request_id,
+        &running,
+    )
+    .expect("build 43002")
+    .sign_with_keys(&worker_keys)
+    .expect("sign 43002");
+    let running_ok = worker.send_event(running_event).await.expect("send 43002");
+    assert!(
+        running_ok.accepted,
+        "43002 rejected: {}",
+        running_ok.message
+    );
+
+    let result = JobResult {
+        v: AGENT_JOB_VERSION,
+        task_id,
+        status: JobTerminalStatus::Completed,
+        summary: vec!["PASS".into()],
+        artifacts: vec![],
+        evidence_refs: vec![],
+        checks: vec!["fixture passed".into()],
+        gaps: vec![],
+    };
+    let result_event = buzz_sdk::build_agent_job_result(
+        KIND_JOB_RESULT,
+        channel_id,
+        &manager_keys.public_key().to_hex(),
+        &root_task_id,
+        &request_id,
+        &result,
+    )
+    .expect("build 43004")
+    .sign_with_keys(&worker_keys)
+    .expect("sign 43004");
+    let result_ok = worker.send_event(result_event).await.expect("send 43004");
+    assert!(result_ok.accepted, "43004 rejected: {}", result_ok.message);
+
+    let mut received = Vec::new();
+    while received.len() < 2 {
+        match manager
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("manager receives native status/result")
+        {
+            RelayMessage::Event { event, .. } => received.push(event),
+            other => panic!("expected manager native event, got {other:?}"),
+        }
+    }
+    assert_eq!(received[0].kind, Kind::Custom(KIND_JOB_ACCEPTED as u16));
+    assert_eq!(received[1].kind, Kind::Custom(KIND_JOB_RESULT as u16));
+    for event in &received {
+        assert_eq!(event.pubkey, worker_keys.public_key());
+        assert_eq!(tag(event, "task"), Some(task_id.to_string().as_str()));
+        assert_eq!(tag(event, "root"), Some(root_task_id.as_str()));
+        assert_eq!(tag(event, "request"), Some(request_id.as_str()));
+    }
+
+    let audit_sid = sub_id("native-audit");
+    manager
+        .subscribe(
+            &audit_sid,
+            vec![Filter::new()
+                .kinds(vec![
+                    Kind::Custom(KIND_JOB_REQUEST as u16),
+                    Kind::Custom(KIND_JOB_ACCEPTED as u16),
+                    Kind::Custom(KIND_JOB_RESULT as u16),
+                ])
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])],
+        )
+        .await
+        .expect("audit subscribe");
+    let events = manager
+        .collect_until_eose(&audit_sid, Duration::from_secs(5))
+        .await
+        .expect("audit EOSE");
+    let counts = [KIND_JOB_REQUEST, KIND_JOB_ACCEPTED, KIND_JOB_RESULT].map(|kind| {
+        events
+            .iter()
+            .filter(|event| {
+                event.kind == Kind::Custom(kind as u16)
+                    && tag(event, "task") == Some(task_id.to_string().as_str())
+            })
+            .count()
+    });
+    assert_eq!(counts, [1, 1, 1]);
+
+    manager.disconnect().await.expect("manager disconnect");
+    worker.disconnect().await.expect("worker disconnect");
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_large_event_frame_below_configured_limit_is_accepted() {

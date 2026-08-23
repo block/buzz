@@ -641,6 +641,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Default-off native job routing configuration for this harness.
+    pub native_jobs: crate::jobs::NativeJobsConfig,
 }
 
 impl AgentPool {
@@ -2281,10 +2283,13 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    if let Some(ref native_batch) = batch {
+        crate::jobs::publish_accepted(&ctx.native_jobs, &ctx.rest_client, native_batch).await;
+    }
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
-    let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+    let mut prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
         //
@@ -2308,77 +2313,88 @@ pub async fn run_prompt_task(
         };
         vec![text]
     } else if let Some(ref b) = batch {
-        // Build prompt from batch with context enrichment.
-        // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
-
-        let conversation_context = if ctx.context_message_limit > 0 {
-            fetch_conversation_context(b, &channel_info, &ctx).await
-        } else {
-            None
-        };
         let rendered_batch_ids: HashSet<String> = b
             .events
             .iter()
             .chain(b.cancelled_events.iter())
             .map(|event| event.event.id.to_hex())
             .collect();
-        let delivered_ids = agent
-            .state
-            .deliveries
-            .get(&b.channel_id)
-            .map(|delivery| &delivery.delivered_event_ids)
-            .cloned()
-            .unwrap_or_default();
-        let conversation_context_had_delivered_events =
-            conversation_context.as_ref().is_some_and(|context| {
-                conversation_context_event_ids(Some(context))
-                    .iter()
-                    .any(|event_id| delivered_ids.contains(event_id))
-            });
-        let conversation_context =
-            conversation_context_delta(conversation_context, &delivered_ids, &rendered_batch_ids);
-        pending_delivered_event_ids.extend(rendered_batch_ids);
-        pending_delivered_event_ids.extend(conversation_context_event_ids(
-            conversation_context.as_ref(),
-        ));
+        pending_delivered_event_ids.extend(rendered_batch_ids.iter().cloned());
 
-        let profile_lookup =
-            fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
-
-        let known_names: Vec<&str> = profile_lookup
-            .iter()
-            .flat_map(|lookup| lookup.values())
-            .flat_map(|p| [p.display_name.as_deref(), p.nip05_handle.as_deref()])
+        if let Some(prompt) = ctx
+            .native_jobs
+            .enabled
+            .then(|| crate::jobs::compact_prompt(b))
             .flatten()
-            .collect();
-        slash_command = crate::queue::slash_command_for_batch(b, &known_names);
-        if let Some(ref cmd) = slash_command {
-            tracing::info!(
-                target: "pool::prompt",
-                channel = %b.channel_id,
-                command = %cmd,
-                "slash-command pass-through"
+        {
+            vec![prompt]
+        } else {
+            // Build an ordinary prompt with context enrichment.
+            let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+            let conversation_context = if ctx.context_message_limit > 0 {
+                fetch_conversation_context(b, &channel_info, &ctx).await
+            } else {
+                None
+            };
+            let delivered_ids = agent
+                .state
+                .deliveries
+                .get(&b.channel_id)
+                .map(|delivery| &delivery.delivered_event_ids)
+                .cloned()
+                .unwrap_or_default();
+            let conversation_context_had_delivered_events =
+                conversation_context.as_ref().is_some_and(|context| {
+                    conversation_context_event_ids(Some(context))
+                        .iter()
+                        .any(|event_id| delivered_ids.contains(event_id))
+                });
+            let conversation_context = conversation_context_delta(
+                conversation_context,
+                &delivered_ids,
+                &rendered_batch_ids,
             );
-        }
+            pending_delivered_event_ids.extend(conversation_context_event_ids(
+                conversation_context.as_ref(),
+            ));
 
-        crate::queue::format_prompt(
-            b,
-            &crate::queue::FormatPromptArgs {
-                agent_core: standing.agent_core,
-                huddle_instructions: standing.huddle_instructions,
-                channel_info: channel_info.as_ref(),
-                conversation_context: conversation_context.as_ref(),
-                conversation_context_had_delivered_events,
-                profile_lookup: profile_lookup.as_ref(),
-                has_system_prompt_support: agent.has_system_prompt_support(),
-                base_prompt: standing.base_prompt,
-                system_prompt: standing.system_prompt,
-                team_instructions: standing.team_instructions,
-                agent_canvas: standing.agent_canvas,
-                standing_context_sent,
-            },
-        )
+            let profile_lookup =
+                fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client)
+                    .await;
+            let known_names: Vec<&str> = profile_lookup
+                .iter()
+                .flat_map(|lookup| lookup.values())
+                .flat_map(|p| [p.display_name.as_deref(), p.nip05_handle.as_deref()])
+                .flatten()
+                .collect();
+            slash_command = crate::queue::slash_command_for_batch(b, &known_names);
+            if let Some(ref cmd) = slash_command {
+                tracing::info!(
+                    target: "pool::prompt",
+                    channel = %b.channel_id,
+                    command = %cmd,
+                    "slash-command pass-through"
+                );
+            }
+
+            crate::queue::format_prompt(
+                b,
+                &crate::queue::FormatPromptArgs {
+                    agent_core: standing.agent_core,
+                    huddle_instructions: standing.huddle_instructions,
+                    channel_info: channel_info.as_ref(),
+                    conversation_context: conversation_context.as_ref(),
+                    conversation_context_had_delivered_events,
+                    profile_lookup: profile_lookup.as_ref(),
+                    has_system_prompt_support: agent.has_system_prompt_support(),
+                    base_prompt: standing.base_prompt,
+                    system_prompt: standing.system_prompt,
+                    team_instructions: standing.team_instructions,
+                    agent_canvas: standing.agent_canvas,
+                    standing_context_sent,
+                },
+            )
+        }
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
@@ -2393,6 +2409,13 @@ pub async fn run_prompt_task(
         );
         return;
     };
+    if let (Some(control), Some(ordinary_batch)) =
+        (ctx.native_jobs.manager_control_prompt(), batch.as_ref())
+    {
+        if crate::jobs::compact_prompt(ordinary_batch).is_none() {
+            prompt_sections.push(control.to_string());
+        }
+    }
 
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
@@ -2700,7 +2723,7 @@ pub async fn run_prompt_task(
                 agent,
                 source,
                 PromptOutcome::Ok(stop_reason),
-                None,
+                batch,
             );
         }
         Err(AcpError::AgentExited) => {
@@ -7953,6 +7976,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            native_jobs: crate::jobs::NativeJobsConfig::default(),
         }
     }
 
