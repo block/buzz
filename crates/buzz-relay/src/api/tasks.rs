@@ -45,6 +45,7 @@ pub struct TasksQuery {
     status: Option<String>,
     assignee: Option<String>,
     channel: Option<Uuid>,
+    source_ref: Option<String>,
     include_archived: Option<bool>,
     limit: Option<i64>,
 }
@@ -352,6 +353,7 @@ pub async fn list_tasks(
                 status,
                 assignee_pubkey: assignee,
                 channel_id: query.channel,
+                source_ref: query.source_ref.clone(),
                 include_archived: query.include_archived.unwrap_or(false),
                 limit,
             },
@@ -562,6 +564,7 @@ fn task_event_json(event: &TaskEventRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Uri;
 
     #[test]
     fn request_path_preserves_signed_query_verbatim() {
@@ -571,6 +574,37 @@ mod tests {
         );
         assert_eq!(request_path("/api/tasks", None), "/api/tasks");
         assert_eq!(request_path("/api/tasks", Some("")), "/api/tasks");
+    }
+
+    #[test]
+    fn source_ref_survives_verbatim_into_the_signed_path() {
+        // The client signs the raw query, so the relay must reconstruct it
+        // byte-for-byte. A normalised or re-ordered `source_ref` would break
+        // the NIP-98 signature rather than merely filter differently.
+        let raw = "channel=6f1b0e2c-0000-4000-8000-000000000001&source_ref=abc123";
+        assert_eq!(
+            request_path("/api/tasks", Some(raw)),
+            format!("/api/tasks?{raw}")
+        );
+    }
+
+    #[test]
+    fn source_ref_is_parsed_as_an_opaque_optional_string() {
+        // Opaque TEXT by design (migrations/0033_task_system.sql): the relay
+        // must not validate it as an event id, and its absence must stay
+        // distinct from a present value.
+        fn parse(query: &str) -> TasksQuery {
+            let uri: Uri = format!("http://relay.invalid/api/tasks?{query}")
+                .parse()
+                .expect("valid uri");
+            Query::<TasksQuery>::try_from_uri(&uri).expect("parses").0
+        }
+
+        assert_eq!(parse("status=todo").source_ref, None);
+        assert_eq!(
+            parse("source_ref=not-an-event-id").source_ref.as_deref(),
+            Some("not-an-event-id")
+        );
     }
 
     #[test]

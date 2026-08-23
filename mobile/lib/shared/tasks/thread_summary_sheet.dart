@@ -32,6 +32,7 @@ Future<void> showThreadSummarySheet({
   required WidgetRef ref,
   required String channelId,
   required List<ThreadMessageDigest> messages,
+  String? sourceRef,
 }) {
   return showBuzzModalBottomSheet<void>(
     context: context,
@@ -43,15 +44,27 @@ Future<void> showThreadSummarySheet({
       maxHeight: MediaQuery.sizeOf(context).height * 0.9,
     ),
     builder: (_) =>
-        _ThreadSummarySheet(channelId: channelId, messages: messages),
+        _ThreadSummarySheet(
+          channelId: channelId,
+          messages: messages,
+          sourceRef: sourceRef,
+        ),
   );
 }
 
 class _ThreadSummarySheet extends HookConsumerWidget {
-  const _ThreadSummarySheet({required this.channelId, required this.messages});
+  const _ThreadSummarySheet({
+    required this.channelId,
+    required this.messages,
+    this.sourceRef,
+  });
 
   final String channelId;
   final List<ThreadMessageDigest> messages;
+
+  /// The thread key this sheet was opened from, written as a task's
+  /// `source_ref` by the composer as `threadHeadId ?? rootId`.
+  final String? sourceRef;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -64,22 +77,44 @@ class _ThreadSummarySheet extends HookConsumerWidget {
 
     Future<void> save() async {
       final messenger = ScaffoldMessenger.of(context);
-      final target = await showSummaryTaskPicker(
-        context: context,
-        ref: ref,
-        channelId: channelId,
-      );
+      final api = ref.read(tasksApiProvider);
+
+      // The thread this sheet was opened from may already have produced a
+      // task. `source_ref` records exactly that, written by the composer as
+      // `threadHeadId ?? rootId`, so querying by the same expression matches
+      // by construction. A unique hit is the answer and the picker — whose
+      // 20-row recency window can simply omit the right task in a busy
+      // channel — is skipped entirely.
+      SummaryTaskTarget? target;
+      if (sourceRef case final key?) {
+        try {
+          final linked = await api.listTasks(channelId: channelId, sourceRef: key);
+          if (linked.length == 1) target = SummaryTaskTarget(linked.single);
+        } on Exception {
+          // A failed reverse lookup is not a failed save: fall through to the
+          // picker rather than blocking on an optional convenience.
+          target = null;
+        }
+      }
+      if (target == null) {
+        if (!context.mounted) return;
+        target = await showSummaryTaskPicker(
+          context: context,
+          ref: ref,
+          channelId: channelId,
+        );
+      }
       if (target == null || !context.mounted) return;
 
       isSaving.value = true;
       actionError.value = null;
       try {
-        final api = ref.read(tasksApiProvider);
         final task =
             target.task ??
             await api.createTask(
               title: threadTaskTitle(messages),
               channelId: channelId,
+              sourceRef: sourceRef,
             );
         await api.appendTaskEvent(
           task.id,

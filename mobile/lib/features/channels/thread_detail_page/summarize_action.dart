@@ -10,12 +10,18 @@ class _SummarizeThreadButton extends ConsumerWidget {
   const _SummarizeThreadButton({
     required this.channelId,
     required this.messages,
+    required this.sourceRef,
   });
 
   final String channelId;
 
   /// The thread in reading order — head first, then replies.
   final List<TimelineMessage> messages;
+
+  /// This thread's task key: the same `threadHeadId ?? rootId` expression the
+  /// composer writes as a task's `source_ref`, so the reverse lookup matches
+  /// by construction rather than by heuristic.
+  final String? sourceRef;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -28,6 +34,7 @@ class _SummarizeThreadButton extends ConsumerWidget {
           context: context,
           ref: ref,
           channelId: channelId,
+          sourceRef: sourceRef,
           messages: threadSummaryDigest(
             messages,
             // Read, not watch: the transcript is assembled once, on tap. A

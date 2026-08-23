@@ -139,6 +139,12 @@ pub struct TaskFilter {
     pub assignee_pubkey: Option<Vec<u8>>,
     /// Restrict to one channel.
     pub channel_id: Option<Uuid>,
+    /// Restrict to tasks originating from one harness reference.
+    ///
+    /// Exact equality only. `source_ref` is opaque TEXT (see
+    /// `migrations/0033_task_system.sql`), so no parsing or prefix matching is
+    /// applied here.
+    pub source_ref: Option<String>,
     /// Include archived tasks. Archived tasks are hidden by default.
     pub include_archived: bool,
     /// Maximum rows to return.
@@ -341,6 +347,10 @@ pub async fn list_tasks(
     if let Some(channel_id) = filter.channel_id {
         builder.push(" AND channel_id = ");
         builder.push_bind(channel_id);
+    }
+    if let Some(source_ref) = filter.source_ref.as_deref() {
+        builder.push(" AND source_ref = ");
+        builder.push_bind(source_ref.to_owned());
     }
     if !filter.include_archived {
         builder.push(" AND archived_at IS NULL");
@@ -696,6 +706,88 @@ mod tests {
             .expect("list events");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, TaskAction::Created);
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_task_is_findable_by_its_source_ref() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let creator = make_test_user(&pool, community, 0x21).await;
+
+        let wanted = create_task(
+            &pool,
+            community,
+            NewTask {
+                created_by_pubkey: Some(creator.clone()),
+                title: "from the thread we care about".to_owned(),
+                source: Some("app".to_owned()),
+                source_ref: Some("thread-head-aaa".to_owned()),
+                ..NewTask::default()
+            },
+        )
+        .await
+        .expect("create linked task");
+
+        let other = create_task(
+            &pool,
+            community,
+            NewTask {
+                created_by_pubkey: Some(creator.clone()),
+                title: "from a different thread".to_owned(),
+                source: Some("app".to_owned()),
+                source_ref: Some("thread-head-bbb".to_owned()),
+                ..NewTask::default()
+            },
+        )
+        .await
+        .expect("create unrelated task");
+
+        // Exact equality: the reader queries the same key the writer wrote.
+        let found = list_tasks(
+            &pool,
+            community,
+            &TaskFilter {
+                source_ref: Some("thread-head-aaa".to_owned()),
+                limit: 10,
+                ..TaskFilter::default()
+            },
+        )
+        .await
+        .expect("list by source_ref");
+        assert_eq!(found, vec![wanted.clone()]);
+
+        // An unknown reference is an empty page, never an error and never a
+        // fallback to "everything".
+        let missing = list_tasks(
+            &pool,
+            community,
+            &TaskFilter {
+                source_ref: Some("thread-head-does-not-exist".to_owned()),
+                limit: 10,
+                ..TaskFilter::default()
+            },
+        )
+        .await
+        .expect("list unknown source_ref");
+        assert!(missing.is_empty());
+
+        // Omitting the filter must keep today's behaviour: both tasks.
+        let unfiltered = list_tasks(
+            &pool,
+            community,
+            &TaskFilter {
+                limit: 10,
+                ..TaskFilter::default()
+            },
+        )
+        .await
+        .expect("list unfiltered");
+        assert_eq!(unfiltered.len(), 2);
+        assert!(unfiltered.contains(&wanted));
+        assert!(unfiltered.contains(&other));
 
         delete_test_community(&pool, community).await;
     }
