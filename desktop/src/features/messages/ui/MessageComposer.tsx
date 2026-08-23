@@ -221,6 +221,9 @@ function MessageComposerImpl({
   const editTargetRef = React.useRef(editTarget);
   const extractMentionPubkeysRef = React.useRef(mentions.extractMentionPubkeys);
   const ownerPubkeyRef = React.useRef(ownerPubkey);
+  const syncAddressedAgentsFromTextRef = React.useRef<(text: string) => void>(
+    () => {},
+  );
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   isUploadingRef.current = media.isUploading;
@@ -278,6 +281,9 @@ function MessageComposerImpl({
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       setComposerContentFromText(text);
       setPreviewContent(linkPreviewContent);
+      if (!isSubmitLockedRef.current && !editTargetRef.current) {
+        syncAddressedAgentsFromTextRef.current(text);
+      }
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
@@ -421,21 +427,26 @@ function MessageComposerImpl({
     removeAddressedAgent,
     restoreAddressedAgentMentions,
     selectMentionSuggestion,
+    syncAddressedAgentsFromText,
     toggleAlwaysAddressAgent,
+    trackMentionAddressedAgent,
   } = useAgentAddressLockPicker({
     applyAutocompleteEdit,
     audience: persistentAudience,
     audienceScope,
     mentions,
-    onAutoPinAgentMention: (suggestion) =>
+    onAutoPinAgentMention: (suggestion) => {
+      if (suggestion.pubkey) trackMentionAddressedAgent(suggestion.pubkey);
       addInlineAgentMentionsToAudience({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
-      }),
+      });
+    },
     onPulseAddressLock: addressPulse.pulseOne,
     profiles,
     richText,
   });
   restoreAddressedAgentMentionsRef.current = restoreAddressedAgentMentions;
+  syncAddressedAgentsFromTextRef.current = syncAddressedAgentsFromText;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();

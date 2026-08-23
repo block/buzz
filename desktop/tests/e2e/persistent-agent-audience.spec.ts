@@ -190,6 +190,15 @@ test("Tab immediately selects a manually mentioned agent", async ({ page }) => {
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible();
+  const selectAllShortcut = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "Meta+A" : "Control+A",
+  );
+  await input.press(selectAllShortcut);
+  await input.press("Backspace");
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
 });
 
 test("primary+Shift+M addresses the default agent, then selects the highlighted agent", async ({
@@ -228,10 +237,13 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
     composer.getByTestId(`composer-address-lock-${AGENT_B}`),
   ).toBeVisible();
   await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  await expect(
     composer
       .getByTestId("composer-address-locks")
       .getByRole("button", { name: /^Stop automatically mentioning / }),
-  ).toHaveCount(2);
+  ).toHaveCount(1);
 });
 
 test("primary+Shift+M favors the most recently mentioned eligible agent", async ({
@@ -360,7 +372,7 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   const initialPulseVersion = Number(
     await avatar.getAttribute("data-pulse-version"),
   );
-  await input.fill("hello");
+  await input.type("hello");
   await input.evaluate((element) => {
     const snapshots = (
       window as typeof window & { __BUZZ_COMPOSER_TEXT_SNAPSHOTS__?: string[] }
@@ -394,7 +406,7 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
 
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "hello"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita hello"))
     .toContain(AGENT_A);
   await expect(input).toHaveText("@Morgarita ");
 
@@ -440,7 +452,7 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
   );
   await expect(avatar).toHaveAttribute("data-shake-version", "0");
 
-  await input.fill("please retry");
+  await input.type("please retry");
   await input.press("Enter");
 
   await expect(avatar).toHaveAttribute(
@@ -448,7 +460,7 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
     String(initialPulseVersion + 1),
     { timeout: 500 },
   );
-  await expect(input).toHaveText("please retry");
+  await expect(input).toHaveText("@Morgarita please retry");
   await expect(avatar).toHaveAttribute("data-shake-version", "1");
 });
 
@@ -491,10 +503,13 @@ test("a manually mentioned agent becomes selected immediately", async ({
     .toContain(AGENT_A);
 
   await input.fill("follow up");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
   await input.press("Enter");
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "follow up"))
-    .toContain(AGENT_A);
+    .not.toContain(AGENT_A);
 });
 
 test("the auto-pin toast can undo and the picker can restore the agent", async ({

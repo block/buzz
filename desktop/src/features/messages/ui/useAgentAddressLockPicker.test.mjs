@@ -331,6 +331,97 @@ test("selecting a human mention never changes automatic addressing", async () =>
   assert.deepEqual(autoPinnedSuggestions, []);
 });
 
+test("removing the last agent chip clears its automatic address", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const removedPubkeys = [];
+  const mentionRefsByText = {
+    "@Agent Ada first @Agent Ada second": [
+      { displayName: "Agent Ada", pubkey: "agent-pubkey", isAgent: true },
+      { displayName: "Agent Ada", pubkey: "agent-pubkey", isAgent: true },
+    ],
+    "@Agent Ada second": [
+      { displayName: "Agent Ada", pubkey: "agent-pubkey", isAgent: true },
+    ],
+    "": [],
+  };
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: () => {},
+      audience: {
+        pubkeys: ["agent-pubkey", "existing-lock"],
+        removePubkey: (pubkey) => removedPubkeys.push(pubkey),
+      },
+      audienceScope: "channel-scope",
+      mentions: {
+        getDraftMentionRefs: (text) => mentionRefsByText[text] ?? [],
+        getMentionDisplayName: () => "Agent Ada",
+      },
+      onPulseAddressLock: () => {},
+      richText: { getPlainTextAndCursor: () => ({ text: "", cursor: 0 }) },
+    }),
+  );
+
+  act(() => result.current.trackMentionAddressedAgent("agent-pubkey"));
+  act(() =>
+    result.current.syncAddressedAgentsFromText(
+      "@Agent Ada first @Agent Ada second",
+    ),
+  );
+  act(() => result.current.syncAddressedAgentsFromText("@Agent Ada second"));
+  assert.deepEqual(removedPubkeys, []);
+
+  act(() => result.current.syncAddressedAgentsFromText(""));
+  assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
+});
+
+test("removing human mentions and restored agent chips leaves pre-existing locks unchanged", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const removedPubkeys = [];
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: () => {},
+      audience: {
+        pubkeys: ["existing-lock"],
+        removePubkey: (pubkey) => removedPubkeys.push(pubkey),
+      },
+      audienceScope: "channel-scope",
+      mentions: {
+        getDraftMentionRefs: (text) => {
+          if (text === "@Alice @Existing Agent") {
+            return [
+              { displayName: "Alice", pubkey: "human-pubkey", isAgent: false },
+              {
+                displayName: "Existing Agent",
+                pubkey: "existing-lock",
+                isAgent: true,
+              },
+            ];
+          }
+          return text
+            ? [{ displayName: "Alice", pubkey: "human-pubkey", isAgent: false }]
+            : [];
+        },
+        getMentionDisplayName: () => "Existing Agent",
+      },
+      onPulseAddressLock: () => {},
+      richText: { getPlainTextAndCursor: () => ({ text: "", cursor: 0 }) },
+    }),
+  );
+
+  act(() =>
+    result.current.syncAddressedAgentsFromText("@Alice @Existing Agent"),
+  );
+  act(() => result.current.syncAddressedAgentsFromText("@Alice"));
+  act(() => result.current.syncAddressedAgentsFromText(""));
+  assert.deepEqual(removedPubkeys, []);
+});
+
 test("selecting an agent from the explicit picker auto-addresses it", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
