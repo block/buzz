@@ -36,6 +36,34 @@ final class EventKitFixtureTests: XCTestCase {
         XCTAssertEqual(page.records.map(\.identifier), ["included"])
     }
 
+    func testCalendarOutputPreservesAllDayAvailabilitySemantics() throws {
+        let reader = EventKitReader.fixture(calendarRecords: [
+            .init(
+                identifier: "mission",
+                calendarIdentifier: "command-adviser",
+                title: "Alongside FBE",
+                recurrenceIdentifier: "",
+                start: .distantPast,
+                end: .distantFuture,
+                isRecurring: false,
+                isAllDay: true,
+                blocksAvailability: false,
+                isDeleted: false,
+                isStale: false
+            ),
+        ])
+
+        let page = try reader.readCalendar(
+            calendarIdentifiers: ["command-adviser"],
+            start: Date(),
+            end: Date().addingTimeInterval(86_400),
+            maximum: 1
+        )
+
+        XCTAssertEqual(page.records[0].output().fields["is_all_day"], "true")
+        XCTAssertEqual(page.records[0].output().fields["blocks_availability"], "false")
+    }
+
     func testSourceDiscoveryReturnsStableUniqueIdentifiersAndTitles() {
         let reader = EventKitReader.fixture(
             calendarRecords: [
