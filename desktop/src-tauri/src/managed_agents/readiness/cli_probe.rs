@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::managed_agents::runtime::build_augmented_path;
 
@@ -70,6 +71,127 @@ pub(crate) fn login_probe(
         Ok(o) => classify_probe_output(&o.stderr, false),
         Err(_) => ProbeOutcome::LoggedOut,
     }
+}
+
+/// Retry policy for [`login_probe_with_recheck`].
+///
+/// Guards against the transient-flap failure mode where a CLI auth probe
+/// returns a false negative for a fraction of a second (typically while the
+/// underlying credential store is refreshing on-demand), and the desktop
+/// snapshots that false negative into `BUZZ_ACP_SETUP_PAYLOAD` for the
+/// lifetime of the spawned harness process. `buzz-acp` explicitly never
+/// re-derives readiness after startup, so a single false negative traps the
+/// agent in setup-listener mode.
+///
+/// The default policy [`RetryPolicy::startup_readiness_default`] runs at
+/// most three fast attempts (250 ms apart) plus one authoritative final
+/// recheck (500 ms after the last attempt). Worst-case added latency
+/// versus the pre-fix single probe: ~1 s when auth is genuinely broken;
+/// zero when the first probe already returns `LoggedIn`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetryPolicy {
+    /// Total probe attempts before the final recheck. Must be ≥ 1.
+    pub max_attempts: u32,
+    /// Delay between successive probe attempts.
+    pub backoff: Duration,
+    /// Delay before the authoritative final recheck runs. The recheck runs
+    /// only if every prior attempt returned `LoggedOut`; a single `LoggedIn`
+    /// or `ConfigInvalid` short-circuits the whole sequence.
+    pub final_recheck_delay: Duration,
+}
+
+impl RetryPolicy {
+    /// Default startup-readiness policy: three attempts, 250 ms backoff,
+    /// 500 ms final-recheck delay. Chosen to fit inside the desktop's
+    /// spawn latency budget while covering the sub-second flap window
+    /// observed in the Fizz Air incident (2026-08-23).
+    pub(crate) fn startup_readiness_default() -> Self {
+        Self {
+            max_attempts: 3,
+            backoff: Duration::from_millis(250),
+            final_recheck_delay: Duration::from_millis(500),
+        }
+    }
+}
+
+/// Run the login probe with a bounded retry sequence and one authoritative
+/// final recheck.
+///
+/// Semantics:
+/// * If any attempt returns `LoggedIn` or `ConfigInvalid`, that outcome is
+///   returned immediately — `ConfigInvalid` is not a transient state, so
+///   retrying it would only stall the spawn without changing the result.
+/// * If every attempt through `policy.max_attempts` returns `LoggedOut`,
+///   sleep for `policy.final_recheck_delay` and run one more probe. The
+///   recheck's outcome is authoritative — this is the "final recheck"
+///   that breaks a stuck negative when auth turned green during the
+///   backoff window.
+/// * Every attempt's diagnostic (attempt index, elapsed millis, and the
+///   first stderr line on non-success) is written to stderr via
+///   `eprintln!` so the desktop log preserves the error trail the pre-fix
+///   single-shot path silently discarded.
+pub(crate) fn login_probe_with_recheck(
+    binary_path: &Path,
+    probe_args: &[&str],
+    augmented_path: Option<&str>,
+    policy: RetryPolicy,
+) -> ProbeOutcome {
+    let max_attempts = policy.max_attempts.max(1);
+    let binary_display = binary_path.display();
+    for attempt in 1..=max_attempts {
+        let started = Instant::now();
+        let outcome = login_probe(binary_path, probe_args, augmented_path);
+        log_probe_attempt(&binary_display, attempt, max_attempts, &outcome, started);
+        match outcome {
+            ProbeOutcome::LoggedIn | ProbeOutcome::ConfigInvalid { .. } => return outcome,
+            ProbeOutcome::LoggedOut if attempt < max_attempts => {
+                std::thread::sleep(policy.backoff);
+            }
+            ProbeOutcome::LoggedOut => {}
+        }
+    }
+    // Every attempt returned LoggedOut. Take the final authoritative recheck.
+    std::thread::sleep(policy.final_recheck_delay);
+    let started = Instant::now();
+    let final_outcome = login_probe(binary_path, probe_args, augmented_path);
+    log_probe_attempt(
+        &binary_display,
+        max_attempts + 1,
+        max_attempts + 1,
+        &final_outcome,
+        started,
+    );
+    final_outcome
+}
+
+/// Emit one line per attempt so operators can reconstruct the retry trail.
+/// Never panics; logging failures are ignored on purpose.
+fn log_probe_attempt(
+    binary_display: &std::path::Display<'_>,
+    attempt: u32,
+    total: u32,
+    outcome: &ProbeOutcome,
+    started: Instant,
+) {
+    let elapsed_ms = started.elapsed().as_millis();
+    let label = match outcome {
+        ProbeOutcome::LoggedIn => "logged_in",
+        ProbeOutcome::LoggedOut => "logged_out",
+        ProbeOutcome::ConfigInvalid { .. } => "config_invalid",
+    };
+    let excerpt = match outcome {
+        ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
+            format!(" stderr={:?}", excerpt_first_line(stderr_excerpt))
+        }
+        _ => String::new(),
+    };
+    eprintln!(
+        "buzz-desktop: cli_probe attempt {attempt}/{total} outcome={label} elapsed_ms={elapsed_ms} binary={binary_display}{excerpt}"
+    );
+}
+
+fn excerpt_first_line(s: &str) -> &str {
+    s.trim().lines().next().unwrap_or("")
 }
 
 /// Classify collected probe output into a `ProbeOutcome`.
@@ -244,5 +366,177 @@ mod tests {
                 "CONFIG_PARSE_SIGNAL must be lowercase for case-insensitive matching: {sig}"
             );
         }
+    }
+
+    // ── Bounded-retry + final-recheck regression tests ────────────────────
+    //
+    // Guards the failure mode observed on Fizz Air 2026-08-23: a single
+    // sub-second false-negative from `claude auth status` at spawn time
+    // trapped the harness in setup-listener mode for the lifetime of the
+    // process because the pre-fix single-shot probe discarded the flap
+    // and buzz-acp never re-derives readiness.
+
+    #[cfg(unix)]
+    fn write_counter_script(
+        dir: &std::path::Path,
+        filename: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(filename);
+        fs::write(&path, body).expect("write script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+        path
+    }
+
+    /// A single transient false-negative in the middle of otherwise-green
+    /// probes must NOT produce `LoggedOut` — the bounded retry recovers
+    /// and returns `LoggedIn`.
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_with_recheck_recovers_from_transient_flap() {
+        use std::fs;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let counter_path = temp.path().join("attempts");
+        fs::write(&counter_path, "").expect("init counter");
+        // Script increments the counter and exits 1 on attempt 1, exit 0 thereafter.
+        let script_body = format!(
+            "#!/bin/sh\nprintf 'x' >> '{}'\nn=$(wc -c < '{}' | tr -d ' ')\nif [ \"$n\" -eq 1 ]; then\n  echo 'transient flap' >&2\n  exit 1\nfi\nexit 0\n",
+            counter_path.display(),
+            counter_path.display()
+        );
+        let script = write_counter_script(temp.path(), "fake-claude-flap", &script_body);
+        let policy = super::RetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::from_millis(1),
+            final_recheck_delay: std::time::Duration::from_millis(1),
+        };
+        let outcome = super::login_probe_with_recheck(
+            &script,
+            &["fake-claude-flap", "auth", "status"],
+            None,
+            policy,
+        );
+        assert_eq!(
+            outcome,
+            ProbeOutcome::LoggedIn,
+            "one-attempt flap must recover to LoggedIn under bounded retry"
+        );
+        // Exactly 2 attempts: one flap, then the retry that succeeds.
+        let attempts_seen = std::fs::read_to_string(&counter_path)
+            .expect("read attempts counter")
+            .len();
+        assert_eq!(
+            attempts_seen, 2,
+            "expected 2 probe runs (flap + retry-that-succeeds); got {attempts_seen}"
+        );
+    }
+
+    /// If every retry attempt fails AND the final recheck also fails, the
+    /// authoritative outcome is `LoggedOut`. This is the genuine-not-authed
+    /// case and must NOT be masked by the retry loop.
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_with_recheck_returns_logged_out_when_all_attempts_fail() {
+        use std::fs;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let counter_path = temp.path().join("attempts");
+        fs::write(&counter_path, "").expect("init counter");
+        let script_body = format!(
+            "#!/bin/sh\nprintf 'x' >> '{}'\necho 'not authenticated' >&2\nexit 1\n",
+            counter_path.display()
+        );
+        let script = write_counter_script(temp.path(), "fake-claude-always-out", &script_body);
+        let policy = super::RetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::from_millis(1),
+            final_recheck_delay: std::time::Duration::from_millis(1),
+        };
+        let outcome = super::login_probe_with_recheck(
+            &script,
+            &["fake-claude-always-out", "auth", "status"],
+            None,
+            policy,
+        );
+        assert_eq!(
+            outcome,
+            ProbeOutcome::LoggedOut,
+            "genuine LoggedOut must survive the retry sequence"
+        );
+        // max_attempts (3) + one final recheck = 4 total runs.
+        let attempts_seen = std::fs::read_to_string(&counter_path)
+            .expect("read attempts counter")
+            .len();
+        assert_eq!(
+            attempts_seen, 4,
+            "expected 3 retries + 1 final recheck = 4 probe runs; got {attempts_seen}"
+        );
+    }
+
+    /// A `ConfigInvalid` verdict is not a transient condition — retrying it
+    /// would only stall the spawn. First occurrence must short-circuit the
+    /// whole retry sequence.
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_with_recheck_short_circuits_on_config_invalid() {
+        use std::fs;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let counter_path = temp.path().join("attempts");
+        fs::write(&counter_path, "").expect("init counter");
+        let script_body = format!(
+            "#!/bin/sh\nprintf 'x' >> '{}'\necho 'Error loading configuration: /home/user/.codex/config.toml: unknown variant `ultra`' >&2\nexit 1\n",
+            counter_path.display()
+        );
+        let script = write_counter_script(temp.path(), "fake-codex-bad-config", &script_body);
+        let policy = super::RetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::from_millis(1),
+            final_recheck_delay: std::time::Duration::from_millis(1),
+        };
+        let outcome = super::login_probe_with_recheck(
+            &script,
+            &["fake-codex-bad-config", "login", "status"],
+            None,
+            policy,
+        );
+        assert!(
+            matches!(outcome, ProbeOutcome::ConfigInvalid { .. }),
+            "ConfigInvalid must short-circuit retry; got {outcome:?}"
+        );
+        let attempts_seen = std::fs::read_to_string(&counter_path)
+            .expect("read attempts counter")
+            .len();
+        assert_eq!(
+            attempts_seen, 1,
+            "ConfigInvalid should short-circuit after 1 attempt; got {attempts_seen}"
+        );
+    }
+
+    /// The default startup-readiness policy is the load-bearing knob wired
+    /// into `cli_login::requirements`. Lock its shape so a well-meaning
+    /// tweak to the constants cannot silently expand the spawn budget
+    /// past what the desktop tolerates.
+    #[test]
+    fn startup_readiness_default_policy_stays_bounded() {
+        let p = super::RetryPolicy::startup_readiness_default();
+        assert_eq!(p.max_attempts, 3, "default max_attempts drifted");
+        assert_eq!(
+            p.backoff.as_millis(),
+            250,
+            "default backoff drifted; a longer backoff extends the spawn budget"
+        );
+        assert_eq!(
+            p.final_recheck_delay.as_millis(),
+            500,
+            "default final_recheck_delay drifted; keep total worst-case ≤ 1 s"
+        );
+        // Worst-case total added latency = (max_attempts - 1) * backoff + final_recheck_delay
+        let worst_case_ms = (p.max_attempts as u128 - 1) * p.backoff.as_millis()
+            + p.final_recheck_delay.as_millis();
+        assert!(
+            worst_case_ms <= 1_000,
+            "startup-readiness retry policy worst case must stay ≤ 1000 ms; got {worst_case_ms}"
+        );
     }
 }

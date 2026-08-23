@@ -47,7 +47,13 @@ pub(super) fn requirements(
                 )];
             };
             let augmented_path = cli_probe::augmented_path();
-            match cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref()) {
+            let policy = cli_probe::RetryPolicy::startup_readiness_default();
+            match cli_probe::login_probe_with_recheck(
+                &binary_path,
+                probe_args,
+                augmented_path.as_deref(),
+                policy,
+            ) {
                 cli_probe::ProbeOutcome::LoggedIn => vec![],
                 cli_probe::ProbeOutcome::LoggedOut => vec![missing_requirement(
                     probe_args,
