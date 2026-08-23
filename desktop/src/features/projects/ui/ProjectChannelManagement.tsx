@@ -41,33 +41,37 @@ export function ProjectChannelManagement({
       ? project.owner
       : undefined;
 
-  if (!canEdit) return null;
-
   return (
     <>
-      <CreateChannelDialog
-        channelKind={createOpen ? "stream" : null}
-        description="Add another stream to this project. A template can keep the same canvas and agents."
-        isCreating={createMutation.isPending}
-        onCreate={async (input) => {
-          const result = await createMutation.mutateAsync({
-            ...input,
-            ownerControlAgentPubkey,
-            project,
-          });
-          toast.success(`Channel "#${result.channel.name}" created.`);
-          await goChannel(result.channel.id);
-        }}
-        onOpenChange={setCreateOpen}
-        testId="create-project-channel-dialog"
-        title="Create a project channel"
-      />
+      {canEdit ? (
+        <CreateChannelDialog
+          channelKind={createOpen ? "stream" : null}
+          description="Add another stream to this project. A template can keep the same canvas and agents."
+          isCreating={createMutation.isPending}
+          onCreate={async (input) => {
+            const result = await createMutation.mutateAsync({
+              ...input,
+              ownerControlAgentPubkey,
+              project,
+            });
+            toast.success(`Channel "#${result.channel.name}" created.`);
+            await goChannel(result.channel.id);
+          }}
+          onOpenChange={setCreateOpen}
+          testId="create-project-channel-dialog"
+          title="Create a project channel"
+        />
+      ) : null}
       <Button
         aria-label="Add channel"
         className="h-6 w-6 shrink-0 rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         data-testid="add-project-channel"
+        disabled={!canEdit}
         onClick={() => setCreateOpen(true)}
         size="icon"
+        title={
+          canEdit ? "Add channel" : "Only the project owner can add channels"
+        }
         type="button"
         variant="ghost"
       >

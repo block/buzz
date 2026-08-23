@@ -19,6 +19,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayEvent } from "@/shared/api/types";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
+import { SIDEBAR_WIDTH_MIN } from "@/shared/layout/sidebarLayout";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
@@ -117,6 +118,7 @@ export function ProjectChannelHome({
   const [workspaceDetail, setWorkspaceDetail] =
     React.useState<ProjectHomeWorkspaceDetail | null>(null);
   const summaryWidth = useThreadPanelWidth(undefined, {
+    minWidthPx: SIDEBAR_WIDTH_MIN,
     sessionKey: PROJECT_HOME_SUMMARY_WIDTH_KEY,
   });
   const homeChannel =

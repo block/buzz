@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  collapseProjectRelatedChannelRows,
   collectProjectRelatedChannelRows,
   listProjectBoundChannels,
   listProjectChildChannels,
@@ -104,6 +105,37 @@ test("collects one row per repository channel binding", () => {
     ]),
     2,
   );
+});
+
+test("collapses repositories sharing one project channel", () => {
+  const rows = collectProjectRelatedChannelRows([
+    makeProject({
+      repositories: [
+        makeRepository({ name: "web" }),
+        makeRepository({ id: "repo-mobile", name: "mobile" }),
+        makeRepository({
+          channelId: CHANNEL_B,
+          id: "repo-relay",
+          name: "relay",
+        }),
+      ],
+    }),
+  ]);
+
+  assert.deepEqual(collapseProjectRelatedChannelRows(rows), [
+    {
+      channelId: CHANNEL_A,
+      projectId: "project-buzz",
+      projectName: "buzz",
+      repositoryNames: ["web", "mobile"],
+    },
+    {
+      channelId: CHANNEL_B,
+      projectId: "project-buzz",
+      projectName: "buzz",
+      repositoryNames: ["relay"],
+    },
+  ]);
 });
 
 test("keeps a project channel only when no repository in that project shares it", () => {

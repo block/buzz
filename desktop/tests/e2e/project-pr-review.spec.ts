@@ -1047,15 +1047,15 @@ test("project pull requests report aggregate root query failures", async ({
   await page.getByTestId("open-projects-view").click();
   await page.getByRole("button", { name: "Reviews", exact: true }).click();
 
-  await expect(page.getByText("Could not load reviews.")).toBeVisible();
+  await expect(page.getByText("Could not load reviews")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByText("No reviews yet.")).toHaveCount(0);
+  await expect(page.getByText("No reviews yet")).toHaveCount(0);
 
   await page.evaluate(() => {
     window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
   });
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Could not load reviews.")).toHaveCount(0);
+  await expect(page.getByText("Could not load reviews")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: /^View / }).first(),
   ).toBeVisible();
@@ -1705,9 +1705,12 @@ test("project overview presents collapsible context beside grouped activity", as
     "Projects Activity",
   );
   await expect(page.getByTestId("projects-activity-search")).toBeVisible();
-  await expect(page.getByTestId("projects-activity-intro")).toContainText(
-    "Keeping up with the community has never been easier—or mattered more.",
+  await expect(page.getByTestId("projects-activity-summary")).toContainText(
+    /^(This week:|Currently tracking)/,
   );
+  await expect(
+    page.getByTestId("projects-activity-summary").locator("strong").first(),
+  ).toBeVisible();
   await expect(
     page.getByTestId("projects-overview-context-panel"),
   ).toBeVisible();
@@ -1863,6 +1866,19 @@ test("project overview presents collapsible context beside grouped activity", as
   await expect(page.getByTestId("project-channel-repository")).toHaveCount(
     channelCount,
   );
+  await expect(
+    page.getByTestId("project-channel-repository").first(),
+  ).toHaveCSS("text-align", "left");
+  const affiliationXs = (
+    await page
+      .getByTestId("project-channel-repository")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getBoundingClientRect().x),
+      )
+  ).filter((x) => Number.isFinite(x));
+  expect(
+    Math.max(...affiliationXs) - Math.min(...affiliationXs),
+  ).toBeLessThanOrEqual(2);
   await page.getByTestId("projects-section-projects").click();
   await expect(page.getByTestId("projects-page-header")).toContainText(
     "Projects",
@@ -2140,6 +2156,38 @@ test("project overview info control animates the context rail", async ({
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
 });
 
+test("Projects search replaces and restores the section tabs", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+
+  await expect(
+    page.getByTestId("projects-page-tabs").getByRole("combobox"),
+  ).toHaveCount(0);
+  await page.getByTestId("projects-activity-search").click();
+  const search = page.getByTestId("projects-section-search-input");
+  await expect(search).toBeFocused();
+  await expect(page.getByTestId("projects-section-projects")).toHaveCount(0);
+  await expect(
+    page.getByTestId("projects-page-tabs").getByRole("combobox"),
+  ).toHaveValue("updated");
+
+  await search.fill("Space Invaders");
+  await expect(page.getByTestId("project-row-space-invaders-3d")).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("projects-section-search")).toHaveCount(0);
+  await expect(page.getByTestId("projects-section-projects")).toBeVisible();
+
+  await page.getByTestId("projects-activity-search").click();
+  await page.getByTestId("projects-section-search-close").click();
+  await expect(page.getByTestId("projects-section-search")).toHaveCount(0);
+});
+
 test("selecting overview list rows switches the context pod to the cluster", async ({
   page,
 }) => {
@@ -2168,6 +2216,9 @@ test("selecting overview list rows switches the context pod to the cluster", asy
   await page.keyboard.press("Space");
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
     "1 task",
+  );
+  await expect(page.getByTestId("projects-selection-summary")).toContainText(
+    "Selection",
   );
   await expect(page.getByTestId("projects-selection-items")).toHaveCount(0);
   await expect(page.getByTestId("projects-selection-clear")).toBeVisible();
@@ -2225,6 +2276,36 @@ test("selecting overview list rows switches the context pod to the cluster", asy
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
     "Tasks",
   );
+  await expect(page.getByTestId("projects-overview-context-rail")).toHaveCSS(
+    "width",
+    "288px",
+  );
+});
+
+test("selection restores a previously collapsed Projects context drawer", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Tasks", exact: true }).click();
+  await page.getByRole("button", { name: "List layout" }).click();
+
+  const toggle = page.getByTestId("projects-overview-context-toggle");
+  const rail = page.getByTestId("projects-overview-context-rail");
+  await toggle.click();
+  await expect(rail).toHaveCSS("width", "0px");
+
+  const row = page.locator('[data-testid^="projects-issue-row-"]').first();
+  await row.hover();
+  await row.getByTestId("projects-row-select").click();
+  await expect(rail).toHaveCSS("width", "288px");
+  await expect(page.getByTestId("projects-selection-clear")).toBeVisible();
+
+  await page.getByTestId("projects-selection-clear").click();
+  await expect(rail).toHaveCSS("width", "0px");
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
 });
 
 test("repository changes discard captured selection context before agent sends", async ({
@@ -2408,7 +2489,7 @@ test("overview lists position identifying and generic icons consistently", async
   }
 });
 
-test("repository info control animates the context rail from the far right", async ({
+test("repository drawer control animates the context rail from the far right", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -2418,7 +2499,7 @@ test("repository info control animates the context rail from the far right", asy
   const chat = page.getByTestId("project-right-panel-chat-tab");
   const terminal = page.getByTestId("project-terminal-toggle");
   const info = page.getByTestId("project-right-panel-repository-tab");
-  const infoIcon = page.getByTestId("project-right-panel-repository-icon");
+  const contextIcon = page.getByTestId("project-right-panel-repository-icon");
   const rail = page.getByTestId("project-context-rail");
   const repositoryPanel = page.getByTestId("project-repository-actions-panel");
   const layout = page.getByTestId("project-panel-layout");
@@ -2450,7 +2531,8 @@ test("repository info control animates the context rail from the far right", asy
   expect(terminalBounds?.x).toBeLessThan(chatBounds?.x ?? 0);
   expect(chatBounds?.x).toBeLessThan(infoBounds?.x ?? 0);
   await expect(info).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-  await expect(infoIcon).toHaveCSS("opacity", "1");
+  await expect(contextIcon).toBeVisible();
+  await expect(info).toHaveAttribute("aria-pressed", "true");
   await expect(rail).toHaveCSS("width", "288px");
   await expect(layout).toHaveCSS("padding-right", "8px");
   await expect(rail).toHaveCSS("transition-duration", "0.2s");
@@ -2458,7 +2540,7 @@ test("repository info control animates the context rail from the far right", asy
 
   await info.click();
   await expect(rail).toHaveCSS("width", "0px");
-  await expect(infoIcon).toHaveCSS("opacity", "0.6");
+  await expect(info).toHaveAttribute("aria-pressed", "false");
   await expect(layout).toHaveAttribute("data-project-context-detached", "true");
   expect(
     await contentSurface.evaluate((element) => {
@@ -2474,7 +2556,7 @@ test("repository info control animates the context rail from the far right", asy
 
   await info.click();
   await expect(rail).toHaveCSS("width", "288px");
-  await expect(infoIcon).toHaveCSS("opacity", "1");
+  await expect(info).toHaveAttribute("aria-pressed", "true");
   await expect(repositoryPanel).toBeVisible();
 });
 

@@ -64,6 +64,25 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.getByTestId("project-home-context-repo-buzz").click();
 }
 
+test("repository-only relays keep the Repositories section available", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__ = true;
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
+  await page.getByTestId("projects-section-repositories").click();
+  await expect(
+    page.locator(
+      '[data-testid="repository-card-buzz"], [data-testid="repository-row-buzz"]',
+    ),
+  ).toBeVisible();
+});
+
 test("projects activity overview screenshot", async ({ page }) => {
   await page.addInitScript(() => {
     window.localStorage.setItem("buzz-theme", "light");
@@ -73,17 +92,11 @@ test("projects activity overview screenshot", async ({ page }) => {
   await page.getByTestId("open-projects-view").click();
   await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
   const activityHeader = page.getByTestId("projects-page-header");
-  const relayIcon = page.getByTestId("projects-activity-relay-icon");
   await expect(activityHeader).toBeVisible();
-  await expect(relayIcon).toBeVisible();
-  const [activityHeaderBox, relayIconBox] = await Promise.all([
-    activityHeader.boundingBox(),
-    relayIcon.boundingBox(),
-  ]);
-  expect(activityHeaderBox).not.toBeNull();
-  expect(relayIconBox).not.toBeNull();
-  expect((relayIconBox?.y ?? 0) + (relayIconBox?.height ?? 0)).toBeLessThan(
-    activityHeaderBox?.y ?? 0,
+  await expect(page.getByTestId("projects-activity-relay-icon")).toHaveCount(0);
+  await expect(page.getByTestId("projects-activity-intro")).toHaveCSS(
+    "text-align",
+    "left",
   );
   await expect(page.getByTestId("projects-activity-search")).toBeVisible();
   await expect(page.getByTestId("projects-activity-intro")).toContainText(

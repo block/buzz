@@ -135,16 +135,10 @@ function ChannelContextRow({
   projectHome?: boolean;
   testId: string;
 }) {
-  const count = presentContextCount(channel.memberCount);
   const Icon = projectHome ? ProjectChannelIcon : Hash;
   if (onClick) {
     return (
-      <ContextNavButton
-        count={count}
-        icon={<Icon />}
-        onClick={onClick}
-        testId={testId}
-      >
+      <ContextNavButton icon={<Icon />} onClick={onClick} testId={testId}>
         {channel.name}
       </ContextNavButton>
     );
@@ -154,9 +148,7 @@ function ChannelContextRow({
       className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex items-center`}
       data-testid={testId}
     >
-      <ContextRowContent count={count} icon={<Icon />}>
-        {channel.name}
-      </ContextRowContent>
+      <ContextRowContent icon={<Icon />}>{channel.name}</ContextRowContent>
     </div>
   );
 }

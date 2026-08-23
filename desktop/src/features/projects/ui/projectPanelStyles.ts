@@ -13,10 +13,6 @@ export const PROJECT_PICKER_TRIGGER_CLASS =
 export const PROJECT_DETAIL_PANEL_CLASS =
   "overflow-hidden rounded-xl border border-border/60 bg-transparent";
 
-/** Empty or loading state using the same transparent project panel shell. */
-export const PROJECT_DETAIL_PANEL_MESSAGE_CLASS =
-  "rounded-xl border border-border/60 bg-transparent p-4 text-sm text-muted-foreground";
-
 /** Centered, borderless reading column used by selected work-item details. */
 export const PROJECT_DETAIL_READING_COLUMN_CLASS =
   "mx-auto w-full max-w-3xl overflow-hidden";

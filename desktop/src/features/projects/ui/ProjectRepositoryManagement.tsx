@@ -142,7 +142,7 @@ export function ProjectRepositoryManagement({
         project={project}
         repositories={attachCandidates}
       />
-      {canEdit && !hideTriggers ? (
+      {!hideTriggers ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -153,7 +153,13 @@ export function ProjectRepositoryManagement({
                   : "h-7 shrink-0 gap-1.5 rounded-md"
               }
               data-testid="add-project-repository"
+              disabled={!canEdit}
               size={compact ? "icon" : "sm"}
+              title={
+                canEdit
+                  ? "Add repository"
+                  : "Only the project owner can add repositories"
+              }
               type="button"
               variant={compact ? "ghost" : "outline"}
             >

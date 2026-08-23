@@ -1241,6 +1241,8 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Omits kind 30621 seeds while retaining standalone kind 30617 repositories. */
+    __BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__?: boolean;
     /** Project-scoped events accepted by the mock relay. */
     __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
       content: string;
@@ -5975,30 +5977,32 @@ function buildMockProjectEvents(): RelayEvent[] {
     }
   }
 
-  const projectOwner =
-    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
-  events.push(
-    createMockEvent(
-      KIND_PROJECT_ANNOUNCEMENT,
-      "",
-      [
-        ["d", "buzz"],
-        ["name", "buzz"],
-        ["description", "The complete Buzz community platform."],
-        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
-        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+  if (!window.__BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__) {
+    const projectOwner =
+      window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
+    events.push(
+      createMockEvent(
+        KIND_PROJECT_ANNOUNCEMENT,
+        "",
         [
-          "buzz-channel",
-          getConfig()?.mock?.projectAccessChannelId ??
-            STARTER_PROJECT_HOME_CHANNEL_ID,
+          ["d", "buzz"],
+          ["name", "buzz"],
+          ["description", "The complete Buzz community platform."],
+          ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
+          ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+          [
+            "buzz-channel",
+            getConfig()?.mock?.projectAccessChannelId ??
+              STARTER_PROJECT_HOME_CHANNEL_ID,
+          ],
+          ["buzz-related-channel", "9dae0116-799b-5071-a0a8-fdd30a91a35d"],
         ],
-        ["buzz-related-channel", "9dae0116-799b-5071-a0a8-fdd30a91a35d"],
-      ],
-      projectOwner,
-      now,
-      "project-buzz".padEnd(64, "0"),
-    ),
-  );
+        projectOwner,
+        now,
+        "project-buzz".padEnd(64, "0"),
+      ),
+    );
+  }
 
   return events;
 }

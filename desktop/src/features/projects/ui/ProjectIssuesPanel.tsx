@@ -56,6 +56,7 @@ import {
 } from "./ProjectStatusProgressIcon";
 import { ProjectWorkItemGroup } from "./ProjectWorkItemGroup";
 import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Triage" || status === "In Progress") return "text-amber-500";
@@ -435,11 +436,15 @@ export function ProjectIssuesPanel({
 
   if (issues.length === 0) {
     return (
-      <p className="p-4 text-sm text-muted-foreground">
-        {issuesQuery.error
-          ? "Could not load tasks for this repository."
-          : "No tasks yet."}
-      </p>
+      <ProjectPanelState
+        description={
+          issuesQuery.error
+            ? "Refresh the repository and try again."
+            : "Tasks created for this repository will appear here."
+        }
+        error={Boolean(issuesQuery.error)}
+        title={issuesQuery.error ? "Could not load tasks" : "No tasks yet"}
+      />
     );
   }
 

@@ -40,14 +40,16 @@ export function ProjectHomeColumn({
       widthPx={widthPx}
     >
       <div className="relative z-30 flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-sidebar">
-        <AuxiliaryPanelHeader mode="docked" transparent>
+        <AuxiliaryPanelHeader mode="panel" transparent>
           <AuxiliaryPanelHeaderGroup>
-            <AuxiliaryPanelHeaderTitleBlock title={title} />
+            <div className="-ml-1 min-w-0 flex-1">
+              <AuxiliaryPanelHeaderTitleBlock title={title} />
+            </div>
           </AuxiliaryPanelHeaderGroup>
         </AuxiliaryPanelHeader>
         <AuxiliaryPanelBody
           className={cn("min-h-0 flex-1 overflow-hidden", bodyClassName)}
-          mode="docked"
+          mode="panel"
         >
           {children}
         </AuxiliaryPanelBody>

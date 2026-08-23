@@ -53,10 +53,10 @@ import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailabl
 import {
   PROJECT_COLUMN_HEADER_BACKDROP_CLASS,
   PROJECT_DETAIL_PANEL_CLASS,
-  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
   PROJECT_SECTION_HEADER_CLASS,
 } from "./projectPanelStyles";
 import { ProjectSectionHeader } from "./ProjectSectionHeader";
+import { ProjectPanelState } from "./ProjectPanelState";
 import { CreatePullRequestDialog } from "./CreatePullRequestDialog";
 import {
   CreateIssueDialog,
@@ -444,7 +444,10 @@ export function WorkspaceTabs({
       >
         {sectionHeader}
 
-        <TabsContent className="m-0" value="overview">
+        <TabsContent
+          className="m-0 min-h-0 flex-1 flex-col data-[state=active]:flex"
+          value="overview"
+        >
           <ProjectOverviewPanel
             accessChannelId={project.channelId}
             externalHost={externalHost}
@@ -571,14 +574,10 @@ export function WorkspaceTabs({
             (repoSource === "local" &&
             !localSnapshot &&
             !localSnapshotLoading ? (
-              <div className="mb-3">
-                <div
-                  className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-                  data-project-detail-panel
-                >
-                  No local checkout found.
-                </div>
-              </div>
+              <ProjectPanelState
+                description="Switch to the remote source or clone this repository locally."
+                title="No local checkout found"
+              />
             ) : (
               <RepositoryFilesPanel
                 error={displayedSnapshotError}

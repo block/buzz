@@ -16,6 +16,7 @@ export type ChannelIntro = {
   channelKindLabel: string;
   channelName: string;
   description?: string | null;
+  hideBeginning?: boolean;
   icon?: React.ReactNode;
 };
 
@@ -50,13 +51,15 @@ export function ChannelIntroBlock({
       <p className="mt-4 max-w-2xl truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
         #{intro.channelName}
       </p>
-      <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-        This is the beginning of the{" "}
-        <span className="font-medium text-foreground">
-          {intro.channelKindLabel}
-        </span>
-        .
-      </p>
+      {intro.hideBeginning ? null : (
+        <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
+          This is the beginning of the{" "}
+          <span className="font-medium text-foreground">
+            {intro.channelKindLabel}
+          </span>
+          .
+        </p>
+      )}
       {intro.description ? (
         <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
           {intro.description}

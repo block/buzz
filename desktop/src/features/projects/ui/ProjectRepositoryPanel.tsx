@@ -42,11 +42,9 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import {
-  PROJECT_DETAIL_PANEL_CLASS,
-  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
-} from "./projectPanelStyles";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProjectRepositoryLatestCommitRow } from "./ProjectRepositoryLatestCommitRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
@@ -736,15 +734,20 @@ export function RepositoryFilesPanel({
         ? "No files have been pushed yet."
         : null;
   if (stateMessage) {
+    const state = (
+      <ProjectPanelState
+        description={
+          error || unavailableMessage
+            ? "Refresh the repository or check its access settings."
+            : "Files pushed to this repository will appear here."
+        }
+        error={Boolean(error || unavailableMessage)}
+        panel={!sourceControls}
+        title={stateMessage}
+      />
+    );
     if (!sourceControls) {
-      return (
-        <div
-          className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-          data-project-detail-panel
-        >
-          {stateMessage}
-        </div>
-      );
+      return state;
     }
     return (
       <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
@@ -768,7 +771,7 @@ export function RepositoryFilesPanel({
             <RepoSyncActionButton controls={sourceControls} />
           </div>
         </div>
-        <div className="p-4 text-sm text-muted-foreground">{stateMessage}</div>
+        {state}
       </div>
     );
   }

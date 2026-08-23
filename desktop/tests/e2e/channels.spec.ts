@@ -1749,10 +1749,10 @@ test("empty channel shows intro actions", async ({ page }) => {
   const addAgentsAction = page.getByTestId("channel-intro-action-create-agent");
   await expect(addAgentsAction).toBeVisible();
   await expect(
-    addAgentsAction.getByText("Add agents", { exact: true }),
+    addAgentsAction.getByText("Add agent", { exact: true }),
   ).toBeVisible();
   await expect(
-    addAgentsAction.getByText("Bring them in.", {
+    addAgentsAction.getByText("Add an agent here.", {
       exact: true,
     }),
   ).toBeVisible();

@@ -107,9 +107,9 @@ export function useChannelIntro({
 
       if (onAddAgent) {
         actions.push({
-          description: "Bring them in.",
-          icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Add agents",
+          description: "Add an agent here.",
+          icon: <Bot aria-hidden className="h-5 w-5" />,
+          label: "Add agent",
           onClick: onAddAgent,
           testId: "channel-intro-action-create-agent",
         });
@@ -118,7 +118,7 @@ export function useChannelIntro({
       if (onOpenMembers) {
         actions.push({
           description: "Invite members.",
-          icon: <UserPlus aria-hidden className="h-6 w-6" />,
+          icon: <UserPlus aria-hidden className="h-5 w-5" />,
           label: "Add people",
           onClick: onOpenMembers,
           testId: "channel-intro-action-add-people",
@@ -131,6 +131,7 @@ export function useChannelIntro({
       channelKindLabel: getChannelIntroKind(activeChannel, projectHome),
       channelName: activeChannel.name,
       description: getChannelIntroDescription(activeChannel),
+      hideBeginning: projectHome,
       icon: projectHome ? (
         <ProjectChannelIcon className="h-7 w-7" />
       ) : undefined,

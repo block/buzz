@@ -191,11 +191,9 @@ test("top-level project lists show metadata and overflow actions", async ({
   await page.keyboard.press("Escape");
 
   await page.getByRole("button", { name: "Reviews", exact: true }).click();
-  await page.getByRole("button", { name: "Filter reviews" }).click();
   await expect(
-    page.getByRole("menuitem", { name: "My Reviews" }),
-  ).toBeVisible();
-  await page.keyboard.press("Escape");
+    page.getByRole("button", { name: "Filter reviews" }),
+  ).toHaveCount(0);
   await page.getByTestId("projects-create-menu").hover();
   await expect(page.getByRole("menuitem", { name: "Project" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Task" })).toBeVisible();
@@ -224,9 +222,9 @@ test("top-level project lists show metadata and overflow actions", async ({
   await page.keyboard.press("Escape");
 
   await page.getByRole("button", { name: "Tasks", exact: true }).click();
-  await page.getByRole("button", { name: "Filter tasks" }).click();
-  await expect(page.getByRole("menuitem", { name: "My Tasks" })).toBeVisible();
-  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Filter tasks" })).toHaveCount(
+    0,
+  );
   const issueRow = page.locator('[data-testid^="projects-issue-row-"]').first();
   await expect(issueRow).toBeVisible();
   const issuePositions = await trailingPositions(issueRow);
@@ -296,8 +294,8 @@ test("creating a project opens its channel conversation", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("multi-repo-demo");
   await expect(page.getByTestId("project-agent-chat-panel")).toHaveCount(0);
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
-  await expect(page.getByTestId("message-channel-intro")).toContainText(
-    "project channel",
+  await expect(page.getByTestId("message-channel-intro")).not.toContainText(
+    "This is the beginning",
   );
   await expect(
     page
@@ -348,6 +346,7 @@ test("creating a project opens its channel conversation", async ({ page }) => {
     page.getByTestId("project-home-context-channel"),
   ).not.toContainText("people in this channel");
   await expect(page.getByTestId("add-project-channel")).toBeVisible();
+  await expect(page.getByTestId("add-project-repository")).toBeVisible();
   await page.getByTestId("add-project-channel").click();
   await expect(page.getByTestId("create-project-channel-dialog")).toBeVisible();
   await page.keyboard.press("Escape");

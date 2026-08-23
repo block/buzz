@@ -9,6 +9,7 @@ import { normalizeRelayUrl } from "@/features/communities/communityStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
 import type { ProjectDetailAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
 import { projectDetailAgentContextBlock } from "@/features/projects/lib/projectDetailAgentContext";
+import { pickDefaultProjectsAgent } from "@/features/projects/lib/projectAgentSelection";
 import {
   restoreProjectsAgentConversation,
   submitProjectAgentMessage,
@@ -102,7 +103,8 @@ export function ProjectAgentChatPanel({
   const profileQuery = useProfileQuery();
   const openDmMutation = useOpenDmMutation();
   const startAgentMutation = useStartManagedAgentMutation();
-  const selectedAgent = conversation?.agent ?? candidates[0] ?? null;
+  const selectedAgent =
+    conversation?.agent ?? pickDefaultProjectsAgent(candidates);
   const candidateProfilesQuery = useUsersBatchQuery(
     selectedAgent ? [selectedAgent.pubkey] : [],
   );

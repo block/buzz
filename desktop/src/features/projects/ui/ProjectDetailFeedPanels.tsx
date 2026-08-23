@@ -30,12 +30,10 @@ import {
 } from "lucide-react";
 
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
-import {
-  PROJECT_DETAIL_PANEL_CLASS,
-  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
-} from "./projectPanelStyles";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -152,12 +150,10 @@ export function ContributorsPanel({
 
   if (rows.length === 0) {
     return (
-      <p
-        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-        data-project-detail-panel
-      >
-        No git contributors are available yet.
-      </p>
+      <ProjectPanelState
+        description="Contributors appear after signed project or repository activity."
+        title="No contributors yet"
+      />
     );
   }
 
@@ -288,14 +284,15 @@ export function ActivityPanel({
 
   if (commits.length === 0) {
     return (
-      <p
-        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
-        data-project-detail-panel
-      >
-        {error
-          ? "Could not load repository activity from git."
-          : "No commits are available yet."}
-      </p>
+      <ProjectPanelState
+        description={
+          error
+            ? "Refresh the repository and try again."
+            : "Commits pushed to this repository will appear here."
+        }
+        error={Boolean(error)}
+        title={error ? "Could not load commits" : "No commits yet"}
+      />
     );
   }
 

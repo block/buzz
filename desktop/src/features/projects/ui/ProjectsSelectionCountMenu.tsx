@@ -1,4 +1,4 @@
-import { Bot, GitPullRequest, Link2, X } from "lucide-react";
+import { Bot, GitPullRequest, Link2, ListChecks, X } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -67,13 +67,26 @@ export function ProjectsSelectionCountMenu({
 
   return (
     <div className="w-full" data-testid="projects-selection-actions">
-      <h2
-        className="flex h-7 min-w-0 items-center truncate text-sm font-normal text-muted-foreground/70"
-        data-testid="projects-overview-context-title"
+      <div
+        className="flex min-w-0 items-center gap-2.5"
+        data-testid="projects-selection-summary"
       >
-        {presentation.title}
-      </h2>
-      <div className="space-y-0.5 pt-2">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground">
+          <ListChecks className="h-4 w-4" />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-2xs font-medium uppercase tracking-wider text-muted-foreground/55">
+            Selection
+          </span>
+          <h2
+            className="truncate text-sm font-semibold text-foreground"
+            data-testid="projects-overview-context-title"
+          >
+            {presentation.title}
+          </h2>
+        </span>
+      </div>
+      <div className="space-y-2.5 pt-4">
         {presentation.actions
           .filter(
             (action) =>

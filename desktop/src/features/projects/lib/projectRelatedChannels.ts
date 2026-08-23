@@ -20,6 +20,14 @@ export type ProjectRelatedChannelRow = {
   repositoryName: string | null;
 };
 
+/** One display row per distinct channel within a project. */
+export type ProjectRelatedChannelDisplayRow = {
+  channelId: string;
+  projectId: string;
+  projectName: string;
+  repositoryNames: string[];
+};
+
 function trimmedChannelId(value: string | null | undefined) {
   const channelId = value?.trim() ?? "";
   return channelId.length > 0 ? channelId : null;
@@ -86,6 +94,40 @@ export function uniqueProjectRelatedChannelCount(
 
 export function projectRelatedChannelRowKey(row: ProjectRelatedChannelRow) {
   return `${row.channelId}:${row.projectId}:${row.repositoryId ?? "project"}`;
+}
+
+/** Collapses repository bindings that point at the same project channel. */
+export function collapseProjectRelatedChannelRows(
+  rows: readonly ProjectRelatedChannelRow[],
+): ProjectRelatedChannelDisplayRow[] {
+  const collapsed = new Map<string, ProjectRelatedChannelDisplayRow>();
+  for (const row of rows) {
+    const key = `${row.projectId}:${row.channelId}`;
+    const current = collapsed.get(key);
+    if (current) {
+      if (
+        row.repositoryName &&
+        !current.repositoryNames.includes(row.repositoryName)
+      ) {
+        current.repositoryNames.push(row.repositoryName);
+      }
+      continue;
+    }
+    collapsed.set(key, {
+      channelId: row.channelId,
+      projectId: row.projectId,
+      projectName: row.projectName,
+      repositoryNames: row.repositoryName ? [row.repositoryName] : [],
+    });
+  }
+  return [...collapsed.values()];
+}
+
+/** Stable key for one collapsed project-channel row. */
+export function projectRelatedChannelDisplayRowKey(
+  row: ProjectRelatedChannelDisplayRow,
+) {
+  return `${row.channelId}:${row.projectId}`;
 }
 
 export type ProjectBoundChannel = {
