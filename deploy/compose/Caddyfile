@@ -1,5 +1,14 @@
 {$BUZZ_DOMAIN} {
-  encode zstd gzip
+	encode zstd gzip
 
-  reverse_proxy relay:3000
+	# Legacy same-host mobile pairing convention: desktop/mobile clients fall
+	# back to wss://<domain>/pair when the relay's NIP-11 doesn't advertise a
+	# dedicated pairing_relay_url. Route it to the buzz-pair-relay sidecar.
+	handle /pair* {
+		reverse_proxy pair-relay:5000
+	}
+
+	handle {
+		reverse_proxy relay:3000
+	}
 }
