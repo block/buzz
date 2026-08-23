@@ -238,6 +238,31 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(selectedSemantics.properties.selected, isTrue);
   });
 
+  testWidgets('exposes the selected emoji tile', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: EmojiAvatarTile(
+          emoji: '😊',
+          label: 'Smiling Face',
+          tileId: 'smile',
+          isSelected: true,
+          onTap: () {},
+        ),
+      ),
+    );
+
+    final selectedTile = tester.widget<Semantics>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Smiling Face' &&
+            widget.child is ExcludeSemantics,
+      ),
+    );
+    expect(selectedTile.properties.button, isTrue);
+    expect(selectedTile.properties.selected, isTrue);
+  });
+
   testWidgets('uses the shared animated background grid for emoji avatars', (
     tester,
   ) async {

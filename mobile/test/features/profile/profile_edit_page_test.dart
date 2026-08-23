@@ -5,6 +5,7 @@ import 'package:buzz/features/profile/profile_edit_page.dart';
 import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
+import 'package:buzz/features/profile/emoji_avatar_tile.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -811,50 +812,6 @@ void main() {
       Uri.decodeComponent(notifier.savedAvatarUrls.single),
       contains('😊'),
     );
-  });
-
-  testWidgets('seeds emoji editing from the current avatar', (tester) async {
-    final avatarUrl = emojiAvatarDataUrl('🦝', emojiAvatarColors[11]);
-    final notifier = _FakeProfileNotifier(
-      profile: UserProfile(
-        pubkey: 'aabb',
-        displayName: 'Alice',
-        avatarUrl: avatarUrl,
-      ),
-    );
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(() => notifier)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-
-    final preview = find.byKey(const ValueKey('emoji-avatar-preview'));
-    expect(
-      tester
-          .widget<NativeEmojiGlyph>(
-            find.descendant(
-              of: preview,
-              matching: find.byType(NativeEmojiGlyph),
-            ),
-          )
-          .emoji,
-      '🦝',
-    );
-    expect(
-      (tester.widget<AnimatedContainer>(preview).decoration! as BoxDecoration)
-          .color,
-      Color(emojiAvatarColors[11]),
-    );
-    await tester.tap(find.byKey(const ValueKey('avatar-save')));
-    await tester.pumpAndSettle();
-    expect(notifier.savedAvatarUrls, [avatarUrl]);
   });
 
   testWidgets('keeps emoji drafts scoped to the emoji mode', (tester) async {

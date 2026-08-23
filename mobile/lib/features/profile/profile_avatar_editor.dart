@@ -23,6 +23,7 @@ import '../../shared/widgets/playing_avatar_image.dart';
 import 'animated_avatar_capture.dart';
 import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
+import 'emoji_avatar_tile.dart';
 import 'profile_avatar_crop_page.dart';
 import 'profile_avatar_draft.dart';
 

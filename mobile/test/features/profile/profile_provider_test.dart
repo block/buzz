@@ -109,6 +109,30 @@ void main() {
     expect(profile.label, '${keys.public.substring(0, 8)}...');
   });
 
+  test('malformed profile metadata can be repaired by an edit', () async {
+    final keys = nostr.Keys.generate();
+    final relaySession = _ProfileRelaySession(
+      NostrEvent(
+        id: 'profile-malformed',
+        pubkey: keys.public,
+        createdAt: 1,
+        kind: EventKind.profile,
+        tags: const [],
+        content: 'not-json',
+        sig: 'sig',
+      ),
+    );
+    final container = _profileContainer(keys.nsec, relaySession);
+    addTearDown(container.dispose);
+
+    expect(await container.read(profileProvider.future), isNotNull);
+    await container.read(profileProvider.notifier).updateAbout('Repaired');
+
+    expect(jsonDecode(relaySession.published.single.content), {
+      'about': 'Repaired',
+    });
+  });
+
   test('profile updates fail closed while hydration is pending', () async {
     final keys = nostr.Keys.generate();
     final history = Completer<List<NostrEvent>>();

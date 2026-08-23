@@ -228,11 +228,14 @@ NostrEvent? _latestProfileEvent(List<NostrEvent> events) {
 }
 
 Map<String, dynamic> _decodeProfileMetadata(NostrEvent event) {
-  final decoded = jsonDecode(event.content);
-  if (decoded is! Map<String, dynamic>) {
-    throw const FormatException('Profile metadata must be a JSON object.');
+  try {
+    final decoded = jsonDecode(event.content);
+    return decoded is Map<String, dynamic>
+        ? Map<String, dynamic>.from(decoded)
+        : <String, dynamic>{};
+  } on FormatException {
+    return <String, dynamic>{};
   }
-  return Map<String, dynamic>.from(decoded);
 }
 
 final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(

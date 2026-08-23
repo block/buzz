@@ -16,6 +16,40 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('settings text editor waits for profile hydration', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final notifier = _DelayedHydrationProfileNotifier();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(() => notifier)],
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => unawaited(showProfileDisplayNameEditor(context)),
+            child: const Text('Open editor'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open editor'));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('profile-field-input')), findsNothing);
+
+    notifier.completeHydration();
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('profile-field-input')))
+          .controller
+          ?.text,
+      'Hydrated name',
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('native text retry retains the failed value', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -468,6 +502,17 @@ class _MutableRelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() => const RelayConfig(
     baseUrl: 'https://first.example',
     nsec: 'first-identity',
+  );
+}
+
+class _DelayedHydrationProfileNotifier extends ProfileNotifier {
+  final _hydration = Completer<UserProfile?>();
+
+  @override
+  Future<UserProfile?> build() => _hydration.future;
+
+  void completeHydration() => _hydration.complete(
+    const UserProfile(pubkey: 'aabb', displayName: 'Hydrated name'),
   );
 }
 

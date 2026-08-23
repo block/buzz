@@ -15,7 +15,15 @@ import 'profile_provider.dart';
 /// Opens the current user's display-name editor from a profile action surface.
 Future<void> showProfileDisplayNameEditor(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
-  final profile = container.read(profileProvider).asData?.value;
+  try {
+    await container.read(profileProvider.future);
+  } catch (_) {
+    return;
+  }
+  if (!context.mounted) return;
+  final profileState = container.read(profileProvider);
+  if (!profileState.hasValue) return;
+  final profile = profileState.requireValue;
   final onSave = bindProfileSaveToOpeningContext(
     container,
     container.read(profileProvider.notifier).updateDisplayName,
@@ -32,7 +40,15 @@ Future<void> showProfileDisplayNameEditor(BuildContext context) async {
 /// Opens the current user's profile-description editor.
 Future<void> showProfileDescriptionEditor(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
-  final profile = container.read(profileProvider).asData?.value;
+  try {
+    await container.read(profileProvider.future);
+  } catch (_) {
+    return;
+  }
+  if (!context.mounted) return;
+  final profileState = container.read(profileProvider);
+  if (!profileState.hasValue) return;
+  final profile = profileState.requireValue;
   final onSave = bindProfileSaveToOpeningContext(
     container,
     container.read(profileProvider.notifier).updateAbout,
