@@ -1,5 +1,7 @@
 part of '../channel_detail_page.dart';
 
+const _huddleAgentResponseResetDelay = Duration(milliseconds: 1200);
+
 class _HuddleCallAvatar extends HookConsumerWidget {
   const _HuddleCallAvatar({
     required this.pubkey,
@@ -26,12 +28,29 @@ class _HuddleCallAvatar extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final responseHasStarted = useRef(false);
-    if (!preparingResponse) {
-      responseHasStarted.value = false;
-    } else if (active) {
-      responseHasStarted.value = true;
-    }
+    final responseHasStarted = useState(false);
+    final responseResetTimer = useRef<Timer?>(null);
+    useEffect(() {
+      if (active) {
+        responseResetTimer.value?.cancel();
+        responseResetTimer.value = null;
+        responseHasStarted.value = true;
+      } else if (preparingResponse) {
+        responseResetTimer.value?.cancel();
+        responseResetTimer.value = null;
+      } else if (responseHasStarted.value && responseResetTimer.value == null) {
+        responseResetTimer.value = Timer(_huddleAgentResponseResetDelay, () {
+          responseResetTimer.value = null;
+          responseHasStarted.value = false;
+        });
+      }
+      return null;
+    }, [active, preparingResponse, responseHasStarted.value]);
+    useEffect(
+      () =>
+          () => responseResetTimer.value?.cancel(),
+      const [],
+    );
     final showPreparingResponse =
         preparingResponse && !active && !responseHasStarted.value;
     final scale = frameSize / _huddleAvatarFrameSize;

@@ -12,6 +12,23 @@ final _huddleParticipantProfileUpdatesProvider = NotifierProvider.autoDispose
       _HuddleParticipantProfileUpdates.new,
     );
 
+final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
+    .family<List<String>, String>((ref, channelId) {
+      final session = ref.watch(huddleSessionProvider);
+      final backingMembers =
+          ref.watch(channelMembersProvider(channelId)).value ??
+          const <ChannelMember>[];
+      return _huddleParticipantPubkeys(
+        sessionParticipantPubkeys: session.ephemeralChannelId == channelId
+            ? session.participantPubkeys
+            : const [],
+        currentPubkey: session.currentPubkey,
+        members: session.wasAdmitted
+            ? backingMembers.where((member) => member.isBot)
+            : backingMembers,
+      );
+    });
+
 class _HuddleParticipantProfileUpdates extends Notifier<int> {
   _HuddleParticipantProfileUpdates(this.channelId);
 
@@ -21,29 +38,9 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
 
   @override
   int build() {
-    final session = ref.watch(
-      huddleSessionProvider.select(
-        (state) => (
-          ephemeralChannelId: state.ephemeralChannelId,
-          currentPubkey: state.currentPubkey,
-          participantPubkeys: state.participantPubkeys,
-          wasAdmitted: state.wasAdmitted,
-        ),
-      ),
-    );
-    final backingMembers =
-        ref.watch(channelMembersProvider(channelId)).value ??
-        const <ChannelMember>[];
-    final members = session.wasAdmitted
-        ? backingMembers.where((member) => member.isBot)
-        : backingMembers;
     final relayState = ref.watch(relaySessionProvider);
-    final participantPubkeys = _huddleParticipantPubkeys(
-      sessionParticipantPubkeys: session.ephemeralChannelId == channelId
-          ? session.participantPubkeys
-          : const [],
-      currentPubkey: session.currentPubkey,
-      members: members,
+    final participantPubkeys = ref.watch(
+      _huddleLogicalParticipantPubkeysProvider(channelId),
     );
     final subscriptionVersion = ++_subscriptionVersion;
     _clearSubscription();
@@ -549,18 +546,11 @@ class _MobileHuddleCallPage extends ConsumerWidget {
         !unavailable &&
         session.microphonePermissionRequired;
     final localPubkey = session.currentPubkey?.toLowerCase();
-    final backingMembers =
-        ref.watch(channelMembersProvider(invite.ephemeralChannelId)).value ??
-        const <ChannelMember>[];
-    final participantPubkeys = _huddleParticipantPubkeys(
-      sessionParticipantPubkeys: session.participantPubkeys,
-      currentPubkey: localPubkey,
-      // Audio peers remain authoritative for humans after admission. Agents
-      // are logical Huddle participants as soon as their bot membership is
-      // published, before their send-only audio connection starts speaking.
-      members: session.wasAdmitted
-          ? backingMembers.where((member) => member.isBot)
-          : backingMembers,
+    // Audio peers remain authoritative for humans after admission. Agents are
+    // logical Huddle participants as soon as their bot membership is published,
+    // before their send-only audio connection starts speaking.
+    final participantPubkeys = ref.watch(
+      _huddleLogicalParticipantPubkeysProvider(invite.ephemeralChannelId),
     );
     final remotePubkeys = participantPubkeys
         .where((pubkey) => pubkey != localPubkey)
@@ -677,12 +667,15 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                       final isSelf = pubkey == localPubkey || pubkey.isEmpty;
                       _showHuddleParticipantSpotlight(
                         context: context,
+                        ephemeralChannelId: invite.ephemeralChannelId,
                         pubkey: pubkey,
                         isSelf: isSelf,
                       );
                     },
-                    onOverflowTap: () =>
-                        _showHuddleParticipantRoster(context: context),
+                    onOverflowTap: () => _showHuddleParticipantRoster(
+                      context: context,
+                      ephemeralChannelId: invite.ephemeralChannelId,
+                    ),
                   ),
                 ),
                 if (connected)
