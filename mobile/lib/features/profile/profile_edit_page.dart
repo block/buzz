@@ -544,6 +544,8 @@ class _ProfileTextEditSheet extends HookWidget {
       try {
         await onSave(controller.text);
         if (context.mounted) Navigator.of(context).pop();
+      } on ProfileCommunityChangedException {
+        if (context.mounted) Navigator.of(context).pop();
       } catch (_) {
         error.value = "We couldn't save this change. Try again.";
       } finally {

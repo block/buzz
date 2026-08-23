@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
@@ -29,6 +30,31 @@ import '../../helpers/widget_helpers.dart';
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
 void main() {
+  testWidgets('keeps crop Save disabled while dimensions decode', (
+    tester,
+  ) async {
+    final bytes = Uint8List.fromList(
+      image.encodePng(image.Image(width: 20, height: 10)),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProfileAvatarCropPage(
+          imageBytes: Future<Uint8List?>.value(bytes),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final saveButton = tester.widget<TextButton>(
+      find.descendant(
+        of: find.byKey(const ValueKey('avatar-crop-use-photo')),
+        matching: find.byType(TextButton),
+      ),
+    );
+    expect(saveButton.onPressed, isNull);
+  });
+
   testWidgets('can open directly into the photo editor from Settings', (
     tester,
   ) async {
