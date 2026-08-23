@@ -33,13 +33,16 @@ String clampThreadTaskTitle(String title) {
 
 /// Read-only banner saying "this thread already produced a task".
 ///
-/// DELIBERATELY NON-INTERACTIVE. There is no `onTap`, no [InkWell], no
-/// [GestureDetector] and no navigation anywhere in this widget, and
-/// `thread_task_chip_test.dart` asserts that absence. Mobile has no
-/// task-viewing surface to navigate to — `getTask()` has zero production
-/// callers and no `TaskDetailPage` exists — so a tap target here would either
-/// dead-end or force this item to invent one. Surfacing the fact honestly is
-/// the whole feature; opening the task is filed separately as HW-005.
+/// The widget itself stays NON-INTERACTIVE by design: there is still no
+/// `onTap`, no [InkWell], no [GestureDetector] and no navigation anywhere in
+/// this subtree, and `thread_task_chip_test.dart` asserts that absence — a
+/// display widget that owns no gestures keeps its standalone test meaningful.
+///
+/// The TAP AFFORDANCE lives at the page instead (HW-005):
+/// `thread_detail_page.dart` wraps this chip in an `InkWell` that opens the
+/// read-only task detail sheet (`task_detail_sheet.dart`), so opening the task
+/// is tested where the gesture actually lives. This widget's contract — render
+/// the fact, claim nothing about navigation — is unchanged.
 ///
 /// Renders nothing when there is no task: callers pass a non-null [task] only
 /// when the reverse lookup actually matched, so an empty result produces no
