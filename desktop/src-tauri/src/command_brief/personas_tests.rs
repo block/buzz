@@ -169,6 +169,9 @@ fn every_model_prompt_spells_out_the_exact_rust_output_contract() {
         assert!(prompt.contains("Do not create a finding merely because evidence exists"));
         assert!(prompt.contains("return empty findings"));
         assert!(prompt.contains("credible alternative"));
+        assert!(prompt.contains("scheduleRole mission_context"));
+        assert!(prompt.contains("does not block availability"));
+        assert!(prompt.contains("scheduleRole attendance_commitment"));
     }
     let chief = definition_for(AdviserId::ChiefOfStaff).system_prompt();
     assert!(chief.contains("no more than seven findings"));

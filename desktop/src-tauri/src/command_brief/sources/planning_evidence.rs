@@ -191,23 +191,7 @@ fn prepare_candidate(
             (
                 SourceKind::BattleRhythm,
                 "battle_rhythm",
-                bounded_projection(
-                    "battle_rhythm_event",
-                    object,
-                    &[
-                        "id",
-                        "title",
-                        "status",
-                        "start",
-                        "end",
-                        "allDay",
-                        "location",
-                        "responsibleOwner",
-                        "remarks",
-                        "linkedPlanId",
-                        "linkedTaskId",
-                    ],
-                )?,
+                battle_rhythm_projection(object)?,
                 format!("0:{}", start.to_rfc3339()),
             )
         }
@@ -401,6 +385,42 @@ fn bounded_projection(
         }
     }
     let quote = serde_json::to_string(&Value::Object(projected)).map_err(|_| ())?;
+    (quote.len() <= MAX_CONTENT_BYTES)
+        .then_some(quote)
+        .ok_or(())
+}
+
+fn battle_rhythm_projection(source: &Map<String, Value>) -> Result<String, ()> {
+    let all_day = source.get("allDay").and_then(Value::as_bool).ok_or(())?;
+    let quote = bounded_projection(
+        "battle_rhythm_event",
+        source,
+        &[
+            "id",
+            "title",
+            "status",
+            "start",
+            "end",
+            "allDay",
+            "location",
+            "responsibleOwner",
+            "remarks",
+            "linkedPlanId",
+            "linkedTaskId",
+        ],
+    )?;
+    let mut projected = serde_json::from_str::<Value>(&quote).map_err(|_| ())?;
+    let object = projected.as_object_mut().ok_or(())?;
+    object.insert(
+        "scheduleRole".to_string(),
+        json!(if all_day {
+            "mission_context"
+        } else {
+            "attendance_commitment"
+        }),
+    );
+    object.insert("blocksAvailability".to_string(), json!(!all_day));
+    let quote = serde_json::to_string(&projected).map_err(|_| ())?;
     (quote.len() <= MAX_CONTENT_BYTES)
         .then_some(quote)
         .ok_or(())
@@ -643,6 +663,73 @@ mod tests {
             .candidates
             .iter()
             .any(|candidate| candidate.quote.contains("Completed task")));
+    }
+
+    #[test]
+    fn classifies_all_day_programme_as_non_blocking_mission_context() {
+        let records = vec![
+            record(
+                20,
+                KIND_BATTLE_RHYTHM_EVENT,
+                "alongside-fbe",
+                1_722_211_200,
+                json!({
+                    "schemaVersion": 1,
+                    "id": "alongside-fbe",
+                    "title": "Alongside FBE",
+                    "status": "approved",
+                    "start": "2026-08-03T00:00:00+10:00",
+                    "end": "2026-08-04T00:00:00+10:00",
+                    "allDay": true,
+                    "location": "FBE",
+                    "responsibleOwner": "Operations",
+                    "remarks": null
+                }),
+            ),
+            record(
+                21,
+                KIND_BATTLE_RHYTHM_EVENT,
+                "command-brief",
+                1_722_211_201,
+                json!({
+                    "schemaVersion": 1,
+                    "id": "command-brief",
+                    "title": "Command brief",
+                    "status": "approved",
+                    "start": "2026-08-03T08:00:00+10:00",
+                    "end": "2026-08-03T08:30:00+10:00",
+                    "allDay": false,
+                    "location": "Wardroom",
+                    "responsibleOwner": "CO",
+                    "remarks": null
+                }),
+            ),
+        ];
+
+        let batch = select_planning_evidence(records, OWNER, OBSERVED_AT);
+        let all_day: Value = serde_json::from_str(
+            &batch
+                .candidates
+                .iter()
+                .find(|candidate| candidate.document_id == "alongside-fbe")
+                .expect("all-day programme evidence")
+                .quote,
+        )
+        .expect("all-day evidence JSON");
+        let timed: Value = serde_json::from_str(
+            &batch
+                .candidates
+                .iter()
+                .find(|candidate| candidate.document_id == "command-brief")
+                .expect("timed event evidence")
+                .quote,
+        )
+        .expect("timed evidence JSON");
+
+        assert_eq!(all_day["scheduleRole"], "mission_context");
+        assert_eq!(all_day["blocksAvailability"], false);
+        assert_eq!(timed["scheduleRole"], "attendance_commitment");
+        assert_eq!(timed["blocksAvailability"], true);
     }
 
     #[test]

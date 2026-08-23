@@ -13,6 +13,8 @@ struct CalendarProjection: Equatable {
     let isAllDay: Bool
     let location: String?
     let notes: String?
+
+    var blocksAvailability: Bool { !isAllDay }
 }
 
 struct StoredCalendarEvent: Equatable {
@@ -22,6 +24,7 @@ struct StoredCalendarEvent: Equatable {
     let start: Date
     let end: Date
     let isAllDay: Bool
+    let blocksAvailability: Bool
     let location: String?
     let notes: String?
 
@@ -31,6 +34,7 @@ struct StoredCalendarEvent: Equatable {
             && start == projection.start
             && end == projection.end
             && isAllDay == projection.isAllDay
+            && blocksAvailability == projection.blocksAvailability
             && location == projection.location
             && notes == projection.notes
     }
@@ -188,6 +192,7 @@ final class EventKitCalendarWritingStore: CalendarWritingStore {
                 start: event.startDate,
                 end: event.endDate,
                 isAllDay: event.isAllDay,
+                blocksAvailability: event.availability != .free,
                 location: event.location,
                 notes: event.notes
             )
@@ -208,6 +213,7 @@ final class EventKitCalendarWritingStore: CalendarWritingStore {
         event.startDate = projection.start
         event.endDate = projection.end
         event.isAllDay = projection.isAllDay
+        event.availability = projection.blocksAvailability ? .busy : .free
         event.location = projection.location
         event.notes = projection.notes
         event.url = Self.url(for: projection.externalID)
