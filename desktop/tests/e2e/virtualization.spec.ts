@@ -312,9 +312,11 @@ test.describe("list virtualization", () => {
       // genuine post-prepend drift still reads as drift.
       await timeline.evaluate(async (element) => {
         let prior = element.scrollTop;
+        let stableFrames = 0;
         for (let frame = 0; frame < 30; frame += 1) {
           await new Promise((resolve) => requestAnimationFrame(resolve));
-          if (element.scrollTop === prior) break;
+          stableFrames = element.scrollTop === prior ? stableFrames + 1 : 0;
+          if (stableFrames >= 2) break;
           prior = element.scrollTop;
         }
       });
