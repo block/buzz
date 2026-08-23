@@ -552,6 +552,48 @@ void main() {
   );
 
   test(
+    'remote kind-9 reply stays visible when the authoritative refetch fails',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+          <NostrEvent>[],
+          Exception('thread refetch failed'),
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.read(threadRepliesWithLocalProvider(args));
+      await _pumpEventQueue();
+
+      relaySession.emit(
+        _event(
+          id: 'agent-reply',
+          createdAt: 20,
+          kind: EventKind.streamMessage,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['agent-reply'],
+      );
+    },
+  );
+
+  test(
     'successful never-echoed send releases ownership but keeps its row across reconnect',
     () async {
       final relaySession = _RecordingRelaySessionNotifier(
@@ -775,13 +817,14 @@ ProviderContainer _buildContainer(_RecordingRelaySessionNotifier relaySession) {
 NostrEvent _event({
   required String id,
   required int createdAt,
+  int kind = EventKind.streamMessageV2,
   List<List<String>> extraTags = const [],
 }) {
   return NostrEvent(
     id: id,
     pubkey: 'alice',
     createdAt: createdAt,
-    kind: EventKind.streamMessageV2,
+    kind: kind,
     tags: [
       ['h', _channelId],
       ...extraTags,
