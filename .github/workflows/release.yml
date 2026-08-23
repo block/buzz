@@ -71,6 +71,15 @@ jobs:
         with:
           node-version: 24
 
+      # NOTE: this version MUST equal `packageManager` in the **root**
+      # `package.json`. `pnpm/action-setup` hard-errors on a mismatch
+      # (`ERR_PNPM_BAD_PM_VERSION`), which fails the whole release build.
+      #
+      # The trap: running `pnpm install` locally with a newer pnpm rewrites that
+      # field, and `git add -u` sweeps it into an unrelated commit. That broke
+      # the `v0.5.18-1` release build. After any `pnpm install`, check
+      # `git diff package.json` before staging.
+      #
       # Pinned via pnpm/action-setup rather than bare `corepack enable`.
       # desktop/package.json has no `"packageManager"` field, so corepack
       # alone has no version to pin to and can stall or behave

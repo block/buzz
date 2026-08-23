@@ -194,6 +194,23 @@ This is a permanent tax on being a Windows-first fork of a project that is not,
 and it will recur on any release that adds Unix-only test scaffolding. It is
 **not** the same as the extraction problem above, and the fix is different.
 
+### `packageManager` drift breaks the release build
+The **root** `package.json` carries `"packageManager": "pnpm@<v>"`, and
+`.github/workflows/{release,windows-canary}.yml` pin the same version in
+`pnpm/action-setup`. **A mismatch is a hard error** —
+`ERR_PNPM_BAD_PM_VERSION` — and it fails the release build before anything is
+compiled.
+
+**Running `pnpm install` locally with a newer pnpm rewrites that field.** It
+then rides into whatever commit `git add -u` next sweeps up. That is exactly how
+the `v0.5.18-1` build broke: local pnpm was 11.22.0, upstream's pin is 11.4.0.
+
+Two habits: after any `pnpm install`, run `git diff package.json` before
+staging; and note this lives in the **root** `package.json`, not
+`desktop/package.json`, which has no such field. An earlier version of this
+document and the `release.yml` comment both said there was no `packageManager`
+field anywhere — that was true before `desktop-v0.5.18` and is now wrong.
+
 ### 0.5.18 raises the minimum local Node version
 Upstream's new `features/projects/ui/useRetainedProjectGitViews.test.mjs` imports
 `registerHooks` from `node:module`, which exists only in **Node 22.15+**. On an

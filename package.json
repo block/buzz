@@ -1,7 +1,7 @@
 {
   "name": "buzz-workspace",
   "private": true,
-  "packageManager": "pnpm@11.22.0",
+  "packageManager": "pnpm@11.4.0",
   "scripts": {
     "check": "pnpm -r check"
   },
