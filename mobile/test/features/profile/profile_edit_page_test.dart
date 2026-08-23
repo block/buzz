@@ -778,6 +778,33 @@ void main() {
     );
   });
 
+  testWidgets('saves the displayed default emoji without another selection', (
+    tester,
+  ) async {
+    final notifier = _FakeProfileNotifier();
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(() => notifier)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Emoji'));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+
+    expect(notifier.savedAvatarUrls, hasLength(1));
+    expect(notifier.savedAvatarUrls.single, startsWith('data:image/svg+xml,'));
+    expect(
+      Uri.decodeComponent(notifier.savedAvatarUrls.single),
+      contains('😊'),
+    );
+  });
+
   testWidgets('keeps emoji drafts scoped to the emoji mode', (tester) async {
     final notifier = _FakeProfileNotifier();
     await tester.pumpWidget(

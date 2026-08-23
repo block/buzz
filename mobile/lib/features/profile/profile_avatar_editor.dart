@@ -113,6 +113,13 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       onAnimatedPrepareChanged(null);
       if (!reduceMotion) modeTransitionController.value = 0;
       onModeChanged(nextMode);
+      if (nextMode == ProfileAvatarMode.emoji) {
+        onDraftChanged(
+          ProfileUrlAvatarDraft(
+            emojiAvatarDataUrl(selectedEmoji.value, selectedColor.value),
+          ),
+        );
+      }
       if (reduceMotion) {
         modeTransitionController.value = 1;
       } else {

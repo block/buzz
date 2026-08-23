@@ -105,6 +105,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     Map<String, dynamic> patch,
     _ProfileWriteContext context,
   ) async {
+    _requireCurrentWriteContext(context);
     if (!_hasHydrated || !state.hasValue) {
       throw StateError('Cannot update profile before metadata is loaded.');
     }
@@ -112,8 +113,6 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     if (pubkey == null) {
       throw StateError('Cannot update profile without a signing identity.');
     }
-    _requireCurrentWriteContext(context);
-
     final session = context.session;
     final currentEvents = await session.fetchHistory(
       NostrFilters.profile(pubkey),

@@ -316,6 +316,72 @@ void main() {
   });
 
   test(
+    'queued profile updates report a community change before rehydration',
+    () async {
+      final keys = nostr.Keys.generate();
+      final otherKeys = nostr.Keys.generate();
+      final initial = NostrEvent(
+        id: 'profile-initial',
+        pubkey: keys.public,
+        createdAt: 10,
+        kind: EventKind.profile,
+        tags: const [],
+        content: jsonEncode({'display_name': 'Initial'}),
+        sig: 'sig',
+      );
+      final patchFetchStarted = Completer<void>();
+      final patchHistory = Completer<List<NostrEvent>>();
+      final rehydration = Completer<List<NostrEvent>>();
+      var fetchCount = 0;
+      final relaySession = _ControlledProfileRelaySession(
+        fetch: () async {
+          fetchCount += 1;
+          if (fetchCount == 1) return [initial];
+          if (fetchCount == 2) {
+            patchFetchStarted.complete();
+            return patchHistory.future;
+          }
+          return rehydration.future;
+        },
+      );
+      final config = _MutableRelayConfigNotifier(keys.nsec);
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(() => config),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(profileProvider.future);
+      final firstUpdate = container
+          .read(profileProvider.notifier)
+          .updateDisplayName('First');
+      await patchFetchStarted.future;
+      final queuedUpdate = container
+          .read(profileProvider.notifier)
+          .updateAbout('Queued');
+      config.update(
+        baseUrl: 'https://other-relay.example',
+        nsec: otherKeys.nsec,
+      );
+      await Future<void>.delayed(Duration.zero);
+      patchHistory.complete([initial]);
+
+      await expectLater(
+        firstUpdate,
+        throwsA(isA<ProfileCommunityChangedException>()),
+      );
+      await expectLater(
+        queuedUpdate,
+        throwsA(isA<ProfileCommunityChangedException>()),
+      );
+      expect(relaySession.published, isEmpty);
+      rehydration.complete(const []);
+    },
+  );
+
+  test(
     'manual presence persists until Online restores automatic mode',
     () async {
       SharedPreferences.setMockInitialValues({});
