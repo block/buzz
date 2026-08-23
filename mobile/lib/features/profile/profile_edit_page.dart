@@ -106,6 +106,8 @@ class ProfileEditPage extends HookConsumerWidget {
             placeholder: hintText,
             multiline: multiline,
             onSave: onSave,
+            shouldRetryOnError: (error) =>
+                error is! ProfileCommunityChangedException,
             onSaveError: () {
               if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(

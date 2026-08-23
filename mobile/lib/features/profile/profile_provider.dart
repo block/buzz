@@ -9,6 +9,12 @@ import '../../shared/profile/user_profile.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 
+/// Signals that a profile write no longer belongs to the active community.
+class ProfileCommunityChangedException extends StateError {
+  ProfileCommunityChangedException()
+    : super('Profile update cancelled because the active community changed.');
+}
+
 /// The current user's profile (kind:0 metadata) loaded over the relay
 /// WebSocket. Returns null when no nsec is configured or when the user has
 /// not yet published a profile.
@@ -172,9 +178,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
         currentConfig.nsec != context.config.nsec ||
         currentPubkey != context.pubkey ||
         !identical(currentSession, context.session)) {
-      throw StateError(
-        'Profile update cancelled because the active community changed.',
-      );
+      throw ProfileCommunityChangedException();
     }
   }
 }

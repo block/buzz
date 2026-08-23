@@ -313,7 +313,7 @@ void main() {
     );
     expect(tester.widget<AvatarImage>(preview).radius, 110);
     await tester.tap(find.text('Photo Library'));
-    await tester.pumpAndSettle();
+    await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
     final cancelButton = find.ancestor(
       of: find.text('Cancel'),
@@ -376,7 +376,7 @@ void main() {
     await tester.tap(find.text('Edit Photo'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Photo Library'));
-    await tester.pumpAndSettle();
+    await _waitForAvatarCropToLoad(tester);
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
     await _waitForAvatarCropToClose(tester);
 
@@ -620,7 +620,7 @@ void main() {
     );
 
     uploadService.completeGallerySelection();
-    await tester.pumpAndSettle();
+    await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
   });
 
@@ -644,7 +644,7 @@ void main() {
     await tester.tap(find.text('Edit Photo'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Camera'));
-    await tester.pumpAndSettle();
+    await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
     await tester.runAsync(
@@ -1003,6 +1003,21 @@ Future<void> _waitForAvatarCropToClose(WidgetTester tester) async {
     }
   }
   fail('Avatar crop did not complete within 5 seconds.');
+}
+
+Future<void> _waitForAvatarCropToLoad(WidgetTester tester) async {
+  final cropViewer = find.byKey(const ValueKey('avatar-crop-viewer'));
+  for (var attempt = 0; attempt < 100; attempt += 1) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 25)),
+    );
+    await tester.pump(const Duration(milliseconds: 25));
+    if (cropViewer.evaluate().isNotEmpty) {
+      await tester.pumpAndSettle();
+      return;
+    }
+  }
+  fail('Avatar crop did not load within 5 seconds.');
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

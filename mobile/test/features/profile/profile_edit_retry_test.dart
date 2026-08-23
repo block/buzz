@@ -49,6 +49,39 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('native text editor stops retrying after a community switch', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/profile_text_editor');
+    var presentations = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async {
+          presentations++;
+          return 'Old community draft';
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    final notifier = _CommunityChangedProfileNotifier();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(() => notifier)],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('profile-display-name-row')));
+    await tester.pumpAndSettle();
+
+    expect(presentations, 1);
+    expect(notifier.displayNameAttempts, ['Old community draft']);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('animated save retry reuses its prepared draft', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -220,6 +253,23 @@ class _RetryProfileNotifier extends ProfileNotifier {
       throw Exception('profile publish failed');
     }
     savedAvatarUrls.add(avatarUrl);
+  }
+}
+
+class _CommunityChangedProfileNotifier extends ProfileNotifier {
+  final displayNameAttempts = <String>[];
+
+  @override
+  Future<UserProfile?> build() async => const UserProfile(
+    pubkey: 'aabb',
+    displayName: 'Alice',
+    about: 'Building Buzz',
+  );
+
+  @override
+  Future<void> updateDisplayName(String displayName) async {
+    displayNameAttempts.add(displayName);
+    throw ProfileCommunityChangedException();
   }
 }
 

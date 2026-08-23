@@ -27,6 +27,7 @@ class IosProfileTextEditor {
     required bool multiline,
     required Future<void> Function(String value) onSave,
     required void Function() onSaveError,
+    bool Function(Object error)? shouldRetryOnError,
   }) async {
     var draft = initialValue;
     while (true) {
@@ -40,7 +41,8 @@ class IosProfileTextEditor {
       try {
         await onSave(value);
         return;
-      } catch (_) {
+      } catch (error) {
+        if (shouldRetryOnError?.call(error) == false) return;
         draft = value;
         onSaveError();
       }

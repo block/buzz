@@ -54,6 +54,8 @@ Future<void> _showProfileTextEditor({
         placeholder: hintText,
         multiline: multiline,
         onSave: onSave,
+        shouldRetryOnError: (error) =>
+            error is! ProfileCommunityChangedException,
         onSaveError: () {
           if (context.mounted) _showSaveError(context);
         },
