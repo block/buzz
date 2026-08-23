@@ -1,7 +1,18 @@
-import { CircleCheck, CircleDot, CircleX, MessageSquare } from "lucide-react";
+import {
+  Circle,
+  CircleCheck,
+  CircleDashed,
+  CircleDot,
+  CircleX,
+  MessageSquare,
+  Tag,
+  type LucideIcon,
+  User,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type ProjectIssue,
@@ -13,36 +24,96 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { entityDiscussionQuery } from "@/features/projects/lib/discussionChannels";
+import { selectionItemFromTask } from "@/features/projects/lib/projectSelection";
+import { issueShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
-import type { ChannelMember } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
-  ProjectFeedRow,
-  ProjectFeedRowCluster,
-  ProjectFeedRowMonoCell,
-} from "./ProjectFeedRow";
+  projectTaskCategoryLabel,
+  projectTaskUserLabels,
+} from "@/features/projects/projectTaskCategories";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import type { ChannelMember } from "@/shared/api/types";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { IssueAssigneeFacepile, IssueAssigneesRow } from "./IssueAssigneesRow";
+import { DiscussedInChannels } from "./DiscussionChannels";
 import { ProjectIssueCommentTimeline } from "./ProjectIssueCommentTimeline";
 import { ProjectOriginReference } from "./ProjectOriginReference";
-import { OverviewRailSection } from "./ProjectOverviewPanel";
+import {
+  ProjectDetailMetaList,
+  ProjectDetailMetaPills,
+  ProjectDetailMetaRow,
+} from "./ProjectDetailMeta";
+import { ProjectDetailSection } from "./ProjectDetailSection";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectRichContent } from "./ProjectRichContent";
+import { ShareLinkButton } from "./ShareLinkButton";
+import { PROJECT_DETAIL_READING_COLUMN_CLASS } from "./projectPanelStyles";
+import {
+  ProjectStatusProgressIcon,
+  type ProjectStatusProgressState,
+} from "./ProjectStatusProgressIcon";
+import { ProjectWorkItemGroup } from "./ProjectWorkItemGroup";
+import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
+  if (status === "Triage" || status === "In Progress") return "text-amber-500";
+  if (status === "Backlog") return "text-muted-foreground";
+  if (status === "In Review") return "text-green-500";
   if (status === "Done") return "text-purple-400";
   if (status === "Closed") return "text-destructive";
-  return "text-green-500";
+  return "text-muted-foreground";
 }
 
-function issueStatusVisual(status: ProjectIssue["status"]) {
+function issueStatusVisual(status: ProjectIssue["status"]): {
+  className: string;
+  icon: LucideIcon;
+  progress: ProjectStatusProgressState;
+} {
   if (status === "Done") {
-    return { className: "text-purple-400", icon: CircleCheck };
+    return {
+      className: "text-purple-400",
+      icon: CircleCheck,
+      progress: "completed",
+    };
   }
   if (status === "Closed") {
-    return { className: "text-destructive", icon: CircleX };
+    return {
+      className: "text-destructive",
+      icon: CircleX,
+      progress: "canceled",
+    };
   }
-  return { className: "text-green-500", icon: CircleDot };
+  if (status === "Backlog") {
+    return {
+      className: issueStatusClassName(status),
+      icon: Circle,
+      progress: "queued",
+    };
+  }
+  if (status === "Triage") {
+    return {
+      className: issueStatusClassName(status),
+      icon: CircleDashed,
+      progress: "queued",
+    };
+  }
+  return {
+    className: issueStatusClassName(status),
+    icon: CircleDot,
+    progress: status === "In Review" ? "review" : "started",
+  };
 }
+
+const ISSUE_STATUS_ORDER: readonly ProjectIssue["status"][] = [
+  "In Review",
+  "In Progress",
+  "Triage",
+  "Backlog",
+  "Done",
+  "Closed",
+];
 
 function issueMembers(
   project: Project,
@@ -69,74 +140,124 @@ function issueMembers(
   });
 }
 
+function issueSelectionItem(project: Project, issue: ProjectIssue) {
+  return selectionItemFromTask({
+    author: issue.author,
+    channelId: issue.channelId ?? project.channelId,
+    id: issue.id,
+    shareLink: issueShareLink(issue),
+    title: issue.title,
+  });
+}
+
 function IssueRow({
   issue,
   onOpen,
   profiles,
+  project,
+  rangeItems,
 }: {
   issue: ProjectIssue;
   onOpen: () => void;
   profiles?: UserProfileLookup;
+  project: Project;
+  rangeItems: ReturnType<typeof issueSelectionItem>[];
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const status = issueStatusVisual(issue.status);
 
   return (
-    <ProjectFeedRow
-      meta={
-        <>
-          <ProfileIdentityButton
-            avatarClassName="shrink-0"
-            avatarSize="xs"
-            avatarUrl={authorProfile?.avatarUrl ?? null}
-            isAgent={authorProfile?.isAgent === true}
-            label={authorLabel}
-            pubkey={issue.author}
-            showLabel={false}
-          />
-          <span className="truncate text-foreground/80">
-            <span className="font-medium">{authorLabel}</span> created this
-            issue {relativeTime(issue.createdAt)}
-          </span>
-          <span>·</span>
-          <span>{issue.status}</span>
-          {issue.labels.map((label) => (
-            <span
-              className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs"
-              key={label}
-            >
-              {label}
-            </span>
-          ))}
-        </>
-      }
+    <ProjectWorkItemRow
+      eventId={issue.id}
+      identifier={`#${issue.id.slice(0, 8)}`}
+      identifierTitle="View task"
       onOpen={onOpen}
+      selection={{
+        item: issueSelectionItem(project, issue),
+        rangeItems,
+      }}
       statusIcon={
-        <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
+        <ProjectStatusProgressIcon
+          aria-label={issue.status}
+          className={`h-3.5 w-3.5 shrink-0 ${status.className}`}
+          state={status.progress}
+        />
       }
       testId="project-issue-row"
       title={issue.title}
       trailing={
         <>
-          {issue.comments.length > 0 ? (
+          <span
+            className="hidden w-24 shrink-0 truncate text-right text-xs text-muted-foreground/60 md:block"
+            data-testid="project-issue-row-category"
+          >
+            {projectTaskCategoryLabel(issue.category)}
+          </span>
+          <span className="flex w-20 shrink-0 items-center justify-end gap-1">
+            <span
+              className="flex h-5 w-5 shrink-0 items-center justify-center"
+              data-testid="project-issue-creator"
+              title={`Created by ${authorLabel}`}
+            >
+              <ProfileIdentityButton
+                avatarClassName="shrink-0"
+                avatarSize="xs"
+                avatarUrl={authorProfile?.avatarUrl ?? null}
+                isAgent={authorProfile?.isAgent === true}
+                label={authorLabel}
+                pubkey={issue.author}
+                showLabel={false}
+              />
+            </span>
+            <span
+              className="flex min-w-5 shrink-0 justify-end text-muted-foreground/45"
+              data-testid="project-issue-assignee-cell"
+            >
+              {issue.assignees.length > 0 ? (
+                <IssueAssigneeFacepile
+                  assignees={issue.assignees}
+                  profiles={profiles}
+                />
+              ) : (
+                <span
+                  className="flex h-5 w-5 items-center justify-center rounded-full border border-border/70 bg-muted/35"
+                  data-testid="project-issue-assignee-placeholder"
+                  title="Unassigned"
+                >
+                  <User aria-hidden="true" className="h-3 w-3" />
+                  <span className="sr-only">Unassigned</span>
+                </span>
+              )}
+            </span>
+          </span>
+          <span className="flex w-8 shrink-0 justify-end">
             <button
-              aria-label={`View ${issue.comments.length} comments`}
-              className="flex items-center gap-1 rounded-md text-xs text-muted-foreground hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label={
+                issue.comments.length > 0
+                  ? `View ${issue.comments.length} comments`
+                  : "View comments"
+              }
+              className={`flex items-center gap-1 rounded-md text-xs hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring ${
+                issue.comments.length > 0
+                  ? "text-muted-foreground/60"
+                  : "text-muted-foreground/45"
+              }`}
+              data-testid="project-issue-comments"
               onClick={onOpen}
               type="button"
             >
               <MessageSquare className="h-3.5 w-3.5" />
               {issue.comments.length}
             </button>
-          ) : null}
-          <ProjectFeedRowCluster>
-            <ProjectFeedRowMonoCell
-              label={`#${issue.id.slice(0, 8)}`}
-              onClick={onOpen}
-              title="View issue"
-            />
-          </ProjectFeedRowCluster>
+          </span>
+          <span
+            className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground/55 sm:block"
+            data-testid="project-issue-row-date"
+            title={new Date(issue.createdAt * 1_000).toLocaleString()}
+          >
+            {relativeTime(issue.createdAt)}
+          </span>
         </>
       }
     />
@@ -148,15 +269,12 @@ export function ProjectIssueDetail({
   issue,
   profiles,
   project,
-  stackMetaRail = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
-  stackMetaRail?: boolean;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
-  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const members = React.useMemo(
     () => issueMembers(project, issue, profiles),
     [issue, profiles, project],
@@ -184,141 +302,114 @@ export function ProjectIssueDetail({
     },
     [commentMutation, issue],
   );
+  const identityQuery = useIdentityQuery();
+  const status = issueStatusVisual(issue.status);
+  const labels = projectTaskUserLabels(issue.labels);
+  const viewerPubkey = identityQuery.data?.pubkey;
+  const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
+  const isAuthor = viewer === normalizePubkey(issue.author);
+  const isOwner = viewer === normalizePubkey(project.owner);
+  const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
+  const canAssignOthers =
+    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
     <div
-      className={cn(
-        "grid",
-        !stackMetaRail && "xl:grid-cols-[minmax(0,1fr)_18rem]",
-      )}
+      className={PROJECT_DETAIL_READING_COLUMN_CLASS}
+      data-project-detail-panel
+      data-testid="project-issue-detail"
     >
-      <div className="min-w-0 divide-y divide-border/50">
-        <header className="space-y-3 p-4">
-          <div className="min-w-0">
-            <p className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <CircleDot className="h-3.5 w-3.5" />
-              Issue from {authorLabel}
-              <ProjectOriginReference
-                agentName={issue.originAgentName}
-                channelId={issue.channelId}
-              />
-            </p>
-            <h3 className="mt-1 line-clamp-2 text-base font-semibold text-foreground">
-              {issue.title}{" "}
-              <span className="font-normal text-muted-foreground">
-                #{issue.id.slice(0, 8)}
-              </span>
-            </h3>
-          </div>
-          {issue.content ? (
-            <ProjectRichContent content={issue.content} tags={issue.tags} />
-          ) : null}
-        </header>
-
-        <section className="space-y-3 p-4">
+      <header className="space-y-2 px-6 pb-3 pt-5">
+        <h3 className="line-clamp-2 text-lg font-semibold leading-6 text-foreground">
+          {issue.title}{" "}
+          <span className="font-normal text-muted-foreground">
+            #{issue.id.slice(0, 8)}
+          </span>
+          <ShareLinkButton
+            className="ml-1 inline-flex h-7 w-7 align-text-bottom"
+            label="Copy task link"
+            link={issueShareLink(issue)}
+            testId="project-issue-copy-link"
+          />
+        </h3>
+        <p className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-muted-foreground">
+          <span>Task created</span>
+          <span
+            className="shrink-0 whitespace-nowrap"
+            title={new Date(issue.createdAt * 1_000).toLocaleString()}
+          >
+            {relativeTime(issue.createdAt)}
+          </span>
+          <ProjectOriginReference
+            agentName={issue.originAgentName}
+            channelId={issue.channelId}
+          />
+        </p>
+      </header>
+      <ProjectDetailMetaList>
+        <ProjectDetailMetaRow icon={status.icon} label="Status">
+          <span className={`font-medium ${status.className}`}>
+            {issue.status}
+          </span>
+        </ProjectDetailMetaRow>
+        <ProjectDetailMetaRow icon={CircleDot} label="Category">
+          {projectTaskCategoryLabel(issue.category)}
+        </ProjectDetailMetaRow>
+        {issue.assignees.length > 0 || viewer ? (
+          <ProjectDetailMetaRow icon={User} label="Assignees">
+            <IssueAssigneesRow
+              canAssignOthers={canAssignOthers}
+              issue={issue}
+              profiles={profiles}
+              project={project}
+              signAsManagedOwner={isManagedAgentOwner && !isOwner}
+              viewerPubkey={viewer}
+            />
+          </ProjectDetailMetaRow>
+        ) : null}
+        {labels.length > 0 ? (
+          <ProjectDetailMetaRow icon={Tag} label="Labels">
+            <ProjectDetailMetaPills labels={labels} />
+          </ProjectDetailMetaRow>
+        ) : null}
+      </ProjectDetailMetaList>
+      {issue.content ? (
+        <ProjectDetailSection defaultOpen title="Description">
+          <ProjectRichContent content={issue.content} tags={issue.tags} />
+        </ProjectDetailSection>
+      ) : null}
+      <ProjectDetailSection defaultOpen title="Activity">
+        <div className="space-y-3">
+          <DiscussedInChannels
+            entityLabel="this task"
+            originChannelId={issue.channelId}
+            originCreatedAt={issue.createdAt}
+            originPubkey={issue.author}
+            query={entityDiscussionQuery(issue.id)}
+            testId="issue-discussed-in"
+          />
           <ProjectIssueCommentTimeline
             comments={issue.comments}
             key={issue.id}
             profiles={profiles}
           />
-          <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
-            <MessageSquare className="h-3.5 w-3.5" />
-            Add Your Comment
-          </h4>
-          <div data-testid="project-issue-comment-composer">
-            <ForumComposer
-              className="border border-border/60 bg-background/45"
-              disabled={commentMutation.isPending}
-              isSending={commentMutation.isPending}
-              members={members}
-              onSubmit={handleCommentSubmit}
-              placeholder="Add a comment…"
-              profiles={profiles}
-            />
-          </div>
-        </section>
-      </div>
-
-      <IssueMetaRail
-        issue={issue}
-        profiles={profiles}
-        stacked={stackMetaRail}
-      />
-    </div>
-  );
-}
-
-/** Right-hand meta column for the issue detail view: status, author, labels,
- * and dates — keeps the conversation column focused. */
-function IssueMetaRail({
-  issue,
-  profiles,
-  stacked = false,
-}: {
-  issue: ProjectIssue;
-  profiles?: UserProfileLookup;
-  stacked?: boolean;
-}) {
-  const authorProfile = profiles?.[normalizePubkey(issue.author)];
-  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
-  const status = issueStatusVisual(issue.status);
-
-  return (
-    <aside
-      className={cn(
-        "space-y-6 border-border/60 p-4",
-        stacked ? "border-t" : "border-t xl:border-l xl:border-t-0",
-      )}
-    >
-      <OverviewRailSection title="Status">
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
-        >
-          <status.icon className="h-3.5 w-3.5" />
-          {issue.status}
-        </span>
-      </OverviewRailSection>
-      <OverviewRailSection title="Author">
-        <ProfileIdentityButton
-          align="center"
-          avatarSize="xs"
-          avatarUrl={authorProfile?.avatarUrl ?? null}
-          isAgent={authorProfile?.isAgent === true}
-          label={authorLabel}
-          pubkey={issue.author}
+        </div>
+      </ProjectDetailSection>
+      <div
+        className="px-6 pb-6 pt-4"
+        data-testid="project-issue-comment-composer"
+      >
+        <ForumComposer
+          className="border border-border/60 bg-background/45"
+          disabled={commentMutation.isPending}
+          isSending={commentMutation.isPending}
+          members={members}
+          onSubmit={handleCommentSubmit}
+          placeholder="Add a comment…"
+          profiles={profiles}
         />
-      </OverviewRailSection>
-      {issue.labels.length > 0 ? (
-        <OverviewRailSection title="Labels">
-          <div className="flex flex-wrap gap-1.5">
-            {issue.labels.map((label) => (
-              <span
-                className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs text-muted-foreground"
-                key={label}
-              >
-                {label}
-              </span>
-            ))}
-          </div>
-        </OverviewRailSection>
-      ) : null}
-      <OverviewRailSection title="Activity">
-        <dl className="space-y-1.5 text-xs text-muted-foreground">
-          <div className="flex items-center justify-between gap-3">
-            <dt>Created</dt>
-            <dd className="font-medium text-foreground">
-              {relativeTime(issue.createdAt)}
-            </dd>
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <dt>Updated</dt>
-            <dd className="font-medium text-foreground">
-              {relativeTime(issue.updatedAt)}
-            </dd>
-          </div>
-        </dl>
-      </OverviewRailSection>
-    </aside>
+      </div>
+    </div>
   );
 }
 
@@ -339,15 +430,15 @@ export function ProjectIssuesPanel({
     issues.find((issue) => issue.id === selectedIssueId) ?? null;
 
   if (issuesQuery.isLoading) {
-    return <p className="p-4 text-sm text-muted-foreground">Loading issues…</p>;
+    return <BuzzLoadingState label="Loading tasks" />;
   }
 
   if (issues.length === 0) {
     return (
       <p className="p-4 text-sm text-muted-foreground">
         {issuesQuery.error
-          ? "Could not load issues for this repository."
-          : "No issues yet."}
+          ? "Could not load tasks for this repository."
+          : "No tasks yet."}
       </p>
     );
   }
@@ -362,16 +453,42 @@ export function ProjectIssuesPanel({
     );
   }
 
+  const groups = ISSUE_STATUS_ORDER.map((status) => ({
+    items: issues.filter((issue) => issue.status === status),
+    status,
+  })).filter((group) => group.items.length > 0);
+  const rangeItems = issues.map((issue) => issueSelectionItem(project, issue));
+
   return (
-    <div className="divide-y divide-border/50">
-      {issues.map((issue) => (
-        <IssueRow
-          issue={issue}
-          key={issue.id}
-          onOpen={() => onSelectedIssueIdChange(issue.id)}
-          profiles={profiles}
-        />
-      ))}
+    <div>
+      {groups.map(({ items, status }) => {
+        const visual = issueStatusVisual(status);
+        return (
+          <ProjectWorkItemGroup
+            count={items.length}
+            icon={
+              <ProjectStatusProgressIcon
+                className={`h-4 w-4 ${visual.className}`}
+                state={visual.progress}
+              />
+            }
+            items={items.map((issue) => issueSelectionItem(project, issue))}
+            key={status}
+            label={status}
+          >
+            {items.map((issue) => (
+              <IssueRow
+                issue={issue}
+                key={issue.id}
+                onOpen={() => onSelectedIssueIdChange(issue.id)}
+                profiles={profiles}
+                project={project}
+                rangeItems={rangeItems}
+              />
+            ))}
+          </ProjectWorkItemGroup>
+        );
+      })}
     </div>
   );
 }

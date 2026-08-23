@@ -2,14 +2,34 @@ import type {
   ProjectRepoSnapshot,
   Repository as Project,
 } from "@/features/projects/hooks";
+import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+
+export const PROJECT_REPOSITORY_SEARCH_KEYS = [
+  "repositoryId",
+  "issueId",
+  "pullRequestId",
+  "commitHash",
+] as const;
 
 export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
   files: "Files",
   activity: "Commits",
-  issues: "Issues",
-  prs: "Pull Request",
+  issues: "Tasks",
+  prs: "Review",
   contributors: "Contributors",
+  channels: "Channels",
+};
+
+export type ProjectDetailScreenProps = {
+  commitHash?: string;
+  entityNavigationId?: string;
+  projectId: string;
+  pullRequestId?: string;
+  issueId?: string;
+  repositoryId?: string;
+  /** Workspace tab requested by a share link (link vocabulary). */
+  tab?: EntityLinkTab;
 };
 
 /** Tooltip for the push/pull sync buttons, e.g. "Pull 2 remote commits". */

@@ -8,7 +8,10 @@ const RENAMES: &[(&str, &str)] = &[
     ("builtin:bumble", "builtin:montero"),
     ("Fizz", "Diego"),
     ("Honey", "Murietta"),
-    ("Bumble", "Montero"),
+    // Preserve upstream's profile-safe staged rename: Bumble becomes the
+    // intermediate Pollen spelling here, then `migration::pollen` advances
+    // Pollen to Montero and queues relay profile reconciliation.
+    ("Bumble", "Pollen"),
 ];
 
 fn rewrite_strings(value: &mut serde_json::Value) -> bool {
@@ -93,11 +96,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rename_updates_ids_names_and_prompts() {
+    fn rename_updates_ids_and_stages_bumble_for_profile_reconciliation() {
         let mut value = serde_json::json!([{
             "id": "builtin:fizz",
             "display_name": "Fizz",
             "system_prompt": "You are Fizz.",
+            "research_prompt": "You are Bumble.",
             "persona_ids": ["builtin:honey", "builtin:bumble"]
         }]);
 
@@ -105,10 +109,26 @@ mod tests {
         assert_eq!(value[0]["id"], "builtin:diego");
         assert_eq!(value[0]["display_name"], "Diego");
         assert_eq!(value[0]["system_prompt"], "You are Diego.");
+        assert_eq!(value[0]["research_prompt"], "You are Pollen.");
         assert_eq!(
             value[0]["persona_ids"],
             serde_json::json!(["builtin:murietta", "builtin:montero"])
         );
+        assert!(!rewrite_strings(&mut value));
+    }
+
+    #[test]
+    fn rename_prepares_intermediate_pollen_for_profile_safe_migration() {
+        let mut value = serde_json::json!([{
+            "id": "builtin:bumble",
+            "display_name": "Pollen",
+            "system_prompt": "You are Pollen."
+        }]);
+
+        assert!(rewrite_strings(&mut value));
+        assert_eq!(value[0]["id"], "builtin:montero");
+        assert_eq!(value[0]["display_name"], "Pollen");
+        assert_eq!(value[0]["system_prompt"], "You are Pollen.");
         assert!(!rewrite_strings(&mut value));
     }
 }

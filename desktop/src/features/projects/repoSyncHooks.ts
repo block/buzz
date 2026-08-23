@@ -11,6 +11,7 @@ import type {
   Repository as Project,
 } from "@/features/projects/hooks";
 import { useProjectRepoHost } from "@/features/projects/useProjectRepoHost";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { publishProjectPullRequestUpdate } from "./pullRequestMutations";
 
 /** Local-vs-remote git sync status for a project checkout (ahead/behind
@@ -24,6 +25,7 @@ export function useProjectRepoSyncStatusQuery(
   baseBranch?: string | null,
 ) {
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+  const refetchInterval = useFocusedRefetchInterval(60_000);
   const selectedBaseBranch = baseBranch ?? project?.defaultBranch ?? null;
   const host = useProjectRepoHost(project);
 
@@ -48,8 +50,8 @@ export function useProjectRepoSyncStatusQuery(
       });
     },
     staleTime: 10_000,
-    refetchInterval: 60_000,
-    refetchOnWindowFocus: true,
+    refetchInterval,
+    refetchOnWindowFocus: false,
     retry: 1,
   });
 }
@@ -97,7 +99,7 @@ export function usePushProjectLocalRepositoryMutation(
             error:
               error instanceof Error
                 ? error.message
-                : "The pull request update could not be published.",
+                : "The review update could not be published.",
           };
         }
       }

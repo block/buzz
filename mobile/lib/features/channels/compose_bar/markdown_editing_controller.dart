@@ -16,6 +16,20 @@ class _MarkdownRule {
 
 class _MarkdownEditingController extends TextEditingController {
   final Set<String> _agentMentionNames = <String>{};
+  TextSpan? _cachedTextSpan;
+  String? _cachedText;
+  TextRange? _cachedComposingRange;
+  TextStyle? _cachedBaseStyle;
+  Color? _cachedOnSurface;
+  Color? _cachedSurface;
+  Map<String, String> _channelNames = const {};
+
+  void setChannelNames(Map<String, String> names) {
+    if (mapEquals(_channelNames, names)) return;
+    _channelNames = Map.unmodifiable(names);
+    _cachedTextSpan = null;
+    notifyListeners();
+  }
 
   static final _rules = [
     _MarkdownRule(
@@ -45,6 +59,7 @@ class _MarkdownEditingController extends TextEditingController {
     _agentMentionNames
       ..clear()
       ..addAll(next);
+    _cachedTextSpan = null;
     notifyListeners();
   }
 
@@ -59,7 +74,16 @@ class _MarkdownEditingController extends TextEditingController {
         withComposing && value.composing.isValid && !value.composing.isCollapsed
         ? value.composing
         : TextRange.empty;
-    return TextSpan(
+    final colors = context.colors;
+    if (_cachedTextSpan case final cached?
+        when _cachedText == text &&
+            _cachedComposingRange == composingRange &&
+            _cachedBaseStyle == baseStyle &&
+            _cachedOnSurface == colors.onSurface &&
+            _cachedSurface == colors.surface) {
+      return cached;
+    }
+    final span = TextSpan(
       style: baseStyle,
       children: _buildMarkdownSpans(
         context,
@@ -69,6 +93,13 @@ class _MarkdownEditingController extends TextEditingController {
         composingRange: composingRange,
       ),
     );
+    _cachedText = text;
+    _cachedComposingRange = composingRange;
+    _cachedBaseStyle = baseStyle;
+    _cachedOnSurface = colors.onSurface;
+    _cachedSurface = colors.surface;
+    _cachedTextSpan = span;
+    return span;
   }
 
   List<InlineSpan> _buildMarkdownSpans(
@@ -219,8 +250,13 @@ class _MarkdownEditingController extends TextEditingController {
   List<InlineSpan> _buildAgentMentionSpans(
     BuildContext context,
     String source,
-    TextStyle style,
-  ) {
+    TextStyle style, {
+    bool renderLinks = true,
+  }) {
+    final tokenSpans = renderLinks
+        ? _buildComposerTokenSpans(context, source, style)
+        : null;
+    if (tokenSpans != null) return tokenSpans;
     if (_agentMentionNames.isEmpty) {
       return [TextSpan(text: source, style: style)];
     }
@@ -269,6 +305,120 @@ class _MarkdownEditingController extends TextEditingController {
       spans.add(TextSpan(text: source.substring(offset), style: style));
     }
     return spans.isEmpty ? [TextSpan(text: source, style: style)] : spans;
+  }
+
+  List<InlineSpan>? _buildComposerTokenSpans(
+    BuildContext context,
+    String source,
+    TextStyle style,
+  ) {
+    final expression = RegExp(
+      r'''buzz://(?:message\?|channel/|(?:repo|pr|issue)\?)[^\s<>"']+''',
+      caseSensitive: false,
+    );
+    final matches = expression.allMatches(source).toList();
+    if (matches.isEmpty) return null;
+
+    final spans = <InlineSpan>[];
+    var offset = 0;
+    for (final match in matches) {
+      if (match.start > offset) {
+        spans.addAll(
+          _buildAgentMentionSpans(
+            context,
+            source.substring(offset, match.start),
+            style,
+            renderLinks: false,
+          ),
+        );
+      }
+      final raw = match.group(0)!;
+      final url = raw.replaceFirst(RegExp(r'[.,!?:;)\]}*]+$'), '');
+      final trailing = raw.substring(url.length);
+      final presentation = _composerLinkPresentation(url);
+      if (presentation == null) {
+        spans.add(TextSpan(text: raw, style: style));
+      } else {
+        spans.add(
+          WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            child: _ComposerBuzzLinkChip(
+              icon: presentation.$1,
+              label: presentation.$2,
+              semanticLabel: presentation.$3,
+              textStyle: style,
+            ),
+          ),
+        );
+        // Preserve one source character per input character for native cursor
+        // movement while the visible atomic chip replaces the URL.
+        spans.add(
+          TextSpan(
+            text: url.substring(1),
+            semanticsLabel: '',
+            style: _hiddenMentionTextStyle(style),
+          ),
+        );
+        if (trailing.isNotEmpty) {
+          spans.add(TextSpan(text: trailing, style: style));
+        }
+      }
+      offset = match.end;
+    }
+    if (offset < source.length) {
+      spans.addAll(
+        _buildAgentMentionSpans(
+          context,
+          source.substring(offset),
+          style,
+          renderLinks: false,
+        ),
+      );
+    }
+    return spans;
+  }
+
+  (IconData, String, String)? _composerLinkPresentation(String raw) {
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return null;
+    final link = parseBuzzDeepLink(uri) ?? parseEntityDeepLink(uri);
+    return switch (link) {
+      ChannelDeepLink(:final channelId) => (
+        LucideIcons.hash,
+        _resolvedChannelName(channelId),
+        'Channel ${_resolvedChannelName(channelId)}',
+      ),
+      MessageDeepLink(:final channelId, :final messageId) => (
+        LucideIcons.messageSquare,
+        '${_resolvedChannelName(channelId)} · ${messageId.substring(0, 8)}',
+        'Message ${messageId.substring(0, 8)} in channel ${_resolvedChannelName(channelId)}',
+      ),
+      EntityDeepLink(:final type, :final repository, :final eventId) => (
+        switch (type) {
+          'repo' => LucideIcons.folderGit2,
+          'pr' => LucideIcons.gitPullRequest,
+          _ => LucideIcons.circleDot,
+        },
+        type == 'repo'
+            ? repository
+            : '$repository · ${eventId!.substring(0, 8)}',
+        switch (type) {
+          'repo' => 'Repository $repository',
+          'pr' =>
+            'Pull request ${eventId!.substring(0, 8)} in repository $repository',
+          _ => 'Issue ${eventId!.substring(0, 8)} in repository $repository',
+        },
+      ),
+      _ => null,
+    };
+  }
+
+  String _resolvedChannelName(String channelId) {
+    for (final entry in _channelNames.entries) {
+      if (entry.value == channelId) return entry.key;
+    }
+    return channelId.substring(0, math.min(8, channelId.length));
   }
 
   TextStyle _hiddenMentionTextStyle(TextStyle inheritedStyle) =>
@@ -336,6 +486,53 @@ class _MarkdownEditingController extends TextEditingController {
       height: 0.01,
       letterSpacing: 0,
       decoration: TextDecoration.none,
+    );
+  }
+}
+
+class _ComposerBuzzLinkChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String semanticLabel;
+  final TextStyle textStyle;
+
+  const _ComposerBuzzLinkChip({
+    required this.icon,
+    required this.label,
+    required this.semanticLabel,
+    required this.textStyle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final style = textStyle.copyWith(
+      color: context.colors.primary,
+      fontWeight: FontWeight.w600,
+      height: 1,
+    );
+    final fontSize = style.fontSize ?? 16;
+    return Semantics(
+      label: semanticLabel,
+      excludeSemantics: true,
+      child: Container(
+        key: ValueKey('composer-buzz-link-chip:$label'),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+        decoration: BoxDecoration(
+          color: context.colors.primary.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(Radii.sm),
+          border: Border.all(
+            color: context.colors.primary.withValues(alpha: 0.12),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: fontSize * 0.95, color: context.colors.primary),
+            const SizedBox(width: Grid.quarter + 1),
+            Text(label, style: style),
+          ],
+        ),
+      ),
     );
   }
 }

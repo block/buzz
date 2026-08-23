@@ -10,6 +10,12 @@ abstract final class EventKind {
   static const contactList = 3;
   static const deletion = 5;
   static const reaction = 7;
+
+  /// Kind:9030 event requesting that the relay add a community member.
+  static const relayAdminAddMember = 9030;
+
+  /// Kind:13534 event containing the current relay-community membership.
+  static const relayMembership = 13534;
   static const streamMessage = 9;
   static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;
@@ -86,6 +92,7 @@ abstract final class EventKind {
     jobCancel,
     jobError,
     huddleStarted,
+    huddleEnded,
   ];
 }
 

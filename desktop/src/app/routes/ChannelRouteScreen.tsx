@@ -3,6 +3,7 @@ import * as React from "react";
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useOpenChannelDirectoryQuery } from "@/features/channels/openChannelDirectory";
 import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
 import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingView";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
@@ -110,8 +111,21 @@ export function ChannelRouteScreen({
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const channels = channelsQuery.data ?? [];
-  const activeChannel =
+  const memberChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
+  // A deep link to a non-member open channel resolves nothing in the
+  // member-only poll list. Fall back to the discovery directory — but only for
+  // that case, so a normal in-membership route never triggers the all-open
+  // scan. React Query dedups the shared directory key across surfaces.
+  const needsDirectoryFallback =
+    !memberChannel && channelsQuery.isSuccess && !isHuddleTranscript;
+  const openDirectoryQuery = useOpenChannelDirectoryQuery({
+    enabled: needsDirectoryFallback,
+  });
+  const activeChannel =
+    memberChannel ??
+    openDirectoryQuery.data?.find((channel) => channel.id === channelId) ??
+    null;
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
@@ -188,7 +202,11 @@ export function ChannelRouteScreen({
     };
   }, [selectedPostId, targetMessageId, targetThreadRootId]);
 
-  if (channelsQuery.isPending && !activeChannel) {
+  if (
+    !activeChannel &&
+    (channelsQuery.isPending ||
+      (needsDirectoryFallback && openDirectoryQuery.isPending))
+  ) {
     if (isHuddleTranscript) {
       return <HuddleStartingView />;
     }

@@ -22,11 +22,13 @@ import type { RelayEvent } from "@/shared/api/types";
 import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { useHuddle } from "../HuddleContext";
+import { useHuddle, useHuddleLevels } from "../HuddleContext";
+import { useHuddleParticipantRoster } from "../hooks/useHuddleParticipantRoster";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
@@ -150,16 +152,14 @@ export function HuddleBar({
   onOpenHuddleWindow,
   onVisibilityChange,
 }: HuddleBarProps) {
+  const documentVisible = useDocumentVisible();
   const {
     leaveHuddle,
     micConnected,
     isMuted,
     toggleMute,
-    micLevel,
     voiceInputMode,
     setVoiceInputMode,
-    activeSpeakers,
-    speakerLevels,
     huddleError,
     clearHuddleError,
     audioDevices,
@@ -171,6 +171,7 @@ export function HuddleBar({
     selectedOutputDevice,
     setSelectedOutputDevice,
   } = useHuddle();
+  const { activeSpeakers, micLevel, speakerLevels } = useHuddleLevels();
   const customEmoji = useCustomEmoji();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
@@ -238,7 +239,7 @@ export function HuddleBar({
       }
     }
 
-    void fetchState();
+    if (documentVisible) void fetchState();
 
     // Primary: listen for Rust-emitted state change events
     listen<HuddleState>("huddle-state-changed", (event) => {
@@ -253,21 +254,27 @@ export function HuddleBar({
 
     // Fallback in case events are missed; keep it slow so normal huddle use is
     // event-driven and does not keep a sync IPC command warm on the main thread.
-    const id = window.setInterval(
-      () => void fetchState(),
-      HUDDLE_STATE_FALLBACK_INTERVAL_MS,
-    );
+    const id = documentVisible
+      ? window.setInterval(
+          () => void fetchState(),
+          HUDDLE_STATE_FALLBACK_INTERVAL_MS,
+        )
+      : null;
 
     return () => {
       cancelled = true;
       unlisten?.();
-      window.clearInterval(id);
+      if (id !== null) window.clearInterval(id);
     };
-  }, [applyIncomingState]);
+  }, [applyIncomingState, documentVisible]);
 
   const huddlePhase = state?.phase;
   React.useEffect(() => {
-    if (huddlePhase !== "active" && huddlePhase !== "connected") return;
+    if (
+      !documentVisible ||
+      (huddlePhase !== "active" && huddlePhase !== "connected")
+    )
+      return;
 
     let cancelled = false;
 
@@ -310,8 +317,12 @@ export function HuddleBar({
     return () => {
       cancelled = true;
       window.clearInterval(id);
-      setModelStatus(null); // Clear stale status on huddle end/phase change.
     };
+  }, [documentVisible, huddlePhase]);
+
+  React.useEffect(() => {
+    if (huddlePhase === "active" || huddlePhase === "connected") return;
+    setModelStatus(null);
   }, [huddlePhase]);
 
   const isHuddleVisible = isVisibleHuddleState(state);
@@ -366,6 +377,13 @@ export function HuddleBar({
   const barState = isHuddleVisible && state ? state : renderedState;
   const reactionChannelId = barState?.ephemeral_channel_id ?? null;
   const currentPubkey = identityQuery.data?.pubkey ?? null;
+  const lifecycleParticipants = useHuddleParticipantRoster({
+    parentChannelId: barState?.parent_channel_id ?? null,
+    ephemeralChannelId: barState?.ephemeral_channel_id ?? null,
+    fallbackParticipants: barState?.participants ?? [],
+    preservedParticipants: barState?.agent_pubkeys ?? [],
+    huddleThreadEventId: barState?.huddle_thread_event_id ?? null,
+  });
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };
     if (currentPubkey) {
@@ -680,7 +698,7 @@ export function HuddleBar({
 
           {mode === "main" ? (
             <HuddleParticipantsControl
-              participants={barState.participants}
+              participants={lifecycleParticipants}
               activeSpeakers={activeSpeakers}
               speakerLevels={participantSpeakerLevels}
               agentPubkeys={barState.agent_pubkeys}

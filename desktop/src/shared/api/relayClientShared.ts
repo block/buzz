@@ -54,12 +54,32 @@ type FirstEventSubscription = {
   timeout: number;
 };
 
+export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
+
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
-  resolveReady?: () => void;
+  resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
   lastSeenCreatedAt?: number;
+  /**
+   * Lower bound of a reconnect backfill window that has not yet completed.
+   *
+   * Events on the restored live REQ advance `lastSeenCreatedAt` regardless of
+   * backfill success, so after an exhausted backfill the cursor alone would
+   * make the next reconnect skip the unresolved older window — silent message
+   * loss. This floor is pinned when paging starts and cleared only when a
+   * backfill pass completes; the next replay starts from
+   * `min(pendingReplaySince, cursor window)`.
+   */
+  pendingReplaySince?: number;
+  /** Dispatch-level duplicate suppression shared by restored-live and repair. */
+  reconnectReplay?: {
+    generation: number;
+    seenEventIds: Set<string>;
+    liveEose: boolean;
+    repairDone: boolean;
+  };
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
 };
@@ -76,6 +96,12 @@ export type RelaySubscription =
   | FirstEventSubscription
   | LiveSubscription;
 
+export type SubscriptionEventBufferItem = {
+  subId: string;
+  event: RelayEvent;
+  generation: number;
+};
+
 export function sortEvents(events: RelayEvent[]) {
   return [...events].sort((left, right) => {
     if (left.created_at !== right.created_at) {
@@ -87,6 +113,19 @@ export function sortEvents(events: RelayEvent[]) {
     // two sorts on one invariant avoids a latent ordering drift.
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
   });
+}
+
+/**
+ * Splits a native websocket delivery into individual frames.
+ *
+ * The native plugin coalesces inbound frames into one IPC delivery, so a
+ * delivery is an array of frames. Older single-frame deliveries stay valid:
+ * `getTextPayload` rejects arrays, so every consumer must unwrap here rather
+ * than per-client — an un-unwrapped consumer drops batched frames silently
+ * instead of failing.
+ */
+export function toRelayFrames(message: unknown): unknown[] {
+  return Array.isArray(message) ? message : [message];
 }
 
 export function getTextPayload(message: unknown) {

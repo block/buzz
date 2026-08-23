@@ -113,6 +113,7 @@ pub(crate) struct WireSpan {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WireRow {
     line: usize,
+    wrapped: bool,
     spans: Vec<WireSpan>,
 }
 
@@ -187,6 +188,7 @@ fn wire_publication(publication: Publication) -> Result<FrameMessage> {
                 .collect::<Result<Vec<_>>>()?;
             Ok(WireRow {
                 line: row.line,
+                wrapped: row.wrapped,
                 spans,
             })
         })
@@ -819,7 +821,11 @@ mod tests {
             subscription_id: SubscriptionId::new(),
             sequence: 7,
             frame: buzz_terminal::damage::Frame {
-                rows: vec![RowFrame { line: 3, spans }],
+                rows: vec![RowFrame {
+                    line: 3,
+                    wrapped: true,
+                    spans,
+                }],
                 cursor: CursorFrame {
                     line: 1,
                     column: 2,
@@ -848,6 +854,7 @@ mod tests {
         Frame {
             rows: vec![RowFrame {
                 line: marker,
+                wrapped: false,
                 spans: Vec::new(),
             }],
             cursor: CursorFrame {
@@ -920,6 +927,12 @@ mod tests {
         publisher.attach(old, marker_frame(0, true)).unwrap();
         assert!(publisher.acknowledge(old, 1).is_none());
         assert_post_snapshot_capture_survives_attach(publisher);
+    }
+
+    #[test]
+    fn mapper_preserves_soft_wrap_metadata() {
+        let message = wire_publication(publication(Vec::new())).unwrap();
+        assert!(message.rows[0].wrapped);
     }
 
     #[test]

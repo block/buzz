@@ -1,28 +1,25 @@
-import 'dart:math' show cos, min, pi;
+import 'dart:math' show cos, pi;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-/// The Buzz mark with a quick double strike when the user taps it.
+import 'flapping_bee.dart';
+
+/// The Zorro mark with a quick double strike when the user taps it.
 ///
 /// The geometry matches the desktop mark. When reduced motion is enabled, the
 /// mark stays static.
-class TappableFlappingBee extends HookConsumerWidget {
+class TappableZorroHat extends HookWidget {
   /// The rendered width of the complete mark.
   final double width;
 
   /// The color used for the mark.
   final Color color;
 
-  const TappableFlappingBee({
-    required this.width,
-    required this.color,
-    super.key,
-  });
+  const TappableZorroHat({required this.width, required this.color, super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final animation = useAnimationController(
       duration: const Duration(milliseconds: 480),
     );
@@ -47,12 +44,10 @@ class TappableFlappingBee extends HookConsumerWidget {
             animation: animation,
             builder: (context, _) {
               final strikeAmount = 0.5 - (0.5 * cos(animation.value * 4 * pi));
-              return CustomPaint(
-                size: Size.square(width),
-                painter: _FlappingBeePainter(
-                  color: color,
-                  flapAmount: strikeAmount,
-                ),
+              return FlappingBee(
+                width: width,
+                color: color,
+                flapAmount: strikeAmount,
               );
             },
           ),
@@ -62,46 +57,21 @@ class TappableFlappingBee extends HookConsumerWidget {
   }
 }
 
-class _FlappingBeePainter extends CustomPainter {
+/// Compatibility wrapper for the former tappable loading-bee API.
+class TappableFlappingBee extends StatelessWidget {
+  /// The rendered width of the complete mark.
+  final double width;
+
+  /// The base ink color used for the mark.
   final Color color;
-  final double flapAmount;
 
-  const _FlappingBeePainter({required this.color, required this.flapAmount});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final animatedScale = 1 + (0.04 * flapAmount);
-    final scale = min(size.width / 512, size.height / 512) * animatedScale;
-    final renderedWidth = 512 * scale;
-    final renderedHeight = 512 * scale;
-
-    canvas
-      ..save()
-      ..translate(
-        (size.width - renderedWidth) / 2,
-        (size.height - renderedHeight) / 2,
-      )
-      ..scale(scale);
-
-    final finishedMark = Path()
-      ..moveTo(72, 64)
-      ..lineTo(440, 64)
-      ..lineTo(440, 168)
-      ..lineTo(224, 344)
-      ..lineTo(440, 344)
-      ..lineTo(440, 448)
-      ..lineTo(72, 448)
-      ..lineTo(72, 344)
-      ..lineTo(288, 168)
-      ..lineTo(72, 168)
-      ..close();
-
-    canvas
-      ..drawPath(finishedMark, Paint()..color = color)
-      ..restore();
-  }
+  const TappableFlappingBee({
+    required this.width,
+    required this.color,
+    super.key,
+  });
 
   @override
-  bool shouldRepaint(_FlappingBeePainter oldDelegate) =>
-      color != oldDelegate.color || flapAmount != oldDelegate.flapAmount;
+  Widget build(BuildContext context) =>
+      TappableZorroHat(width: width, color: color);
 }

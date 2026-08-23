@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  cupertino_icons: ^1.0.8
   # Grapheme-cluster segmentation, for deciding whether a message body is
   # nothing but emoji. Already present transitively via the Flutter SDK;
   # declared here because we import it directly.
@@ -42,6 +43,7 @@ dependencies:
   open_filex: ^4.7.0
   path_provider: ^2.1.6
   share_plus: ^13.3.0
+  local_auth: ^3.0.2
 
 dev_dependencies:
   flutter_test:

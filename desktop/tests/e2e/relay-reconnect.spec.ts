@@ -80,10 +80,7 @@ async function getMockWebsocketConnectAttempts(
 ) {
   return page.evaluate(() => {
     const getAttempts = window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__;
-    if (!getAttempts) {
-      throw new Error("E2E websocket attempt seam is not installed.");
-    }
-    return getAttempts();
+    return getAttempts?.() ?? [];
   });
 }
 
@@ -134,6 +131,19 @@ async function closeLiveSubscriptions(
   expect(closed).toBeGreaterThan(0);
 }
 
+async function queueChannelHistoryCloses(
+  page: import("@playwright/test").Page,
+  reasons: string[],
+) {
+  await page.evaluate((queued) => {
+    const queue = window.__BUZZ_E2E_QUEUE_CHANNEL_HISTORY_CLOSES__;
+    if (!queue) {
+      throw new Error("E2E channel history CLOSED seam is not installed.");
+    }
+    queue(queued);
+  }, reasons);
+}
+
 async function driveConnectionDegraded(
   page: import("@playwright/test").Page,
   state: "connected" | "reconnecting" | "stalled" | "disconnected",
@@ -155,6 +165,52 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("stalled early AUTH signing times out and starts a replacement dial", async ({
+  page,
+}) => {
+  test.setTimeout(40_000);
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+    stallFirstAuthSigning: true,
+  });
+  await page.goto("/");
+
+  await expect
+    .poll(() => getMockWebsocketConnectAttempts(page), { timeout: 32_000 })
+    .toHaveLength(2);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+});
+
+test("AUTH arriving before connect resolves does not lose the first send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+  });
+  await page.goto("/");
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const message = `first send after early auth ${Date.now()}`;
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+});
+
 test("failed initial relay dial retries automatically", async ({ page }) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["mock relay pod unavailable"],
@@ -173,8 +229,7 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
               __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
             }
           ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__;
-          if (!getState) throw new Error("Relay state seam is not installed.");
-          return getState();
+          return getState?.() ?? null;
         }),
       { timeout: 10_000 },
     )
@@ -253,6 +308,61 @@ test("authenticated reconnect reports connected while replay is rate-limited", a
   await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
 });
 
+test("rate-limited reconnect backfill does not tear down the authenticated socket", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Give the channel live subscription a replay cursor. On reconnect this
+  // causes a paged channel-history REQ in addition to restoring the live REQ.
+  await emitMockMessages(page, [
+    {
+      content: `replay cursor ${Date.now()}`,
+      createdAt: Math.floor(Date.now() / 1_000),
+    },
+  ]);
+  const attemptsBeforeReconnect = (await getMockWebsocketConnectAttempts(page))
+    .length;
+
+  // Inject back-pressure from the history REQ itself. This differs from a
+  // pre-armed gate and from CLOSED on the live subscription: AUTH has already
+  // succeeded and the socket is healthy when replay backfill is rejected.
+  await queueChannelHistoryCloses(page, [
+    "rate-limited: quota exceeded; retry in 1s",
+  ]);
+  await disconnectMockWebsockets(page);
+
+  await expect
+    .poll(
+      async () =>
+        (await getMockWebsocketConnectAttempts(page)).length -
+        attemptsBeforeReconnect,
+      { timeout: 3_000 },
+    )
+    .toBe(1);
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+    )
+    .toBe("connected");
+
+  // Hold through the rate-limit hint plus the next base-backoff window. The
+  // authenticated socket must remain the only reconnect attempt, rather than
+  // flashing connected and redialing after replay rejects.
+  await page.waitForTimeout(2_500);
+  expect(
+    (await getMockWebsocketConnectAttempts(page)).length -
+      attemptsBeforeReconnect,
+  ).toBe(1);
+  expect(
+    await page.evaluate(() =>
+      window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.(),
+    ),
+  ).toBe("connected");
+});
+
 test("service restart close resets accumulated backoff", async ({ page }) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["down 1", "down 2", "down 3"],
@@ -281,7 +391,7 @@ test("passive relay watchdog does not write while the websocket is half-open", a
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   await setMockWebsocketSendsStalled(page, true);

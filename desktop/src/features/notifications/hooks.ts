@@ -4,6 +4,7 @@ import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { scheduleAfterForegroundReady } from "@/shared/lib/foregroundReady";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
@@ -208,6 +209,38 @@ export function useNotificationSettings(pubkey?: string) {
     void normalizedPubkey;
     void refreshPermission();
   }, [normalizedPubkey]);
+
+  React.useEffect(() => {
+    let cancelPendingRefresh: (() => void) | null = null;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== "visible") {
+        cancelPendingRefresh?.();
+        cancelPendingRefresh = null;
+        return;
+      }
+      if (cancelPendingRefresh) return;
+      cancelPendingRefresh = scheduleAfterForegroundReady(() => {
+        cancelPendingRefresh = null;
+        if (document.visibilityState === "visible") void refreshPermission();
+      });
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      cancelPendingRefresh?.();
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (
+      settings.desktopEnabled &&
+      (permission === "denied" || permission === "unsupported")
+    ) {
+      setSettings((current) => ({ ...current, desktopEnabled: false }));
+    }
+  }, [permission, settings.desktopEnabled]);
 
   const setDesktopEnabled = React.useCallback(async (enabled: boolean) => {
     if (!enabled) {

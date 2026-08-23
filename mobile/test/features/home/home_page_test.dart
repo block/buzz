@@ -1,5 +1,6 @@
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/channels/channels_page.dart';
+import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,13 +12,14 @@ void main() {
   Future<Widget> buildHome({
     int unreadInboxCount = 0,
     bool disableAnimations = false,
+    Gradient? topSectionGradient,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     return ProviderScope(
       overrides: [savedPrefsProvider.overrideWithValue(prefs)],
       child: MaterialApp(
-        theme: AppTheme.light(),
+        theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(
             context,
@@ -68,6 +70,130 @@ void main() {
       quickActionRect.center.dy,
       closeTo(homeDestinationRect.center.dy, 0.01),
     );
+  });
+
+  testWidgets('keeps the Buzz backdrop behind the scalable Home screen', (
+    tester,
+  ) async {
+    const gradient = LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [Colors.yellow, Colors.blue],
+    );
+    await tester.pumpWidget(await buildHome(topSectionGradient: gradient));
+    await tester.pump();
+
+    final backdrop = find.byKey(
+      const ValueKey('home-settings-transition-backdrop'),
+    );
+    final decoration =
+        tester.widget<DecoratedBox>(backdrop).decoration as BoxDecoration;
+    expect(decoration.gradient, gradient);
+    expect(
+      find.byKey(const ValueKey('home-settings-transition-scale')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Transform>(
+            find.byKey(const ValueKey('home-settings-transition-scale')),
+          )
+          .transform
+          .getMaxScaleOnAxis(),
+      1,
+    );
+    expect(
+      tester
+          .widget<Opacity>(
+            find.byKey(const ValueKey('home-settings-transition-opacity')),
+          )
+          .opacity,
+      1,
+    );
+  });
+
+  testWidgets('keeps Home opaque beneath the Settings transition', (
+    tester,
+  ) async {
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 95));
+
+    double homeOpacity() => tester
+        .widget<Opacity>(
+          find.byKey(const ValueKey('home-settings-transition-opacity')),
+        )
+        .opacity;
+
+    expect(homeOpacity(), 1);
+
+    await tester.pumpAndSettle();
+    Navigator.of(
+      tester.element(
+        find.byKey(
+          const ValueKey('settings-transition-opacity'),
+          skipOffstage: false,
+        ),
+      ),
+    ).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 95));
+
+    expect(homeOpacity(), 1);
+  });
+
+  testWidgets('uses one monotonic route animation for Settings and Home', (
+    tester,
+  ) async {
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+
+    double homeScale() => tester
+        .widget<Transform>(
+          find.byKey(const ValueKey('home-settings-transition-scale')),
+        )
+        .transform
+        .storage[0];
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+
+    final settingsTransition = find.byKey(
+      const ValueKey('settings-transition-opacity'),
+      skipOffstage: false,
+    );
+    final settingsRoute = ModalRoute.of(tester.element(settingsTransition));
+
+    final entranceScales = <double>[homeScale()];
+    final routeValues = <double>[settingsRoute!.animation!.value];
+    for (var frame = 0; frame < 15; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      entranceScales.add(homeScale());
+      routeValues.add(settingsRoute.animation!.value);
+    }
+    expect(entranceScales.first, closeTo(1, 0.000001));
+    final reversalFrames = <int>[];
+    for (var frame = 1; frame < entranceScales.length; frame++) {
+      if (entranceScales[frame] > entranceScales[frame - 1] + 0.000001) {
+        reversalFrames.add(frame);
+      }
+    }
+    expect(
+      reversalFrames,
+      isEmpty,
+      reason:
+          'Home must scale down in one direction on entrance. '
+          'scales=$entranceScales route=$routeValues',
+    );
+    expect(entranceScales, everyElement(inInclusiveRange(0.97, 1)));
+    expect(entranceScales.last, closeTo(0.97, 0.001));
+
+    await tester.pumpAndSettle();
+    Navigator.of(tester.element(settingsTransition)).pop();
+    await tester.pumpAndSettle();
   });
 
   testWidgets('gives selection haptics only when the tab changes', (

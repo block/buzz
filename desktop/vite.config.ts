@@ -25,6 +25,10 @@ export default defineConfig(async () => ({
     alias: {
       "@": "/src",
       "@features-manifest": path.resolve(__dirname, "../preview-features.json"),
+      "@model-capabilities-manifest": path.resolve(
+        __dirname,
+        "../scripts/model-capabilities.json",
+      ),
     },
   },
 

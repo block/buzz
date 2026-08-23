@@ -20,6 +20,37 @@ test("parseSupportedLinkPreview parses GitHub pull request URLs", () => {
   );
 });
 
+test("parseSupportedLinkPreview strips the fragment from the preview href", () => {
+  // A `#fragment` is a client-only anchor; the preview and its signed snapshot
+  // canonical URL are of the page. Keeping it would fail the fragmentless
+  // snapshot-URL guard and drop the preview entirely.
+  assert.equal(
+    parseSupportedLinkPreview(
+      "https://github.com/block/sprout/pull/1234#pullrequestreview-99",
+    )?.href,
+    "https://github.com/block/sprout/pull/1234",
+  );
+});
+
+test("extractSupportedLinkPreviews collapses fragment variants of one page", () => {
+  const previews = extractSupportedLinkPreviews(
+    [
+      "https://github.com/block/sprout/pull/1234#pullrequestreview-99",
+      "https://github.com/block/sprout/pull/1234#issuecomment-1",
+      "https://github.com/block/sprout/pull/5678",
+    ].join("\n"),
+  );
+  // Two anchors into the same page dedupe to one card at first occurrence; the
+  // distinct second page keeps its own card.
+  assert.deepEqual(
+    previews.map((preview) => preview.href),
+    [
+      "https://github.com/block/sprout/pull/1234",
+      "https://github.com/block/sprout/pull/5678",
+    ],
+  );
+});
+
 test("parseSupportedLinkPreview parses GitHub repository URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview("https://github.com/block/sprout"),
@@ -71,12 +102,12 @@ test("parseSupportedLinkPreview parses Zorro relay git clone URLs", () => {
       typeLabel: "repo",
     },
   );
-  // Same URL without a matching origin stays external.
+  // Same URL without a matching origin stays an ordinary external preview.
   assert.equal(
     parseSupportedLinkPreview(
       `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
-    ),
-    null,
+    )?.kind,
+    "generic-link",
   );
 });
 
@@ -108,10 +139,10 @@ test("parseSupportedLinkPreview rejects malformed Zorro git URLs", () => {
     // Deeper transport paths are not repo links.
     `https://relay.example/git/${BUZZ_OWNER}/repo/info/refs`,
   ]) {
-    // Even with a matching origin, structural issues return null.
+    // Structural non-matches remain ordinary external previews.
     assert.equal(
-      parseSupportedLinkPreview(href, "https://relay.example"),
-      null,
+      parseSupportedLinkPreview(href, "https://relay.example")?.kind,
+      "generic-link",
       href,
     );
   }
@@ -123,8 +154,8 @@ test("parseSupportedLinkPreview rejects clone URLs from non-relay hosts", () => 
     parseSupportedLinkPreview(
       `https://evil.example/git/${BUZZ_OWNER}/my-repo`,
       "https://buzz.block.builderlab.xyz",
-    ),
-    null,
+    )?.kind,
+    "generic-link",
   );
   // github.com sharing the path shape must never become a Buzz repo card.
   assert.equal(
@@ -139,8 +170,8 @@ test("parseSupportedLinkPreview rejects clone URLs from non-relay hosts", () => 
     parseSupportedLinkPreview(
       `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world`,
       null,
-    ),
-    null,
+    )?.kind,
+    "generic-link",
   );
 });
 
@@ -157,14 +188,14 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
       href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
       provider: "Zorro",
       title: "buzz-world #c3b589fa",
-      typeLabel: "PR",
+      typeLabel: "Review",
     },
   );
   assert.deepEqual(
     parseSupportedLinkPreview(
       `buzz://issue?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
     )?.typeLabel,
-    "issue",
+    "Task",
   );
   assert.deepEqual(
     parseSupportedLinkPreview(`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`),
@@ -178,32 +209,55 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
   );
 });
 
+test("parseSupportedLinkPreview parses buzz:// project deep links", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview(
+      `buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+    ),
+    {
+      kind: "buzz-project",
+      href: `buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+      provider: "Zorro",
+      title: "buzz-world",
+      typeLabel: "project",
+    },
+  );
+});
+
 test("parseSupportedLinkPreview rejects malformed buzz:// entity links", () => {
   for (const href of [
     `buzz://pr?owner=${BUZZ_OWNER}&d=buzz-world`,
     `buzz://pr?id=short&owner=${BUZZ_OWNER}&d=buzz-world`,
     `buzz://issue?id=${BUZZ_EVENT_ID}&owner=nope&d=buzz-world`,
     `buzz://repo?owner=${BUZZ_OWNER}&d=.hidden`,
+    `buzz://project?owner=${BUZZ_OWNER}&d=.hidden`,
   ]) {
     assert.equal(parseSupportedLinkPreview(href), null, href);
   }
 });
 
-test("extractSupportedLinkPreviews picks up buzz:// links in prose", () => {
+test("extractSupportedLinkPreviews excludes Buzz entity links while keeping external links", () => {
+  const entityLinks = [
+    `buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+    `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
+    `buzz://issue?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
+    `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
+  ];
+
   assert.deepEqual(
     extractSupportedLinkPreviews(
-      `PR is up: buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world — review please.`,
-    ).map((preview) => [preview.kind, preview.title]),
-    [["buzz-pull-request", "buzz-world #c3b589fa"]],
+      `${entityLinks.join(" ")} https://example.com/story`,
+    ).map((preview) => preview.href),
+    ["https://example.com/story"],
   );
 });
 
-test("extractSupportedLinkPreviews uses markdown labels for buzz:// links", () => {
+test("extractSupportedLinkPreviews excludes markdown-labeled Buzz entity links", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
-      `[Add header links](buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world)`,
-    ).map((preview) => preview.title),
-    ["Add header links"],
+      `[Project](buzz://project?owner=${BUZZ_OWNER}&d=buzz-world)`,
+    ),
+    [],
   );
 });
 
@@ -268,63 +322,30 @@ test("extractSupportedLinkPreviews returns unique supported links in order", () 
   );
 });
 
-test("extractSupportedLinkPreviews picks up bare Zorro clone URLs in prose", () => {
+test("extractSupportedLinkPreviews excludes same-relay Buzz clone URLs", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `master pushed; clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy and review please.`,
       "https://buzz.block.builderlab.xyz",
     ),
-    [
-      {
-        kind: "buzz-repository",
-        href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
-        provider: "Zorro",
-        title: "buzz-world-galaxy",
-        typeLabel: "repo",
-      },
-    ],
+    [],
   );
   // Without a relay origin the URL is treated as an ordinary external link.
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
-    ),
-    [],
+    ).map((preview) => preview.kind),
+    ["generic-link"],
   );
 });
 
-test("extractSupportedLinkPreviews uses markdown labels for Zorro repo links", () => {
+test("extractSupportedLinkPreviews excludes markdown-labeled Buzz clone URLs", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `[Zorro World](https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy)`,
       "https://relay.example",
-    ).map((preview) => preview.title),
-    ["Zorro World"],
-  );
-});
-
-test("extractSupportedLinkPreviews dedupes clone URL variants of one repo", () => {
-  assert.deepEqual(
-    extractSupportedLinkPreviews(
-      [
-        `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy`,
-        `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy.git`,
-      ].join(" "),
-      "https://relay.example",
-    ).map((preview) => preview.href),
-    [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
-  );
-});
-
-test("clone URLs and buzz://repo links for the same repo dedupe to one card", () => {
-  assert.deepEqual(
-    extractSupportedLinkPreviews(
-      [
-        `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy`,
-        `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
-      ].join(" "),
-    ).map((preview) => preview.href),
-    [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
+    ),
+    [],
   );
 });
 
@@ -412,7 +433,7 @@ test("extractSupportedLinkPreviews skips markdown image link URLs", () => {
   );
 });
 
-test("extractSupportedLinkPreviews requires bare URL boundaries", () => {
+test("extractSupportedLinkPreviews treats other absolute HTTPS URLs as generic", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
       [
@@ -421,7 +442,7 @@ test("extractSupportedLinkPreviews requires bare URL boundaries", () => {
         "(https://github.com/block/sprout/pull/2)",
       ].join(" "),
     ).map((preview) => preview.title),
-    ["block/sprout #2"],
+    ["evil-github.com", "example.com", "block/sprout #2"],
   );
 });
 
@@ -467,105 +488,38 @@ test("isSupportedLinkAutolinkLabel matches normalized bare URL labels", () => {
   assert.equal(isSupportedLinkAutolinkLabel("review this", preview), false);
 });
 
-// ── useResolvedLinkPreviews: behavioral regression pins ──────────────────────
-//
-// These tests pin the three behaviors that were implemented without tests in
-// the initial fix round. They use the exported pure helpers directly so no
-// React hook environment is required.
-
-import {
-  getLinkPreviewCacheGeneration,
-  resetLinkPreviewTitleCache,
-  shouldResolveTitle,
-} from "./useResolvedLinkPreviews.ts";
-import { buzzEntityFallbackTitle } from "./linkPreview.ts";
-
-const OWNER_HEX =
-  "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
-const EVENT_HEX =
-  "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
-
-function makePrPreview(title) {
-  return {
-    kind: "buzz-pull-request",
-    href: `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`,
-    title,
-    provider: "Zorro",
-    typeLabel: "pr",
-  };
-}
-
-// 1. Cache epoch: stale promise cannot seed the new generation.
-//    `resetLinkPreviewTitleCache` must increment the generation counter so that
-//    a promise captured before the reset sees a different generation and skips
-//    writing back.
-test("resetLinkPreviewTitleCache_incrementsGenerationCounter", () => {
-  const before = getLinkPreviewCacheGeneration();
-  resetLinkPreviewTitleCache();
-  const after = getLinkPreviewCacheGeneration();
-  assert.equal(after, before + 1, "each reset must bump the generation by 1");
-  resetLinkPreviewTitleCache();
-  assert.equal(
-    getLinkPreviewCacheGeneration(),
-    before + 2,
-    "second reset must increment again",
+test("parseSupportedLinkPreview parses generic HTTPS URLs", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview("https://example.com/articles/rich-previews"),
+    {
+      kind: "generic-link",
+      href: "https://example.com/articles/rich-previews",
+      provider: "example.com",
+      title: "example.com",
+      typeLabel: "link",
+    },
   );
 });
 
-// 2. Mismatched a-tag: shouldResolveTitle uses buzzEntityFallbackTitle to
-//    decide whether to attempt a relay lookup. When the link's href parses to a
-//    PR/issue with the expected fallback title, resolution should proceed. When
-//    the title has already been set to something else (explicit label or earlier
-//    relay result), shouldResolveTitle must return false so the label wins.
-test("shouldResolveTitle_fallbackTitle_returnsTrue", () => {
-  const parsed = {
-    ok: true,
-    value: { type: "pr", id: EVENT_HEX, owner: OWNER_HEX, dtag: "buzz-world" },
-  };
-  // Construct the expected fallback title and verify shouldResolveTitle allows lookup.
-  const fallback = buzzEntityFallbackTitle(parsed.value);
-  const preview = makePrPreview(fallback);
+test("parseSupportedLinkPreview rejects generic HTTP URLs", () => {
   assert.equal(
-    shouldResolveTitle(preview),
-    true,
-    "fallback title should trigger relay lookup",
+    parseSupportedLinkPreview("http://example.com/articles/rich-previews"),
+    null,
   );
 });
 
-test("shouldResolveTitle_customLabel_returnsFalse_labelMustWin", () => {
-  // User has written `[My custom PR title](buzz://pr?...)` — the label must
-  // win; shouldResolveTitle must return false to skip writing the relay title.
-  const preview = makePrPreview("My custom PR title");
-  assert.equal(
-    shouldResolveTitle(preview),
-    false,
-    "custom label must suppress relay title lookup (label-must-win invariant)",
-  );
-});
-
-// 3. Label-rerender: converting a bare link to `[label](link)` changes the
-//    preview title away from the fallback — shouldResolveTitle transitions
-//    from true to false, so a cached relay title is not applied.
-test("shouldResolveTitle_transitionsFromTrueToFalseWhenLabelApplied", () => {
-  const parsed = {
-    ok: true,
-    value: { type: "pr", id: EVENT_HEX, owner: OWNER_HEX, dtag: "buzz-world" },
-  };
-  const fallback = buzzEntityFallbackTitle(parsed.value);
-
-  // Before the label: bare link with fallback title — should resolve.
-  const barePreview = makePrPreview(fallback);
-  assert.equal(
-    shouldResolveTitle(barePreview),
-    true,
-    "bare link should resolve",
-  );
-
-  // After the label: same href but title is now the user's label — must NOT resolve.
-  const labeledPreview = makePrPreview("My labeled PR");
-  assert.equal(
-    shouldResolveTitle(labeledPreview),
-    false,
-    "labeled link must not overwrite label with cached relay title",
+test("extractSupportedLinkPreviews finds generic links and preserves exclusions", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "Read https://example.com/article first.",
+        "`https://hidden.example.com/secret`",
+        "then [the details](https://docs.example.org/details)",
+      ].join(" "),
+    ).map(({ kind, title }) => ({ kind, title })),
+    [
+      { kind: "generic-link", title: "example.com" },
+      { kind: "generic-link", title: "the details" },
+    ],
   );
 });

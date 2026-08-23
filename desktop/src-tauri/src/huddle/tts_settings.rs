@@ -624,6 +624,7 @@ pub async fn preview_pocket_voice(
             model_dir,
             active.clone(),
             cancel,
+            super::human_floor::HumanFloor::new(),
             &voice_name,
             output_device,
             None,

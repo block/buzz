@@ -56,6 +56,38 @@ void main() {
         zorroThemeName,
       );
     });
+
+    test('forces neutral rendering without changing the stored accent', () {
+      const storedAccent = '#ef4444';
+
+      expect(
+        effectiveAccentIndex(zorroThemeName, storedAccent),
+        neutralAccentIndex,
+      );
+      expect(
+        effectiveAccentIndex(zorroDarkThemeName, storedAccent),
+        neutralAccentIndex,
+      );
+      expect(
+        effectiveAccentIndex('github-light', storedAccent),
+        accentIndexForWireValue(storedAccent),
+      );
+      expect(storedAccent, '#ef4444');
+    });
+
+    test('fallbacks expose the effective Zorro theme for gradients', () {
+      for (final name in ['nord', 'not-a-theme']) {
+        final resolved = resolveSchemes(name, ThemeMode.light);
+        expect(resolved.lightTheme?.name, zorroThemeName);
+        expect(
+          zorroTopSectionGradient(
+            resolved.lightTheme!.name,
+            resolved.light.brightness,
+          ),
+          isNotNull,
+        );
+      }
+    });
   });
 
   group('zorroTopSectionGradient', () {
@@ -110,5 +142,87 @@ void main() {
     final decoration = container.decoration! as BoxDecoration;
     expect(decoration.gradient, isNotNull);
     expect(decoration.color, isNull);
+  });
+
+  testWidgets('non-Zorro themes keep the frosted surface fill', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: const Stack(children: [FrostedAppBar(title: Text('Home'))]),
+      ),
+    );
+
+    final container = tester
+        .widgetList<Container>(
+          find.descendant(
+            of: find.byType(FrostedAppBar),
+            matching: find.byType(Container),
+          ),
+        )
+        .first;
+    final decoration = container.decoration! as BoxDecoration;
+    expect(decoration.gradient, isNull);
+    expect(decoration.color, isNotNull);
+  });
+
+  testWidgets('Zorro navigation roles use neutral foregrounds', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(
+          topSectionGradient: zorroTopSectionGradient(
+            zorroThemeName,
+            Brightness.light,
+          ),
+        ),
+        home: const Scaffold(body: Text('Home')),
+      ),
+    );
+
+    final context = tester.element(find.text('Home'));
+    expect(navigationPrimaryForeground(context), Colors.black);
+    expect(
+      navigationSecondaryForeground(context),
+      Colors.black.withValues(alpha: 0.4),
+    );
+    expect(
+      navigationSectionForeground(context),
+      Colors.black.withValues(alpha: 0.8),
+    );
+    expect(
+      navigationSearchSurface(context),
+      Colors.black.withValues(alpha: 0.04),
+    );
+  });
+
+  testWidgets('navigation roles inherit non-Zorro theme tokens', (
+    tester,
+  ) async {
+    const primaryForeground = Color(0xFF123456);
+    const secondaryForeground = Color(0xFF789ABC);
+    const searchSurface = Color(0xFFDEF012);
+    final theme = ThemeData(
+      colorScheme: ColorScheme.fromSeed(seedColor: Colors.purple).copyWith(
+        onSurface: primaryForeground,
+        onSurfaceVariant: secondaryForeground,
+        surfaceContainerHighest: searchSurface,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: theme,
+        home: const Scaffold(body: SizedBox()),
+      ),
+    );
+
+    final context = tester.element(find.byType(SizedBox));
+    expect(navigationPrimaryForeground(context), primaryForeground);
+    expect(navigationSecondaryForeground(context), secondaryForeground);
+    expect(navigationSectionForeground(context), secondaryForeground);
+    expect(navigationSearchSurface(context), searchSurface);
+    expect(
+      navigationDivider(context, 0.15),
+      primaryForeground.withValues(alpha: 0.15),
+    );
   });
 }

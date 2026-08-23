@@ -49,7 +49,6 @@ export function backupNextDisabled(): boolean {
 type BackupStepProps = {
   direction: OnboardingTransitionDirection;
   identityStorage?: IdentityStorage;
-  onBack: () => void;
   onNext: () => void;
   onOpenPasswordBackup: () => void;
   onShowOptions: () => void;
@@ -66,7 +65,6 @@ type BackupStepProps = {
 export function BackupStep({
   direction,
   identityStorage,
-  onBack,
   onNext,
   onOpenPasswordBackup,
   onShowOptions,
@@ -185,7 +183,6 @@ export function BackupStep({
         className="flex min-h-0 w-full flex-col items-center"
         data-testid="onboarding-page-backup-options"
         direction={direction}
-        effect={direction === "forward" ? "mask-reveal-up" : "line-slide"}
         transitionKey={`backup-options-${direction}`}
       >
         <div className="flex w-full max-w-140 shrink-0 flex-col text-center">
@@ -297,8 +294,7 @@ export function BackupStep({
       className="flex min-h-0 w-full flex-col items-center"
       data-testid="onboarding-page-backup"
       direction={direction}
-      effect={returningFromSecurity ? "mask-reveal-down" : "line-slide"}
-      transitionKey={`backup-${direction}-${returningFromSecurity ? "down" : "line"}`}
+      transitionKey={`backup-${direction}-${returningFromSecurity ? "security" : "line"}`}
     >
       <div className="flex w-full max-w-[500px] shrink-0 flex-col text-center">
         {/* Plain string concat: cn()'s tailwind-merge misreads the custom
@@ -410,29 +406,17 @@ export function BackupStep({
         </div>
       )}
 
-      {created ? (
-        <OnboardingFooter className={REVEAL_ANIMATION_CLASS}>
-          <Button
-            className={ONBOARDING_PRIMARY_CTA_CLASS}
-            data-testid="onboarding-next"
-            disabled={backupNextDisabled()}
-            onClick={onNext}
-            type="button"
-          >
-            Next
-          </Button>
-
-          <Button
-            className={ONBOARDING_SECONDARY_CTA_CLASS}
-            data-testid="onboarding-back"
-            onClick={onBack}
-            type="button"
-            variant="ghost"
-          >
-            Back
-          </Button>
-        </OnboardingFooter>
-      ) : null}
+      <OnboardingFooter className={REVEAL_ANIMATION_CLASS}>
+        <Button
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
+          data-testid="onboarding-next"
+          disabled={!created || backupNextDisabled()}
+          onClick={onNext}
+          type="button"
+        >
+          Next
+        </Button>
+      </OnboardingFooter>
     </OnboardingSlideTransition>
   );
 }

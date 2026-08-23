@@ -53,7 +53,9 @@ const MURIETTA_SYSTEM_PROMPT: &str = concat!(
     "playful when appropriate. Favor experiences that are useful, inclusive, and easy to understand.",
 );
 
-const MONTERO_SYSTEM_PROMPT: &str = concat!(
+pub(crate) const MONTERO_PERSONA_ID: &str = "builtin:montero";
+pub(crate) const MONTERO_DISPLAY_NAME: &str = "Montero";
+pub(crate) const MONTERO_SYSTEM_PROMPT: &str = concat!(
     "You are Montero, a former university researcher who lives and breathes research, evidence, ",
     "and data. You investigate questions deeply enough to support sound decisions and move ",
     "projects forward, while keeping the effort proportional to the importance and uncertainty of ",
@@ -71,6 +73,16 @@ const MONTERO_SYSTEM_PROMPT: &str = concat!(
     "evidence, and explain the reasoning, limitations, and tradeoffs behind them.",
 );
 
+// Compatibility aliases consumed by the staged Bumble -> Pollen migration
+// introduced upstream. Zorro's canonical research persona is Montero, but
+// retaining these symbols lets that hardened migration safely advance stored
+// Pollen records to Montero without creating another persisted coordinate.
+pub(crate) const POLLEN_PERSONA_ID: &str = MONTERO_PERSONA_ID;
+pub(crate) const POLLEN_DISPLAY_NAME: &str = MONTERO_DISPLAY_NAME;
+pub(crate) const POLLEN_SYSTEM_PROMPT: &str = MONTERO_SYSTEM_PROMPT;
+pub(crate) const POLLEN_LEGACY_DISPLAY_NAME: &str = "Pollen";
+pub(crate) const POLLEN_LEGACY_SYSTEM_PROMPT: &str = "You are Pollen, a curious and adventurous researcher. Explore questions, compare options, check assumptions, and explain what you find clearly. Be candid when uncertain and favor useful evidence. Add occasional bee wordplay or 🐝🔎—keep it playful, never chaotic.";
+
 const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
     BuiltInPersona {
         id: "builtin:diego",
@@ -78,7 +90,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         avatar_png: Some(DIEGO_AVATAR_PNG),
         system_prompt: DIEGO_SYSTEM_PROMPT,
         name_pool: &[
-            "Nectar", "Comet", "Bramble", "Clover", "Pollen", "Amber", "Daisy", "Mason", "Thistle",
+            "Nectar", "Comet", "Bramble", "Clover", "Amber", "Daisy", "Mason", "Thistle",
             "Waxwing", "Hive", "Meadow", "Juniper", "Aster", "Sage", "Willow", "Orchard", "Zorro",
         ],
         model: None,
@@ -96,11 +108,11 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         default_active: true,
     },
     BuiltInPersona {
-        id: "builtin:montero",
-        display_name: "Montero",
+        id: MONTERO_PERSONA_ID,
+        display_name: MONTERO_DISPLAY_NAME,
         avatar_png: Some(MONTERO_AVATAR_PNG),
         system_prompt: MONTERO_SYSTEM_PROMPT,
-        name_pool: &["Montero"],
+        name_pool: &[MONTERO_DISPLAY_NAME],
         model: None,
         runtime: None,
         default_active: true,

@@ -30,6 +30,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_util::sync::CancellationToken;
 
+use super::human_floor::HumanFloor;
 use super::jitter::{PeerJitterBuffer, SAMPLE_RATE_HZ};
 use super::relay_api::{WsStream, REMOTE_SPEECH_THRESHOLD};
 use super::wire::{FrameHeader, FLAG_DTX, V2_HEADER_LEN};
@@ -42,6 +43,7 @@ const SPEAKER_TICK_MS: u64 = 500;
 const SPEAKER_LEVEL_TICK_MS: u64 = 50;
 /// Per-peer arrival window for the TTS interrupt frame counter.
 const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+const REMOTE_RELEASE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
 const PLAYOUT_TICK_MS: u64 = 10;
 
@@ -84,6 +86,39 @@ fn normalized_speaker_level(level_dbov: i8) -> f32 {
     ((f32::from(level_dbov) + 60.0) / 48.0).clamp(0.0, 1.0)
 }
 
+fn update_remote_release_deadline(
+    peer: u8,
+    is_dtx: bool,
+    remote_floor_owners: &std::collections::HashSet<u8>,
+    deadlines: &mut std::collections::HashMap<u8, tokio::time::Instant>,
+    now: tokio::time::Instant,
+) {
+    if !is_dtx {
+        deadlines.remove(&peer);
+    } else if remote_floor_owners.contains(&peer) {
+        deadlines
+            .entry(peer)
+            .or_insert(now + REMOTE_RELEASE_DEBOUNCE);
+    }
+}
+
+fn release_expired_remote_floors(
+    now: tokio::time::Instant,
+    owners: &mut std::collections::HashSet<u8>,
+    deadlines: &mut std::collections::HashMap<u8, tokio::time::Instant>,
+    human_floor: &HumanFloor,
+) {
+    let released: Vec<u8> = deadlines
+        .iter()
+        .filter_map(|(peer, deadline)| (*deadline <= now).then_some(*peer))
+        .collect();
+    for peer in released {
+        deadlines.remove(&peer);
+        owners.remove(&peer);
+        human_floor.leave_remote(peer);
+    }
+}
+
 fn should_recover_playout(depth: usize, currently_recovering: bool) -> bool {
     if currently_recovering {
         depth > PLAYOUT_QUEUE_RECOVERY_END
@@ -92,11 +127,77 @@ fn should_recover_playout(depth: usize, currently_recovering: bool) -> bool {
     }
 }
 
+fn is_locally_synthesized_peer(
+    peer_idx: u8,
+    local_tts_publishers: &super::tts::LocalTtsPublishers,
+) -> bool {
+    local_tts_publishers
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(&peer_idx)
+}
+
+fn is_agent_peer(
+    peer_idx: u8,
+    index_to_pubkey: &std::collections::HashMap<u8, String>,
+    agent_pubkeys: &[String],
+) -> bool {
+    index_to_pubkey.get(&peer_idx).is_some_and(|pubkey| {
+        agent_pubkeys
+            .iter()
+            .any(|agent| agent.eq_ignore_ascii_case(pubkey))
+    })
+}
+
+/// Whether `peer_idx` is currently occupied at exactly `epoch`, per the
+/// authoritative roster. A frame is deliverable only when both match: an index
+/// absent from the roster is stale, and a slot reused by a later occupant has
+/// advanced its epoch, so a departed occupant's in-flight frame is fenced
+/// rather than mis-attributed to the new occupant. A legacy relay omits the
+/// epoch, which degrades to `0` on both sides, making the fence a no-op.
+fn is_current_occupant(
+    peer_idx: u8,
+    epoch: u8,
+    index_to_epoch: &std::collections::HashMap<u8, u8>,
+) -> bool {
+    index_to_epoch.get(&peer_idx) == Some(&epoch)
+}
+
+fn same_occupancy(
+    peer_idx: u8,
+    pubkey: &str,
+    epoch: u8,
+    index_to_pubkey: &std::collections::HashMap<u8, String>,
+    index_to_epoch: &std::collections::HashMap<u8, u8>,
+) -> bool {
+    index_to_pubkey
+        .get(&peer_idx)
+        .is_some_and(|current| current == pubkey)
+        && index_to_epoch.get(&peer_idx) == Some(&epoch)
+}
+
+fn mix_remote_stt_samples(mix: &mut Vec<f32>, samples: &[f32]) {
+    if mix.len() < samples.len() {
+        mix.resize(samples.len(), 0.0);
+    }
+    for (mixed, sample) in mix.iter_mut().zip(samples) {
+        *mixed = (*mixed + *sample).clamp(-1.0, 1.0);
+    }
+}
+
+fn f32_samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
 /// Per-frame seq/timestamp come from the v2 wire header (sender-authored).
-/// The relay forwards `peer_index | header | opus_bytes` opaquely; we parse
-/// the header here and pass the sender's own monotonic seq + 48 kHz media
+/// The relay forwards `peer_index | epoch | header | opus_bytes` opaquely; we
+/// parse the header here and pass the sender's own monotonic seq + 48 kHz media
 /// timestamp into NetEq.
 struct PeerSlot {
     jitter: PeerJitterBuffer,
@@ -168,9 +269,13 @@ pub(crate) async fn run_playout_recv_loop(
     sink_handle: rodio::MixerDeviceSink,
     cancel: CancellationToken,
     app_handle: Option<tauri::AppHandle>,
-    initial_peers: Vec<(u8, String)>,
+    initial_peers: Vec<(u8, String, u8)>,
     tts_active: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
+    local_tts_publishers: super::tts::LocalTtsPublishers,
+    remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
+    agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
+    human_floor: HumanFloor,
 ) {
     use rodio::buffer::SamplesBuffer;
     use std::num::NonZero;
@@ -180,12 +285,23 @@ pub(crate) async fn run_playout_recv_loop(
     let rate = NonZero::new(SAMPLE_RATE_HZ).expect("48k is non-zero");
 
     let mut index_to_pubkey: std::collections::HashMap<u8, String> =
-        initial_peers.into_iter().collect();
+        std::collections::HashMap::new();
+    // Occupancy epoch per index, mirroring the authoritative roster. Advances
+    // each time a slot is reused by a new occupant, so a frame authored by a
+    // departed occupant that arrives after its index is reassigned carries the
+    // old epoch and is fenced rather than mis-attributed to the new occupant.
+    let mut index_to_epoch: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+    for (idx, pubkey, epoch) in initial_peers {
+        index_to_pubkey.insert(idx, pubkey);
+        index_to_epoch.insert(idx, epoch);
+    }
     let mut active_indices: std::collections::HashSet<u8> = std::collections::HashSet::new();
     let mut speaker_levels: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
+    let mut remote_release_deadlines: std::collections::HashMap<u8, tokio::time::Instant> =
+        std::collections::HashMap::new();
+    let mut remote_floor_owners: std::collections::HashSet<u8> = std::collections::HashSet::new();
     let mut frame_counts: std::collections::HashMap<u8, u16> = std::collections::HashMap::new();
     let mut last_frame_reset = tokio::time::Instant::now();
-    let mut tts_was_active = false;
 
     let mut speaker_tick = tokio::time::interval(std::time::Duration::from_millis(SPEAKER_TICK_MS));
     speaker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -215,6 +331,7 @@ pub(crate) async fn run_playout_recv_loop(
                 // per idle peer into rodio forever. `is_active` is a 500 ms
                 // grace past the last received packet, far longer than typical
                 // DTX comfort-noise cadence.
+                let mut remote_stt_mix = Vec::new();
                 for (peer_idx, slot) in peers.iter_mut() {
                     if !slot.is_active() {
                         // Still drain the frame to keep NetEq's internal clock
@@ -236,6 +353,17 @@ pub(crate) async fn run_playout_recv_loop(
                                 );
                                 slot.player.skip_one();
                             }
+                            if !is_locally_synthesized_peer(*peer_idx, &local_tts_publishers) {
+                                let remote_agent = {
+                                    let agents = agent_pubkeys
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner());
+                                    is_agent_peer(*peer_idx, &index_to_pubkey, &agents)
+                                };
+                                if !remote_agent {
+                                    mix_remote_stt_samples(&mut remote_stt_mix, &samples);
+                                }
+                            }
                             slot.player.append(SamplesBuffer::new(channels, rate, samples));
                         }
                         Err(e) => {
@@ -245,8 +373,26 @@ pub(crate) async fn run_playout_recv_loop(
                         }
                     }
                 }
+                if !remote_stt_mix.is_empty() {
+                    let pipeline = remote_stt_pipeline
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade);
+                    if let Some(pipeline) = pipeline {
+                        let _ = pipeline.push_remote_audio(f32_samples_to_le_bytes(
+                            &remote_stt_mix,
+                        ));
+                    }
+                }
             }
             _ = speaker_tick.tick() => {
+                release_expired_remote_floors(
+                    tokio::time::Instant::now(),
+                    &mut remote_floor_owners,
+                    &mut remote_release_deadlines,
+                    &human_floor,
+                );
                 if let Some(ref app) = app_handle {
                     use tauri::Emitter;
                     let pubkeys: Vec<String> = active_indices
@@ -276,13 +422,31 @@ pub(crate) async fn run_playout_recv_loop(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(WsMsg::Binary(data))) => {
-                        // Wire shape (v2): [peer_index: u8][header: 8 bytes][opus payload...]
-                        // The minimum size is 1 (peer_index) + 8 (header) + ≥1 Opus byte.
-                        if data.len() <= 1 + V2_HEADER_LEN {
+                        // Wire shape (v2): [peer_index: u8][epoch: u8][header: 8 bytes][opus payload...]
+                        // The minimum size is 2 (peer_index + epoch) + 8 (header) + ≥1 Opus byte.
+                        if data.len() <= 2 + V2_HEADER_LEN {
                             continue;
                         }
                         let peer_idx = data[0];
-                        let after_idx = &data[1..];
+                        let epoch = data[1];
+                        // Fence the peer-index reuse race: a frame authored by a
+                        // departed occupant that arrives after its index is
+                        // reassigned carries the old epoch. Drop it rather than
+                        // mis-attribute stale audio (and the new occupant's
+                        // human/agent STT policy) to whoever grabbed the index.
+                        // An index absent from the roster is also stale. A slot
+                        // with no known epoch (legacy relay) degrades to 0 on
+                        // both sides, so the fence is a no-op there.
+                        if !is_current_occupant(peer_idx, epoch, &index_to_epoch) {
+                            continue;
+                        }
+                        // Suppress only an agent stream synthesized and
+                        // published by this desktop. Other bot-role peers may
+                        // publish their own legitimate audio and must play.
+                        if is_locally_synthesized_peer(peer_idx, &local_tts_publishers) {
+                            continue;
+                        }
+                        let after_idx = &data[2..];
                         let Some((header, opus_bytes)) = FrameHeader::parse(after_idx)
                         else {
                             // Malformed v2 frame: header parse only fails when
@@ -303,6 +467,13 @@ pub(crate) async fn run_playout_recv_loop(
                         // by an idle peer to keep the codec alive — they
                         // don't mean the peer is speaking, and shouldn't
                         // make their tile flash for the 500 ms speaker tick.
+                        update_remote_release_deadline(
+                            peer_idx,
+                            is_dtx,
+                            &remote_floor_owners,
+                            &mut remote_release_deadlines,
+                            tokio::time::Instant::now(),
+                        );
                         if !is_dtx {
                             active_indices.insert(peer_idx);
                             let level = normalized_speaker_level(header.level_dbov);
@@ -312,14 +483,9 @@ pub(crate) async fn run_playout_recv_loop(
                                 .or_insert(level);
                         }
 
-                        // TTS interrupt frame counter — reset on TTS rising edge.
-                        let tts_now = tts_active.load(Ordering::Acquire);
-                        if tts_now && !tts_was_active {
-                            frame_counts.clear();
-                            last_frame_reset = tokio::time::Instant::now();
-                        }
-                        tts_was_active = tts_now;
-
+                        // Track remote speech independently of TTS liveness so a
+                        // human who starts while output is idle still owns the
+                        // floor and rejects delayed synthesis.
                         let slot = match peers.entry(peer_idx) {
                             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                             std::collections::hash_map::Entry::Vacant(e) => {
@@ -347,11 +513,16 @@ pub(crate) async fn run_playout_recv_loop(
                             slot.last_packet_at = tokio::time::Instant::now();
                         }
 
-                        // Count remote-speech frame arrivals for the TTS
-                        // interrupt. DTX/comfort frames don't count — they
-                        // mean the peer is silent, just keeping the codec
-                        // state alive.
-                        if tts_now && !is_dtx {
+                        let remote_human = {
+                            let agents = agent_pubkeys
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            !is_agent_peer(peer_idx, &index_to_pubkey, &agents)
+                        };
+                        // Count only remote-human speech toward floor onset.
+                        // Agent audio still plays, but it must not acquire the
+                        // human floor or suppress another agent's response.
+                        if !is_dtx && remote_human {
                             if last_frame_reset.elapsed() >= FRAME_WINDOW {
                                 frame_counts.clear();
                                 last_frame_reset = tokio::time::Instant::now();
@@ -359,7 +530,11 @@ pub(crate) async fn run_playout_recv_loop(
                             let count = frame_counts.entry(peer_idx).or_insert(0);
                             *count = count.saturating_add(1);
                             if *count >= REMOTE_SPEECH_THRESHOLD {
-                                tts_cancel.store(true, Ordering::Release);
+                                human_floor.enter_remote(peer_idx);
+                                remote_floor_owners.insert(peer_idx);
+                                if tts_active.load(Ordering::Acquire) {
+                                    tts_cancel.store(true, Ordering::Release);
+                                }
                             }
                         }
                     }
@@ -374,20 +549,30 @@ pub(crate) async fn run_playout_recv_loop(
                                                 p["peer_index"].as_u64(),
                                             ) {
                                                 let key = idx as u8;
-                                                // peer_index reuse with a new pubkey:
+                                                // Absent `epoch` (legacy relay) degrades to
+                                                // 0 so the fence stays a no-op.
+                                                let epoch =
+                                                    p["epoch"].as_u64().unwrap_or(0) as u8;
+                                                // Any new occupancy (pubkey or epoch) must
                                                 // flush the old peer's NetEq + Player so
                                                 // the next frame starts clean.
-                                                if index_to_pubkey
-                                                    .get(&key)
-                                                    .map(|s| s.as_str())
-                                                    != Some(pk)
-                                                {
+                                                if !same_occupancy(
+                                                    key,
+                                                    pk,
+                                                    epoch,
+                                                    &index_to_pubkey,
+                                                    &index_to_epoch,
+                                                ) {
                                                     peers.remove(&key);
                                                     frame_counts.remove(&key);
+                                                    remote_release_deadlines.remove(&key);
+                                                    remote_floor_owners.remove(&key);
+                                                    human_floor.leave_remote(key);
                                                     active_indices.remove(&key);
                                                     speaker_levels.remove(&key);
                                                 }
                                                 index_to_pubkey.insert(key, pk.to_string());
+                                                index_to_epoch.insert(key, epoch);
                                             }
                                         }
                                     }
@@ -395,29 +580,60 @@ pub(crate) async fn run_playout_recv_loop(
                                 Some("roster") => {
                                     if let Some(peer_list) = v["peers"].as_array() {
                                         let mut replacement = std::collections::HashMap::new();
+                                        let mut replacement_epochs =
+                                            std::collections::HashMap::new();
                                         for p in peer_list {
                                             if let (Some(pk), Some(idx)) = (
                                                 p["pubkey"].as_str(),
                                                 p["peer_index"].as_u64(),
                                             ) {
-                                                replacement.insert(idx as u8, pk.to_string());
+                                                let key = idx as u8;
+                                                let epoch =
+                                                    p["epoch"].as_u64().unwrap_or(0) as u8;
+                                                replacement.insert(key, pk.to_string());
+                                                replacement_epochs.insert(key, epoch);
                                             }
                                         }
                                         let identity_unchanged = |idx: &u8| {
-                                            replacement.get(idx) == index_to_pubkey.get(idx)
+                                            replacement.get(idx).is_some_and(|pubkey| {
+                                                replacement_epochs.get(idx).is_some_and(|epoch| {
+                                                    same_occupancy(
+                                                        *idx,
+                                                        pubkey,
+                                                        *epoch,
+                                                        &index_to_pubkey,
+                                                        &index_to_epoch,
+                                                    )
+                                                })
+                                            })
                                         };
                                         peers.retain(|idx, _| identity_unchanged(idx));
+                                        for idx in index_to_pubkey
+                                            .keys()
+                                            .filter(|idx| !identity_unchanged(idx))
+                                            .copied()
+                                            .collect::<Vec<_>>()
+                                        {
+                                            human_floor.leave_remote(idx);
+                                            remote_release_deadlines.remove(&idx);
+                                            remote_floor_owners.remove(&idx);
+                                        }
                                         frame_counts.retain(|idx, _| identity_unchanged(idx));
                                         active_indices.retain(identity_unchanged);
                                         speaker_levels.retain(|idx, _| identity_unchanged(idx));
                                         index_to_pubkey = replacement;
+                                        index_to_epoch = replacement_epochs;
                                     }
                                 }
                                 Some("left") => {
                                     if let Some(idx) = v["peer_index"].as_u64() {
                                         let key = idx as u8;
                                         index_to_pubkey.remove(&key);
+                                        index_to_epoch.remove(&key);
                                         frame_counts.remove(&key);
+                                        remote_release_deadlines.remove(&key);
+                                        remote_floor_owners.remove(&key);
+                                        human_floor.leave_remote(key);
                                         active_indices.remove(&key);
                                         speaker_levels.remove(&key);
                                         // Dropping Player detaches its queue from the
@@ -441,6 +657,7 @@ pub(crate) async fn run_playout_recv_loop(
         }
     }
 
+    human_floor.clear_remote();
     if let Some(ref app) = app_handle {
         use tauri::Emitter;
         let _ = app.emit(
@@ -453,6 +670,50 @@ pub(crate) async fn run_playout_recv_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_dtx_does_not_extend_remote_floor_deadline() {
+        let peer = 7;
+        let started = tokio::time::Instant::now();
+        let owners = std::collections::HashSet::from([peer]);
+        let mut deadlines = std::collections::HashMap::new();
+
+        update_remote_release_deadline(peer, true, &owners, &mut deadlines, started);
+        let armed = deadlines[&peer];
+        for elapsed_ms in [100, 200, 300, 400] {
+            update_remote_release_deadline(
+                peer,
+                true,
+                &owners,
+                &mut deadlines,
+                started + std::time::Duration::from_millis(elapsed_ms),
+            );
+        }
+
+        assert_eq!(deadlines[&peer], armed);
+        assert!(armed <= started + REMOTE_RELEASE_DEBOUNCE);
+
+        let human_floor = HumanFloor::new();
+        human_floor.enter_remote(peer);
+        let mut owners = owners;
+        release_expired_remote_floors(armed, &mut owners, &mut deadlines, &human_floor);
+        assert!(!human_floor.is_blocked());
+        assert!(owners.is_empty());
+        assert!(deadlines.is_empty());
+    }
+
+    #[test]
+    fn dtx_from_non_owner_does_not_arm_remote_floor_deadline() {
+        let mut deadlines = std::collections::HashMap::new();
+        update_remote_release_deadline(
+            7,
+            true,
+            &std::collections::HashSet::new(),
+            &mut deadlines,
+            tokio::time::Instant::now(),
+        );
+        assert!(deadlines.is_empty());
+    }
 
     #[test]
     fn speaker_level_maps_conversational_range() {
@@ -469,5 +730,88 @@ mod tests {
         assert!(should_recover_playout(10, false));
         assert!(should_recover_playout(5, true));
         assert!(!should_recover_playout(4, true));
+    }
+
+    #[test]
+    fn only_the_local_socket_is_suppressed_for_a_shared_agent_identity() {
+        let local_publishers = super::super::tts::LocalTtsPublishers::default();
+        local_publishers
+            .lock()
+            .expect("local publishers")
+            .insert(3, 1);
+
+        assert!(is_locally_synthesized_peer(3, &local_publishers));
+        assert!(
+            !is_locally_synthesized_peer(4, &local_publishers),
+            "a second socket for the same agent remains audible"
+        );
+        assert!(!is_locally_synthesized_peer(9, &local_publishers));
+    }
+
+    #[test]
+    fn remote_agent_identity_is_excluded_from_human_stt() {
+        let peers =
+            std::collections::HashMap::from([(3, "human".to_owned()), (4, "AGENT".to_owned())]);
+        let agents = vec!["agent".to_owned()];
+
+        assert!(!is_agent_peer(3, &peers, &agents));
+        assert!(is_agent_peer(4, &peers, &agents));
+        assert!(!is_agent_peer(9, &peers, &agents));
+    }
+
+    #[test]
+    fn occupancy_identity_includes_epoch_for_same_pubkey_rejoin() {
+        let pubkeys = std::collections::HashMap::from([(3_u8, "alice".to_owned())]);
+        let epochs = std::collections::HashMap::from([(3_u8, 4_u8)]);
+
+        assert!(same_occupancy(3, "alice", 4, &pubkeys, &epochs));
+        assert!(
+            !same_occupancy(3, "alice", 5, &pubkeys, &epochs),
+            "same pubkey with a new epoch must reset decoder and playout state"
+        );
+    }
+
+    /// Causal regression for the peer-index reuse race (Jude's blocking
+    /// finding): a frame authored by a departed occupant that arrives after
+    /// its slot is reassigned to a new occupant carries the stale epoch and
+    /// must be fenced, never mis-attributed to the new occupant.
+    #[test]
+    fn stale_epoch_frame_is_fenced_after_its_index_is_reused() {
+        let mut index_to_epoch = std::collections::HashMap::new();
+        // Slot 3 first occupied at epoch 0.
+        index_to_epoch.insert(3_u8, 0_u8);
+        assert!(
+            is_current_occupant(3, 0, &index_to_epoch),
+            "current occupant's frame is delivered"
+        );
+
+        // The occupant departs and a new peer reuses slot 3 at epoch 1.
+        index_to_epoch.insert(3, 1);
+        assert!(
+            !is_current_occupant(3, 0, &index_to_epoch),
+            "in-flight frame from the departed occupant (epoch 0) is fenced"
+        );
+        assert!(
+            is_current_occupant(3, 1, &index_to_epoch),
+            "the new occupant's frame (epoch 1) is delivered"
+        );
+
+        // A frame for an index absent from the roster is stale.
+        assert!(
+            !is_current_occupant(9, 0, &index_to_epoch),
+            "frame for an unoccupied index is dropped"
+        );
+    }
+
+    #[test]
+    fn remote_human_stt_mix_sums_and_clamps_concurrent_speakers() {
+        let mut mix = Vec::new();
+        mix_remote_stt_samples(&mut mix, &[0.4, -0.7, 0.2]);
+        mix_remote_stt_samples(&mut mix, &[0.8, -0.6, -0.1]);
+
+        assert_eq!(mix, vec![1.0, -1.0, 0.1]);
+        let bytes = f32_samples_to_le_bytes(&mix);
+        assert_eq!(bytes.len(), std::mem::size_of_val(mix.as_slice()));
+        assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 1.0);
     }
 }

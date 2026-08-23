@@ -1,11 +1,7 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
-import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
-import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
-import { normalizePubkey } from "@/shared/lib/pubkey";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import {
   buildThreadSummaryFromVisibleEntries,
   hasNestedThreadBranches,
@@ -15,22 +11,19 @@ import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
 } from "@/features/messages/lib/messageGrouping";
-import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
+import { VideoReviewNavigationProvider } from "@/shared/ui/VideoReviewNavigation";
 import { cn } from "@/shared/lib/cn";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
-import {
-  AuxiliaryPanelHeader,
-  AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
-} from "@/shared/layout/AuxiliaryPanel";
 import {
   THREAD_PANEL_COLUMN_CLASS,
   THREAD_PANEL_COMPOSER_GUTTER_CLASS,
@@ -38,16 +31,20 @@ import {
 } from "@/features/messages/lib/messageThreadPanelLayout";
 import { Button } from "@/shared/ui/button";
 import { Separator } from "@/shared/ui/separator";
-import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
-import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
-import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
+import {
+  MessageThreadPanelHeader,
+  ThreadMessageSkeleton,
+} from "./MessageThreadPanelSkeleton";
+import type { ThreadDepthGuideAction } from "./MessageRow";
+import { MessageThreadRow } from "./MessageThreadRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
+import { useStableSendToChannel } from "./useStableSendToChannel";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
@@ -62,12 +59,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   huddleMemberPubkeysPending?: boolean;
   /** Present the huddle's parent-channel thread as a dedicated live chat. */
   isHuddleTranscript?: boolean;
-  editTarget?: {
-    author: string;
-    body: string;
-    id: string;
-    imetaMedia?: ImetaMedia[];
-  } | null;
+  editTarget?: MessageComposerEditTarget | null;
   isSending: boolean;
   onCancelEdit?: () => void;
   onCancelReply: () => void;
@@ -96,6 +88,12 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
       parentEventId: string | null;
       threadHeadId: string | null;
     } | null,
+    forceRest?: boolean,
+  ) => Promise<void>;
+  onSendToChannel?: (
+    message: TimelineMessage,
+    threadRoot: TimelineMessage,
+    channelId: string,
   ) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -111,7 +109,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
-  videoReviewContextsByMessageId?: ReadonlyMap<string, VideoReviewContext>;
+  videoReviewPresentation?: VideoReviewPresentation;
   activityAccessoryContent?: React.ReactNode;
   activityAccessoryVisible: boolean;
   widthPx: number;
@@ -197,7 +195,10 @@ export function MessageThreadPanel({
   isHuddleTranscript = false,
   layout = "standalone",
   editTarget,
+  enterMotion,
   headerLeading,
+  headerTitle,
+  headerTitleAriaLabel,
   isSending,
   isFocusMode,
   isSinglePanelView = false,
@@ -206,6 +207,9 @@ export function MessageThreadPanel({
   onCancelEdit,
   onCancelReply,
   onClose,
+  onHeaderTitleClick,
+  onResetWidth,
+  onResizeStart,
   onDelete,
   onEdit,
   onEditLastOwnMessage,
@@ -218,6 +222,7 @@ export function MessageThreadPanel({
   onScrollTargetSettled,
   onSelectReplyTarget,
   onSend,
+  onSendToChannel,
   onToggleReaction,
   onUnfollowThread,
   profiles,
@@ -225,7 +230,7 @@ export function MessageThreadPanel({
   scrollTargetId,
   scrollTargetHighlights = true,
   threadHead,
-  videoReviewContextsByMessageId,
+  videoReviewPresentation,
   threadReplies,
   threadRepliesPending = false,
   threadUnreadCount,
@@ -233,6 +238,10 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   activityAccessoryContent,
   activityAccessoryVisible,
+  canResetWidth,
+  splitPaneClamp,
+  showBackButton,
+  testId = "message-thread-panel",
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -521,35 +530,14 @@ export function MessageThreadPanel({
     "padding",
     settleAtBottomAfterLayout,
   );
-
-  const knownAgentPubkeys = useKnownAgentPubkeys();
-  const initialAgentPubkeys = React.useMemo(() => {
-    if (
-      !threadHead ||
-      !currentPubkey ||
-      normalizePubkey(threadHead.signerPubkey ?? threadHead.pubkey ?? "") !==
-        normalizePubkey(currentPubkey)
-    ) {
-      return [];
-    }
-    const { mentionPubkeysByName } = resolveMentionProps(
-      threadHead.tags,
-      profiles,
-    );
-    if (!mentionPubkeysByName) return [];
-
-    return orderMentionPubkeysByText(
-      threadHead.body,
-      mentionPubkeysByName,
-      (pubkey) =>
-        knownAgentPubkeys.has(pubkey) || profiles?.[pubkey]?.isAgent === true,
-    );
-  }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
-
+  const stableSendToChannel = useStableSendToChannel(
+    channelId,
+    threadHead,
+    onSendToChannel,
+  );
   if (!threadHead) {
     return null;
   }
-
   const threadScrollRegion = (
     <AuxiliaryPanelBody
       className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
@@ -577,14 +565,14 @@ export function MessageThreadPanel({
             data-testid="message-thread-head"
           >
             <div className="rounded-2xl">
-              <MessageRow
+              <MessageThreadRow
                 actionBarPlacement="inside"
                 channelId={channelId}
+                currentPubkey={currentPubkey}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                 isFollowingThread={isFollowingThread}
                 isUnread={isMessageUnreadById?.(threadHead.id)}
-                layoutVariant="thread-reply"
                 message={threadHead}
                 onDelete={
                   onDelete &&
@@ -617,7 +605,10 @@ export function MessageThreadPanel({
                 }
                 profiles={profiles}
                 showDepthGuides={shouldShowThreadBranchGuides}
-                videoReviewContext={videoReviewContextsByMessageId?.get(
+                videoReviewCommentRootId={videoReviewPresentation?.commentRootIdsByMessageId.get(
+                  threadHead.id,
+                )}
+                videoReviewContext={videoReviewPresentation?.contextsByMessageId.get(
                   threadHead.id,
                 )}
               />
@@ -707,8 +698,9 @@ export function MessageThreadPanel({
                       key={entry.message.renderKey ?? entry.message.id}
                     >
                       {showUnreadDivider ? <UnreadDivider /> : null}
-                      <MessageRow
+                      <MessageThreadRow
                         channelId={channelId}
+                        currentPubkey={currentPubkey}
                         collapseDepthGuideActions={collapseDepthGuideActions}
                         collapseDescendantsLabel="Collapse replies"
                         connectDescendants={
@@ -734,7 +726,6 @@ export function MessageThreadPanel({
                         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                         isContinuation={isContinuation}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
-                        layoutVariant="thread-reply"
                         message={entry.message}
                         onCollapseDepthGuide={handleCollapseDepthGuide}
                         onCollapseDepthGuideHoverChange={
@@ -773,10 +764,14 @@ export function MessageThreadPanel({
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
+                        onSendToChannel={stableSendToChannel}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}
-                        videoReviewContext={videoReviewContextsByMessageId?.get(
+                        videoReviewCommentRootId={videoReviewPresentation?.commentRootIdsByMessageId.get(
+                          entry.message.id,
+                        )}
+                        videoReviewContext={videoReviewPresentation?.contextsByMessageId.get(
                           entry.message.id,
                         )}
                       />
@@ -871,11 +866,7 @@ export function MessageThreadPanel({
           >
             <ComposerDockBackdrop gutterClassName="inset-x-5" />
             <MessageComposer
-              audienceContext={{
-                type: "thread",
-                threadRootId: threadHead.id,
-                initialAgentPubkeys,
-              }}
+              audienceContext={{ type: "thread" }}
               channelId={channelId}
               channelName={channelName}
               channelType={channel?.channelType ?? null}
@@ -937,42 +928,39 @@ export function MessageThreadPanel({
     </>
   );
 
-  const threadHeaderContent = (
-    <>
-      <AuxiliaryPanelHeaderGroup
-        backButtonAriaLabel="Back to conversation"
-        backButtonTestId="message-thread-back"
-        // A focus drawer only sets `isSinglePanelView` to fill its container's
-        // width — it isn't the narrow single-column view, and it has the scrimmed
-        // sliver as its way back, so it takes no back control of its own. The
-        // narrow view still needs one.
-        leading={headerLeading}
-        onBack={isSinglePanelView && !isFocusMode ? onClose : undefined}
-      >
-        <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
-      </AuxiliaryPanelHeaderGroup>
-    </>
-  );
-
   return (
-    <AuxiliaryPanel
-      className="relative"
-      // The focus drawer animates itself; a second slide here would compound.
-      enterMotion={!isFocusMode}
-      footer={threadFooter}
-      header={
-        isHuddleTranscript ? undefined : (
-          <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
-        )
-      }
-      isSinglePanelView={isSinglePanelView}
-      layout={layout}
-      onClose={onClose}
-      testId="message-thread-panel"
-      transparentChrome={transparentChrome}
-      widthPx={widthPx}
-    >
-      {threadScrollRegion}
-    </AuxiliaryPanel>
+    <VideoReviewNavigationProvider>
+      <AuxiliaryPanel
+        canResetWidth={canResetWidth}
+        className="relative"
+        enterMotion={enterMotion ?? !isFocusMode}
+        footer={threadFooter}
+        header={
+          isHuddleTranscript ? undefined : (
+            <MessageThreadPanelHeader
+              headerLeading={headerLeading}
+              headerTitle={headerTitle}
+              headerTitleAriaLabel={headerTitleAriaLabel}
+              isFocusMode={isFocusMode}
+              isSinglePanelView={isSinglePanelView}
+              onClose={onClose}
+              onHeaderTitleClick={onHeaderTitleClick}
+              showBackButton={showBackButton}
+            />
+          )
+        }
+        isSinglePanelView={isSinglePanelView}
+        layout={layout}
+        onClose={onClose}
+        onResetWidth={onResetWidth}
+        onResizeStart={onResizeStart}
+        splitPaneClamp={splitPaneClamp}
+        testId={testId}
+        transparentChrome={transparentChrome}
+        widthPx={widthPx}
+      >
+        {threadScrollRegion}
+      </AuxiliaryPanel>
+    </VideoReviewNavigationProvider>
   );
 }

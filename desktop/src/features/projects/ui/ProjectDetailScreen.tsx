@@ -1,19 +1,14 @@
-import { ArrowLeft, ExternalLink, FolderGit2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useOpenDmMutation } from "@/features/channels/hooks";
+import { useTerminalContextOverride } from "@/app/TerminalContextOverrideContext";
 import {
   type Project,
   type Repository,
   useProjectQuery,
   useProjectIssuesQuery,
-  useProjectLocalRepoDiffQuery,
-  useProjectLocalRepoSnapshotQuery,
-  useProjectRepoDiffQuery,
   useProjectPullRequestsQuery,
-  useProjectRepoSnapshotQuery,
   useProjectsQuery,
   useRepoStateQuery,
 } from "@/features/projects/hooks";
@@ -28,104 +23,82 @@ import { useOptimisticProjectBranches } from "@/features/projects/useOptimisticP
 import { useProjectRepositoryRefSelection } from "@/features/projects/useProjectRepositoryRefSelection";
 import { useUpdateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
-import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
-import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
-import {
-  type ProfilePanelTab,
-  type ProfilePanelView,
-  UserProfilePanel,
-} from "@/features/profile/ui/UserProfilePanel";
-import {
-  profilePanelTabFromSearch,
-  profilePanelViewFromSearch,
-} from "@/features/profile/ui/UserProfilePanelUtils";
-import { useIdentityQuery } from "@/shared/api/hooks";
-import { openProjectMergeRecoveryTerminal } from "@/shared/api/projectGit";
-import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
-import { channelContentTopPaddingMeasurement } from "@/shared/layout/chromeLayout";
-import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
+import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
-import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
-import { Button } from "@/shared/ui/button";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
-import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
-import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
 import {
   projectBranchCreationReason,
   projectBranchManagementState,
   projectBranchOptionsFromSync,
   resolveProjectDefaultBranch,
 } from "@/features/projects/lib/projectBranches";
-import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
+import { workspaceTabForShareTab } from "@/features/projects/lib/projectShareLinks";
+import {
+  buildProjectDetailAgentContext,
+  type ProjectDetailAgentContext,
+} from "@/features/projects/lib/projectDetailAgentContext";
+import { projectDetailSelectionItem } from "@/features/projects/lib/projectDetailSelectionItem";
+import {
+  projectRepoUnavailablePresentation,
+  projectRepoUnavailableReason,
+  refineRepoUnavailableReason,
+} from "@/features/projects/lib/projectRepoAvailability";
 import { selectProjectRepository } from "@/features/projects/projectModels";
+import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
+import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
 import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
+import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { useProjectRepoPresentation } from "@/features/projects/useProjectRepoHost";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import { showProjectCloneErrorToast } from "./projectGitErrorToast";
-import {
-  projectTerminalLabel,
-  useOpenProjectTerminal,
-} from "./useOpenProjectTerminal";
+import { projectTerminalLabel } from "./useOpenProjectTerminal";
 import type { CreateIssueDialogInput } from "./CreateIssueDialog";
 import { ProjectBranchActionDialogs } from "./ProjectBranchActionDialogs";
 import { ProjectDetailChrome } from "./ProjectDetailChrome";
-import { ProjectRepositoryManagement } from "./ProjectRepositoryManagement";
-import { UnavailableProjectRepositories } from "./UnavailableProjectRepositories";
+import { ProjectConversationPanelController } from "./ProjectConversationPanelContext";
+import { ProjectDetailRightPanel } from "./ProjectDetailRightPanel";
+import { ProjectDetailUnavailableState } from "./ProjectDetailUnavailableState";
+import { ProjectRightPanelControls } from "./ProjectRightPanelControls";
+import { buildProjectDetailCrumbs } from "./useProjectDetailCrumbs";
+import { useProjectDetailPeople } from "./useProjectDetailPeople";
+import { useProjectProfilePanel } from "./useProjectProfilePanel";
+import { useProjectRepositoryPanel } from "./useProjectRepositoryPanel";
+import { useRepositoryFileContentSource } from "./useRepositoryFileContentSource";
+import { useProjectPanelWidths } from "./useProjectPanelWidths";
+import { useProjectRepositoryOpenActions } from "./useProjectRepositoryOpenActions";
 import {
-  PROJECT_TAB_CRUMB_LABELS,
-  projectPeople,
+  useProjectDetailGitViews,
+  useRetainedPullRequestSelection,
+} from "./useRetainedProjectGitViews";
+import {
+  PROJECT_REPOSITORY_SEARCH_KEYS,
+  type ProjectDetailScreenProps,
   pushPullTitle,
   snapshotHasContent,
 } from "./projectDetailHelpers";
 
-type ProjectDetailScreenProps = {
-  commitHash?: string;
-  projectId: string;
-  pullRequestId?: string;
-  issueId?: string;
-  repositoryId?: string;
-};
-
-const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
-  "profile",
-  "profileTab",
-  "profileView",
-] as const;
-const PROJECT_REPOSITORY_SEARCH_KEYS = [
-  "repositoryId",
-  "issueId",
-  "pullRequestId",
-  "commitHash",
-] as const;
-
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
-  const { commitHash, projectId, pullRequestId, issueId, repositoryId } = props;
-  const { goChannel, goProject, goProjects } = useAppNavigation();
+  const {
+    commitHash,
+    entityNavigationId,
+    projectId,
+    pullRequestId,
+    issueId,
+    repositoryId,
+    tab,
+  } = props;
+  const { goProject, goProjects } = useAppNavigation();
   const { activeCommunity } = useCommunities();
-  const mainInsetRef = useMainInsetRef();
-  const projectDetailHeaderChromeRef = useMeasuredCssVariable({
-    targetRef: mainInsetRef,
-    resetKey: projectId,
-    ...channelContentTopPaddingMeasurement,
-  });
   const projectQuery = useProjectQuery(projectId);
   const projectsQuery = useProjectsQuery();
   const project = projectQuery.data;
-  // When the projectId is a canonical 30617:<owner>:<d> coordinate (emitted by
-  // entity links in #4695), derive the repository selection directly from the
-  // <owner>:<d> portion rather than falling back to the project's primary
-  // repository. Repository.id is "<owner>:<dtag>", so stripping the kind+colon
-  // prefix gives the exact repository id. This ensures a linked PR/issue on a
-  // non-primary member opens from the correct repository instead of the primary.
   const routeRepositoryId: string | undefined = React.useMemo(() => {
     if (repositoryId) return repositoryId;
     const kindStr = `${String(KIND_REPO_ANNOUNCEMENT)}:`;
     if (!projectId.startsWith(kindStr)) return undefined;
-    // projectId is "30617:<owner>:<dtag>" — strip "30617:" to get "<owner>:<dtag>"
     return projectId.slice(kindStr.length);
   }, [projectId, repositoryId]);
   const repository = selectProjectRepository(project, routeRepositoryId);
@@ -154,6 +127,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       defaultBranch,
       projectAvailable: Boolean(repository),
       projectPending: projectQuery.isPending,
+      repositoryId: repository?.id ?? null,
       tags: repoStateQuery.data?.tags ?? [],
     });
   const activeTag =
@@ -161,14 +135,17 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
     string | null
   >(pullRequestId ?? null);
-  React.useEffect(
-    () => setSelectedPullRequestId(pullRequestId ?? null),
-    [pullRequestId],
-  );
   const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
     issueId ?? null,
   );
-  React.useEffect(() => setSelectedIssueId(issueId ?? null), [issueId]);
+  const [createIssueRequestKey, setCreateIssueRequestKey] = React.useState(0);
+  const [createPullRequestRequestKey, setCreatePullRequestRequestKey] =
+    React.useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the transient request ID deliberately reapplies an unchanged entity selection.
+  React.useEffect(() => {
+    setSelectedPullRequestId(pullRequestId ?? null);
+    setSelectedIssueId(issueId ?? null);
+  }, [entityNavigationId, issueId, pullRequestId]);
   const [selectedCommitHash, setSelectedCommitHash] = React.useState<
     string | null
   >(commitHash ?? null);
@@ -176,14 +153,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     () => setSelectedCommitHash(commitHash ?? null),
     [commitHash],
   );
-  // Bumped when breadcrumb navigation should land on the project Overview
-  // tab; remounts WorkspaceTabs, which owns the selected-tab state.
   const [tabsResetKey, setTabsResetKey] = React.useState(0);
-  // Mirror of the WorkspaceTabs selection so the breadcrumb can name the
-  // active sub-tab. The Overview (readme) tab is "home" and gets no crumb.
+  const [requestedTab, setRequestedTab] = React.useState<
+    EntityLinkTab | undefined
+  >(tab);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the transient request ID deliberately reapplies an unchanged share-link tab.
+  React.useEffect(() => setRequestedTab(tab), [entityNavigationId, tab]);
   const [activeTab, setActiveTab] = React.useState("overview");
-  // Commit, PR, and issue details are mutually exclusive views, so opening
-  // one clears the others.
+  const [filesContext, setFilesContext] =
+    React.useState<ProjectDetailAgentContext["file"]>(null);
   const handleSelectedPullRequestIdChange = React.useCallback(
     (id: string | null) => {
       setSelectedPullRequestId(id);
@@ -206,62 +184,55 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     [],
   );
   const issuesQuery = useProjectIssuesQuery(repository);
-  const selectedBranchPullRequest = React.useMemo(() => {
-    const projectRepositories = new Set(
-      (repository?.cloneUrls ?? []).map(normalizeRepositoryUrl),
-    );
-    const matches =
-      pullRequestsQuery.data?.filter(
-        (pullRequest) =>
-          pullRequest.branchName === activeBranch &&
-          pullRequest.cloneUrls.some((cloneUrl) =>
-            projectRepositories.has(normalizeRepositoryUrl(cloneUrl)),
-          ),
-      ) ?? [];
-    return matches.length === 1 ? matches[0] : null;
-  }, [activeBranch, pullRequestsQuery.data, repository?.cloneUrls]);
-  const openBranchPullRequest =
-    selectedBranchPullRequest?.status === "Open" ||
-    selectedBranchPullRequest?.status === "Draft"
-      ? selectedBranchPullRequest
-      : null;
-  const activeRepoPullRequest =
-    pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
-    selectedBranchPullRequest;
+  const {
+    activeRepoPullRequest,
+    openBranchPullRequest,
+    selectedBranchPullRequest,
+    selectedPullRequest,
+  } = useRetainedPullRequestSelection({
+    activeBranch,
+    isFetching: pullRequestsQuery.isFetching,
+    pullRequests: pullRequestsQuery.data,
+    repository,
+    selectedPullRequestId,
+  });
   const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
     "remote",
   );
-  const repoSnapshotQuery = useProjectRepoSnapshotQuery(
-    repository,
+  const repositoryPanel = useProjectRepositoryPanel(
+    `${repository?.id ?? ""}:${activeTab}:${selectedPullRequestId ?? ""}:${selectedIssueId ?? ""}:${selectedCommitHash ?? ""}`,
+  );
+  const {
+    commitDiffQuery,
+    displayedRepoDiff,
+    displayedRepoDiffError,
+    displayedRepoDiffLoading,
+    displayedRepoSnapshot,
+    localRepoSnapshotQuery,
+    repoSnapshotQuery,
+  } = useProjectDetailGitViews({
     activeBranch,
-    selectedTag ? null : selectedBranchPullRequest,
+    activeRepoPullRequest,
     activeTag,
-    repoRemote.host.kind === "buzz",
-  );
-  const repoDiffQuery = useProjectRepoDiffQuery(
+    isBuzzHost: repoRemote.host.kind === "buzz",
     repository,
-    activeBranch,
-    activeRepoPullRequest,
-    repoSource === "remote",
-  );
-  const localRepoDiffQuery = useProjectLocalRepoDiffQuery(
-    repository,
-    activeCommunity?.reposDir,
-    activeBranch,
-    activeRepoPullRequest,
-    repoSource === "local" && Boolean(activeRepoPullRequest),
-  );
-  const commitDiffQuery = useProjectCommitDiffQuery(
-    repository,
-    selectedCommitHash,
+    reposDir: activeCommunity?.reposDir,
     repoSource,
-    activeCommunity?.reposDir,
-  );
-  const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
-    repository,
-    activeCommunity?.reposDir,
-    activeBranch,
-  );
+    selectedBranchPullRequest,
+    selectedCommitHash,
+    selectedTag,
+  });
+  const memberChannelIds = useMemberChannelIds();
+  const remoteUnavailableReason =
+    repoRemote.host.kind === "buzz" &&
+    !repoSnapshotQuery.isLoading &&
+    !displayedRepoSnapshot
+      ? refineRepoUnavailableReason({
+          reason: projectRepoUnavailableReason(repoSnapshotQuery.error),
+          repositoryChannelId: repository?.channelId,
+          memberChannelIds,
+        })
+      : undefined;
   const repoSyncStatusQuery = useProjectRepoSyncStatusQuery(
     repository,
     activeCommunity?.reposDir,
@@ -290,15 +261,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const hasLocalCheckout = Boolean(
     localRepoSnapshotQuery.data || repoSyncStatusQuery.data?.localPath,
   );
-  const hasRemoteSnapshot = snapshotHasContent(repoSnapshotQuery.data);
-  const displayedRepoDiff =
-    repoSource === "local" ? localRepoDiffQuery.data : repoDiffQuery.data;
-  const displayedRepoDiffError =
-    repoSource === "local" ? localRepoDiffQuery.error : repoDiffQuery.error;
-  const displayedRepoDiffLoading =
-    repoSource === "local"
-      ? localRepoDiffQuery.isLoading
-      : repoDiffQuery.isLoading;
   const branchOptionsWithLocal = projectBranchOptionsFromSync(
     branchOptions,
     repoSyncStatusQuery.data,
@@ -315,7 +277,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ),
       remoteBranch: repoSyncStatusQuery.data?.remoteBranch,
       remoteHead: repoSyncStatusQuery.data?.remoteHead,
-      snapshotCommit: repoSnapshotQuery.data?.latestCommit?.hash,
+      snapshotCommit: displayedRepoSnapshot?.latestCommit?.hash,
     });
   const handleBranchChange = React.useCallback(
     (branch: string | null) => {
@@ -362,16 +324,29 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     ]);
     const error = results.find((result) => result.error)?.error;
     if (error) {
-      toast.error("Could not fetch repository.", {
-        description:
-          error instanceof Error ? error.message : "The Git fetch failed.",
+      const reason = refineRepoUnavailableReason({
+        reason: projectRepoUnavailableReason(error),
+        repositoryChannelId: repository?.channelId,
+        memberChannelIds,
+      });
+      const presentation = projectRepoUnavailablePresentation(reason);
+      toast.error(presentation.title, {
+        description: presentation.description,
       });
       return;
     }
     toast.success("Remote state refreshed.");
-  }, [repoSnapshotQuery, repoStateQuery, repoSyncStatusQuery]);
-  // Compact branch + remote/local controls shared by the readme and Files
-  // tab headers.
+  }, [
+    memberChannelIds,
+    repoSnapshotQuery,
+    repoStateQuery,
+    repoSyncStatusQuery,
+    repository?.channelId,
+  ]);
+  const cloneBlockedByRemote =
+    remoteUnavailableReason !== undefined &&
+    remoteUnavailableReason !== "ref" &&
+    remoteUnavailableReason !== "unknown";
   const filesSourceControls: RepoSourceHeaderControls = {
     branch: activeBranch ?? "",
     branchOptions: branchOptionsWithLocal,
@@ -398,9 +373,19 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       : repoSyncStatusQuery.data?.localPath || localRepoSnapshotQuery.data
         ? "Local"
         : "Local missing",
+    localPath:
+      repoSyncStatusQuery.data?.localPath ?? localRepoSnapshotQuery.data?.path,
     ...repoRemote.controls,
+    remoteUnavailableReason,
+    onAskForAccess: () => {
+      repositoryPanel.setMode("chat");
+      repositoryPanel.expand();
+    },
     onCloneLocal:
-      !selectedTag && repository?.cloneUrls[0] && repoRemote.canCloneLocally
+      !selectedTag &&
+      !cloneBlockedByRemote &&
+      repository?.cloneUrls[0] &&
+      repoRemote.canCloneLocally
         ? () => {
             void handleCloneRepo();
           }
@@ -442,12 +427,18 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     fetchTitle:
       repoSyncStatusQuery.data?.pullBlockReason ?? "Check for remote changes",
   };
+  const fileContentSource = useRepositoryFileContentSource({
+    activeBranch,
+    activeTag,
+    pullRequest: selectedBranchPullRequest,
+    repository,
+    reposDir: activeCommunity?.reposDir,
+    selectedTag,
+    source: repoSource,
+  });
   const projectPending = projectQuery.isPending;
   React.useEffect(() => {
     if (!repository) {
-      // While the project query is still loading, keep the URL-seeded
-      // pullRequestId/issueId selections — clearing here would discard them
-      // before the detail view ever gets a chance to open.
       if (projectPending) return;
       setSelectedPullRequestId(null);
       setSelectedIssueId(null);
@@ -455,101 +446,52 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     }
   }, [projectPending, repository]);
   React.useEffect(() => {
-    setRepoSource((currentSource) => {
-      if (selectedTag) return "remote";
-      if (currentSource === "local" && !hasLocalCheckout) return "remote";
-      if (
-        currentSource === "remote" &&
-        !hasRemoteSnapshot &&
-        hasLocalCheckout
-      ) {
-        return "local";
-      }
-      return currentSource;
-    });
-  }, [hasLocalCheckout, hasRemoteSnapshot, selectedTag]);
-  const peoplePubkeys = React.useMemo(() => {
-    if (!repository) return [];
-    // Include PR authors/updaters so commit rows can resolve avatars for
-    // publishers who are not listed as project contributors.
-    const pullRequestPubkeys = (pullRequestsQuery.data ?? []).flatMap(
-      (pullRequest) => [
-        pullRequest.author,
-        ...pullRequest.updates.map((update) => update.author),
-        ...pullRequest.comments.map((comment) => comment.author),
-        ...pullRequest.reviewers,
-        ...pullRequest.approvals.map((approval) => approval.author),
-      ],
-    );
-    const issuePubkeys = (issuesQuery.data ?? []).flatMap((issue) => [
-      issue.author,
-      ...issue.recipients,
-      ...issue.comments.map((comment) => comment.author),
-    ]);
-    return [
-      ...new Set([
-        ...projectPeople(repository),
-        ...pullRequestPubkeys,
-        ...issuePubkeys,
-      ]),
-    ];
-  }, [issuesQuery.data, pullRequestsQuery.data, repository]);
-  const profilesQuery = useUsersBatchQuery(peoplePubkeys, {
-    enabled: peoplePubkeys.length > 0,
+    if (selectedTag) {
+      if (repoSource !== "remote") setRepoSource("remote");
+      return;
+    }
+    if (repoSource === "local" && !hasLocalCheckout) {
+      setRepoSource("remote");
+      return;
+    }
+    if (
+      !selectedPullRequestId &&
+      repoSource === "remote" &&
+      !snapshotHasContent(displayedRepoSnapshot) &&
+      hasLocalCheckout
+    ) {
+      setRepoSource("local");
+    }
+  }, [
+    displayedRepoSnapshot,
+    hasLocalCheckout,
+    repoSource,
+    selectedPullRequestId,
+    selectedTag,
+  ]);
+  const {
+    contributorActivityCounts,
+    contributorPubkeys,
+    identityPubkey,
+    profiles,
+    viewerGitIdentity,
+  } = useProjectDetailPeople({
+    issues: issuesQuery.data ?? [],
+    pullRequests: pullRequestsQuery.data ?? [],
+    repository,
   });
-  const currentProfileQuery = useProfileQuery();
-  const profiles = React.useMemo(
-    () =>
-      mergeCurrentProfileIntoLookup(
-        profilesQuery.data?.profiles,
-        currentProfileQuery.data,
-      ),
-    [currentProfileQuery.data, profilesQuery.data?.profiles],
-  );
-  const identityQuery = useIdentityQuery();
-  const gitIdentityQuery = useGitIdentityQuery();
-  const viewerGitIdentity = React.useMemo<ViewerGitIdentity | null>(() => {
-    const pubkey = identityQuery.data?.pubkey ?? null;
-    if (!pubkey || !gitIdentityQuery.data) return null;
-    return {
-      pubkey,
-      name: gitIdentityQuery.data.name,
-      email: gitIdentityQuery.data.email,
-    };
-  }, [gitIdentityQuery.data, identityQuery.data?.pubkey]);
-  const { applyPatch, values } = useHistorySearchState(
-    PROJECT_DETAIL_PANEL_SEARCH_KEYS,
-  );
-  const profilePanelPubkey = values.profile;
-  const profilePanelTab = profilePanelTabFromSearch(values.profileTab);
-  const profilePanelView = profilePanelViewFromSearch(values.profileView);
-  const handleOpenProfilePanel = React.useCallback(
-    (pubkey: string) =>
-      applyPatch({ profile: pubkey, profileTab: null, profileView: null }),
-    [applyPatch],
-  );
-  const handleCloseProfilePanel = React.useCallback(
-    () => applyPatch({ profile: null, profileTab: null, profileView: null }),
-    [applyPatch],
-  );
-  const handleProfilePanelViewChange = React.useCallback(
-    (view: ProfilePanelView, options?: { replace?: boolean }) =>
-      applyPatch({ profileView: view === "summary" ? null : view }, options),
-    [applyPatch],
-  );
-  const handleProfilePanelTabChange = React.useCallback(
-    (tab: ProfilePanelTab, options?: { replace?: boolean }) =>
-      applyPatch({ profileTab: tab === "info" ? null : tab }, options),
-    [applyPatch],
-  );
-  const threadPanelWidth = useThreadPanelWidth();
-  const openDmMutation = useOpenDmMutation();
-  const handleOpenDm = React.useCallback(
-    async (pubkeys: string[]) => {
-      const dm = await openDmMutation.mutateAsync({ pubkeys });
-      await goChannel(dm.id);
-    },
-    [goChannel, openDmMutation],
+  const {
+    handleCloseProfilePanel,
+    handleOpenDm,
+    handleOpenProfilePanel,
+    handleProfilePanelTabChange,
+    handleProfilePanelViewChange,
+    profilePanelPubkey,
+    profilePanelTab,
+    profilePanelView,
+  } = useProjectProfilePanel();
+  const { activeRightPanelWidth, threadPanelWidth } = useProjectPanelWidths(
+    repositoryPanel.mode,
   );
   const handlePushLocalRepo = React.useCallback(async () => {
     try {
@@ -561,7 +503,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       } else {
         toast.success(
           result.pullRequestUpdate.status === "updated"
-            ? `${result.message} Pull request updated.`
+            ? `${result.message} Review updated.`
             : result.message,
         );
       }
@@ -589,9 +531,23 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       toast.success(result.message);
       setRepoSource("local");
     } catch (error) {
-      showProjectCloneErrorToast(error, repository?.cloneUrls[0]);
+      const unavailableReason = refineRepoUnavailableReason({
+        reason: projectRepoUnavailableReason(error),
+        repositoryChannelId: repository?.channelId,
+        memberChannelIds,
+      });
+      showProjectCloneErrorToast(
+        error,
+        repository?.cloneUrls[0],
+        unavailableReason,
+      );
     }
-  }, [cloneRepoMutation, repository?.cloneUrls]);
+  }, [
+    cloneRepoMutation,
+    memberChannelIds,
+    repository?.channelId,
+    repository?.cloneUrls,
+  ]);
   const handlePullRequestCreated = React.useCallback(
     async (
       createdProject: Project,
@@ -621,9 +577,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     ],
   );
   const handleCreateIssue = React.useCallback(
-    async ({ body, title }: CreateIssueDialogInput) => {
-      const issueId = await createIssueMutation.mutateAsync({ body, title });
-      toast.success("Issue created.");
+    async (input: CreateIssueDialogInput) => {
+      const issueId = await createIssueMutation.mutateAsync(input);
+      toast.success("Task created.");
       await issuesQuery.refetch();
       setSelectedIssueId(issueId);
     },
@@ -637,15 +593,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         commit,
         mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
       });
-      toast.success(
-        updated ? "Pull request updated." : "Pull request is already current.",
-      );
+      toast.success(updated ? "Review updated." : "Review is already current.");
       await pullRequestsQuery.refetch();
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to update pull request",
+        error instanceof Error ? error.message : "Failed to update review",
       );
     }
   }, [
@@ -676,148 +628,122 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoStateQuery,
     repoSyncStatusQuery,
   ]);
-  const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
-  const handleOpenTerminal = React.useCallback(() => {
-    if (!repository) return Promise.resolve();
-    return openTerminal(repository, {
-      branch: activeBranch,
-      hasLocalCheckout,
-    });
-  }, [activeBranch, hasLocalCheckout, openTerminal, repository]);
-  const handleOpenMergeRecoveryTerminal = React.useCallback(
-    async (input: {
-      expectedCommit: string;
-      sourceBranch: string;
-      sourceCloneUrl: string;
-      targetBranch: string;
-    }) => {
-      const targetCloneUrl = repository?.cloneUrls[0];
-      if (!repository || !targetCloneUrl) {
-        throw new Error("No project selected.");
-      }
-      return openProjectMergeRecoveryTerminal({
-        ...input,
-        projectDtag: repository.dtag,
-        reposDir: activeCommunity?.reposDir,
-        targetCloneUrl,
-      });
-    },
-    [activeCommunity?.reposDir, repository],
-  );
-
+  const {
+    handleOpenLocalRepository,
+    handleOpenMergeRecoveryTerminal,
+    handleOpenTerminal,
+  } = useProjectRepositoryOpenActions({
+    activeBranch,
+    hasLocalCheckout,
+    localRepositoryPath: filesSourceControls.localPath ?? null,
+    repository,
+    reposDir: activeCommunity?.reposDir,
+  });
+  const projectTerminalContext = React.useMemo(() => {
+    const channelId = repository?.channelId ?? project?.projectChannelId;
+    if (!channelId) return null;
+    return {
+      channelId,
+      channelName: repository?.name ?? project?.name ?? "Project",
+    };
+  }, [
+    project?.name,
+    project?.projectChannelId,
+    repository?.channelId,
+    repository?.name,
+  ]);
+  useTerminalContextOverride(projectTerminalContext);
   if (projectQuery.isLoading) {
     return <ViewLoadingFallback kind="projects" />;
   }
   if (projectQuery.isError) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-        <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
-        <p className="text-sm text-red-400">Failed to load project</p>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={() => void projectQuery.refetch()}
-            size="sm"
-            variant="outline"
-          >
-            Retry
-          </Button>
-          <Button
-            onClick={() => {
-              void goProjects();
-            }}
-            size="sm"
-            variant="ghost"
-          >
-            <ArrowLeft className="mr-1.5 h-4 w-4" />
-            Back to Projects
-          </Button>
-        </div>
-      </div>
+      <ProjectDetailUnavailableState
+        kind="load-error"
+        onBack={() => void goProjects()}
+        onRetry={() => void projectQuery.refetch()}
+      />
     );
   }
   if (!project) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-        <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
-        <p className="text-sm text-muted-foreground">
-          This project could not be found.
-        </p>
-        <Button
-          onClick={() => {
-            void goProjects();
-          }}
-          size="sm"
-          variant="outline"
-        >
-          <ArrowLeft className="mr-1.5 h-4 w-4" />
-          Back to Projects
-        </Button>
-      </div>
+      <ProjectDetailUnavailableState
+        kind="not-found"
+        onBack={() => void goProjects()}
+      />
     );
   }
   if (!repository) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-        <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
-        <p className="text-sm font-medium text-foreground">{project.name}</p>
-        <p className="text-sm text-muted-foreground">
-          This project does not have any available repositories yet.
-        </p>
-        <UnavailableProjectRepositories project={project} />
-      </div>
+      <ProjectDetailUnavailableState
+        kind="repositories-unavailable"
+        project={project}
+      />
     );
   }
-
-  const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
-  const selectedPullRequest =
-    pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
-    null;
+  const repoContributors = displayedRepoSnapshot?.contributors ?? [];
+  const displayedRepositorySnapshot =
+    repoSource === "local"
+      ? (localRepoSnapshotQuery.data?.snapshot ?? null)
+      : displayedRepoSnapshot;
+  const displayedRepositoryContributors =
+    displayedRepositorySnapshot?.contributors ?? repoContributors;
+  const displayedRepositoryFiles = displayedRepositorySnapshot?.files ?? [];
   const selectedIssue =
     issuesQuery.data?.find((item) => item.id === selectedIssueId) ?? null;
   const displayedSnapshotCommits =
     repoSource === "local"
       ? (localRepoSnapshotQuery.data?.snapshot.commits ?? [])
-      : (repoSnapshotQuery.data?.commits ?? []);
+      : (displayedRepoSnapshot?.commits ?? []);
   const selectedCommit = selectedCommitHash
     ? (displayedSnapshotCommits.find(
         (commit) => commit.hash === selectedCommitHash,
       ) ?? null)
     : null;
-
-  // The active work item drives the breadcrumb trail: Projects › project ›
-  // sub-tab › title. `clear` steps back to the item's list tab. Categories
-  // match the workspace tab labels.
-  const activeWorkItemCrumb = selectedPullRequest
-    ? {
-        category: "Pull Request",
-        title: selectedPullRequest.title,
-        clear: () => setSelectedPullRequestId(null),
-      }
-    : selectedIssue
-      ? {
-          category: "Issues",
-          title: selectedIssue.title,
-          clear: () => setSelectedIssueId(null),
-        }
-      : selectedCommitHash
-        ? {
-            category: "Commits",
-            title: selectedCommit?.subject ?? selectedCommitHash.slice(0, 7),
-            clear: () => setSelectedCommitHash(null),
-          }
-        : null;
-  // Sub-tab crumb when no work item is open. Overview (readme) is home.
-  const activeTabCrumb = activeWorkItemCrumb
-    ? null
-    : (PROJECT_TAB_CRUMB_LABELS[activeTab] ?? null);
-  const handleGoToProjectHome = () => {
-    setSelectedPullRequestId(null);
-    setSelectedIssueId(null);
-    setSelectedCommitHash(null);
-    // Remount the workspace tabs so the project page opens on Overview
-    // instead of whatever tab the work item left behind.
-    setTabsResetKey((key) => key + 1);
-  };
+  const contextItem = projectDetailSelectionItem({
+    commit: selectedCommit,
+    issue: selectedIssue,
+    projectChannelId: project.projectChannelId,
+    projectId: project.id,
+    pullRequest: selectedPullRequest,
+    repository,
+  });
+  const { activeTabCrumb, activeWorkItemCrumb, handleGoToProjectHome } =
+    buildProjectDetailCrumbs({
+      activeTab,
+      commit: selectedCommit,
+      issue: selectedIssue,
+      pullRequest: selectedPullRequest,
+      setRequestedTab,
+      setSelectedCommitHash,
+      setSelectedIssueId,
+      setSelectedPullRequestId,
+      setTabsResetKey,
+    });
+  const agentPageContext = buildProjectDetailAgentContext({
+    activeTab,
+    branch: activeBranch,
+    file: filesContext,
+    project,
+    repository,
+    source: repoSource,
+    workItems: [selectedCommit, selectedIssue, selectedPullRequest],
+  });
+  const selectionChat = repositoryPanel.openSelectionChatFor(agentPageContext);
+  const repositoryPanelAction = (
+    <ProjectRightPanelControls
+      collapsed={repositoryPanel.collapsed}
+      mode={repositoryPanel.mode}
+      onCollapse={repositoryPanel.collapse}
+      onExpand={repositoryPanel.expand}
+      onModeChange={repositoryPanel.setMode}
+      terminalAvailable={projectTerminalContext !== null}
+    />
+  );
+  const detachedRepositoryPanel =
+    !profilePanelPubkey && repositoryPanel.mode === "repository";
+  const sharedHeaderBackdrop =
+    !selectedPullRequestId && !selectedIssueId && !selectedCommitHash;
   const handleRepositoryChange = (nextRepositoryId: string) => {
     applyRepositorySearch({
       repositoryId: nextRepositoryId,
@@ -828,163 +754,201 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     setSelectedPullRequestId(null);
     setSelectedIssueId(null);
     setSelectedCommitHash(null);
+    setRequestedTab(undefined);
     setRepoSource("remote");
     setTabsResetKey((key) => key + 1);
   };
-
   return (
-    <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
-      <ProjectBranchActionDialogs
-        actions={branchActions}
-        activeBranch={activeBranch}
-        activeBranchCommit={activeBranchCommit}
-        existingBranches={branchOptionsWithLocal}
-      />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <ProjectDetailChrome
-            activeTabCrumb={activeTabCrumb}
-            activeWorkItemCrumb={activeWorkItemCrumb}
-            chromeRef={projectDetailHeaderChromeRef}
-            onGoChannel={(channelId) => {
-              void goChannel(channelId);
-            }}
-            onGoProjectHome={handleGoToProjectHome}
-            onGoProjects={() => {
-              void goProjects();
-            }}
-            project={project}
-          />
-
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
-            <div className="w-full space-y-3 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
-              <section className="space-y-3">
-                <div className="flex min-w-0 items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1 space-y-0.5">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <h2 className="truncate text-xl font-semibold tracking-tight">
-                        {project.name}
-                      </h2>
-                      {repoRemote.webUrl &&
-                      (repoRemote.host.kind !== "external" ||
-                        repoSource === "local") ? (
-                        <Button
-                          asChild
-                          aria-label="Open project web page"
-                          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-                          size="icon-xs"
-                          variant="ghost"
-                        >
-                          <a
-                            href={repoRemote.webUrl}
-                            rel="noopener noreferrer"
-                            target="_blank"
-                          >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </a>
-                        </Button>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className="hidden text-xs font-medium text-muted-foreground sm:inline">
-                      Repository
-                    </span>
-                    <ProjectRepositoryManagement
-                      identityPubkey={identityQuery.data?.pubkey}
-                      onChange={handleRepositoryChange}
-                      project={project}
-                      projects={projectsQuery.data ?? []}
-                      repository={repository}
-                    />
-                  </div>
-                </div>
-              </section>
-
-              <WorkspaceTabs
-                key={`${project.id}:${repository.id}:${tabsResetKey}`}
-                commitDiff={commitDiffQuery.data}
-                commitDiffError={commitDiffQuery.error}
-                commitDiffLoading={commitDiffQuery.isLoading}
-                createIssueAction={{
-                  onCreate: handleCreateIssue,
-                  pending: createIssueMutation.isPending,
-                }}
-                createPullRequestAction={{
-                  onCreated: handlePullRequestCreated,
-                  projects: projectsQuery.data ?? [project],
-                  reposDir: activeCommunity?.reposDir,
-                }}
-                updatePullRequestAction={
-                  openBranchPullRequest &&
-                  repoSyncStatusQuery.data?.remoteHead &&
-                  repoSyncStatusQuery.data.remoteHead !==
-                    openBranchPullRequest.commit
-                    ? {
-                        onUpdate: () => {
-                          void handleUpdatePullRequest();
-                        },
-                        pending: updatePullRequestMutation.isPending,
-                      }
-                    : undefined
-                }
-                localSnapshot={localRepoSnapshotQuery.data}
-                localSnapshotError={localRepoSnapshotQuery.error}
-                localSnapshotLoading={localRepoSnapshotQuery.isLoading}
-                onBranchChange={handleBranchChange}
-                onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
-                onOpenTerminal={() => {
-                  void handleOpenTerminal();
-                }}
-                terminalTitle={projectTerminalLabel(hasLocalCheckout)}
-                onSelectedCommitHashChange={handleSelectedCommitHashChange}
-                onSelectedIssueIdChange={handleSelectedIssueIdChange}
-                onSelectedPullRequestIdChange={
-                  handleSelectedPullRequestIdChange
-                }
-                onSelectedTabChange={setActiveTab}
-                profiles={profiles}
-                project={repository}
-                projectId={project.id}
-                repoDiff={displayedRepoDiff}
-                repoDiffError={displayedRepoDiffError}
-                repoDiffLoading={displayedRepoDiffLoading}
-                pullRequests={pullRequestsQuery.data ?? []}
-                pullRequestsError={pullRequestsQuery.error}
-                pullRequestsLoading={pullRequestsQuery.isLoading}
-                repoContributors={repoContributors}
-                repoHost={repoRemote.host}
-                repoSource={repoSource}
-                selectedCommitHash={selectedCommitHash}
-                selectedIssueId={selectedIssueId}
-                selectedPullRequestId={selectedPullRequestId}
-                snapshot={repoSnapshotQuery.data}
-                snapshotError={repoSnapshotQuery.error}
-                snapshotLoading={repoSnapshotQuery.isLoading}
-                sourceControls={filesSourceControls}
-                viewerGitIdentity={viewerGitIdentity}
-              />
-            </div>
-          </div>
-        </div>
-        {profilePanelPubkey ? (
-          <UserProfilePanel
+    <ProjectSelectionProvider
+      onSelect={() => {
+        repositoryPanel.setMode("repository");
+        repositoryPanel.expand();
+      }}
+      resetKey={`${repository.id}:${activeTab}`}
+    >
+      <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+        <ProjectBranchActionDialogs
+          actions={branchActions}
+          activeBranch={activeBranch}
+          activeBranchCommit={activeBranchCommit}
+          existingBranches={branchOptionsWithLocal}
+        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+          <ProjectConversationPanelController
             canResetWidth={threadPanelWidth.canReset}
-            currentPubkey={identityQuery.data?.pubkey}
-            onClose={handleCloseProfilePanel}
-            onOpenDm={handleOpenDm}
-            onOpenProfile={handleOpenProfilePanel}
+            closeWhen={Boolean(profilePanelPubkey)}
+            detachFallbackPanel={detachedRepositoryPanel}
+            fallbackPanel={
+              profilePanelPubkey ? null : (
+                <ProjectDetailRightPanel
+                  activeTab={activeTab}
+                  canResetWidth={activeRightPanelWidth.canReset}
+                  contributors={displayedRepositoryContributors}
+                  context={repositoryPanel.agentContext(agentPageContext)}
+                  contextItem={contextItem}
+                  createIssuePending={createIssueMutation.isPending}
+                  detachedRepository={detachedRepositoryPanel}
+                  files={displayedRepositoryFiles}
+                  identityPubkey={identityPubkey}
+                  issues={issuesQuery.data ?? []}
+                  mode={repositoryPanel.mode}
+                  onChatWithAgent={selectionChat}
+                  onClose={repositoryPanel.collapse}
+                  onCreateTask={() => setCreateIssueRequestKey((k) => k + 1)}
+                  onCreatePullRequest={() =>
+                    setCreatePullRequestRequestKey((k) => k + 1)
+                  }
+                  onOpenTerminal={() => void handleOpenTerminal()}
+                  onOpenLocalRepository={() => void handleOpenLocalRepository()}
+                  onRepositoryChange={handleRepositoryChange}
+                  onResetWidth={activeRightPanelWidth.onResetWidth}
+                  onResizeStart={activeRightPanelWidth.onResizeStart}
+                  profiles={profiles}
+                  pullRequests={pullRequestsQuery.data ?? []}
+                  project={project}
+                  projects={projectsQuery.data ?? []}
+                  repository={repository}
+                  selectedIssue={selectedIssue}
+                  selectedPullRequest={selectedPullRequest}
+                  snapshot={displayedRepositorySnapshot}
+                  sourceControls={filesSourceControls}
+                  terminalTitle={projectTerminalLabel(hasLocalCheckout)}
+                  widthPx={activeRightPanelWidth.widthPx}
+                />
+              )
+            }
+            fallbackPanelOpen={
+              !profilePanelPubkey && !repositoryPanel.collapsed
+            }
+            fallbackPanelResizing={activeRightPanelWidth.isResizing}
+            fallbackPanelWidthPx={activeRightPanelWidth.widthPx}
+            onOpenConversation={handleCloseProfilePanel}
             onResetWidth={threadPanelWidth.onResetWidth}
             onResizeStart={threadPanelWidth.onResizeStart}
-            onTabChange={handleProfilePanelTabChange}
-            onViewChange={handleProfilePanelViewChange}
-            pubkey={profilePanelPubkey}
-            tab={profilePanelTab}
-            view={profilePanelView}
+            resetKey={`${repository.id}:${selectedPullRequestId ?? ""}:${selectedIssueId ?? ""}:${selectedCommitHash ?? ""}`}
+            sharedHeaderBackdrop={sharedHeaderBackdrop}
             widthPx={threadPanelWidth.widthPx}
-          />
-        ) : null}
-      </div>
-    </ProfilePanelProvider>
+          >
+            <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden [container-type:inline-size]">
+              <ProjectDetailChrome
+                actions={repositoryPanelAction}
+                activeTabCrumb={activeTabCrumb}
+                activeWorkItemCrumb={activeWorkItemCrumb}
+                onGoProjectHome={handleGoToProjectHome}
+                onGoProjects={() => {
+                  void goProjects();
+                }}
+                project={project}
+                repository={repository}
+              />
+              <div
+                className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-none px-4 pb-4"
+                data-testid="project-detail-scroll"
+              >
+                {/* min-h-full + flex chain lets the commit detail's diff pane
+                    grow to the bottom of the scrollport without forcing a
+                    taller page when content already overflows. */}
+                <div className="flex min-h-full w-full flex-col space-y-3">
+                  <WorkspaceTabs
+                    key={`${project.id}:${repository.id}:${tabsResetKey}`}
+                    initialTab={
+                      requestedTab
+                        ? workspaceTabForShareTab(requestedTab)
+                        : undefined
+                    }
+                    initialTabRequestKey={entityNavigationId}
+                    fileContentSource={fileContentSource}
+                    commitDiff={commitDiffQuery.data}
+                    commitDiffError={commitDiffQuery.error}
+                    commitDiffLoading={commitDiffQuery.isLoading}
+                    contributorActivityCounts={contributorActivityCounts}
+                    contributorPubkeys={contributorPubkeys}
+                    createIssueAction={{
+                      onCreate: handleCreateIssue,
+                      pending: createIssueMutation.isPending,
+                    }}
+                    createIssueRequestKey={createIssueRequestKey}
+                    createPullRequestAction={{
+                      onCreated: handlePullRequestCreated,
+                      projects: projectsQuery.data ?? [project],
+                      reposDir: activeCommunity?.reposDir,
+                    }}
+                    createPullRequestRequestKey={createPullRequestRequestKey}
+                    updatePullRequestAction={
+                      openBranchPullRequest &&
+                      repoSyncStatusQuery.data?.remoteHead &&
+                      repoSyncStatusQuery.data.remoteHead !==
+                        openBranchPullRequest.commit
+                        ? {
+                            onUpdate: () => {
+                              void handleUpdatePullRequest();
+                            },
+                            pending: updatePullRequestMutation.isPending,
+                          }
+                        : undefined
+                    }
+                    localSnapshot={localRepoSnapshotQuery.data}
+                    localSnapshotError={localRepoSnapshotQuery.error}
+                    localSnapshotLoading={localRepoSnapshotQuery.isLoading}
+                    onFilesContextChange={setFilesContext}
+                    onOpenMergeRecoveryTerminal={
+                      handleOpenMergeRecoveryTerminal
+                    }
+                    onSelectedCommitHashChange={handleSelectedCommitHashChange}
+                    onSelectedIssueIdChange={handleSelectedIssueIdChange}
+                    onSelectedPullRequestIdChange={
+                      handleSelectedPullRequestIdChange
+                    }
+                    onSelectedTabChange={setActiveTab}
+                    profiles={profiles}
+                    project={repository}
+                    projectId={project.id}
+                    repoDiff={displayedRepoDiff}
+                    repoDiffError={displayedRepoDiffError}
+                    repoDiffLoading={displayedRepoDiffLoading}
+                    pullRequests={pullRequestsQuery.data ?? []}
+                    pullRequestsError={pullRequestsQuery.error}
+                    pullRequestsLoading={pullRequestsQuery.isLoading}
+                    repoContributors={repoContributors}
+                    repoHost={repoRemote.host}
+                    repoSource={repoSource}
+                    selectedCommitHash={selectedCommitHash}
+                    selectedIssueId={selectedIssueId}
+                    selectedPullRequest={selectedPullRequest}
+                    selectedPullRequestId={selectedPullRequestId}
+                    sharedHeaderBackdrop={sharedHeaderBackdrop}
+                    snapshot={displayedRepoSnapshot}
+                    snapshotError={repoSnapshotQuery.error}
+                    snapshotLoading={
+                      repoSnapshotQuery.isLoading && !displayedRepoSnapshot
+                    }
+                    sourceControls={filesSourceControls}
+                    viewerGitIdentity={viewerGitIdentity}
+                  />
+                </div>
+              </div>
+            </div>
+            {profilePanelPubkey ? (
+              <UserProfilePanel
+                canResetWidth={threadPanelWidth.canReset}
+                currentPubkey={identityPubkey}
+                onClose={handleCloseProfilePanel}
+                onOpenDm={handleOpenDm}
+                onOpenProfile={handleOpenProfilePanel}
+                onResetWidth={threadPanelWidth.onResetWidth}
+                onResizeStart={threadPanelWidth.onResizeStart}
+                onTabChange={handleProfilePanelTabChange}
+                onViewChange={handleProfilePanelViewChange}
+                pubkey={profilePanelPubkey}
+                tab={profilePanelTab}
+                transparentChrome={sharedHeaderBackdrop}
+                view={profilePanelView}
+                widthPx={threadPanelWidth.widthPx}
+              />
+            ) : null}
+          </ProjectConversationPanelController>
+        </div>
+      </ProfilePanelProvider>
+    </ProjectSelectionProvider>
   );
 }

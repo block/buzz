@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
@@ -10,8 +12,8 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
@@ -115,6 +117,9 @@ void main() {
     List<Channel>? channels,
     TextScaler? textScaler,
     EdgeInsets mediaPadding = EdgeInsets.zero,
+    ValueListenable<int>? tabReselection,
+    List<ComposeDraft> drafts = const [],
+    List<Reminder> reminders = const [],
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -133,7 +138,10 @@ void main() {
         readStateProvider.overrideWith(
           () => _FakeReadStateNotifier(readContexts),
         ),
-        remindersProvider.overrideWith(() => _FakeRemindersNotifier(const [])),
+        composeDraftsProvider.overrideWith(
+          () => _FakeComposeDraftsNotifier(drafts),
+        ),
+        remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -143,7 +151,7 @@ void main() {
           ).copyWith(textScaler: textScaler, padding: mediaPadding),
           child: child!,
         ),
-        home: const ActivityPage(),
+        home: ActivityPage(tabReselection: tabReselection),
       ),
     );
   }
@@ -181,9 +189,41 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
     expect(appBar.automaticallyImplyLeading, isFalse);
+    expect(appBar.gradient, isNull);
+    expect(appBar.frosted, isTrue);
+    expect(appBar.showBottomDivider, isTrue);
+    expect(appBar.bottomHeight, Grid.xxs);
     expect(find.byTooltip('Back'), findsNothing);
+  });
+
+  testWidgets('sizes the Activity app bar for its custom title style', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(textScaler: const TextScaler.linear(2)),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    final titleStyle = appBar.titleStyle!;
+    expect(titleStyle.fontSize, 22);
+    expect(
+      tester.getSize(find.byType(ClipRect).last).height,
+      closeTo(
+        frostedAppBarHeight(
+          tester.element(find.byType(FrostedAppBar).last),
+          titleStyle: titleStyle,
+          bottomHeight: Grid.xxs,
+        ),
+        0.01,
+      ),
+    );
   });
 
   testWidgets('keeps footer clearance inside the scrollable content', (
@@ -200,8 +240,48 @@ void main() {
     expect(safeArea.top, isFalse);
     expect(safeArea.bottom, isFalse);
 
-    final list = tester.widget<ListView>(find.byType(ListView));
-    expect(list.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
+    final padding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byType(SliverPadding),
+      ),
+    );
+    expect(padding.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
+  });
+
+  testWidgets('scrolls Activity to the top when its tab is selected again', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 180);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final tabReselection = ValueNotifier(0);
+    addTearDown(tabReselection.dispose);
+    await tester.pumpWidget(
+      await buildTestable(tabReselection: tabReselection),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThan(0));
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    tabReselection.value++;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 130));
+
+    expect(
+      scrollable.position.pixels,
+      lessThan(scrollable.position.maxScrollExtent),
+    );
+    await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
   });
 
   testWidgets('shows error view with retry button', (tester) async {
@@ -285,7 +365,13 @@ void main() {
 
     await tester.tap(find.descendant(of: surface, matching: find.text('All')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('activity-options-menu')));
+    final optionsTrigger = find.byKey(const ValueKey('activity-options-menu'));
+    expect(
+      tester.getSize(optionsTrigger),
+      const Size(Grid.xl, Grid.xl),
+      reason: 'Activity options must retain a 48dp touch target.',
+    );
+    await tester.tap(optionsTrigger);
     await tester.pump();
 
     final optionsSurface = find.byKey(
@@ -304,6 +390,65 @@ void main() {
           .alignment,
       Alignment.topRight,
     );
+  });
+
+  testWidgets('filter stays indicator-free when drafts and reminders exist', (
+    tester,
+  ) async {
+    final dueReminder = Reminder(
+      id: 'reminder-1',
+      notBefore: now - 1,
+      status: 'pending',
+      target: const ReminderTarget(
+        eventId: 'm1',
+        channelId: 'ch1',
+        preview: 'Follow up',
+        authorPubkey: 'alice_pk',
+      ),
+      note: null,
+      createdAt: now - 60,
+      eventId: 'reminder-event-1',
+    );
+    final draft = ComposeDraft(
+      key: 'ch1',
+      channelId: 'ch1',
+      threadHeadId: null,
+      text: 'Unsent review note',
+      updatedAt: now,
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(drafts: [draft], reminders: [dueReminder]),
+    );
+    await tester.pumpAndSettle();
+
+    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
+    expect(
+      find.descendant(
+        of: filterTrigger,
+        matching: find.byWidgetPredicate((widget) {
+          if (widget is! Container) return false;
+          final constraints = widget.constraints;
+          return constraints?.minWidth == 6 && constraints?.minHeight == 6;
+        }),
+      ),
+      findsNothing,
+    );
+
+    await tester.tap(filterTrigger);
+    await tester.pumpAndSettle();
+    final filterPopover = find.byKey(const ValueKey('activity-filter-popover'));
+    expect(
+      find.descendant(of: filterPopover, matching: find.text('1')),
+      findsNothing,
+    );
+
+    await tester.tap(
+      find.descendant(of: filterPopover, matching: find.text('Drafts')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('draft-row-ch1')), findsOneWidget);
+    expect(find.text('Unsent review note'), findsOneWidget);
   });
 
   testWidgets('rows lead with sender, contextual label, and preview', (
@@ -354,8 +499,12 @@ void main() {
     expect(usernameText.style?.fontSize, messageMetadataTextStyle.fontSize);
     expect(usernameText.style?.fontWeight, FontWeight.w400);
     expect(usernameText.style?.height, messageMetadataTextStyle.height);
-    expect(timestampText.style?.fontSize, messageMetadataTextStyle.fontSize);
+    expect(timestampText.style?.fontSize, activityTimestampTextStyle.fontSize);
     expect(timestampText.style?.fontWeight, FontWeight.w400);
+    expect(
+      timestampText.style?.fontSize,
+      lessThan(usernameText.style!.fontSize!),
+    );
 
     final avatars = tester.widgetList<AvatarImage>(find.byType(AvatarImage));
     expect(avatars, isNotEmpty);
@@ -535,6 +684,10 @@ void main() {
     expect(page.channel.id, 'ch1');
     expect(page.initialThreadRootId, 'parent-reply');
     expect(page.initialMessageId, 'reply-event');
+    expect(
+      page.initialThreadRouteBehavior,
+      InitialThreadRouteBehavior.replaceCurrentRoute,
+    );
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {
@@ -828,4 +981,12 @@ class _FakeRemindersNotifier extends RemindersNotifier {
 
   @override
   Future<List<Reminder>> build() async => _reminders;
+}
+
+class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
+  final List<ComposeDraft> _drafts;
+  _FakeComposeDraftsNotifier(this._drafts);
+
+  @override
+  List<ComposeDraft> build() => _drafts;
 }

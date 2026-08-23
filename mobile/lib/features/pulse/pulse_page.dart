@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
+import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import 'agent_activity_card.dart';
@@ -99,7 +100,7 @@ class PulsePage extends HookConsumerWidget {
             ],
           ),
           Expanded(
-            child: RefreshIndicator(
+            child: BeeRefreshIndicator(
               onRefresh: () async => _refresh(ref, active.value, currentPubkey),
               child: _PulseBody(
                 tab: active.value,
@@ -171,7 +172,6 @@ class _PulseBody extends ConsumerWidget {
         if (tab == PulseTab.agents) {
           final groups = groupAgentNotes(notes);
           return ListView.separated(
-            physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(
               Grid.gutter,
               Grid.xxs,
@@ -188,7 +188,6 @@ class _PulseBody extends ConsumerWidget {
           );
         }
         return ListView.separated(
-          physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(
             Grid.gutter,
             Grid.xxs,
@@ -243,7 +242,6 @@ class _MessageListShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(Grid.xs),
       children: [SizedBox(height: 260, child: Center(child: child))],
     );

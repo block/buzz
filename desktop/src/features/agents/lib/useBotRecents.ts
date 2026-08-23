@@ -1,13 +1,16 @@
 import * as React from "react";
 
 import type { AgentPersona } from "@/shared/api/types";
+import { STARTER_AGENT_BRAND } from "@/shared/brand";
 
 const STORAGE_KEY = "buzz:bot-recents";
 const MAX_RECENTS = 8;
 
 // Default persona display names to seed the list when empty.
 // These are resolved to IDs by the consumer.
-export const DEFAULT_PERSONA_NAMES = ["Diego", "Murietta", "Montero"] as const;
+export const DEFAULT_PERSONA_NAMES = STARTER_AGENT_BRAND.map(
+  ({ name }) => name,
+);
 
 export function pickQuickBotPersonas(
   personas: readonly AgentPersona[],

@@ -64,20 +64,20 @@ fi
 body="$(mktemp)"
 trap 'rm -f "$msg" "$body"' EXIT
 cat >"$body" <<EOF
-## Buzz Desktop release v$version
+## Zorro Desktop release v$version
 
 - **Frozen main:** \`$base_sha\`
 - **Reviewed candidate:** \`$candidate_sha\`
 - **Previous desktop release:** \`$previous_tag\`
 - **Proposed immutable tag:** \`desktop-v$version\`
 
-This PR must be **squash merged** only after the Desktop Release Candidate check passes. The branch must remain based directly on current \`main\`; stale base, payload drift, incomplete notes, or an unauthorized merge produce no tag.
+This PR may be **squash merged** after the Desktop Release Candidate check and all protected-branch checks pass. Merging authorizes publication of the exact reviewed candidate; later or unrelated changes on \`main\` cannot alter it.
 
-The checked-in changelog accounts for every non-merge commit in the release range. Publication remains bound to the immutable candidate tag.
+The checked-in changelog accounts for every non-merge commit in the release range. The Desktop tag points to the reviewed candidate commit, not the later squash commit. Publication remains bound to that immutable candidate tag.
 EOF
-if existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" && [[ -n "$existing" ]]; then
-  gh pr edit "$existing" --title "chore(release): release Zorro Desktop version $version" --body-file "$body"
+if existing="$(gh pr list --repo SaledaAI/saleda-buzz --head "$branch" --state open --json number --jq '.[0].number')" && [[ -n "$existing" ]]; then
+  gh pr edit --repo SaledaAI/saleda-buzz "$existing" --title "chore(release): release Zorro Desktop version $version" --body-file "$body"
 else
-  gh pr create --base main --head "$branch" \
+  gh pr create --repo SaledaAI/saleda-buzz --base main --head "$branch" \
     --title "chore(release): release Zorro Desktop version $version" --body-file "$body"
 fi

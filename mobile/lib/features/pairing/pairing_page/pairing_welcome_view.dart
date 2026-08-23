@@ -50,7 +50,7 @@ class _PairingWelcomeView extends StatelessWidget {
                     shape: BoxShape.circle,
                     color: Color(0x4DFFFFFF),
                   ),
-                  child: const TappableFlappingBee(
+                  child: const TappableZorroHat(
                     width: 76,
                     color: _onboardingInk,
                   ),

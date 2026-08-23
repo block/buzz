@@ -4,6 +4,7 @@ import {
   isWelcomeKickoffStageExiting,
   type WelcomeKickoffStagePhase,
 } from "@/features/onboarding/useWelcomeKickoffStage";
+import { STARTER_AGENT_BRAND } from "@/shared/brand";
 import { cn } from "@/shared/lib/cn";
 
 type StageCharacter = {
@@ -12,11 +13,7 @@ type StageCharacter = {
 };
 
 /** Same animated APNGs the "Meet your starter team" onboarding step uses. */
-const STAGE_CHARACTERS: readonly StageCharacter[] = [
-  { name: "Diego", animationUrl: "/onboarding/starter-team/diego.png" },
-  { name: "Murietta", animationUrl: "/onboarding/starter-team/murietta.png" },
-  { name: "Montero", animationUrl: "/onboarding/starter-team/montero.png" },
-];
+const STAGE_CHARACTERS: readonly StageCharacter[] = STARTER_AGENT_BRAND;
 
 const STAGE_EXIT_ANIMATION = "motion-kickoff-stage-exit";
 

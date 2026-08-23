@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { clearMarkdownNodeCache, renderCachedMarkdown } from "./nodeCache.ts";
@@ -81,6 +82,103 @@ test("render variants do not collide", () => {
   assert.notEqual(interactive, nonInteractive);
 });
 
+test("leading inline content is inserted into the first prose-capable block", () => {
+  const components = {
+    span: ({ children, node: _node, ...props }) =>
+      "data-leading-inline-content" in props
+        ? React.createElement(
+            "button",
+            { "data-chip": "", type: "button" },
+            "00:01",
+          )
+        : React.createElement("span", props, children),
+  };
+
+  for (const [content, pattern] of [
+    ["plain note", /<p><button[^>]*>00:01<\/button>plain note<\/p>/],
+    ["> quoted note", /<blockquote>\s*<p><button[^>]*>00:01<\/button>quoted/],
+    ["- list note", /<li><button[^>]*>00:01<\/button>list note<\/li>/],
+    ["# heading", /<h1><button[^>]*>00:01<\/button>heading<\/h1>/],
+  ]) {
+    const node = renderCachedMarkdown({
+      ...BASE,
+      components,
+      content,
+      leadingInlineContent: true,
+      variant: "leading",
+    });
+    assert.match(renderToStaticMarkup(node), pattern);
+  }
+});
+
+test("leading inline content falls back before code and media blocks", () => {
+  const components = {
+    span: ({ children, node: _node, ...props }) =>
+      "data-leading-inline-content" in props
+        ? React.createElement(
+            "button",
+            { "data-chip": "", type: "button" },
+            "00:01",
+          )
+        : React.createElement("span", props, children),
+  };
+
+  for (const [content, blockPattern] of [
+    ["```js\nconst answer = 42;\n```", "<pre"],
+    ["![](https://example.com/review.png)", "<img"],
+    ["```js\nconst answer = 42;\n```\n\nlater note", "<pre"],
+    ["![](https://example.com/review.png)\n\nlater note", "<img"],
+    ["> ```js\nconst answer = 42;\n```\n\n> later note", "<pre"],
+    ["> ![](https://example.com/review.png)\n\n> later note", "<img"],
+  ]) {
+    const node = renderCachedMarkdown({
+      ...BASE,
+      components,
+      content,
+      leadingInlineContent: true,
+      variant: "leading-fallback",
+    });
+    const html = renderToStaticMarkup(node);
+    assert.match(html, /<p><button[^>]*>00:01<\/button><\/p>/);
+    assert.ok(html.indexOf("<button") < html.indexOf(blockPattern));
+  }
+});
+
+test("leading inline content stays on the outer tight-list item", () => {
+  const components = {
+    span: ({ children, node: _node, ...props }) =>
+      "data-leading-inline-content" in props
+        ? React.createElement(
+            "button",
+            { "data-chip": "", type: "button" },
+            "00:01",
+          )
+        : React.createElement("span", props, children),
+  };
+  const node = renderCachedMarkdown({
+    ...BASE,
+    components,
+    content: "- parent\n  - child",
+    leadingInlineContent: true,
+    variant: "leading-tight-nested-list",
+  });
+
+  assert.match(
+    renderToStaticMarkup(node),
+    /<li><button[^>]*>00:01<\/button>parent\s*<ul>\s*<li>child<\/li>/,
+  );
+});
+
+test("leading inline content participates in the cache key", () => {
+  clearMarkdownNodeCache();
+  const withoutLeading = renderCachedMarkdown({ ...BASE });
+  const withLeading = renderCachedMarkdown({
+    ...BASE,
+    leadingInlineContent: true,
+  });
+  assert.notEqual(withoutLeading, withLeading);
+});
+
 test("crafted values cannot forge key-segment boundaries", () => {
   clearMarkdownNodeCache();
   // Length-prefixed segments: a single name containing arbitrary bytes must
@@ -107,6 +205,26 @@ test("oversized content bypasses the cache", () => {
   const first = renderCachedMarkdown(huge);
   const second = renderCachedMarkdown(huge);
   assert.notEqual(first, second);
+});
+
+test("hardLineBreaks changes the parse and the cache key", () => {
+  clearMarkdownNodeCache();
+  const content = "hello\nworld";
+  const withBreaks = renderCachedMarkdown({ ...BASE, content });
+  const withoutBreaks = renderCachedMarkdown({
+    ...BASE,
+    content,
+    hardLineBreaks: false,
+  });
+  assert.notEqual(withBreaks, withoutBreaks);
+  assert.match(renderToStaticMarkup(withBreaks), /<br/i);
+  assert.doesNotMatch(renderToStaticMarkup(withoutBreaks), /<br/i);
+  const withoutBreaksAgain = renderCachedMarkdown({
+    ...BASE,
+    content,
+    hardLineBreaks: false,
+  });
+  assert.equal(withoutBreaks, withoutBreaksAgain);
 });
 
 test("active search queries bypass the cache", () => {
