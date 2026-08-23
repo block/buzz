@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use super::human_floor::HumanFloor;
 use super::jitter::{PeerJitterBuffer, SAMPLE_RATE_HZ};
 use super::relay_api::{WsStream, REMOTE_SPEECH_THRESHOLD};
-use super::wire::{FrameHeader, FLAG_DTX, V2_HEADER_LEN};
+use super::wire::{parse_relay_frame, FLAG_DTX};
 
 /// Speaker-tick window for emitting `huddle-active-speakers`. Active set is
 /// cleared each tick — peers that didn't send a frame in the last window are
@@ -149,18 +149,11 @@ fn is_agent_peer(
     })
 }
 
-/// Whether `peer_idx` is currently occupied at exactly `epoch`, per the
-/// authoritative roster. A frame is deliverable only when both match: an index
-/// absent from the roster is stale, and a slot reused by a later occupant has
-/// advanced its epoch, so a departed occupant's in-flight frame is fenced
-/// rather than mis-attributed to the new occupant. A legacy relay omits the
-/// epoch, which degrades to `0` on both sides, making the fence a no-op.
-fn is_current_occupant(
-    peer_idx: u8,
-    epoch: u8,
-    index_to_epoch: &std::collections::HashMap<u8, u8>,
-) -> bool {
-    index_to_epoch.get(&peer_idx) == Some(&epoch)
+/// Whether `peer_idx` is currently occupied per the authoritative roster.
+/// Protocol v2 media carries only the peer index, so roster presence is the
+/// strongest routing boundary available until the relay supports v3 epochs.
+fn is_current_occupant(peer_idx: u8, index_to_epoch: &std::collections::HashMap<u8, u8>) -> bool {
+    index_to_epoch.contains_key(&peer_idx)
 }
 
 fn same_occupancy(
@@ -196,7 +189,7 @@ fn f32_samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
 /// Per-frame seq/timestamp come from the v2 wire header (sender-authored).
-/// The relay forwards `peer_index | epoch | header | opus_bytes` opaquely; we
+/// The relay forwards `peer_index | header | opus_bytes` opaquely; we
 /// parse the header here and pass the sender's own monotonic seq + 48 kHz media
 /// timestamp into NetEq.
 struct PeerSlot {
@@ -422,43 +415,25 @@ pub(crate) async fn run_playout_recv_loop(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(WsMsg::Binary(data))) => {
-                        // Wire shape (v2): [peer_index: u8][epoch: u8][header: 8 bytes][opus payload...]
-                        // The minimum size is 2 (peer_index + epoch) + 8 (header) + ≥1 Opus byte.
-                        if data.len() <= 2 + V2_HEADER_LEN {
+                        // Wire shape (v2): [peer_index: u8][header: 8 bytes][opus payload...]
+                        // The minimum size is 1 (peer index) + 8 (header) + ≥1 Opus byte.
+                        let Some((peer_idx, header, opus_bytes)) = parse_relay_frame(&data) else {
+                            eprintln!(
+                                "buzz-desktop: dropping malformed v2 audio relay frame ({} bytes)",
+                                data.len(),
+                            );
                             continue;
-                        }
-                        let peer_idx = data[0];
-                        let epoch = data[1];
-                        // Fence the peer-index reuse race: a frame authored by a
-                        // departed occupant that arrives after its index is
-                        // reassigned carries the old epoch. Drop it rather than
-                        // mis-attribute stale audio (and the new occupant's
-                        // human/agent STT policy) to whoever grabbed the index.
-                        // An index absent from the roster is also stale. A slot
-                        // with no known epoch (legacy relay) degrades to 0 on
-                        // both sides, so the fence is a no-op there.
-                        if !is_current_occupant(peer_idx, epoch, &index_to_epoch) {
+                        };
+                        // Protocol v2 has no media epoch. Drop frames for slots
+                        // absent from the control roster; delayed frames after
+                        // an index is reassigned cannot be fenced until v3.
+                        if !is_current_occupant(peer_idx, &index_to_epoch) {
                             continue;
                         }
                         // Suppress only an agent stream synthesized and
                         // published by this desktop. Other bot-role peers may
                         // publish their own legitimate audio and must play.
                         if is_locally_synthesized_peer(peer_idx, &local_tts_publishers) {
-                            continue;
-                        }
-                        let after_idx = &data[2..];
-                        let Some((header, opus_bytes)) = FrameHeader::parse(after_idx)
-                        else {
-                            // Malformed v2 frame: header parse only fails when
-                            // the slice is too short, which `if data.len() <= ...`
-                            // already guards. Defensive log + drop.
-                            eprintln!(
-                                "buzz-desktop: dropping malformed audio frame from peer {peer_idx} ({} bytes)",
-                                data.len(),
-                            );
-                            continue;
-                        };
-                        if opus_bytes.is_empty() {
                             continue;
                         }
                         let is_dtx = (header.flags & FLAG_DTX) != 0;
@@ -771,34 +746,16 @@ mod tests {
         );
     }
 
-    /// Causal regression for the peer-index reuse race (Jude's blocking
-    /// finding): a frame authored by a departed occupant that arrives after
-    /// its slot is reassigned to a new occupant carries the stale epoch and
-    /// must be fenced, never mis-attributed to the new occupant.
     #[test]
-    fn stale_epoch_frame_is_fenced_after_its_index_is_reused() {
+    fn v2_media_is_routed_only_for_current_roster_indices() {
         let mut index_to_epoch = std::collections::HashMap::new();
-        // Slot 3 first occupied at epoch 0.
         index_to_epoch.insert(3_u8, 0_u8);
         assert!(
-            is_current_occupant(3, 0, &index_to_epoch),
+            is_current_occupant(3, &index_to_epoch),
             "current occupant's frame is delivered"
         );
-
-        // The occupant departs and a new peer reuses slot 3 at epoch 1.
-        index_to_epoch.insert(3, 1);
         assert!(
-            !is_current_occupant(3, 0, &index_to_epoch),
-            "in-flight frame from the departed occupant (epoch 0) is fenced"
-        );
-        assert!(
-            is_current_occupant(3, 1, &index_to_epoch),
-            "the new occupant's frame (epoch 1) is delivered"
-        );
-
-        // A frame for an index absent from the roster is stale.
-        assert!(
-            !is_current_occupant(9, 0, &index_to_epoch),
+            !is_current_occupant(9, &index_to_epoch),
             "frame for an unoccupied index is dropped"
         );
     }
