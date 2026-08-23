@@ -175,11 +175,23 @@ jobs:
           # Push by digest, not by tag — the merge job assembles the tags
           # into one multi-arch manifest. This is what makes the native-arm
           # matrix possible.
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && format('type=docker,name=buzz-ci:release-{0}', matrix.arch) || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_NAME) }}
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
           cache-to: |
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
+
+      - name: Scan release image
+        env:
+          LOCAL_IMAGE: buzz-ci:release-${{ matrix.arch }}
+          REMOTE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build-release.outputs.digest }}
+        run: |
+          . ./bin/activate-hermit
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            scripts/scan-container-image.sh "$LOCAL_IMAGE"
+          else
+            scripts/scan-container-image.sh "$REMOTE_IMAGE"
+          fi
 
       - name: Build and push debug image by digest
         id: build-debug
@@ -190,9 +202,21 @@ jobs:
           target: runtime-debug
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && format('type=docker,name=buzz-ci:debug-{0}', matrix.arch) || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_NAME) }}
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+
+      - name: Scan debug image
+        env:
+          LOCAL_IMAGE: buzz-ci:debug-${{ matrix.arch }}
+          REMOTE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build-debug.outputs.digest }}
+        run: |
+          . ./bin/activate-hermit
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            scripts/scan-container-image.sh "$LOCAL_IMAGE"
+          else
+            scripts/scan-container-image.sh "$REMOTE_IMAGE"
+          fi
 
       - name: Export release and debug digests
         if: github.event_name != 'pull_request'
@@ -400,9 +424,20 @@ jobs:
           file: ./Dockerfile.push-gateway
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && format('type=docker,name=buzz-push-gateway-ci:{0}', matrix.arch) || 'type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=true' }}
           cache-from: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }}
           cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
+      - name: Scan push gateway image
+        env:
+          LOCAL_IMAGE: buzz-push-gateway-ci:${{ matrix.arch }}
+          REMOTE_IMAGE: ghcr.io/block/buzz-push-gateway@${{ steps.build.outputs.digest }}
+        run: |
+          . ./bin/activate-hermit
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            scripts/scan-container-image.sh "$LOCAL_IMAGE"
+          else
+            scripts/scan-container-image.sh "$REMOTE_IMAGE"
+          fi
       - name: Export digest
         if: github.event_name != 'pull_request'
         env:

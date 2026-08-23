@@ -120,11 +120,23 @@ jobs:
           file: ./Dockerfile.sprig
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: ${{ github.event_name == 'pull_request' && format('type=docker,name=buzz-sprig-ci:{0}', matrix.arch) || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_NAME) }}
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
           cache-to: |
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
+
+      - name: Scan image
+        env:
+          LOCAL_IMAGE: buzz-sprig-ci:${{ matrix.arch }}
+          REMOTE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          . ./bin/activate-hermit
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            scripts/scan-container-image.sh "$LOCAL_IMAGE"
+          else
+            scripts/scan-container-image.sh "$REMOTE_IMAGE"
+          fi
 
       - name: Export digest
         if: github.event_name != 'pull_request'
