@@ -348,14 +348,41 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   const composer = threadComposer(page);
   await automaticallyMention(composer, "Morgarita");
   const input = composer.getByTestId("message-input");
+  await input.evaluate((element) => {
+    const snapshots = [element.textContent ?? ""];
+    new MutationObserver(() =>
+      snapshots.push(element.textContent ?? ""),
+    ).observe(element, { childList: true, characterData: true, subtree: true });
+    (
+      window as typeof window & { __BUZZ_COMPOSER_TEXT_SNAPSHOTS__?: string[] }
+    ).__BUZZ_COMPOSER_TEXT_SNAPSHOTS__ = snapshots;
+  });
   const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
   const initialPulseVersion = Number(
     await avatar.getAttribute("data-pulse-version"),
   );
   await input.fill("hello");
+  await input.evaluate((element) => {
+    const snapshots = (
+      window as typeof window & { __BUZZ_COMPOSER_TEXT_SNAPSHOTS__?: string[] }
+    ).__BUZZ_COMPOSER_TEXT_SNAPSHOTS__;
+    snapshots?.splice(0, snapshots.length, element.textContent ?? "");
+  });
   await input.press("Enter");
 
-  await expect(input).toHaveText("", { timeout: 500 });
+  await expect(input).toHaveText("@Morgarita ", { timeout: 500 });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __BUZZ_COMPOSER_TEXT_SNAPSHOTS__?: string[];
+            }
+          ).__BUZZ_COMPOSER_TEXT_SNAPSHOTS__ ?? [],
+      ),
+    )
+    .not.toContain("");
   await expect(avatar).toHaveAttribute(
     "data-pulse-version",
     String(initialPulseVersion + 1),

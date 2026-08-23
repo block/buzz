@@ -58,6 +58,7 @@ type UseMentionSendFlowOptions = {
   mentions: UseMentionsResult;
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onAddressedAgentsSendStarted?: (pubkeys: readonly string[]) => void;
+  onAddressedAgentsComposerCleared?: (pubkeys: readonly string[]) => string;
   onAddressedAgentsSendFailed?: (pubkeys: readonly string[]) => void;
   onAddressedAgentsSendSucceeded?: (
     pubkeys: readonly string[],
@@ -102,6 +103,7 @@ export function useMentionSendFlow({
   mentions,
   onPrepareSendChannel,
   onAddressedAgentsSendStarted,
+  onAddressedAgentsComposerCleared,
   onAddressedAgentsSendFailed,
   onAddressedAgentsSendSucceeded,
   onInlineAgentMentionsSent,
@@ -411,6 +413,7 @@ export function useMentionSendFlow({
         );
       };
       let composerCleared = false;
+      let optimisticComposerContent = "";
       const restoreComposerAfterFailure = () => {
         if (!composerCleared) return;
         composerCleared = false;
@@ -427,7 +430,7 @@ export function useMentionSendFlow({
         }
         const canRestoreCurrentComposer =
           canAnimateCurrentComposer &&
-          contentRef.current.trim().length === 0 &&
+          contentRef.current.trim() === optimisticComposerContent.trim() &&
           !hasUnsavedMedia();
         if (!canRestoreCurrentComposer && draft.recoveryDraftKey) {
           saveQueuedAttachmentsForDraft(
@@ -456,6 +459,12 @@ export function useMentionSendFlow({
           onAddressedAgentsSendStarted?.(draft.addressedAgentPubkeys);
         }
         clearComposer();
+        if (draft.addressedAgentPubkeys.length > 0) {
+          optimisticComposerContent =
+            onAddressedAgentsComposerCleared?.(draft.addressedAgentPubkeys) ??
+            "";
+          contentRef.current = optimisticComposerContent;
+        }
         composerCleared = true;
       }
       let uploadStarted = false;
@@ -677,6 +686,7 @@ export function useMentionSendFlow({
       mentions.isAgentPubkey,
       mentions.revalidateMentionPubkeys,
       onAddressedAgentsSendStarted,
+      onAddressedAgentsComposerCleared,
       onAddressedAgentsSendFailed,
       onAddressedAgentsSendSucceeded,
       onInlineAgentMentionsSent,

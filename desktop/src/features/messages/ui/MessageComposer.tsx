@@ -311,8 +311,8 @@ function MessageComposerImpl({
     (
       pubkeys?: readonly string[],
       allowedUnpinnedPubkeys?: readonly string[],
-    ) => void
-  >(() => {});
+    ) => string
+  >(() => "");
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -323,8 +323,11 @@ function MessageComposerImpl({
     emojiAutocomplete,
     mentions,
     onAddressedAgentsSendStarted: addressPulse.pulseMany,
+    onAddressedAgentsComposerCleared: (pubkeys) =>
+      restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
+      if (newlyPinnedPubkeys.length === 0) return;
       requestAnimationFrame(() =>
         restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys),
       );

@@ -265,19 +265,21 @@ export function useAgentAddressLockPicker({
             allowedUnpinned.has(agent.pubkey)) &&
           getMentionOffsets(text, agent.displayName).length === 0,
       );
-      if (missingAgents.length === 0) return;
+      if (missingAgents.length === 0) return text;
       for (const agent of missingAgents) {
         mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
           isAgent: true,
         });
       }
+      const insertedText = `${missingAgents
+        .map((agent) => `@${agent.displayName}`)
+        .join(" ")} `;
       applyAutocompleteEdit({
         replaceFromOffset: 0,
         replaceToOffset: 0,
-        insertText: `${missingAgents
-          .map((agent) => `@${agent.displayName}`)
-          .join(" ")} `,
+        insertText: insertedText,
       });
+      return `${insertedText}${text}`;
     },
     [
       applyAutocompleteEdit,
