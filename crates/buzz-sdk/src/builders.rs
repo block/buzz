@@ -573,6 +573,12 @@ pub fn build_profile(
 }
 
 /// Build a NIP-29 add-member event (kind 9000).
+///
+/// `.allow_self_tagging()` is required: a self-add (target_pubkey equals the
+/// signer's pubkey) is a legitimate operation — NIP-29's PUT_USER lets a user
+/// join a channel by adding themselves. Without it, nostr 0.44's
+/// `EventBuilder::sign_with_keys` silently strips the `p` tag matching the
+/// signer, and the relay rejects the event as "missing p tag".
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -586,10 +592,14 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags).allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
+///
+/// `.allow_self_tagging()` is required for the same reason as
+/// [`build_add_member`]: a self-removal (leave via remove-member) is a valid
+/// operation, and without it the `p` tag is stripped during signing.
 pub fn build_remove_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -599,7 +609,7 @@ pub fn build_remove_member(
         tag(&["h", &channel_id.to_string()])?,
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags).allow_self_tagging())
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -2958,6 +2968,48 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn add_member_self_target_preserves_p_tag() {
+        // nostr 0.44 strips p tags matching the signer unless
+        // `.allow_self_tagging()` is set. Self-add is a valid NIP-29
+        // operation (joining a channel by adding yourself).
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_add_member(cid, &self_pubkey, None::<MemberRole>).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-targeted p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn add_member_self_target_with_role_preserves_p_tag() {
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_add_member(cid, &self_pubkey, Some(MemberRole::Admin)).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert!(has_tag(&ev, "p", &self_pubkey));
+        assert!(has_tag(&ev, "role", "admin"));
+    }
+
+    #[test]
+    fn remove_member_self_target_preserves_p_tag() {
+        let cid = uuid();
+        let keys = Keys::generate();
+        let self_pubkey = keys.public_key().to_hex();
+        let builder = build_remove_member(cid, &self_pubkey).unwrap();
+        let ev = builder.sign_with_keys(&keys).expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9001);
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-targeted p tag must survive signing"
+        );
     }
 
     #[test]
