@@ -208,9 +208,12 @@ void main() {
     final notifier = _FakeProfileNotifier();
 
     await tester.pumpWidget(
-      WidgetHelpers.testable(
+      ProviderScope(
         overrides: [profileProvider.overrideWith(() => notifier)],
-        child: const ProfileEditPage(),
+        child: MaterialApp(
+          theme: AppTheme.dark(),
+          home: const Scaffold(body: ProfileEditPage()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -223,6 +226,7 @@ void main() {
       'initialValue': 'Alice',
       'placeholder': 'Display name',
       'multiline': false,
+      'brightness': 'dark',
       'allowUnchangedSubmission': false,
     });
     expect(notifier.savedDisplayNames, ['Alice Native']);

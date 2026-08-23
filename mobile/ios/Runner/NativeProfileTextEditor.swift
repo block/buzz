@@ -37,7 +37,8 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       let title = arguments["title"] as? String,
       let initialValue = arguments["initialValue"] as? String,
       let placeholder = arguments["placeholder"] as? String,
-      let multiline = arguments["multiline"] as? Bool
+      let multiline = arguments["multiline"] as? Bool,
+      let brightness = arguments["brightness"] as? String
     else {
       result(
         FlutterError(
@@ -57,6 +58,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         initialValue: initialValue,
         placeholder: placeholder,
         multiline: multiline,
+        brightness: brightness,
         allowUnchangedSubmission: allowUnchangedSubmission,
         result: result
       )
@@ -69,6 +71,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     initialValue: String,
     placeholder: String,
     multiline: Bool,
+    brightness: String,
     allowUnchangedSubmission: Bool,
     result: @escaping FlutterResult
   ) {
@@ -107,6 +110,9 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       onSet: { [weak self] value in self?.finish(value: value) }
     )
     let navigationController = UINavigationController(rootViewController: editor)
+    navigationController.overrideUserInterfaceStyle = brightness == "dark"
+      ? .dark
+      : .light
     if UIDevice.current.userInterfaceIdiom == .pad {
       navigationController.modalPresentationStyle = .formSheet
     }

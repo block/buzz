@@ -110,6 +110,7 @@ class ProfileEditPage extends HookConsumerWidget {
             initialValue: initialValue,
             placeholder: hintText,
             multiline: multiline,
+            brightness: Theme.of(context).brightness,
             onSave: onSave,
             shouldRetryOnError: (error) =>
                 error is! ProfileCommunityChangedException,
