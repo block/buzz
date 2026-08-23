@@ -181,6 +181,26 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(tester.getCenter(retained).dy, greaterThan(emojiCenter));
     await tester.pump(const Duration(milliseconds: 75));
     expect(retained, findsNothing);
+
+    final animatedCenter = tester
+        .getCenter(
+          find.byKey(const ValueKey('animated-avatar-capture-preview')),
+        )
+        .dy;
+    await tester.tap(find.text('Emoji'));
+    await tester.pump();
+    final returningPreview = find.byKey(
+      const ValueKey('avatar-preview-position'),
+    );
+    expect(
+      tester.getCenter(returningPreview).dy,
+      closeTo(animatedCenter, 0.01),
+    );
+
+    await tester.pump(const Duration(milliseconds: 75));
+    expect(tester.getCenter(returningPreview).dy, lessThan(animatedCenter));
+    await tester.pump(const Duration(milliseconds: 75));
+    expect(tester.getCenter(returningPreview).dy, closeTo(emojiCenter, 0.01));
   });
 
   testWidgets('plays an animated avatar on the profile and image editor', (

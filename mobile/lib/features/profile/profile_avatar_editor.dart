@@ -133,6 +133,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final error = useState<String?>(null);
     final dataset = ref.watch(emojiDatasetOrEmptyProvider);
     final modeTransitionDirection = useRef(1.0);
+    final modeTransitionFrom = useRef(mode);
     final retainedPreview = useRef<Widget?>(null);
     final retainedPreviewTop = useRef(0.0);
     final modeTransitionController = useAnimationController(
@@ -146,6 +147,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
 
     void selectMode(ProfileAvatarMode nextMode) {
       if (nextMode == mode) return;
+      modeTransitionFrom.value = mode;
       modeTransitionDirection.value = nextMode.index > mode.index ? 1 : -1;
       unawaited(HapticFeedback.selectionClick());
       onAnimatedPrepareChanged(null);
@@ -244,7 +246,10 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         emoji: selectedEmoji.value,
         color: Color(selectedColor.value),
         animationKey: emojiPreviewKey.value,
-        reduceMotion: reduceMotion,
+        reduceMotion:
+            reduceMotion ||
+            (modeTransitionFrom.value == ProfileAvatarMode.animated &&
+                modeTransitionProgress < 1),
       ),
       ProfileAvatarMode.animated => null,
     };
@@ -308,6 +313,20 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             : avatarBackgroundPreviewShift;
         final previewShift = min(requestedShift, maximumShift);
         final previewTop = basePreviewTop - previewShift;
+        final returningToEmoji =
+            mode == ProfileAvatarMode.emoji &&
+            modeTransitionFrom.value == ProfileAvatarMode.animated;
+        final animatedModeHeight = max(
+          0.0,
+          viewportHeight - _editorControlsBottom - basePreviewTop,
+        );
+        final animatedPreviewSize = animatedModeHeight < 400 ? 180.0 : 228.0;
+        final animatedPreviewTop =
+            basePreviewTop + (animatedPreviewSize - _previewBlockSize) / 2;
+        final displayedPreviewTop = returningToEmoji
+            ? animatedPreviewTop +
+                  (previewTop - animatedPreviewTop) * modeTransitionProgress
+            : previewTop;
         if (mode != ProfileAvatarMode.animated) {
           retainedPreviewTop.value = previewTop;
         }
@@ -426,14 +445,16 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             if (fixedPreview != null)
               AnimatedPositioned(
                 key: const ValueKey('avatar-preview-position'),
-                duration: reduceMotion
-                    ? Duration.zero
-                    : const Duration(milliseconds: 150),
                 curve: Curves.easeOutCubic,
                 left: Grid.gutter,
                 right: Grid.gutter,
-                top: previewTop,
+                top: displayedPreviewTop,
                 height: _previewBlockSize,
+                duration: returningToEmoji
+                    ? Duration.zero
+                    : reduceMotion
+                    ? Duration.zero
+                    : const Duration(milliseconds: 150),
                 child: Center(
                   child: AnimatedBuilder(
                     animation: curvedEntrance,
