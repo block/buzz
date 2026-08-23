@@ -1198,9 +1198,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
         | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
     };
 
-    // node_required now means Buzz cannot provide npm for this platform.
-    // On supported desktop platforms, Buzz downloads a private Node/npm
-    // runtime into app data before running npm-backed adapter installs.
+    // True only when Buzz cannot provide npm for this platform.
     let node_required = matches!(
         availability,
         AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
@@ -1222,6 +1220,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             mcp_command: runtime.mcp_command.map(str::to_string),
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
+            provider_profiles: super::provider_profiles_for_runtime(runtime.id),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
             max_tokens_env_var: runtime.max_tokens_env_var.map(str::to_string),
             context_limit_env_var: runtime.context_limit_env_var.map(str::to_string),
@@ -1362,6 +1361,7 @@ pub fn discover_acp_runtimes_from(
                 mcp_command: None,
                 model_env_var: None,
                 provider_env_var: None,
+                provider_profiles: Vec::new(),
                 thinking_env_var: None,
                 max_tokens_env_var: None,
                 context_limit_env_var: None,

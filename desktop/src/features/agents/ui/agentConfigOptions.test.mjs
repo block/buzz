@@ -294,3 +294,44 @@ test("getProviderApiKeyLabel_provider_id_trimmed_and_lowercased", () => {
   // Mirrors getProviderApiKeyEnvVar normalisation behaviour.
   assert.equal(getProviderApiKeyLabel(" Anthropic "), "Anthropic API Key");
 });
+
+test("runtime provider profiles add Ollama and Hugging Face only to Buzz Agent", () => {
+  const profiles = [
+    {
+      id: "ollama",
+      label: "Ollama",
+      aliases: [],
+      modelEnv: "OLLAMA_MODEL",
+      baseUrlEnv: "OLLAMA_BASE_URL",
+      defaultBaseUrl: "http://127.0.0.1:11434/v1",
+      credential: null,
+      requiredEnv: [],
+      supportsReasoningEffort: false,
+    },
+    {
+      id: "huggingface",
+      label: "Hugging Face",
+      aliases: ["hf"],
+      modelEnv: "HUGGINGFACE_MODEL",
+      baseUrlEnv: "HF_INFERENCE_BASE_URL",
+      defaultBaseUrl: "https://router.huggingface.co/v1",
+      credential: {
+        env: "HF_TOKEN",
+        label: "Hugging Face Token",
+        deviceKeyring: true,
+      },
+      requiredEnv: ["HF_TOKEN"],
+      supportsReasoningEffort: false,
+    },
+  ];
+  const options = getPersonaProviderOptions(
+    "",
+    "buzz-agent",
+    undefined,
+    undefined,
+    profiles,
+  );
+  assert.ok(options.some((option) => option.id === "ollama"));
+  assert.ok(options.some((option) => option.id === "huggingface"));
+  assert.equal(getProviderApiKeyLabel("hf", profiles), "Hugging Face Token");
+});

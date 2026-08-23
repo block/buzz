@@ -15,6 +15,15 @@ test("hf:// prefix → huggingface", () => {
   });
 });
 
+test("immutable Hub GGUF ref → huggingface", () => {
+  const ref =
+    "unsloth/Qwen3-GGUF@b17cb02dd882d5b6ab62fc777ad2995f19668350/model-Q4_K_M.gguf";
+  assert.deepEqual(classifyModelRef(ref), {
+    kind: "huggingface",
+    ref,
+  });
+});
+
 test("absolute path → local-path", () => {
   assert.deepEqual(classifyModelRef("/Users/me/models/qwen.gguf"), {
     kind: "local-path",

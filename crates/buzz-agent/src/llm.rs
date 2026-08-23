@@ -10,6 +10,7 @@ use crate::config::{
     is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_databricks_v2,
     normalize_effort_for_provider, Config, OpenAiApi, Provider, ThinkingEffort,
 };
+use crate::provider_profiles::ChatTokenLimitField;
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
 };
@@ -27,6 +28,12 @@ const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_se
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
 type OpenAiParse = fn(Value) -> Result<LlmResponse, AgentError>;
+
+fn effective_thinking_effort(cfg: &Config) -> Option<ThinkingEffort> {
+    cfg.supports_reasoning_effort
+        .then_some(cfg.thinking_effort)
+        .flatten()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabricksV2Route {
@@ -83,7 +90,11 @@ impl Llm {
         tools: &[ToolDef],
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
-        let effort = cfg.thinking_effort;
+        // Named compatibility profiles start conservatively: do not send a
+        // provider-specific reasoning field until that profile is verified to
+        // accept it. The generic OpenAI and gateway profiles retain existing
+        // behavior.
+        let effort = effective_thinking_effort(cfg);
         let call_start = std::time::Instant::now();
         let result = match cfg.provider {
             Provider::Anthropic => self
@@ -115,11 +126,7 @@ impl Llm {
                     .and_then(parse_openai_with_reasoning_details)
             }
             Provider::OpenAi | Provider::Databricks => {
-                let provider_str = match cfg.provider {
-                    Provider::OpenAi => "openai",
-                    Provider::Databricks => "databricks",
-                    _ => unreachable!(),
-                };
+                let provider_str = cfg.provider_id;
                 self.openai_request(cfg, effective_model, |use_responses, request_model| {
                     // Normalize effort via the manifest: resolve the actual provider/model
                     // record and apply resolve_openai_effort over its supported_efforts.
@@ -225,7 +232,7 @@ impl Llm {
             let duration_ms = call_start.elapsed().as_millis();
             tracing::info!(
                 model = effective_model,
-                provider = ?cfg.provider,
+                provider = cfg.provider_id,
                 thinking_effort = ?cfg.thinking_effort,
                 duration_ms,
                 input_tokens = ?response.input_tokens,
@@ -348,7 +355,7 @@ impl Llm {
             let duration_ms = call_start.elapsed().as_millis();
             tracing::info!(
                 model = effective_model,
-                provider = ?cfg.provider,
+                provider = cfg.provider_id,
                 duration_ms,
                 "llm: summarize completed"
             );
@@ -796,7 +803,12 @@ fn openai_body(
         })
         .collect();
     let mut body = json!({ "model": effective_model, "stream": false,
-        "max_completion_tokens": cfg.max_output_tokens, "messages": messages });
+        "messages": messages });
+    let token_limit_field = match cfg.chat_token_limit {
+        ChatTokenLimitField::MaxCompletionTokens => "max_completion_tokens",
+        ChatTokenLimitField::MaxTokens => "max_tokens",
+    };
+    body[token_limit_field] = json!(cfg.max_output_tokens);
     if let Some(e) = effort {
         body["reasoning_effort"] = json!(e.openai_effort_str());
     }
@@ -2590,8 +2602,18 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     fn cfg(provider: Provider) -> Config {
+        let provider_id = match provider {
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAi => "openai",
+            Provider::Databricks => "databricks",
+            Provider::DatabricksV2 => "databricks_v2",
+            Provider::OpenRouter => "openrouter",
+        };
+        let profile =
+            crate::provider_profiles::provider_profile(provider_id).expect("test provider profile");
         Config {
             provider,
+            provider_id,
             system_prompt: "system".into(),
             max_rounds: 10,
             max_output_tokens: 1024,
@@ -2618,10 +2640,47 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            chat_token_limit: profile.chat_token_limit,
+            supports_reasoning_effort: profile.supports_reasoning_effort,
             hints_enabled: true,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
+        }
+    }
+
+    fn named_openai_compat_cfg(profile_id: &'static str) -> Config {
+        let profile = crate::provider_profiles::provider_profile(profile_id)
+            .expect("named compatibility profile");
+        let mut config = cfg(Provider::OpenAi);
+        config.provider_id = profile.id;
+        config.chat_token_limit = profile.chat_token_limit;
+        config.supports_reasoning_effort = profile.supports_reasoning_effort;
+        config
+    }
+
+    #[test]
+    fn named_compatibility_profiles_use_max_tokens_and_suppress_effort() {
+        for profile_id in ["ollama", "huggingface"] {
+            let mut config = named_openai_compat_cfg(profile_id);
+            config.thinking_effort = Some(ThinkingEffort::High);
+            let body = openai_body(
+                &config,
+                "system",
+                &[HistoryItem::User("hello".into())],
+                &[],
+                "model",
+                effective_thinking_effort(&config),
+            );
+            assert_eq!(body["max_tokens"], 1024, "profile={profile_id}");
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "profile={profile_id}"
+            );
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "profile={profile_id}"
+            );
         }
     }
 

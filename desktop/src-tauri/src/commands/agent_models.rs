@@ -346,13 +346,11 @@ use openrouter::{
 };
 
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("openai" | "openai-compat")
-    )
+    provider
+        .and_then(buzz_agent_pkg::provider_profiles::provider_profile)
+        .is_some_and(|profile| {
+            profile.transport == buzz_agent_pkg::provider_profiles::ProviderTransport::OpenAi
+        })
 }
 
 #[cfg(test)]
@@ -362,10 +360,21 @@ fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
-fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_or_process_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    format!("{}/models", base_url.trim_end_matches('/'))
+fn provider_models_url_for_discovery(
+    provider: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let profile = buzz_agent_pkg::provider_profiles::provider_profile(provider)
+        .ok_or_else(|| format!("unknown provider {provider:?}"))?;
+    let configured_base_url = profile
+        .base_url_env
+        .and_then(|key| env_or_process_value(env, key));
+    let base_url = match (profile.id, configured_base_url) {
+        (_, Some(base_url)) => base_url,
+        ("ollama", None) => crate::ollama::openai_base_url()?,
+        (_, None) => profile.default_base_url.to_string(),
+    };
+    Ok(format!("{}/models", base_url.trim_end_matches('/')))
 }
 
 fn is_agent_text_model_id(id: &str) -> bool {
@@ -496,19 +505,40 @@ async fn discover_openai_compatible_models(
         return Ok(None);
     }
 
+    let provider_id = provider.as_deref().map(str::trim).unwrap_or("openai");
+    let profile = (!relay_mesh)
+        .then(|| buzz_agent_pkg::provider_profiles::provider_profile(provider_id))
+        .flatten();
+    let credential_env = profile
+        .and_then(|profile| profile.credential)
+        .map(|credential| credential.env);
     let api_key = if relay_mesh {
         crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
-    } else {
-        match provider.required_env(env, "OPENAI_COMPAT_API_KEY")? {
+    } else if let Some(credential) = profile.and_then(|profile| profile.credential) {
+        let value = if credential.device_keyring {
+            match env_or_process_value(env, credential.env) {
+                Some(value) => Some(value),
+                None => crate::commands::load_provider_secret(provider_id)?,
+            }
+        } else {
+            provider.required_env(env, credential.env)?
+        };
+        match value {
             Some(api_key) => api_key,
             None => return Ok(None),
         }
+    } else {
+        // Ollama ignores the bearer value but OpenAI-compatible clients expect
+        // one to exist. It is not a credential and is never persisted.
+        "ollama".to_string()
     };
-    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
+    let redaction_env = credential_env
+        .map(|key| redaction_env_with_value(env, key, &api_key))
+        .unwrap_or_else(|| env.clone());
     let url = if relay_mesh {
         format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
     } else {
-        openai_compatible_models_url_for_discovery(env)
+        provider_models_url_for_discovery(provider_id, env)?
     };
     let response = client
         .get(&url)

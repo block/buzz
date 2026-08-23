@@ -626,8 +626,11 @@ pub struct AcpRuntimeCatalogEntry {
     pub mcp_command: Option<String>,
     /// Environment variable used to apply the initial model, when supported.
     pub model_env_var: Option<String>,
-    /// Environment variable used to apply the selected LLM provider, when supported.
+    /// Environment variable used to apply the selected LLM provider.
     pub provider_env_var: Option<String>,
+    /// Secret-free LLM providers projected from the Rust catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_profiles: Vec<super::AcpProviderProfile>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
     pub max_tokens_env_var: Option<String>,
@@ -648,11 +651,9 @@ pub struct AcpRuntimeCatalogEntry {
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
-    /// Whether this entry came from the compiled-in catalog or a user-supplied
-    /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
+    /// Origin used by the UI to decide editability.
     pub source: HarnessSource,
-    /// Definition-level env vars for `source: custom` entries; populated from
-    /// `HarnessDefinition.env` so saves don't silently erase existing vars.
+    /// Definition env for custom entries, preserved across saves.
     /// Absent for builtin/preset entries. Skipped when empty in serialization.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub definition_env: BTreeMap<String, String>,

@@ -150,6 +150,31 @@ fn openai_models_url_uses_openai_default_base_url() {
 }
 
 #[test]
+fn named_openai_compatible_profiles_use_their_catalog_urls() {
+    let ollama = BTreeMap::from([(
+        "OLLAMA_BASE_URL".to_string(),
+        "http://127.0.0.1:22434/v1/".to_string(),
+    )]);
+    assert_eq!(
+        provider_models_url_for_discovery("ollama", &ollama).expect("Ollama URL"),
+        "http://127.0.0.1:22434/v1/models"
+    );
+    assert_eq!(
+        provider_models_url_for_discovery("huggingface", &BTreeMap::new())
+            .expect("Hugging Face URL"),
+        "https://router.huggingface.co/v1/models"
+    );
+    let custom = BTreeMap::from([(
+        "HF_INFERENCE_BASE_URL".to_string(),
+        "https://endpoint.example/v1/".to_string(),
+    )]);
+    assert_eq!(
+        provider_models_url_for_discovery("hf", &custom).expect("custom URL"),
+        "https://endpoint.example/v1/models"
+    );
+}
+
+#[test]
 fn anthropic_models_url_uses_anthropic_default_base_url() {
     assert_eq!(
         anthropic_models_url(&BTreeMap::new()),

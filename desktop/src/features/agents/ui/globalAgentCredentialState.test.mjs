@@ -58,3 +58,34 @@ test("global defaults accept a provider key set in runtime config", () => {
   assert.equal(state.apiKeyInherited, true);
   assert.equal(state.credentialsValid, true);
 });
+
+test("global defaults accept a device-keyring provider credential", () => {
+  const state = getGlobalAgentCredentialState({
+    bakedEnvKeys: [],
+    deviceSatisfiedEnvKeys: ["HF_TOKEN"],
+    envVars: {},
+    provider: "huggingface",
+    providerProfiles: [
+      {
+        id: "huggingface",
+        label: "Hugging Face",
+        aliases: ["hf"],
+        modelEnv: "HUGGINGFACE_MODEL",
+        baseUrlEnv: "HF_INFERENCE_BASE_URL",
+        defaultBaseUrl: "https://router.huggingface.co/v1",
+        credential: {
+          env: "HF_TOKEN",
+          label: "Hugging Face Token",
+          deviceKeyring: true,
+        },
+        requiredEnv: ["HF_TOKEN"],
+        supportsReasoningEffort: false,
+      },
+    ],
+    runtimeFileConfig: null,
+    runtimeId: "buzz-agent",
+  });
+
+  assert.equal(state.apiKeyDeviceSatisfied, true);
+  assert.equal(state.credentialsValid, true);
+});

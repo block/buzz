@@ -10,7 +10,8 @@ export type ModelRefKind =
 
 /**
  * Classify a model-ref string the way mesh-llm's runtime does:
- *  - `hf://…` → HuggingFace ref
+ *  - `hf://…` → Hugging Face layered package ref
+ *  - `owner/repo@revision/file.gguf` → Hugging Face model-file ref
  *  - starts with `/` or `./` or `~`, OR ends with `.gguf` → local file
  *  - otherwise non-empty → catalog name
  *  - empty/whitespace → unknown
@@ -26,6 +27,9 @@ export function classifyModelRef(raw: string): ModelRefKind {
     return { kind: "unknown" };
   }
   if (trimmed.startsWith("hf://")) {
+    return { kind: "huggingface", ref: trimmed };
+  }
+  if (/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+@[^/]+\/.+\.gguf$/i.test(trimmed)) {
     return { kind: "huggingface", ref: trimmed };
   }
   // Local path heuristics. Conservative: only mark as path when there are

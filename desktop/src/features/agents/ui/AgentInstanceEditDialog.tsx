@@ -14,11 +14,9 @@ import {
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
-  ManagedAgent,
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
-import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -74,19 +72,18 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import {
-  getProviderApiKeyEnvVar,
-  getProviderApiKeyLabel,
-} from "./agentConfigOptions";
+import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import { useProviderSecret } from "./useProviderSecret";
+import { ProviderCredentialField } from "./ProviderCredentialField";
+import { providerSecretSatisfiedEnvKeys } from "./providerSecretCredentialState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
@@ -96,6 +93,7 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import type { AgentInstanceEditDialogProps } from "./AgentInstanceEditDialogProps";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -104,16 +102,7 @@ export function AgentInstanceEditDialog({
   onEditLinkedPersona,
   onOpenChange,
   onUpdated,
-}: {
-  agent: ManagedAgent;
-  /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
-  initialFocus?: EditAgentFocusTarget;
-  open: boolean;
-  /** Present only when the linked definition is editable (non-built-in, resolved). Caller closes this dialog and enters definition-edit. */
-  onEditLinkedPersona?: () => void;
-  onOpenChange: (open: boolean) => void;
-  onUpdated?: (agent: ManagedAgent) => void;
-}) {
+}: AgentInstanceEditDialogProps) {
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
@@ -380,8 +369,15 @@ export function AgentInstanceEditDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
-  // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
-  // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
+  const effectiveProvider =
+    (inheritedSubmission.provider ?? "").trim() ||
+    inheritedProviderDefault.value;
+  const providerSecret = useProviderSecret(
+    effectiveProvider,
+    selectedRuntime?.providerProfiles,
+    open,
+  );
+
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
       open,
@@ -391,6 +387,8 @@ export function AgentInstanceEditDialog({
       envVars: inheritedSubmission.envVars,
       globalEnvVars: globalConfig.env_vars,
       personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
+      providerProfiles: selectedRuntime?.providerProfiles,
+      deviceSatisfiedEnvKeys: providerSecretSatisfiedEnvKeys(providerSecret),
     });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
@@ -408,9 +406,6 @@ export function AgentInstanceEditDialog({
     () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
     [globalConfig.env_vars, inheritedSubmission.envVars],
   );
-  const effectiveProvider =
-    (inheritedSubmission.provider ?? "").trim() ||
-    inheritedProviderDefault.value;
   const providerForDiscovery = llmProviderFieldVisible ? effectiveProvider : "";
 
   const {
@@ -426,11 +421,10 @@ export function AgentInstanceEditDialog({
     selectedRuntime,
   });
 
-  // D2/D3: the top-level API key owns display while the readiness gate keeps the
-  // complete required-key list; advancedRequiredEnvKeys drives EnvVarsEditor
-  // display only. The effective snapshot covers persona inheritance during an
-  // instance inherit transition.
-  const providerApiKeyEnvVar = getProviderApiKeyEnvVar(effectiveProvider);
+  const providerApiKeyEnvVar = getProviderApiKeyEnvVar(
+    effectiveProvider,
+    selectedRuntime?.providerProfiles,
+  );
   const personaSatisfied =
     providerApiKeyEnvVar != null &&
     !(providerApiKeyEnvVar in envVars) &&
@@ -444,6 +438,7 @@ export function AgentInstanceEditDialog({
     personaSatisfied,
     provider: effectiveProvider,
     requiredEnvKeys,
+    providerProfiles: selectedRuntime?.providerProfiles,
   });
   const {
     advancedRequiredEnvKeys,
@@ -821,6 +816,7 @@ export function AgentInstanceEditDialog({
       ? inheritedProviderDefault.value
       : "",
     hideProviderIds,
+    selectedRuntime?.providerProfiles,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -1057,19 +1053,21 @@ export function AgentInstanceEditDialog({
             ) : null}
 
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
-              <PersonaProviderApiKeyField
+              <ProviderCredentialField
                 disabled={updateMutation.isPending}
                 envVarName={topLevelSecretEnvVar}
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,
                     [topLevelSecretEnvVar]: next,
                   }));
                 }}
+                provider={effectiveProvider}
+                providerProfiles={selectedRuntime?.providerProfiles}
+                providerSecret={providerSecret}
                 value={apiKeyValue}
               />
             ) : null}

@@ -25,6 +25,9 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         if let Err(error) = shutdown_managed_agents(app) {
             eprintln!("zorro-desktop: failed to stop managed agents: {error}");
         }
+        if let Err(error) = crate::ollama::stop() {
+            eprintln!("zorro-desktop: failed to stop managed Ollama: {error}");
+        }
         #[cfg(feature = "mesh-llm")]
         shutdown_mesh_runtime(app);
     }
@@ -46,6 +49,7 @@ pub(crate) fn install_signal_handler(
             app.state::<crate::terminal_runtime::TerminalSessions>()
                 .shutdown_all();
             let _ = shutdown_managed_agents(&app);
+            let _ = crate::ollama::stop();
             #[cfg(feature = "mesh-llm")]
             shutdown_mesh_runtime(&app);
         }

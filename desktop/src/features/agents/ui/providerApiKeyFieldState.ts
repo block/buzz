@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { AcpProviderProfile } from "@/shared/api/types";
 
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
@@ -30,6 +31,7 @@ export function getProviderApiKeyFieldState({
   personaSatisfied = false,
   provider,
   requiredEnvKeys,
+  providerProfiles,
 }: {
   bakedEnvKeys: readonly string[] | undefined;
   effectiveEnvVars: EnvVarsValue;
@@ -39,8 +41,9 @@ export function getProviderApiKeyFieldState({
   personaSatisfied?: boolean;
   provider: string;
   requiredEnvKeys: readonly string[];
+  providerProfiles?: readonly AcpProviderProfile[];
 }): ProviderApiKeyFieldState {
-  const secretEnvVar = getProviderApiKeyEnvVar(provider);
+  const secretEnvVar = getProviderApiKeyEnvVar(provider, providerProfiles);
   const advancedRequiredEnvKeys = secretEnvVar
     ? requiredEnvKeys.filter((key) => key !== secretEnvVar)
     : requiredEnvKeys;
@@ -108,6 +111,7 @@ export function useProviderApiKeyFieldState({
   personaSatisfied,
   provider,
   requiredEnvKeys,
+  providerProfiles,
 }: {
   bakedEnvKeys: readonly string[] | undefined;
   effectiveEnvVars: EnvVarsValue;
@@ -117,6 +121,7 @@ export function useProviderApiKeyFieldState({
   personaSatisfied?: boolean;
   provider: string;
   requiredEnvKeys: readonly string[];
+  providerProfiles?: readonly AcpProviderProfile[];
 }): ProviderApiKeyFieldState {
   return React.useMemo(
     () =>
@@ -129,6 +134,7 @@ export function useProviderApiKeyFieldState({
         personaSatisfied,
         provider,
         requiredEnvKeys,
+        providerProfiles,
       }),
     [
       bakedEnvKeys,
@@ -139,6 +145,7 @@ export function useProviderApiKeyFieldState({
       personaSatisfied,
       provider,
       requiredEnvKeys,
+      providerProfiles,
     ],
   );
 }

@@ -1,4 +1,5 @@
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
+import type { AcpProviderProfile } from "@/shared/api/types";
 import {
   getBakedSatisfiedEnvKeys,
   getProviderApiKeyEnvVar,
@@ -11,15 +12,23 @@ export function getGlobalAgentCredentialState({
   provider,
   runtimeFileConfig,
   runtimeId,
+  providerProfiles,
+  deviceSatisfiedEnvKeys = [],
 }: {
   bakedEnvKeys: readonly string[];
   envVars: Record<string, string>;
   provider: string;
   runtimeFileConfig: RuntimeFileConfigSubset | null | undefined;
   runtimeId: string;
+  providerProfiles?: readonly AcpProviderProfile[];
+  deviceSatisfiedEnvKeys?: readonly string[];
 }) {
-  const requiredEnvKeys = requiredCredentialEnvKeys(runtimeId, provider);
-  const apiKeyEnvVar = getProviderApiKeyEnvVar(provider);
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    runtimeId,
+    provider,
+    providerProfiles,
+  );
+  const apiKeyEnvVar = getProviderApiKeyEnvVar(provider, providerProfiles);
   const bakedSatisfiedEnvKeys = getBakedSatisfiedEnvKeys(
     requiredEnvKeys,
     envVars,
@@ -49,12 +58,15 @@ export function getGlobalAgentCredentialState({
     apiKeyEnvVar !== null &&
     apiKeyValue.length === 0 &&
     (bakedSatisfiedEnvKeys.includes(apiKeyEnvVar) || apiKeyFileSatisfied);
+  const apiKeyDeviceSatisfied =
+    apiKeyEnvVar !== null && deviceSatisfiedEnvKeys.includes(apiKeyEnvVar);
   const advancedCredentialMissing = advancedRequiredEnvKeys.some(
     (key) => (envVars[key] ?? "").trim().length === 0,
   );
   const apiKeyMissing =
     apiKeyEnvVar !== null &&
     !apiKeyInherited &&
+    !apiKeyDeviceSatisfied &&
     apiKeyValue.trim().length === 0;
 
   return {
@@ -64,6 +76,7 @@ export function getGlobalAgentCredentialState({
     apiKeyEnvVar,
     apiKeyFileSatisfied,
     apiKeyInherited,
+    apiKeyDeviceSatisfied,
     apiKeyValue,
     credentialsValid: !advancedCredentialMissing && !apiKeyMissing,
   };

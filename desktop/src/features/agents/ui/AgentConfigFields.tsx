@@ -38,7 +38,6 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
-  getProviderApiKeyLabel,
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
 import {
@@ -46,7 +45,6 @@ import {
   AgentDropdownSelect,
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
-import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import {
@@ -63,6 +61,32 @@ import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup"
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { CardMintKeyCue } from "./CardMintKeyCue";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
+import { useProviderSecret } from "./useProviderSecret";
+import { ProviderCredentialField } from "./ProviderCredentialField";
+import { providerSecretSatisfiedEnvKeys } from "./providerSecretCredentialState";
+import {
+  CANONICAL_CONFIG_BEHAVIORS,
+  resolveDisclosure,
+  shouldRenderModelControl,
+  shouldRevealDependentConfigFields,
+  shouldShowModelStatusMessage,
+  type AgentConfigDisclosure,
+} from "./agentConfigFieldsContract";
+
+export {
+  CANONICAL_CONFIG_BEHAVIORS,
+  resolveDisclosure,
+  shouldRenderModelControl,
+  shouldRevealDependentConfigFields,
+  shouldShowModelStatusMessage,
+} from "./agentConfigFieldsContract";
+
+const {
+  autoSelectModelOnProviderChange,
+  disableModelSelectDuringDiscovery,
+  preserveCredentialEnvVarsOnProviderChange,
+  requireProviderForModelAndEffort,
+} = CANONICAL_CONFIG_BEHAVIORS;
 
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
@@ -81,99 +105,6 @@ const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-type AgentConfigDisclosure =
-  | "full"
-  | "onboarding-essential"
-  | "progressive-defaults";
-
-// Canonical behaviors (PR 2 flag cleanup). These were per-surface props;
-// onboarding's values won every call and are now the only behavior:
-// - auto-select a valid model when the provider changes
-// - keep the model select usable during discovery
-// - preserve credential env vars across provider switches (the abandoned
-//   provider's key stays in env_vars — visible/deletable under Advanced)
-// - require a provider before model/effort are editable (no saveable
-//   invalid state — design principle #4)
-const autoSelectModelOnProviderChange = true;
-const disableModelSelectDuringDiscovery = false;
-const preserveCredentialEnvVarsOnProviderChange = true;
-const requireProviderForModelAndEffort = true;
-
-/** The canonical behavior contract, exported for the contract test. */
-export const CANONICAL_CONFIG_BEHAVIORS = {
-  autoSelectModelOnProviderChange,
-  disableModelSelectDuringDiscovery,
-  preserveCredentialEnvVarsOnProviderChange,
-  requireProviderForModelAndEffort,
-} as const;
-
-/** Disclosure preset → the eight visibility decisions it owns. Exported for the contract test. */
-export function resolveDisclosure(disclosure: AgentConfigDisclosure) {
-  const full = disclosure !== "onboarding-essential";
-  return {
-    showAdvancedFields: full,
-    showCustomModelOption: full,
-    showCustomProviderOption: full,
-    showDescriptions: full,
-    showEffortField: true,
-    showProviderPlaceholderOption: full,
-    showRequiredIndicators: full,
-    showUnavailableEffortOptions: full,
-  } as const;
-}
-
-export function shouldRevealDependentConfigFields({
-  disclosure,
-  providerFieldVisible,
-  providerValue,
-}: {
-  disclosure: AgentConfigDisclosure;
-  providerFieldVisible: boolean;
-  providerValue: string;
-}): boolean {
-  return (
-    disclosure !== "progressive-defaults" ||
-    !providerFieldVisible ||
-    providerValue.trim().length > 0
-  );
-}
-
-/** Whether the status line under the Model field renders. Discovery warnings bypass onboarding-essential so first-run failures are never invisible. */
-export function shouldShowModelStatusMessage(
-  showDescriptions: boolean,
-  status: { message: string; tone: string } | null,
-): boolean {
-  return showDescriptions || status !== null;
-}
-
-/**
- * Renders the Model control given discovery state. Optional-model harnesses omit it while
- * discovery is loading or after confirmed successful empty; failures keep it for the #2246 UI.
- */
-export function shouldRenderModelControl({
-  discoveredModelOptions,
-  modelDiscoveryLoading,
-  modelDiscoverySuccessfulEmpty,
-  modelIsOptional,
-  showCustomModelOption,
-}: {
-  discoveredModelOptions: readonly { id: string }[] | null;
-  modelDiscoveryLoading: boolean;
-  /** True only when discovery IPC resolved with a response that yielded no options. */
-  modelDiscoverySuccessfulEmpty: boolean;
-  modelIsOptional: boolean;
-  showCustomModelOption: boolean;
-}): boolean {
-  if (!modelIsOptional) return true;
-  if (modelDiscoveryLoading) return false;
-  const hasExplicitModel = (discoveredModelOptions ?? []).some(
-    (option) => option.id.trim().length > 0,
-  );
-  if (hasExplicitModel) return true;
-  if (showCustomModelOption) return true;
-  // Omit only on confirmed successful empty — not on failure/unavailable.
-  return !modelDiscoverySuccessfulEmpty;
-}
 
 export type AgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
@@ -332,6 +263,10 @@ export function AgentConfigFields({
   )
     ? selectedRuntimeId
     : "buzz-agent";
+  const providerSecret = useProviderSecret(
+    credentialProvider,
+    selectedRuntime?.providerProfiles,
+  );
   const bakedEnvKeys = React.useMemo(
     () => bakedEnv.map((entry) => entry.key),
     [bakedEnv],
@@ -351,6 +286,8 @@ export function AgentConfigFields({
     provider: credentialProvider,
     runtimeFileConfig,
     runtimeId: credentialRuntimeId,
+    providerProfiles: selectedRuntime?.providerProfiles,
+    deviceSatisfiedEnvKeys: providerSecretSatisfiedEnvKeys(providerSecret),
   });
   const configIsValid =
     selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
@@ -525,7 +462,10 @@ export function AgentConfigFields({
 
   function handleProviderChange(value: string) {
     userEditedProviderRef.current = true;
-    const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
+    const previousApiKey = getProviderApiKeyEnvVar(
+      effectiveProvider,
+      selectedRuntime?.providerProfiles,
+    );
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
       const nextEnvVars = { ...config.env_vars };
       if (!preserveCredentialEnvVarsOnProviderChange && previousApiKey) {
@@ -539,6 +479,7 @@ export function AgentConfigFields({
       value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "" ? null : value;
     const nextApiKey = getProviderApiKeyEnvVar(
       nextProvider ?? bakedProvider ?? "",
+      selectedRuntime?.providerProfiles,
     );
     const nextEnvVars = { ...config.env_vars };
     if (
@@ -605,6 +546,7 @@ export function AgentConfigFields({
     credentialRuntimeId,
     undefined,
     hideProviderIds,
+    selectedRuntime?.providerProfiles,
   );
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -772,7 +714,7 @@ export function AgentConfigFields({
     <>
       {providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
-          <PersonaProviderApiKeyField
+          <ProviderCredentialField
             disabled={false}
             envVarName={apiKeyEnvVar}
             inheritedLabel={
@@ -782,13 +724,15 @@ export function AgentConfigFields({
             }
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
             onValueChange={(value) =>
               onConfigChange({
                 ...config,
                 env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
               })
             }
+            provider={effectiveProvider}
+            providerProfiles={selectedRuntime?.providerProfiles}
+            providerSecret={providerSecret}
             value={apiKeyValue}
           />
         </div>

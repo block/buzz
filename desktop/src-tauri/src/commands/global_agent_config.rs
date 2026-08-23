@@ -130,6 +130,98 @@ pub async fn set_global_agent_config(
     })
 }
 
+/// Restart running local agents whose effective provider uses a changed
+/// device-keyring credential. The old/new values stay in memory solely to
+/// reuse the effective-env diff and normal stop/start boundary; they are never
+/// persisted or logged.
+pub(crate) async fn restart_local_agents_for_provider_secret_change(
+    app: &AppHandle,
+    provider_id: &str,
+    credential_env: &str,
+    old_value: Option<&str>,
+    new_value: Option<&str>,
+) -> (u32, u32) {
+    if old_value == new_value {
+        return (0, 0);
+    }
+    let base_global = load_global_agent_config(app).unwrap_or_default();
+    // An explicitly persisted global credential shadows the device keyring, so
+    // changing the latter cannot affect a running process.
+    if base_global
+        .env_vars
+        .get(credential_env)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return (0, 0);
+    }
+
+    let mut old_global = base_global.clone();
+    let mut new_global = base_global.clone();
+    match old_value {
+        Some(value) => {
+            old_global
+                .env_vars
+                .insert(credential_env.to_string(), value.to_string());
+        }
+        None => {
+            old_global.env_vars.remove(credential_env);
+        }
+    }
+    match new_value {
+        Some(value) => {
+            new_global
+                .env_vars
+                .insert(credential_env.to_string(), value.to_string());
+        }
+        None => {
+            new_global.env_vars.remove(credential_env);
+        }
+    }
+
+    let (all_candidates, personas) = collect_restart_candidates(app, &old_global, &new_global);
+    let records = load_managed_agents(app).unwrap_or_default();
+    let candidates = all_candidates
+        .into_iter()
+        .filter(|pubkey| {
+            records
+                .iter()
+                .find(|record| record.pubkey == *pubkey)
+                .is_some_and(|record| {
+                    let runtime = record_agent_command(record, &personas);
+                    let metadata = known_acp_runtime(&runtime);
+                    let effective =
+                        resolve_effective_agent_env(record, &personas, metadata, &base_global);
+                    effective
+                        .env
+                        .get("BUZZ_AGENT_PROVIDER")
+                        .and_then(|provider| {
+                            buzz_agent_pkg::provider_profiles::provider_profile(provider)
+                        })
+                        .is_some_and(|profile| profile.id == provider_id)
+                })
+        })
+        .collect::<Vec<_>>();
+
+    let mut restarted = 0;
+    let mut failed = 0;
+    for pubkey in candidates {
+        match restart_local_agent_on_config_change(
+            app,
+            &pubkey,
+            &old_global,
+            &new_global,
+            &personas,
+        )
+        .await
+        {
+            RestartOutcome::Restarted => restarted += 1,
+            RestartOutcome::FailedAfterStop => failed += 1,
+            RestartOutcome::Skipped => {}
+        }
+    }
+    (restarted, failed)
+}
+
 /// Outcome of a single per-agent restart attempt in Phase 2.
 #[derive(Debug)]
 enum RestartOutcome {

@@ -92,6 +92,14 @@ example), keys fall back to a `0o600` owner-only file. The `BUZZ_PRIVATE_KEY`
 environment variable, when set, always takes precedence over both stores — this
 is how harnessed agents and CI receive their identity.
 
+Catalog-authorized LLM provider credentials may also use the OS keyring. These
+device credentials have no plaintext-file fallback: Desktop exposes only
+configured/source status over IPC, resolves the value in the native backend at
+readiness, discovery, Hub access, or local-process spawn boundaries, and never
+copies it into agent records, snapshots, diagnostics, or remote deployments.
+An explicitly supplied provider environment variable takes precedence over the
+device credential.
+
 ### Input Validation
 
 - All UUIDs (channel IDs, workflow IDs) are validated at API boundaries before

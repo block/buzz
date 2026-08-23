@@ -51,6 +51,7 @@ use crate::managed_agents::{
     types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
 
+mod buzz_agent;
 mod cli_login;
 pub(crate) mod cli_probe;
 
@@ -428,7 +429,7 @@ fn collect_missing_requirements(
     };
 
     match rt.id {
-        "buzz-agent" => buzz_agent_requirements(effective),
+        "buzz-agent" => buzz_agent::requirements(effective),
         "goose" => {
             // Read the file config once at the call site so the inner fn is
             // pure and unit-testable by injection.
@@ -443,100 +444,6 @@ fn collect_missing_requirements(
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
         _ => vec![],
     }
-}
-
-/// Requirements for buzz-agent (provider + model + provider-specific creds).
-fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
-    let mut missing = Vec::new();
-
-    #[cfg(windows)]
-    if !crate::managed_agents::git_bash_available(&effective.env) {
-        missing.push(Requirement::GitBash);
-    }
-
-    // Provider is required — maps to BUZZ_AGENT_PROVIDER in the effective env.
-    // An empty string is treated as absent: a key set to "" is not a valid
-    // provider and must not pass the readiness gate.
-    let provider = effective
-        .env
-        .get("BUZZ_AGENT_PROVIDER")
-        .filter(|v| !v.is_empty())
-        .map(String::as_str);
-    if provider.is_none() {
-        missing.push(Requirement::NormalizedField {
-            field: "provider".to_string(),
-        });
-    }
-
-    // Model is required — maps to BUZZ_AGENT_MODEL in the effective env.
-    // Same empty-string treatment as provider.
-    // Also accept provider-specific model fallback keys, matching buzz-agent's
-    // own config.rs `from_env()` resolution order (e.g. DATABRICKS_MODEL for
-    // databricks/databricks_v2, ANTHROPIC_MODEL for anthropic, etc.). The
-    // baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL,
-    // so without this fallback agents baked from releases appear "not ready".
-    let provider_model_key = match provider {
-        Some("databricks") | Some("databricks_v2") | Some("databricks-v2") => {
-            Some("DATABRICKS_MODEL")
-        }
-        Some("anthropic") => Some("ANTHROPIC_MODEL"),
-        Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
-        Some("openrouter") => Some("OPENROUTER_MODEL"),
-        _ => None,
-    };
-    let model_present = effective
-        .env
-        .get("BUZZ_AGENT_MODEL")
-        .filter(|v| !v.is_empty())
-        .is_some()
-        || provider_model_key
-            .and_then(|k| effective.env.get(k))
-            .filter(|v| !v.is_empty())
-            .is_some();
-    if !model_present {
-        missing.push(Requirement::NormalizedField {
-            field: "model".to_string(),
-        });
-    }
-
-    // Provider-specific credential requirements.
-    // A key present with an empty value is treated as absent — matching the
-    // dialog's (envVars[key] ?? "").length === 0 emptiness check.
-    let env_key_missing = |key: &str| effective.env.get(key).is_none_or(|v| v.is_empty());
-    match provider {
-        Some("anthropic")
-            if env_key_missing("ANTHROPIC_API_KEY") => {
-                missing.push(Requirement::EnvKey {
-                    key: "ANTHROPIC_API_KEY".to_string(),
-                });
-            }
-        Some("openai")
-            if env_key_missing("OPENAI_COMPAT_API_KEY") => {
-                missing.push(Requirement::EnvKey {
-                    key: "OPENAI_COMPAT_API_KEY".to_string(),
-                });
-            }
-        Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
-            // DATABRICKS_HOST is hard-required; DATABRICKS_TOKEN is optional
-            // (OAuth PKCE is the normal path — see buzz-agent/src/config.rs:143).
-            if env_key_missing("DATABRICKS_HOST") => {
-                missing.push(Requirement::EnvKey {
-                    key: "DATABRICKS_HOST".to_string(),
-                });
-            }
-        Some("openrouter")
-            if env_key_missing("OPENROUTER_API_KEY") => {
-                missing.push(Requirement::EnvKey {
-                    key: "OPENROUTER_API_KEY".to_string(),
-                });
-            }
-        _ => {
-            // Unknown provider or no provider yet — only the NormalizedField
-            // requirement above captures this gap.
-        }
-    }
-
-    missing
 }
 
 /// Requirements for goose (provider + model + provider-specific creds).
@@ -746,6 +653,47 @@ mod tests {
         assert!(result.requirements().contains(&Requirement::EnvKey {
             key: "OPENAI_COMPAT_API_KEY".to_string()
         }));
+    }
+
+    #[test]
+    fn buzz_agent_openai_compat_uses_the_same_required_credential() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "openai-compat"),
+                ("BUZZ_AGENT_MODEL", "local/model"),
+            ]),
+        );
+        assert!(agent_readiness(&env)
+            .requirements()
+            .contains(&Requirement::EnvKey {
+                key: "OPENAI_COMPAT_API_KEY".to_string()
+            }));
+    }
+
+    #[test]
+    fn buzz_agent_ollama_requires_no_placeholder_credential() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "ollama"),
+                ("BUZZ_AGENT_MODEL", "qwen3:8b"),
+            ]),
+        );
+        assert!(agent_readiness(&env).is_ready());
+    }
+
+    #[test]
+    fn buzz_agent_hugging_face_accepts_environment_token() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "huggingface"),
+                ("BUZZ_AGENT_MODEL", "openai/gpt-oss-120b"),
+                ("HF_TOKEN", "hf_test"),
+            ]),
+        );
+        assert!(agent_readiness(&env).is_ready());
     }
 
     #[test]

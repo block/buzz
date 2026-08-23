@@ -1,4 +1,5 @@
 import type {
+  AcpProviderProfile,
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
 } from "@/shared/api/types";
@@ -184,12 +185,22 @@ function isKnownLlmProvider(
 export function requiredCredentialEnvKeys(
   runtimeId: string,
   provider: string,
+  providerProfiles?: readonly AcpProviderProfile[],
 ): readonly string[] {
   const normalizedRuntime = runtimeId.trim();
   if (normalizedRuntime !== "buzz-agent" && normalizedRuntime !== "goose") {
     return [];
   }
-  const config = PROVIDER_CREDENTIAL_CONFIG[provider.trim().toLowerCase()];
+  const normalizedProvider = provider.trim().toLowerCase();
+  if (providerProfiles !== undefined && providerProfiles.length > 0) {
+    const profile = providerProfiles.find(
+      (candidate) =>
+        candidate.id === normalizedProvider ||
+        candidate.aliases.includes(normalizedProvider),
+    );
+    return profile?.requiredEnv ?? [];
+  }
+  const config = PROVIDER_CREDENTIAL_CONFIG[normalizedProvider];
   return config?.requiredEnvKeys ?? [];
 }
 
@@ -242,6 +253,7 @@ function effectiveModelProviderForOptions(
 export function getPersonaModelOptions(
   runtimeId: string,
   providerId: string | null | undefined,
+  providerProfiles?: readonly AcpProviderProfile[],
 ): readonly PersonaModelOption[] {
   const options = getRuntimePersonaModelOptions(runtimeId);
   const trimmedProvider = effectiveModelProviderForOptions(
@@ -257,7 +269,8 @@ export function getPersonaModelOptions(
 
   return options.filter(
     (option) =>
-      option.id.length === 0 && !providerRequiresExplicitModel(trimmedProvider),
+      option.id.length === 0 &&
+      !providerRequiresExplicitModel(trimmedProvider, providerProfiles),
   );
 }
 
@@ -301,8 +314,16 @@ export function getModelSelectValue({
 
 export function providerRequiresExplicitModel(
   providerId: string | null | undefined,
+  providerProfiles?: readonly AcpProviderProfile[],
 ) {
   const trimmedProvider = providerId?.trim() ?? "";
+  if (providerProfiles !== undefined && providerProfiles.length > 0) {
+    return providerProfiles.some(
+      (profile) =>
+        profile.id === trimmedProvider ||
+        profile.aliases.includes(trimmedProvider),
+    );
+  }
   return (
     trimmedProvider === "anthropic" ||
     trimmedProvider === "openai" ||
@@ -390,14 +411,24 @@ export function getPersonaProviderOptions(
   runtimeId: string,
   globalProvider?: string,
   hideProviderIds?: ReadonlySet<string>,
+  providerProfiles?: readonly AcpProviderProfile[],
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
   const defaultProviderOptions = [
     { id: "", label: getDefaultLlmProviderLabel(runtimeId, globalProvider) },
   ];
+  const catalogOptions =
+    providerProfiles === undefined || providerProfiles.length === 0
+      ? PERSONA_LLM_PROVIDER_OPTIONS
+      : [
+          ...providerProfiles.map(({ id, label }) => ({ id, label })),
+          ...(runtimeId === "buzz-agent"
+            ? [{ id: "relay-mesh", label: "Zorro shared compute" }]
+            : []),
+        ];
   const filteredOptions = hideProviderIds?.size
-    ? PERSONA_LLM_PROVIDER_OPTIONS.filter((o) => !hideProviderIds.has(o.id))
-    : PERSONA_LLM_PROVIDER_OPTIONS;
+    ? catalogOptions.filter((o) => !hideProviderIds.has(o.id))
+    : catalogOptions;
   const options = [...defaultProviderOptions, ...filteredOptions];
   if (
     trimmedProvider.length === 0 ||
@@ -416,7 +447,19 @@ export function getPersonaProviderOptions(
  * Returns the secret credential env var for the provider, if any.
  * Derived from PROVIDER_CREDENTIAL_CONFIG.secretEnvVar.
  */
-export function getProviderApiKeyEnvVar(providerId: string): string | null {
+export function getProviderApiKeyEnvVar(
+  providerId: string,
+  providerProfiles?: readonly AcpProviderProfile[],
+): string | null {
+  if (providerProfiles !== undefined && providerProfiles.length > 0) {
+    const normalized = providerId.trim().toLowerCase();
+    return (
+      providerProfiles.find(
+        (profile) =>
+          profile.id === normalized || profile.aliases.includes(normalized),
+      )?.credential?.env ?? null
+    );
+  }
   return (
     PROVIDER_CREDENTIAL_CONFIG[providerId.trim().toLowerCase()]?.secretEnvVar ??
     null
@@ -431,7 +474,19 @@ export function getProviderApiKeyEnvVar(providerId: string): string | null {
  * Returns null when the provider has no typed-secret credential (e.g.,
  * Databricks, which uses OAuth PKCE).
  */
-export function getProviderApiKeyLabel(providerId: string): string | null {
+export function getProviderApiKeyLabel(
+  providerId: string,
+  providerProfiles?: readonly AcpProviderProfile[],
+): string | null {
+  if (providerProfiles !== undefined && providerProfiles.length > 0) {
+    const normalized = providerId.trim().toLowerCase();
+    return (
+      providerProfiles.find(
+        (profile) =>
+          profile.id === normalized || profile.aliases.includes(normalized),
+      )?.credential?.label ?? null
+    );
+  }
   return (
     PROVIDER_CREDENTIAL_CONFIG[providerId.trim().toLowerCase()]?.apiKeyLabel ??
     null

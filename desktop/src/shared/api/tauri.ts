@@ -1,8 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import {
-  activateRateLimit,
-  parseRateLimitHint,
-} from "@/shared/api/relayRateLimitGate";
+import { invokeTauri } from "./tauriInvoke";
 import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
@@ -32,14 +28,13 @@ import type {
   CreateManagedAgentInput,
   AgentModelsResponse,
   UpdateManagedAgentInput,
-  AcpAvailabilityStatus,
   AcpRuntimeCatalogEntry,
-  AuthStatus,
   CommandAvailability,
   InstallRuntimeResult,
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
+import type { RawAcpRuntimeCatalogEntry } from "./tauriRuntimeCatalogTypes";
 
 export * from "@/shared/api/tauriChannels";
 export { sendChannelMessage } from "@/shared/api/tauriMessages";
@@ -168,36 +163,7 @@ type RawManagedAgentLog = {
   log_path: string;
 };
 
-export type RawAcpRuntimeCatalogEntry = {
-  id: string;
-  label: string;
-  avatar_url: string;
-  availability: AcpAvailabilityStatus;
-  command: string | null;
-  binary_path: string | null;
-  default_args: string[];
-  mcp_command: string | null;
-  model_env_var?: string | null;
-  provider_env_var?: string | null;
-  thinking_env_var?: string | null;
-  max_tokens_env_var?: string | null;
-  context_limit_env_var?: string | null;
-  max_rounds_env_var?: string | null;
-  install_hint: string;
-  install_instructions_url: string;
-  can_auto_install: boolean;
-  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
-  requires_external_cli?: boolean;
-  underlying_cli_path: string | null;
-  node_required: boolean;
-  /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
-  auth_status: AuthStatus;
-  login_hint?: string;
-  source: "builtin" | "preset" | "custom";
-  /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
-  definition_env?: Record<string, string>;
-  max_parallelism?: number;
-};
+export type { RawAcpRuntimeCatalogEntry } from "./tauriRuntimeCatalogTypes";
 
 export type {
   RawInstallRuntimeResult,
@@ -244,68 +210,11 @@ type RawSetCanvasResult = {
   event_id: string;
 };
 
-/** Error normalized from a rejected Tauri invocation with its wire payload. */
-export class TauriInvokeError extends Error {
-  readonly payload: unknown;
-
-  constructor(message: string, payload: unknown) {
-    super(message);
-    this.name = "TauriInvokeError";
-    this.payload = payload;
-  }
-}
-
-function toTauriError(error: unknown): Error {
-  if (error instanceof Error) {
-    return error;
-  }
-
-  if (typeof error === "string") {
-    return new TauriInvokeError(error, error);
-  }
-
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return new TauriInvokeError(error.message, error);
-  }
-
-  try {
-    return new TauriInvokeError(JSON.stringify(error), error);
-  } catch {
-    return new TauriInvokeError("Unknown Tauri error", error);
-  }
-}
-
-/**
- * Inspect a Tauri error message and activate the shared rate-limit gate when
- * the Rust relay layer emitted an HTTP 429 response (`relay rate-limited:` prefix).
- *
- * Extracted so it can be unit-tested without mocking the Tauri invoke bridge.
- */
-export function applyTauriRateLimitIfNeeded(message: string): void {
-  if (message.startsWith("relay rate-limited:")) {
-    activateRateLimit(parseRateLimitHint(message));
-  }
-}
-
-export async function invokeTauri<T>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<T> {
-  try {
-    return await tauriInvoke<T>(command, args);
-  } catch (error) {
-    const err = toTauriError(error);
-    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
-    // shared gate so the TS relay client backs off for the same window.
-    applyTauriRateLimitIfNeeded(err.message);
-    throw err;
-  }
-}
+export {
+  applyTauriRateLimitIfNeeded,
+  invokeTauri,
+  TauriInvokeError,
+} from "./tauriInvoke";
 
 export function fromRawFeedItem(item: RawFeedItem) {
   return {
@@ -690,6 +599,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     mcpCommand: entry.mcp_command,
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
+    providerProfiles: entry.provider_profiles ?? [],
     thinkingEnvVar: entry.thinking_env_var ?? null,
     maxTokensEnvVar: entry.max_tokens_env_var ?? null,
     contextLimitEnvVar: entry.context_limit_env_var ?? null,
@@ -986,6 +896,13 @@ export async function getRuntimeFileConfig(
 export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
 }
+
+export {
+  clearProviderSecret,
+  getProviderSecretStatus,
+  setProviderSecret,
+} from "./tauriProviderSecrets";
+export type { ProviderSecretStatus } from "./tauriProviderSecrets";
 
 /**
  * A single baked build env entry.

@@ -168,3 +168,30 @@ test("PersonaProviderApiKeyField_two_instances_have_unique_ids_and_each_aria_des
     "combined output must name OPENAI_COMPAT_API_KEY",
   );
 });
+
+test("device credential status never renders a stored value", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      PersonaProviderApiKeyField,
+      makeProps({
+        envVarName: "HF_TOKEN",
+        label: "Hugging Face Token",
+        value: "must-not-render",
+        deviceSecret: {
+          configured: true,
+          isPending: false,
+          source: "keyring",
+          error: null,
+          restartedCount: 0,
+          failedRestartCount: 0,
+          set: async () => {},
+          clear: async () => {},
+        },
+      }),
+    ),
+  );
+  assert.ok(html.includes("Saved securely on this device"));
+  assert.ok(html.includes("Replace"));
+  assert.ok(html.includes("Remove"));
+  assert.ok(!html.includes("must-not-render"));
+});

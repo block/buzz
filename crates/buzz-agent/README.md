@@ -22,9 +22,10 @@
                                               │
                                               ▼
                                   Anthropic Messages API,
-                                   OpenRouter, or any OpenAI-compat
+                                  OpenRouter, Hugging Face, or an
+                                  OpenAI-compatible endpoint
                                   (vLLM, llama.cpp, Databricks,
-                                   Block Gateway, Ollama, …)
+                                  Block Gateway, Ollama, …)
 ```
 
 A client sends `session/prompt`. The agent loops: call the LLM → get tool calls → run them via MCP → feed results back → repeat. The loop terminates when the LLM stops asking for tools, the round cap is hit, or the client cancels.
@@ -48,6 +49,17 @@ BUZZ_AGENT_PROVIDER=openai \
 OPENAI_COMPAT_API_KEY=sk-... \
 OPENAI_COMPAT_MODEL=gpt-5 \
 OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
+  ./target/release/buzz-agent
+
+# Or a first-class local Ollama daemon (no API key required)
+BUZZ_AGENT_PROVIDER=ollama \
+BUZZ_AGENT_MODEL=qwen3-coder \
+  ./target/release/buzz-agent
+
+# Or Hugging Face Inference Providers
+BUZZ_AGENT_PROVIDER=huggingface \
+HF_TOKEN=hf_... \
+BUZZ_AGENT_MODEL=openai/gpt-oss-120b \
   ./target/release/buzz-agent
 
 # Or OpenRouter
@@ -135,15 +147,20 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openai-compat`, `ollama`, `huggingface`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
-| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
+| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai or provider=openai-compat. |
+| `OPENAI_COMPAT_MODEL` | — | Required when provider=openai or provider=openai-compat. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `OLLAMA_MODEL` | — | Standalone fallback model when provider=ollama. `BUZZ_AGENT_MODEL` takes precedence. |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434/v1` | OpenAI-compatible URL for an existing or Buzz-managed Ollama daemon. |
+| `HF_TOKEN` | — | Required when provider=huggingface. Desktop can inject its device-keyring token for local agents. |
+| `HUGGINGFACE_MODEL` | — | Standalone fallback model when provider=huggingface. `BUZZ_AGENT_MODEL` takes precedence. |
+| `HF_INFERENCE_BASE_URL` | `https://router.huggingface.co/v1` | Hugging Face Inference Providers OpenAI-compatible URL. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
@@ -237,17 +254,20 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | OpenAI | `openai` | `POST {base}/responses` | gpt-5, gpt-5-mini, o4-mini, gpt-4o |
 | vLLM | `openai` | `POST {base}/chat/completions` | any tool-calling model |
 | llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
-| Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
+| Ollama | `ollama` | `POST {base}/chat/completions` | any model advertising tool support |
+| Hugging Face Inference Providers | `huggingface` | `POST {base}/chat/completions` | routed tool-capable chat models |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If a provider requiring a credential is selected without its declared key (including `HF_TOKEN` for Hugging Face), the agent returns an error — there is no implicit fallback to another provider. Ollama's local OpenAI-compatible endpoint does not require a key.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
+
+The named `ollama` and `huggingface` profiles default to Chat Completions and use that API's broadly-compatible `max_tokens` field. An explicit `OPENAI_COMPAT_API=responses` still overrides the default when the selected endpoint and model support Responses.
 
 `provider=openrouter` is first-class, not routed through `provider=openai`: it speaks OpenAI's Chat Completions wire format but with OpenRouter-specific extensions layered on top —
 

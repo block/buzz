@@ -14,8 +14,7 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
+/// Returns planned adapter install commands for `runtime_id` and an optional resolved binary.
 /// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
 ///
 /// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
@@ -149,6 +148,7 @@ pub async fn save_custom_harness(
         mcp_command: None,
         model_env_var: None,
         provider_env_var: None,
+        provider_profiles: Vec::new(),
         thinking_env_var: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,

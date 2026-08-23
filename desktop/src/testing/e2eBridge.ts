@@ -8207,6 +8207,11 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+let mockOllamaConfig = {
+  endpoint: "http://127.0.0.1:11434",
+  mode: "connect_only",
+  selectedModel: undefined as string | undefined,
+};
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -10703,6 +10708,11 @@ export function maybeInstallE2eTauriMocks() {
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
+  mockOllamaConfig = {
+    endpoint: "http://127.0.0.1:11434",
+    mode: "connect_only",
+    selectedModel: undefined,
+  };
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -11667,6 +11677,46 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "get_ollama_config":
+        return { ...mockOllamaConfig };
+      case "set_ollama_config": {
+        const next = (payload as { config?: typeof mockOllamaConfig }).config;
+        if (!next) throw new Error("Missing Ollama config.");
+        mockOllamaConfig = { ...next };
+        return { ...mockOllamaConfig };
+      }
+      case "get_ollama_status":
+      case "detect_ollama": {
+        const endpoint =
+          (payload as { endpoint?: string } | null)?.endpoint ??
+          mockOllamaConfig.endpoint;
+        return {
+          config: { ...mockOllamaConfig, endpoint },
+          reachable: false,
+          version: null,
+          models: [],
+          error: "Ollama is not running in the E2E mock.",
+          managedRuntimeInstalled: false,
+          managedRuntimeRunning: false,
+          managedInstallSupported: false,
+        };
+      }
+      case "show_ollama_model":
+        return {
+          model: (payload as { model?: string }).model ?? "mock-model",
+          capabilities: ["tools"],
+          supportsTools: true,
+          details: {},
+          modelInfo: {},
+        };
+      case "pull_ollama_model":
+      case "delete_ollama_model":
+      case "stop_managed_ollama":
+        return null;
+      case "install_managed_ollama":
+        throw new Error("Managed Ollama artifacts are unavailable in E2E.");
+      case "start_managed_ollama":
+        throw new Error("Managed Ollama is not installed in E2E.");
       case "mesh_model_catalog":
         return {
           gpuName: "Mock Apple GPU",

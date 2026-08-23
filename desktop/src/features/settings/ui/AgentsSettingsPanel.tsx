@@ -6,6 +6,7 @@ import {
 import { Switch } from "@/shared/ui/switch";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { OllamaSettingsCard } from "./OllamaSettingsCard";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
@@ -51,6 +52,7 @@ export function AgentsSettingsPanel() {
         <PreventSleepSettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
+        <OllamaSettingsCard />
       </SettingsOptionGroupList>
     </section>
   );

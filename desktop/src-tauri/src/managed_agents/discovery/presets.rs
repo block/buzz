@@ -66,6 +66,7 @@ pub(super) fn preset_catalog_entry(
         mcp_command: None,
         model_env_var: None,
         provider_env_var: None,
+        provider_profiles: Vec::new(),
         thinking_env_var: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,

@@ -112,3 +112,54 @@ export type MeshModelCatalog = {
 export async function meshModelCatalog(): Promise<MeshModelCatalog> {
   return await invokeTauri<MeshModelCatalog>("mesh_model_catalog");
 }
+
+export type HuggingFaceModelFile = {
+  path: string;
+  sizeBytes: number | null;
+  quantization: string | null;
+  multipart: boolean;
+};
+
+export type HuggingFaceModelSummary = {
+  repoId: string;
+  /** Immutable Hub commit returned by the native backend. */
+  revision: string;
+  gated: boolean;
+  approvalMode: string | null;
+  private: boolean;
+  license: string | null;
+  downloads: number;
+  files: HuggingFaceModelFile[];
+  webUrl: string;
+  /** Whether the pinned Mesh runtime can authenticate this gated download. */
+  gatedDownloadReady: boolean;
+};
+
+export type HuggingFaceSearchResponse = {
+  repositories: HuggingFaceModelSummary[];
+  nextCursor: string | null;
+};
+
+/**
+ * Search text-generation GGUF repositories through the native Hub adapter.
+ * Credentials are resolved natively and never cross IPC.
+ */
+export async function searchHuggingFaceModels(input: {
+  query: string;
+  cursor?: string;
+  pageSize?: number;
+}): Promise<HuggingFaceSearchResponse> {
+  return await invokeTauri<HuggingFaceSearchResponse>(
+    "search_huggingface_models",
+    { request: input },
+  );
+}
+
+/** Fetch file sizes and current immutable revision for one Hub repository. */
+export async function getHuggingFaceModel(
+  repoId: string,
+): Promise<HuggingFaceModelSummary> {
+  return await invokeTauri<HuggingFaceModelSummary>("get_huggingface_model", {
+    repoId,
+  });
+}

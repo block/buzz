@@ -39,6 +39,7 @@ import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
 import { deriveMeshShareToggle } from "../shareToggleState";
 import { deriveServingIndicator } from "../servingUsage";
+import { HuggingFaceModelBrowser } from "./HuggingFaceModelBrowser";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
 const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
@@ -558,21 +559,30 @@ function MeshModelPicker({
         value={selectedValue}
       />
       {showCustomModelInput ? (
-        <AgentConfigTextInput
-          aria-label="Custom model reference"
-          autoCorrect="off"
-          disabled={disabled}
-          onChange={(event) => {
-            // A stored custom ref starts out inferred rather than explicitly
-            // selected. Mark it as an active custom edit before applying a
-            // cleared value so the field stays mounted while it is replaced.
-            onCustomModelEditingChange(true);
-            onModelChange(event.target.value);
-          }}
-          placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
-          usePersonaInputStyle
-          value={model}
-        />
+        <div className="space-y-2">
+          <AgentConfigTextInput
+            aria-label="Custom model reference"
+            autoCorrect="off"
+            disabled={disabled}
+            onChange={(event) => {
+              // A stored custom ref starts out inferred rather than explicitly
+              // selected. Mark it as an active custom edit before applying a
+              // cleared value so the field stays mounted while it is replaced.
+              onCustomModelEditingChange(true);
+              onModelChange(event.target.value);
+            }}
+            placeholder="Qwen3-8B-Q4_K_M or owner/repo@revision/model.gguf"
+            usePersonaInputStyle
+            value={model}
+          />
+          <HuggingFaceModelBrowser
+            disabled={disabled}
+            onSelect={(modelRef) => {
+              onCustomModelEditingChange(true);
+              onModelChange(modelRef);
+            }}
+          />
+        </div>
       ) : null}
       <p
         className="text-sm font-normal text-muted-foreground/70"

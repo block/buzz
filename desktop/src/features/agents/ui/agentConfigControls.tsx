@@ -636,6 +636,8 @@ export function AgentProviderField({
     trimmedProvider,
     selectedRuntime?.id ?? "",
     globalProvider,
+    undefined,
+    selectedRuntime?.providerProfiles,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE

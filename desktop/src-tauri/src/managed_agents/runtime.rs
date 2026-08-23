@@ -16,6 +16,7 @@ use crate::{
 
 use super::claude_config::{apply_claude_model_env, apply_effort_env};
 mod path;
+mod provider_env;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
 
@@ -61,8 +62,6 @@ mod instance_reaper;
 pub(crate) use instance_reaper::reap_dead_instance_agents;
 #[cfg(test)]
 use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
-
-// Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
 #[cfg(test)]
@@ -804,11 +803,12 @@ pub fn spawn_agent_child(
         );
     }
 
-    // User env (descriptor.env): fully-layered floor→runtime→definition→global→persona→agent,
-    // reserved-key filtered. Written last so user-explicit values win over Buzz-set env.
+    // Layered, reserved-key-filtered user env wins over Buzz-set env.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+
+    provider_env::apply(&mut command, &descriptor.env)?;
 
     // B5: carry persisted effort; harness resolves thought_level configId at first session.
     // Written AFTER descriptor.env so the canonical persisted value wins over any

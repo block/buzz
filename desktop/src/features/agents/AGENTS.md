@@ -31,6 +31,19 @@ the resolved `entry.command` (which may be `null` for unavailable entries).
 The frontend reads `maxParallelism` from the catalog entry and never keeps a
 separate constant.
 
+**LLM provider facts come from `buzz-agent`'s Rust provider catalog.** Builtin
+runtime entries project their supported `providerProfiles` over the existing
+runtime-catalog IPC. Provider picker rows, labels, aliases, model/base-URL env
+keys, required env keys, and credential metadata must be derived from that
+projection; do not add a new TypeScript-only provider fact. Older fixture
+fallbacks may retain the legacy table until their runtime-catalog shape is
+upgraded, but new named providers must work through `providerProfiles` and be
+scoped by the runtime's support flags. Credentials marked `deviceKeyring` use
+the generic provider-secret commands: IPC exposes only configured/source
+status, never the secret value. The backend loads such secrets only at
+readiness, discovery, and local-spawn boundaries; never persist them in agent,
+persona, global-config, snapshot, or diagnostic env maps.
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut

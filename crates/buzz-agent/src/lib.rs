@@ -9,6 +9,7 @@ mod hints;
 mod llm;
 mod mcp;
 pub mod model_capabilities;
+pub mod provider_profiles;
 pub mod types;
 mod wire;
 

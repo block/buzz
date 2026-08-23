@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { AcpProviderProfile } from "@/shared/api/types";
 
 import {
   useBakedBuildEnvKeysQuery,
@@ -60,6 +61,8 @@ export function useRequiredCredentialState(params: {
    *  (mirrors backend readiness.rs which layers live_persona_env under record
    *  env). An explicit local empty shadows the persona value. */
   personaEnvVars?: Record<string, string>;
+  providerProfiles?: readonly AcpProviderProfile[];
+  deviceSatisfiedEnvKeys?: readonly string[];
 }): RequiredCredentialState {
   const {
     open,
@@ -69,6 +72,8 @@ export function useRequiredCredentialState(params: {
     envVars,
     globalEnvVars = {},
     personaEnvVars = {},
+    providerProfiles,
+    deviceSatisfiedEnvKeys = [],
   } = params;
 
   const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
@@ -87,8 +92,12 @@ export function useRequiredCredentialState(params: {
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
-    [prospectiveRuntimeId, providerForRequiredKeys],
+      requiredCredentialEnvKeys(
+        prospectiveRuntimeId,
+        providerForRequiredKeys,
+        providerProfiles,
+      ),
+    [prospectiveRuntimeId, providerForRequiredKeys, providerProfiles],
   );
 
   // Keys covered by the baked build env — silenced, produce no info row.
@@ -114,7 +123,8 @@ export function useRequiredCredentialState(params: {
           !bakedSatisfiedKeys.includes(key) &&
           !fileSatisfiedEnvKeys.includes(key) &&
           !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars) &&
-          !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars),
+          !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars) &&
+          !deviceSatisfiedEnvKeys.includes(key),
       ),
     [
       allRequiredKeys,
@@ -123,6 +133,7 @@ export function useRequiredCredentialState(params: {
       globalEnvVars,
       personaEnvVars,
       envVars,
+      deviceSatisfiedEnvKeys,
     ],
   );
 

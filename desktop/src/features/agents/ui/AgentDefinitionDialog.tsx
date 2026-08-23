@@ -2,11 +2,6 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import type {
-  AcpRuntimeCatalogEntry,
-  CreatePersonaInput,
-  UpdatePersonaInput,
-} from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
@@ -16,7 +11,6 @@ import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
 import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   canSubmitPersonaDialog,
   formatPersonaNamePoolText,
@@ -41,7 +35,6 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
-  getProviderApiKeyLabel,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
@@ -81,6 +74,9 @@ import {
   initialAgentAiConfigurationMode,
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import { useProviderSecret } from "./useProviderSecret";
+import { ProviderCredentialField } from "./ProviderCredentialField";
+import { applyProviderSecretToLocalGate } from "./providerSecretCredentialState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AgentDefinitionDialogShell } from "./AgentDefinitionDialogShell";
@@ -90,34 +86,9 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import type { AgentDefinitionDialogProps } from "./AgentDefinitionDialogProps";
 
-type AgentDefinitionDialogProps = {
-  open: boolean;
-  embedded?: boolean;
-  title: string;
-  description: string;
-  submitLabel: string;
-  initialValues: CreatePersonaInput | UpdatePersonaInput | null;
-  error: Error | null;
-  isPending: boolean;
-  runtimes: AcpRuntimeCatalogEntry[];
-  runtimeCatalogStatus?: "loading" | "ready" | "error";
-  onDirtyChange?: (dirty: boolean) => void;
-  onOpenChange: (open: boolean) => void;
-  onSubmit: (
-    input: CreatePersonaInput | UpdatePersonaInput,
-    options: AgentDefinitionSubmitOptions,
-  ) => Promise<unknown>;
-  /** Publishes saved changes when the edited agent is shared in the catalog. */
-  publishCatalogUpdatesOnSave?: boolean;
-  createRunSection?: React.ReactNode;
-  /** Extra create-mode submit gate (e.g. incomplete provider config). */
-  createSubmitBlocked?: boolean;
-};
-
-export type AgentDefinitionSubmitOptions = {
-  publishCatalogUpdates: boolean;
-};
+export type { AgentDefinitionSubmitOptions } from "./AgentDefinitionDialogProps";
 
 export function AgentDefinitionDialog({
   open,
@@ -452,16 +423,21 @@ export function AgentDefinitionDialog({
       runtimeFileConfig,
     ],
   );
-  // requiredEnvKeys: the gate already handles baked-, global-, and file-
-  // satisfied keys so no further filtering is needed.
-  const { requiredEnvKeys } = localModeGate;
-  const localModeSatisfied = localModeGate.satisfied;
   // Effective provider: agent value → global fallback → file fallback.
   // Mirrors the chain inside computeLocalModeGate so model-option scoping and
   // model requiredness are consistent with the readiness gate.
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
     trimmedProvider || inheritedProviderDefault.value || fileProvider;
+  const providerSecret = useProviderSecret(
+    effectiveProvider,
+    selectedRuntime?.providerProfiles,
+    open,
+  );
+  const {
+    requiredEnvKeys: requiredEnvKeysForDisplay,
+    satisfied: localModeSatisfied,
+  } = applyProviderSecretToLocalGate(localModeGate, providerSecret);
   const apiKeyFieldState = useProviderApiKeyFieldState({
     bakedEnvKeys,
     effectiveEnvVars: envVars,
@@ -469,7 +445,8 @@ export function AgentDefinitionDialog({
     fileSatisfiedEnvKeys: localModeGate.fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
     provider: effectiveProvider,
-    requiredEnvKeys,
+    requiredEnvKeys: requiredEnvKeysForDisplay,
+    providerProfiles: selectedRuntime?.providerProfiles,
   });
   const {
     advancedRequiredEnvKeys,
@@ -531,7 +508,11 @@ export function AgentDefinitionDialog({
       : "",
     selectedRuntime,
   });
-  const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
+  const staticModelOptions = getPersonaModelOptions(
+    runtime,
+    effectiveProvider,
+    selectedRuntime?.providerProfiles,
+  );
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const {
     isCustom: isModelCustom,
@@ -566,6 +547,7 @@ export function AgentDefinitionDialog({
       ? inheritedProviderDefault.value
       : "",
     hideProviderIds,
+    selectedRuntime?.providerProfiles,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -879,19 +861,21 @@ export function AgentDefinitionDialog({
           {llmProviderFieldVisible &&
           aiConfigurationMode === "custom" &&
           topLevelSecretEnvVar ? (
-            <PersonaProviderApiKeyField
+            <ProviderCredentialField
               disabled={isPending}
               envVarName={topLevelSecretEnvVar}
               isInherited={apiKeyIsInherited}
               inheritedLabel={apiKeyInheritedLabel}
               isRequired={apiKeyIsRequired}
-              label={getProviderApiKeyLabel(effectiveProvider) ?? "API key"}
               onValueChange={(next) => {
                 setEnvVars((prev) => ({
                   ...prev,
                   [topLevelSecretEnvVar]: next,
                 }));
               }}
+              provider={effectiveProvider}
+              providerProfiles={selectedRuntime?.providerProfiles}
+              providerSecret={providerSecret}
               value={apiKeyValue}
             />
           ) : null}

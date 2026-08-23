@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use crate::provider_profiles::{
+    provider_profile, ChatTokenLimitField, OpenAiApiDefault, ProviderProfile, ProviderTransport,
+};
+
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Reasoning/thinking effort level for providers that support it.
@@ -444,6 +448,10 @@ pub enum OpenAiApi {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub provider: Provider,
+    /// Canonical provider profile id. Multiple named providers may share the
+    /// same transport while retaining distinct defaults and compatibility
+    /// behavior (for example `openai`, `ollama`, and `huggingface`).
+    pub provider_id: &'static str,
     pub system_prompt: String,
     pub max_rounds: u32,
     pub max_output_tokens: u32,
@@ -503,6 +511,10 @@ pub struct Config {
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
+    /// Output-token field used by Chat Completions for this provider profile.
+    pub chat_token_limit: ChatTokenLimitField,
+    /// Whether this provider profile has verified reasoning-effort support.
+    pub supports_reasoning_effort: bool,
     pub hints_enabled: bool,
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
@@ -527,45 +539,48 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let databricks_host = env("DATABRICKS_HOST");
         let databricks_model = env("DATABRICKS_MODEL");
-        let provider = resolve_provider(
-            env("BUZZ_AGENT_PROVIDER").as_deref(),
-            env("ANTHROPIC_API_KEY").as_deref(),
-            env("OPENAI_COMPAT_API_KEY").as_deref(),
-            env("OPENROUTER_API_KEY").as_deref(),
-        )?;
+        let requested_provider = env("BUZZ_AGENT_PROVIDER");
+        let profile = resolve_provider_profile(requested_provider.as_deref())?;
+        let provider = transport_provider(profile.transport);
 
         // Universal model override — takes priority over provider-specific model
-        // env vars (ANTHROPIC_MODEL, OPENAI_COMPAT_MODEL, DATABRICKS_MODEL) when
-        // present. Set by the desktop from the persona/record to express explicit
-        // user intent; provider-specific vars serve as defaults for CLI/standalone use.
+        // model env var declared by the selected provider profile when present.
+        // Set by the desktop from the persona/record to express explicit user
+        // intent; provider-specific vars serve as defaults for CLI/standalone use.
         let buzz_agent_model = env("BUZZ_AGENT_MODEL");
 
-        // OPENAI_COMPAT_API is only read when provider=openai, so a stray
-        // bad value can't break an Anthropic-only deployment.
+        // OPENAI_COMPAT_API is only read for OpenAI-transport profiles, so a
+        // stray bad value can't break an Anthropic-only deployment.
         //
         // Databricks borrows api_key as the *optional* `DATABRICKS_TOKEN` escape
         // hatch — empty means "use OAuth PKCE." Legacy Databricks encodes the
         // model in the URL path; Databricks v2 keeps it in the request body.
         let (api_key, model, base_url, openai_api) = match provider {
             Provider::Anthropic => (
-                req("ANTHROPIC_API_KEY")?,
+                required_profile_credential(profile)?,
                 resolve_model(
                     buzz_agent_model.as_deref(),
-                    env("ANTHROPIC_MODEL").as_deref(),
+                    env(profile.model_env).as_deref(),
                 )
                 .ok_or_else(|| "config: ANTHROPIC_MODEL required".to_string())?,
-                env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+                profile_base_url(profile),
                 OpenAiApi::Auto, // unused for Anthropic
             ),
             Provider::OpenAi => (
-                req("OPENAI_COMPAT_API_KEY")?,
+                profile_credential(profile)?,
                 resolve_model(
                     buzz_agent_model.as_deref(),
-                    env("OPENAI_COMPAT_MODEL").as_deref(),
+                    env(profile.model_env).as_deref(),
                 )
-                .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
-                parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
+                .ok_or_else(|| format!("config: {} required", profile.model_env))?,
+                profile_base_url(profile),
+                match env("OPENAI_COMPAT_API") {
+                    Some(raw) => parse_openai_api(Some(&raw))?,
+                    None => match profile.openai_api_default {
+                        OpenAiApiDefault::Auto => OpenAiApi::Auto,
+                        OpenAiApiDefault::Chat => OpenAiApi::Chat,
+                    },
+                },
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
@@ -575,13 +590,13 @@ impl Config {
                 OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
             Provider::OpenRouter => (
-                req("OPENROUTER_API_KEY")?,
+                required_profile_credential(profile)?,
                 resolve_model(
                     buzz_agent_model.as_deref(),
-                    env("OPENROUTER_MODEL").as_deref(),
+                    env(profile.model_env).as_deref(),
                 )
                 .ok_or_else(|| "config: OPENROUTER_MODEL required".to_string())?,
-                env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                profile_base_url(profile),
                 OpenAiApi::Chat, // OpenRouter uses Chat Completions only
             ),
         };
@@ -594,12 +609,15 @@ impl Config {
         };
         let cfg = Config {
             provider,
+            provider_id: profile.id,
             system_prompt,
             api_key,
             model,
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
+            chat_token_limit: profile.chat_token_limit,
+            supports_reasoning_effort: profile.supports_reasoning_effort,
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
             max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
@@ -644,14 +662,25 @@ impl Config {
     /// inert defaults. Never call `from_env` for discovery — it requires
     /// `DATABRICKS_MODEL` and other fields that are irrelevant here.
     pub fn for_discovery(provider: Provider, api_key: String, base_url: String) -> Self {
+        let provider_id = match provider {
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAi => "openai",
+            Provider::Databricks => "databricks",
+            Provider::DatabricksV2 => "databricks_v2",
+            Provider::OpenRouter => "openrouter",
+        };
+        let profile = provider_profile(provider_id).expect("built-in provider profile");
         Self {
             provider,
+            provider_id,
             api_key,
             base_url,
             model: String::new(),
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            chat_token_limit: profile.chat_token_limit,
+            supports_reasoning_effort: profile.supports_reasoning_effort,
             max_rounds: 0,
             max_output_tokens: 1,
             max_token_recoveries: 0,
@@ -764,6 +793,72 @@ impl Config {
     }
 }
 
+fn resolve_provider_profile(requested: Option<&str>) -> Result<&'static ProviderProfile, String> {
+    let profile = requested_provider_profile(requested)?;
+    validate_profile_credential(
+        profile,
+        profile
+            .credential
+            .and_then(|credential| env(credential.env))
+            .as_deref(),
+    )?;
+    Ok(profile)
+}
+
+fn requested_provider_profile(requested: Option<&str>) -> Result<&'static ProviderProfile, String> {
+    let raw = requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, ollama, huggingface)".to_string()
+        })?;
+    let profile = provider_profile(raw)
+        .ok_or_else(|| format!("config: BUZZ_AGENT_PROVIDER={raw} not supported"))?;
+    Ok(profile)
+}
+
+fn validate_profile_credential(
+    profile: &ProviderProfile,
+    credential_value: Option<&str>,
+) -> Result<(), String> {
+    if let Some(credential) = profile.credential {
+        if !present_nonempty(credential_value) {
+            return Err(format!("config: {} required", credential.env));
+        }
+    }
+    Ok(())
+}
+
+fn transport_provider(transport: ProviderTransport) -> Provider {
+    match transport {
+        ProviderTransport::Anthropic => Provider::Anthropic,
+        ProviderTransport::OpenAi => Provider::OpenAi,
+        ProviderTransport::Databricks => Provider::Databricks,
+        ProviderTransport::DatabricksV2 => Provider::DatabricksV2,
+        ProviderTransport::OpenRouter => Provider::OpenRouter,
+    }
+}
+
+fn profile_credential(profile: &ProviderProfile) -> Result<String, String> {
+    match profile.credential {
+        Some(credential) => req(credential.env),
+        // Ollama's OpenAI-compatible endpoint ignores the bearer value, but
+        // the shared transport deliberately always supplies one.
+        None => Ok(profile.id.to_string()),
+    }
+}
+
+fn required_profile_credential(profile: &ProviderProfile) -> Result<String, String> {
+    profile_credential(profile)
+}
+
+fn profile_base_url(profile: &ProviderProfile) -> String {
+    profile
+        .base_url_env
+        .and_then(env)
+        .unwrap_or_else(|| profile.default_base_url.to_string())
+}
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok()
 }
@@ -792,6 +887,7 @@ fn present_nonempty(v: Option<&str>) -> bool {
     v.map(str::trim).is_some_and(|s| !s.is_empty())
 }
 
+#[cfg(test)]
 fn resolve_provider(
     requested: Option<&str>,
     anthropic_key: Option<&str>,
@@ -1131,6 +1227,21 @@ mod tests {
         // No implicit inference — absent BUZZ_AGENT_PROVIDER is an error.
         let err = resolve_provider(None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
+    }
+
+    #[test]
+    fn named_provider_profiles_resolve_without_transport_duplication() {
+        let ollama = requested_provider_profile(Some(" Ollama ")).unwrap();
+        assert_eq!(ollama.id, "ollama");
+        assert_eq!(transport_provider(ollama.transport), Provider::OpenAi);
+        assert!(validate_profile_credential(ollama, None).is_ok());
+
+        let huggingface = requested_provider_profile(Some("hf")).unwrap();
+        assert_eq!(huggingface.id, "huggingface");
+        assert_eq!(transport_provider(huggingface.transport), Provider::OpenAi);
+        let err = validate_profile_credential(huggingface, None).unwrap_err();
+        assert_eq!(err, "config: HF_TOKEN required");
+        assert!(validate_profile_credential(huggingface, Some("hf_test")).is_ok());
     }
 
     #[test]

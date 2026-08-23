@@ -32,6 +32,7 @@ mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
+mod ollama;
 mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
@@ -706,17 +707,32 @@ pub fn run() {
             get_agent_config_surface,
             get_runtime_file_config,
             get_baked_build_env_keys,
+            get_provider_secret_status,
+            set_provider_secret,
+            clear_provider_secret,
             get_baked_build_env,
             put_agent_session_config,
             persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
+            get_ollama_config,
+            set_ollama_config,
+            get_ollama_status,
+            detect_ollama,
+            show_ollama_model,
+            pull_ollama_model,
+            delete_ollama_model,
+            install_managed_ollama,
+            start_managed_ollama,
+            stop_managed_ollama,
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,
             mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
+            search_huggingface_models,
+            get_huggingface_model,
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
