@@ -1,5 +1,6 @@
 use std::{
-    fs::{File, OpenOptions},
+    ffi::{OsStr, OsString},
+    fs::File,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -13,6 +14,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+#[cfg(unix)]
+use rustix::{
+    fs::{AtFlags, Mode, OFlags},
+    io::Errno,
+};
+
 use crate::app_state::AppState;
 
 const REQUEST_SCHEMA: &str = "buzz.nip-oa-owner-attestation-request.v1";
@@ -20,6 +27,9 @@ const REQUEST_FILE_NAME: &str = "OWNER_ATTESTATION_REQUEST.json";
 const TARGET_FILE_NAME: &str = "BUZZ_AUTH_TAG";
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const MAX_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
+// Request-v1 custody fingerprints use exactly SHA256(0x03 || x-only-pubkey).
+// Accepting both SEC1 parity bytes would make the public binding non-unique.
+const AGENT_FINGERPRINT_PREFIX: u8 = 0x03;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +129,26 @@ struct ValidatedRequest {
     agent_pubkey: PublicKey,
     valid_from: u64,
     expires_at: u64,
+}
+
+#[cfg(unix)]
+struct PinnedDirectory {
+    root: File,
+    directory: File,
+    path_components: Vec<OsString>,
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TempLinkState {
+    NotCreated,
+    Preparing,
+    Linked,
+    CleanupAmbiguous,
+    TempUnlinked,
+    Committed,
 }
 
 /// Open and validate an owner-attestation request selected by the user.
@@ -252,7 +282,8 @@ fn sign_request(
     owner_keys: &Keys,
     now: u64,
 ) -> Result<OwnerAttestationWriteReceipt, String> {
-    let first = load_and_validate_request(request_path, now)?;
+    let custody = open_pinned_directory(request_path)?;
+    let first = load_and_validate_request_in(&custody, request_path, now)?;
     if first.request_sha256 != expected_request_sha256 {
         return Err("request bytes changed after inspection; select it again".to_string());
     }
@@ -282,7 +313,7 @@ fn sign_request(
     // Re-open and re-validate immediately before the only external effect.
     // Exact bytes, inode metadata, parent directory identity, owner identity,
     // validity, and target absence must all remain bound to the preview.
-    let second = load_and_validate_request(request_path, now)?;
+    let second = load_and_validate_request_in(&custody, request_path, now)?;
     if second.request_sha256 != first.request_sha256
         || second.request_identity != first.request_identity
         || second.parent_identity != first.parent_identity
@@ -294,11 +325,7 @@ fn sign_request(
         return Err("Desktop owner identity changed before commit; nothing was written".into());
     }
 
-    atomic_create_secret(
-        &second.target_path,
-        auth_tag.as_bytes(),
-        second.parent_identity,
-    )?;
+    atomic_create_secret(&custody, auth_tag.as_bytes())?;
 
     Ok(OwnerAttestationWriteReceipt {
         request_path: second.request_path.display().to_string(),
@@ -311,34 +338,114 @@ fn sign_request(
 
 #[cfg(unix)]
 fn load_and_validate_request(request_path: &Path, now: u64) -> Result<ValidatedRequest, String> {
-    use std::os::unix::fs::OpenOptionsExt;
+    let custody = open_pinned_directory(request_path)?;
+    load_and_validate_request_in(&custody, request_path, now)
+}
 
+#[cfg(unix)]
+fn open_pinned_directory(request_path: &Path) -> Result<PinnedDirectory, String> {
     validate_normal_absolute_path(request_path, REQUEST_FILE_NAME)?;
-    ensure_no_symlink_components(request_path)?;
-
     let parent = request_path
         .parent()
         .ok_or_else(|| "request path has no parent directory".to_string())?;
-    let parent_metadata = std::fs::symlink_metadata(parent)
-        .map_err(|error| format!("inspect request directory: {error}"))?;
-    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+
+    let mut path_components = Vec::new();
+    for component in parent.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(value) => path_components.push(value.to_os_string()),
+            _ => return Err("custody path contains a non-normal component".into()),
+        }
+    }
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = File::from(
+        rustix::fs::open("/", flags, Mode::empty())
+            .map_err(|error| format!("open root directory for custody resolution: {error}"))?,
+    );
+    let directory = open_directory_components(&root, &path_components)?;
+    let metadata = directory
+        .metadata()
+        .map_err(|error| format!("inspect pinned custody directory: {error}"))?;
+    if !metadata.is_dir() {
         return Err("request directory must be a regular non-symlink directory".into());
     }
-    let parent_identity = FileIdentity::from_metadata(&parent_metadata);
-    if parent_identity.mode != 0o700 {
+    let identity = FileIdentity::from_metadata(&metadata);
+    if identity.mode != 0o700 {
         return Err(format!(
             "request directory mode must be 0700, got {:04o}",
-            parent_identity.mode
+            identity.mode
         ));
     }
 
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut file = options
-        .open(request_path)
-        .map_err(|error| format!("open owner attestation request: {error}"))?;
+    Ok(PinnedDirectory {
+        root,
+        directory,
+        path_components,
+        path: parent.to_path_buf(),
+        identity,
+    })
+}
+
+#[cfg(unix)]
+fn open_directory_components(root: &File, components: &[OsString]) -> Result<File, String> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut current = File::from(
+        rustix::fs::openat(root, OsStr::new("."), flags, Mode::empty())
+            .map_err(|error| format!("pin root custody directory: {error}"))?,
+    );
+    for component in components {
+        current = File::from(
+            rustix::fs::openat(&current, component.as_os_str(), flags, Mode::empty()).map_err(
+                |error| {
+                    format!(
+                        "open non-symlink custody path component {}: {error}",
+                        component.to_string_lossy()
+                    )
+                },
+            )?,
+        );
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn verify_current_path_binding(custody: &PinnedDirectory) -> Result<(), String> {
+    let current = open_directory_components(&custody.root, &custody.path_components)?;
+    let current_identity = FileIdentity::from_metadata(
+        &current
+            .metadata()
+            .map_err(|error| format!("reinspect custody path binding: {error}"))?,
+    );
+    if !current_identity.same_directory(&custody.identity) {
+        return Err("custody directory path was renamed or replaced".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn load_and_validate_request_in(
+    custody: &PinnedDirectory,
+    request_path: &Path,
+    now: u64,
+) -> Result<ValidatedRequest, String> {
+    validate_normal_absolute_path(request_path, REQUEST_FILE_NAME)?;
+    if request_path.parent() != Some(custody.path.as_path()) {
+        return Err("request path diverges from the pinned custody directory".into());
+    }
+    verify_current_path_binding(custody)?;
+
+    let mut file = File::from(
+        rustix::fs::openat(
+            &custody.directory,
+            REQUEST_FILE_NAME,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            format!("open regular non-symlink owner attestation request: {error}")
+        })?,
+    );
     let metadata = file
         .metadata()
         .map_err(|error| format!("inspect owner attestation request: {error}"))?;
@@ -355,7 +462,9 @@ fn load_and_validate_request(request_path: &Path, now: u64) -> Result<ValidatedR
             request_identity.mode
         ));
     }
-    if request_identity.uid != parent_identity.uid || request_identity.gid != parent_identity.gid {
+    if request_identity.uid != custody.identity.uid
+        || request_identity.gid != custody.identity.gid
+    {
         return Err("request owner and group must match its custody directory".into());
     }
     if request_identity.len == 0 || request_identity.len > MAX_REQUEST_BYTES {
@@ -425,11 +534,10 @@ fn load_and_validate_request(request_path: &Path, now: u64) -> Result<ValidatedR
     let (valid_from, expires_at) = validate_validity(&request.conditions, now)?;
     let target_path = PathBuf::from(&request.result_path);
     validate_normal_absolute_path(&target_path, TARGET_FILE_NAME)?;
-    if target_path.parent() != Some(parent) {
+    if target_path.parent() != Some(custody.path.as_path()) {
         return Err("result_path must be the exact BUZZ_AUTH_TAG sibling of the request".into());
     }
-    ensure_no_symlink_components(parent)?;
-    ensure_target_absent(&target_path)?;
+    ensure_target_absent(custody)?;
 
     Ok(ValidatedRequest {
         request,
@@ -437,7 +545,7 @@ fn load_and_validate_request(request_path: &Path, now: u64) -> Result<ValidatedR
         target_path,
         request_sha256,
         request_identity,
-        parent_identity,
+        parent_identity: custody.identity,
         agent_pubkey,
         valid_from,
         expires_at,
@@ -459,25 +567,17 @@ fn validate_normal_absolute_path(path: &Path, expected_name: &str) -> Result<(),
     Ok(())
 }
 
-fn ensure_no_symlink_components(path: &Path) -> Result<(), String> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        let metadata = std::fs::symlink_metadata(&current)
-            .map_err(|error| format!("inspect path component {}: {error}", current.display()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!("path component must not be a symlink: {}", current.display()));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_target_absent(target_path: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(target_path) {
+#[cfg(unix)]
+fn ensure_target_absent(custody: &PinnedDirectory) -> Result<(), String> {
+    match rustix::fs::statat(
+        &custody.directory,
+        TARGET_FILE_NAME,
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
         Ok(_) => Err(
             "BUZZ_AUTH_TAG target already exists or is a symlink; refusing to replace it".into(),
         ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(Errno::NOENT) => Ok(()),
         Err(error) => Err(format!("inspect BUZZ_AUTH_TAG target: {error}")),
     }
 }
@@ -488,15 +588,15 @@ fn validate_agent_fingerprint(agent_pubkey: &str, fingerprint: &str) -> Result<(
     }
     let xonly = hex::decode(agent_pubkey)
         .map_err(|error| format!("decode agent_pubkey for fingerprint: {error}"))?;
-    let mut even = Vec::with_capacity(33);
-    even.push(0x02);
-    even.extend_from_slice(&xonly);
-    let mut odd = even.clone();
-    odd[0] = 0x03;
-    let even_fingerprint = Sha256Hash::hash(&even).to_string();
-    let odd_fingerprint = Sha256Hash::hash(&odd).to_string();
-    if fingerprint != even_fingerprint && fingerprint != odd_fingerprint {
-        return Err("agent public fingerprint does not bind the compressed agent pubkey".into());
+    let mut normative = Vec::with_capacity(33);
+    normative.push(AGENT_FINGERPRINT_PREFIX);
+    normative.extend_from_slice(&xonly);
+    let normative_fingerprint = Sha256Hash::hash(&normative).to_string();
+    if fingerprint != normative_fingerprint {
+        return Err(
+            "agent public fingerprint must bind the normative 0x03-prefixed compressed key"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -590,133 +690,207 @@ fn verify_computed_tag(
 }
 
 #[cfg(unix)]
-fn atomic_create_secret(
-    target_path: &Path,
+trait AtomicFileOps {
+    fn link_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno>;
+    fn unlink_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno>;
+    fn sync_directory(&self, custody: &PinnedDirectory) -> Result<(), Errno>;
+}
+
+#[cfg(unix)]
+struct RealAtomicFileOps;
+
+#[cfg(unix)]
+impl AtomicFileOps for RealAtomicFileOps {
+    fn link_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        rustix::fs::linkat(
+            &custody.directory,
+            temp_name,
+            &custody.directory,
+            TARGET_FILE_NAME,
+            AtFlags::empty(),
+        )
+    }
+
+    fn unlink_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        rustix::fs::unlinkat(&custody.directory, temp_name, AtFlags::empty())
+    }
+
+    fn sync_directory(&self, custody: &PinnedDirectory) -> Result<(), Errno> {
+        rustix::fs::fsync(&custody.directory)
+    }
+}
+
+#[cfg(unix)]
+fn atomic_create_secret(custody: &PinnedDirectory, bytes: &[u8]) -> Result<(), String> {
+    atomic_create_secret_with_ops(custody, bytes, &RealAtomicFileOps)
+}
+
+#[cfg(unix)]
+fn atomic_create_secret_with_ops<O: AtomicFileOps>(
+    custody: &PinnedDirectory,
     bytes: &[u8],
-    expected_parent: FileIdentity,
+    ops: &O,
 ) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
+    verify_current_path_binding(custody)?;
+    ensure_target_absent(custody)?;
 
-    let parent = target_path
-        .parent()
-        .ok_or_else(|| "BUZZ_AUTH_TAG target has no parent directory".to_string())?;
-    let current_parent = FileIdentity::from_metadata(
-        &std::fs::symlink_metadata(parent)
-            .map_err(|error| format!("reinspect custody directory: {error}"))?,
-    );
-    if !current_parent.same_directory(&expected_parent) {
-        return Err("custody directory changed before write; nothing was written".into());
-    }
-    ensure_target_absent(target_path)?;
+    let temp_name = format!(".{TARGET_FILE_NAME}.{}.tmp", uuid::Uuid::new_v4());
+    let mut state = TempLinkState::NotCreated;
+    let operation = (|| {
+        let mut temp = File::from(
+            rustix::fs::openat(
+                &custody.directory,
+                temp_name.as_str(),
+                OFlags::WRONLY
+                    | OFlags::CREATE
+                    | OFlags::EXCL
+                    | OFlags::NOFOLLOW
+                    | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .map_err(|error| format!("create protected temporary attestation file: {error}"))?,
+        );
+        state = TempLinkState::Preparing;
 
-    let temp_path = parent.join(format!(
-        ".{TARGET_FILE_NAME}.{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
-    let mut cleanup = TempFileCleanup(Some(temp_path.clone()));
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut temp = options
-        .open(&temp_path)
-        .map_err(|error| format!("create protected temporary attestation file: {error}"))?;
-    let temp_identity = FileIdentity::from_metadata(
-        &temp
-            .metadata()
-            .map_err(|error| format!("inspect protected temporary attestation file: {error}"))?,
-    );
-    if temp_identity.mode != 0o600
-        || temp_identity.uid != expected_parent.uid
-        || temp_identity.gid != expected_parent.gid
-        || temp_identity.links != 1
-    {
-        return Err("protected temporary attestation file failed owner/mode/link checks".into());
-    }
-
-    temp.write_all(bytes)
-        .map_err(|error| format!("write protected temporary attestation file: {error}"))?;
-    temp.sync_all()
-        .map_err(|error| format!("sync protected temporary attestation file: {error}"))?;
-    drop(temp);
-    let persisted = std::fs::read(&temp_path)
-        .map_err(|error| format!("verify protected temporary attestation file: {error}"))?;
-    if persisted.as_slice() != bytes {
-        return Err("protected temporary attestation file reread mismatch".into());
-    }
-
-    let current_parent = FileIdentity::from_metadata(
-        &std::fs::symlink_metadata(parent)
-            .map_err(|error| format!("reinspect custody directory before commit: {error}"))?,
-    );
-    if !current_parent.same_directory(&expected_parent) {
-        return Err("custody directory changed before commit; nothing was written".into());
-    }
-    ensure_target_absent(target_path)?;
-
-    // Linking a fully written, synced same-directory inode is an atomic,
-    // no-replace commit: EEXIST preserves any concurrently created target.
-    std::fs::hard_link(&temp_path, target_path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            "BUZZ_AUTH_TAG target appeared before commit; refusing to replace it".to_string()
-        } else {
-            format!("atomically commit BUZZ_AUTH_TAG without replacement: {error}")
+        let temp_identity = FileIdentity::from_metadata(
+            &temp.metadata().map_err(|error| {
+                format!("inspect protected temporary attestation file: {error}")
+            })?,
+        );
+        if temp_identity.mode != 0o600
+            || temp_identity.uid != custody.identity.uid
+            || temp_identity.gid != custody.identity.gid
+            || temp_identity.links != 1
+        {
+            return Err(
+                "protected temporary attestation file failed owner/mode/link checks".into(),
+            );
         }
-    })?;
 
-    if let Err(error) = std::fs::remove_file(&temp_path) {
-        return Err(format!(
-            "BUZZ_AUTH_TAG may have been committed but temporary-link cleanup failed: {error}; STOP and do not retry"
-        ));
-    }
-    cleanup.0 = None;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
+        temp.write_all(bytes)
+            .map_err(|error| format!("write protected temporary attestation file: {error}"))?;
+        temp.sync_all()
+            .map_err(|error| format!("sync protected temporary attestation file: {error}"))?;
+
+        let persisted_file = open_relative_file(custody, &temp_name, "temporary attestation file")?;
+        let persisted_identity = FileIdentity::from_metadata(
+            &persisted_file.metadata().map_err(|error| {
+                format!("reinspect protected temporary attestation file: {error}")
+            })?,
+        );
+        if persisted_identity != temp_identity {
+            return Err("protected temporary attestation file identity changed before commit".into());
+        }
+        let persisted = read_open_file(persisted_file, "temporary attestation file")?;
+        if persisted.as_slice() != bytes {
+            return Err("protected temporary attestation file reread mismatch".into());
+        }
+
+        verify_current_path_binding(custody)?;
+        ensure_target_absent(custody)?;
+        ops.link_temp(custody, &temp_name).map_err(|error| {
+            if error == Errno::EXIST {
+                "BUZZ_AUTH_TAG target appeared before commit; refusing to replace it".to_string()
+            } else {
+                format!("atomically commit BUZZ_AUTH_TAG without replacement: {error}")
+            }
+        })?;
+        state = TempLinkState::Linked;
+
+        if let Err(error) = ops.unlink_temp(custody, &temp_name) {
+            state = TempLinkState::CleanupAmbiguous;
+            return Err(format!(
+                "BUZZ_AUTH_TAG was linked but temporary-link cleanup failed: {error}; STOP and do not retry"
+            ));
+        }
+        state = TempLinkState::TempUnlinked;
+        drop(temp);
+
+        ops.sync_directory(custody).map_err(|error| {
             format!(
                 "BUZZ_AUTH_TAG was committed but custody-directory sync failed: {error}; STOP and do not retry"
             )
         })?;
+        verify_current_path_binding(custody).map_err(|error| {
+            format!(
+                "BUZZ_AUTH_TAG was committed but custody path verification failed: {error}; STOP and do not retry"
+            )
+        })?;
 
-    let target_metadata = std::fs::symlink_metadata(target_path).map_err(|error| {
-        format!(
-            "BUZZ_AUTH_TAG was committed but metadata verification failed: {error}; STOP and do not retry"
-        )
-    })?;
-    let target_identity = FileIdentity::from_metadata(&target_metadata);
-    if !target_metadata.is_file()
-        || target_metadata.file_type().is_symlink()
-        || target_identity.mode != 0o600
-        || target_identity.uid != expected_parent.uid
-        || target_identity.gid != expected_parent.gid
-        || target_identity.links != 1
-    {
-        return Err(
-            "BUZZ_AUTH_TAG was committed but failed regular-file/owner/mode/link verification; STOP and do not retry"
-                .into(),
-        );
+        let target = open_relative_file(custody, TARGET_FILE_NAME, "BUZZ_AUTH_TAG")?;
+        let target_metadata = target.metadata().map_err(|error| {
+            format!(
+                "BUZZ_AUTH_TAG was committed but metadata verification failed: {error}; STOP and do not retry"
+            )
+        })?;
+        let target_identity = FileIdentity::from_metadata(&target_metadata);
+        if !target_metadata.is_file()
+            || target_metadata.file_type().is_symlink()
+            || target_identity.mode != 0o600
+            || target_identity.uid != custody.identity.uid
+            || target_identity.gid != custody.identity.gid
+            || target_identity.links != 1
+        {
+            return Err(
+                "BUZZ_AUTH_TAG was committed but failed regular-file/owner/mode/link verification; STOP and do not retry"
+                    .into(),
+            );
+        }
+        let target_bytes = read_open_file(target, "BUZZ_AUTH_TAG")?;
+        if target_bytes.as_slice() != bytes {
+            return Err(
+                "BUZZ_AUTH_TAG was committed but reread mismatched; STOP and do not retry".into(),
+            );
+        }
+        state = TempLinkState::Committed;
+        Ok(())
+    })();
+
+    if operation.is_err() && state == TempLinkState::Preparing {
+        if let Err(cleanup_error) = ops.unlink_temp(custody, &temp_name) {
+            state = TempLinkState::CleanupAmbiguous;
+            let operation_error = operation
+                .as_ref()
+                .expect_err("operation is known to be an error");
+            return Err(format!(
+                "{operation_error}; pre-commit temporary-file cleanup failed: {cleanup_error}; STOP and do not retry"
+            ));
+        }
+        state = TempLinkState::NotCreated;
     }
-    let target_bytes = std::fs::read(target_path).map_err(|error| {
-        format!(
-            "BUZZ_AUTH_TAG was committed but reread failed: {error}; STOP and do not retry"
-        )
-    })?;
-    if target_bytes.as_slice() != bytes {
-        return Err("BUZZ_AUTH_TAG was committed but reread mismatched; STOP and do not retry".into());
-    }
-    Ok(())
+
+    debug_assert!(matches!(
+        state,
+        TempLinkState::NotCreated
+            | TempLinkState::CleanupAmbiguous
+            | TempLinkState::TempUnlinked
+            | TempLinkState::Committed
+    ));
+    operation
 }
 
-struct TempFileCleanup(Option<PathBuf>);
+#[cfg(unix)]
+fn open_relative_file(
+    custody: &PinnedDirectory,
+    name: &str,
+    label: &str,
+) -> Result<File, String> {
+    rustix::fs::openat(
+        &custody.directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| format!("open protected {label}: {error}; STOP and do not retry"))
+}
 
-impl Drop for TempFileCleanup {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+#[cfg(unix)]
+fn read_open_file(mut file: File, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("reread protected {label}: {error}; STOP and do not retry"))?;
+    Ok(bytes)
 }
 
 #[cfg(all(test, unix))]

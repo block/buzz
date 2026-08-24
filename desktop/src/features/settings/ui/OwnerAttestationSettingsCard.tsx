@@ -165,7 +165,7 @@ export function OwnerAttestationSettingsCard() {
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-medium text-muted-foreground">
-                    Agent public fingerprint SHA256
+                    Agent fingerprint SHA256 (0x03 + x-only key)
                   </p>
                   {publicValue(preview.agentPublicFingerprintSha256)}
                 </div>
