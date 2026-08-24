@@ -118,23 +118,24 @@ export function resolveSlotSound(
  * Pick the sound slot for a home-feed item.
  *
  * `category` is the backend's per-item classification (`FeedItemCategory` in
- * `desktop/src-tauri/src/models.rs`). Every known category maps explicitly;
- * anything else falls back to `needs_action` so a contract drift costs the
- * user the wrong sound rather than a missed alert — and warns so the drift
- * is visible to developers instead of silently masquerading as intended.
+ * `desktop/src-tauri/src/models.rs`). A mention always wins — being addressed
+ * directly outranks whatever kind of event carried it, including agent job
+ * events. Every other known category maps explicitly; anything else falls
+ * back to `needs_action` so a contract drift costs the user the wrong sound
+ * rather than a missed alert — and warns so the drift is visible to
+ * developers instead of silently masquerading as intended.
  */
 export function slotForFeedKind(
   kind: number,
   category: FeedItemCategory,
 ): SoundSlot {
+  if (category === "mention") return "mention";
   if (kind === KIND_JOB_ACCEPTED) return "job_accepted";
   if (kind === KIND_JOB_PROGRESS) return "job_progress";
   if (kind === KIND_JOB_RESULT) return "job_result";
   if (kind === KIND_JOB_ERROR) return "job_error";
 
   switch (category) {
-    case "mention":
-      return "mention";
     case "needs_action":
     case "activity":
     case "agent_activity":

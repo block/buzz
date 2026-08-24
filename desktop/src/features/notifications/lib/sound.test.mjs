@@ -24,11 +24,15 @@ test("routes each feed category to its own sound slot", () => {
   );
 });
 
-test("agent job kinds pick their slot regardless of category", () => {
+test("agent job kinds pick their slot for non-mention categories", () => {
   assert.equal(
     slotForFeedKind(KIND_JOB_ACCEPTED, "agent_activity"),
     "job_accepted",
   );
+});
+
+test("a mention outranks the agent job kind that carried it", () => {
+  assert.equal(slotForFeedKind(KIND_JOB_ACCEPTED, "mention"), "mention");
 });
 
 test("unknown category falls back to needs_action and warns", () => {
