@@ -26,6 +26,7 @@ import 'profile_avatar_draft.dart';
 part 'animated_avatar_capture/review_controls.dart';
 part 'animated_avatar_capture/capture_controls.dart';
 part 'animated_avatar_capture/frame_processing.dart';
+part 'animated_avatar_capture/error_text.dart';
 
 const _captureDuration = Duration(seconds: 3);
 const _captureFrameInterval = Duration(milliseconds: 125);
@@ -631,27 +632,6 @@ List<Uint8List> _resampleCapturedFrames(
     final sourceIndex = (progress * (frames.length - 1)).round();
     return frames[sourceIndex];
   }, growable: false);
-}
-
-class _ErrorText extends StatelessWidget {
-  const _ErrorText(this.message);
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: Grid.xs),
-    child: Semantics(
-      liveRegion: true,
-      child: Text(
-        message,
-        textAlign: TextAlign.center,
-        style: context.textTheme.bodySmall?.copyWith(
-          color: context.colors.error,
-        ),
-      ),
-    ),
-  );
 }
 
 Color _personOutlineColor(int backdropColor) {
