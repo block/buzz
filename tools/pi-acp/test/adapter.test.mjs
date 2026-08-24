@@ -9,6 +9,13 @@ import { attachJsonlReader, writeJsonl } from "../src/jsonl.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const adapterPath = path.join(here, "../src/pi-acp-rpc.mjs");
 const fakePiPath = path.join(here, "fake-pi.mjs");
+const buzzMeta = {
+  buzz: {
+    channelId: "4dcab690-a2ca-4a56-9e5d-d901d12f83c3",
+    triggeringEventIds: ["a".repeat(64)],
+    replyTo: "a".repeat(64),
+  },
+};
 
 function startHarness(mode = "complete") {
   const child = spawn(process.execPath, [adapterPath], {
@@ -108,7 +115,11 @@ test("maps ACP prompt to Pi text, tool, usage, and completion events", async (t)
     jsonrpc: "2.0",
     id: 3,
     method: "session/prompt",
-    params: { sessionId, prompt: [{ type: "text", text: "status?" }] },
+    params: {
+      sessionId,
+      prompt: [{ type: "text", text: "status?" }],
+      _meta: buzzMeta,
+    },
   });
   const completed = await harness.waitFor((message) => message.id === 3);
   assert.equal(completed.result.stopReason, "end_turn");
@@ -152,7 +163,11 @@ test("steers an active Pi prompt without starting a second ACP prompt", async (t
     jsonrpc: "2.0",
     id: 3,
     method: "session/prompt",
-    params: { sessionId, prompt: [{ type: "text", text: "start" }] },
+    params: {
+      sessionId,
+      prompt: [{ type: "text", text: "start" }],
+      _meta: buzzMeta,
+    },
   });
   await new Promise((resolve) => setTimeout(resolve, 30));
   harness.send({
@@ -182,7 +197,11 @@ test("maps ACP cancellation to Pi abort and drains a cancelled prompt", async (t
     jsonrpc: "2.0",
     id: 3,
     method: "session/prompt",
-    params: { sessionId, prompt: [{ type: "text", text: "wait" }] },
+    params: {
+      sessionId,
+      prompt: [{ type: "text", text: "wait" }],
+      _meta: buzzMeta,
+    },
   });
   await new Promise((resolve) => setTimeout(resolve, 30));
   harness.send({
@@ -204,7 +223,11 @@ test("rejects blank prompts and a second task session", async (t) => {
     jsonrpc: "2.0",
     id: 3,
     method: "session/prompt",
-    params: { sessionId, prompt: [{ type: "text", text: "   " }] },
+    params: {
+      sessionId,
+      prompt: [{ type: "text", text: "   " }],
+      _meta: buzzMeta,
+    },
   });
   const blank = await harness.waitFor((message) => message.id === 3);
   assert.equal(blank.error.code, -32602);

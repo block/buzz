@@ -354,8 +354,25 @@ export class PiAcpRpcSpike {
       usage: emptyUsage(),
       finalStopReason: "end_turn",
     };
+    const buzzContext = message.params?._meta?.buzz;
+    if (
+      !buzzContext ||
+      typeof buzzContext.channelId !== "string" ||
+      !Array.isArray(buzzContext.triggeringEventIds) ||
+      typeof buzzContext.replyTo !== "string"
+    ) {
+      this.currentPrompt = null;
+      this.#send(
+        rpcError(
+          message.id,
+          INVALID_PARAMS,
+          "session/prompt: authenticated _meta.buzz routing context is required",
+        ),
+      );
+      return;
+    }
     try {
-      await this.#sendPiCommand("prompt", { message: text });
+      await this.#sendPiCommand("prompt", { message: text, buzzContext });
     } catch (error) {
       const prompt = this.currentPrompt;
       this.currentPrompt = null;

@@ -2416,6 +2416,26 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let buzz_prompt_metadata = batch.as_ref().and_then(|batch| {
+        let triggering_event_ids: Vec<String> = batch
+            .cancelled_events
+            .iter()
+            .chain(batch.events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        let reply_to = batch
+            .events
+            .last()
+            .or_else(|| batch.cancelled_events.last())?
+            .event
+            .id
+            .to_hex();
+        Some(crate::acp::BuzzPromptMetadata {
+            channel_id: batch.channel_id.to_string(),
+            triggering_event_ids,
+            reply_to,
+        })
+    });
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
@@ -2460,9 +2480,10 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_metadata_and_idle_timeout(
                     &session_id,
                     &prompt_blocks,
+                    buzz_prompt_metadata.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -2471,9 +2492,10 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_metadata_and_idle_timeout(
                     &session_id,
                     &prompt_blocks,
+                    buzz_prompt_metadata.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,

@@ -781,7 +781,30 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = build_prompt_params(session_id, prompt_blocks);
+        self.session_prompt_blocks_with_metadata_and_idle_timeout(
+            session_id,
+            prompt_blocks,
+            None,
+            idle_timeout,
+            max_duration,
+        )
+        .await
+    }
+
+    /// Send text blocks with authenticated Buzz routing metadata.
+    ///
+    /// The metadata is supplied by the harness from the triggering relay events;
+    /// adapters must treat it as authoritative and must not accept model-provided
+    /// channel or reply-target overrides.
+    pub async fn session_prompt_blocks_with_metadata_and_idle_timeout(
+        &mut self,
+        session_id: &str,
+        prompt_blocks: &[&str],
+        metadata: Option<&BuzzPromptMetadata>,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        let params = build_prompt_params(session_id, prompt_blocks, metadata);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -2041,15 +2064,31 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
-fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzPromptMetadata {
+    pub channel_id: String,
+    pub triggering_event_ids: Vec<String>,
+    pub reply_to: String,
+}
+
+fn build_prompt_params(
+    session_id: &str,
+    prompt_blocks: &[&str],
+    metadata: Option<&BuzzPromptMetadata>,
+) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect();
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "sessionId": session_id,
         "prompt": blocks,
-    })
+    });
+    if let Some(metadata) = metadata {
+        params["_meta"]["buzz"] = serde_json::to_value(metadata).unwrap_or_default();
+    }
+    params
 }
 
 /// Build `_goose/unstable/session/steer` params from one or more text
@@ -2585,6 +2624,7 @@ mod tests {
                 "/goal ship it",
                 "[Buzz event: @mention]\nContent: @Eva /goal ship it",
             ],
+            None,
         );
         let prompt = params["prompt"].as_array().unwrap();
         assert_eq!(prompt.len(), 2);
@@ -2592,6 +2632,24 @@ mod tests {
         assert_eq!(prompt[0]["text"].as_str(), Some("/goal ship it"));
         assert!(prompt[0]["text"].as_str().unwrap().starts_with('/'));
         assert_eq!(prompt[1]["type"].as_str(), Some("text"));
+    }
+
+    #[test]
+    fn prompt_metadata_is_nested_under_buzz_meta() {
+        let metadata = BuzzPromptMetadata {
+            channel_id: "4dcab690-a2ca-4a56-9e5d-d901d12f83c3".into(),
+            triggering_event_ids: vec!["a".repeat(64), "b".repeat(64)],
+            reply_to: "b".repeat(64),
+        };
+        let params = build_prompt_params("session", &["hello"], Some(&metadata));
+        assert_eq!(params["_meta"]["buzz"]["channelId"], metadata.channel_id);
+        assert_eq!(params["_meta"]["buzz"]["replyTo"], metadata.reply_to);
+        assert_eq!(
+            params["_meta"]["buzz"]["triggeringEventIds"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
     }
 
     #[test]
