@@ -200,6 +200,8 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.loadSession == true`.
+    load_session_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -559,6 +561,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            load_session_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -615,6 +618,10 @@ impl AcpClient {
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        self.load_session_supported = result
+            .pointer("/agentCapabilities/loadSession")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
@@ -700,6 +707,27 @@ impl AcpClient {
             .session_new_full(cwd, mcp_servers, system_prompt, session_title)
             .await?
             .session_id)
+    }
+
+    /// Re-attach to an adapter-persisted session via ACP `session/load`.
+    ///
+    /// Gate on [`Self::load_session_supported`]. The adapter may replay the
+    /// session's history as `session/update` notifications before responding;
+    /// the read loop treats out-of-turn updates as passive.
+    pub async fn session_load(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<(), AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": mcp_servers,
+        });
+        self.send_request("session/load", params).await?;
+        tracing::info!(target: "acp::session", "session loaded: {session_id}");
+        Ok(())
     }
 
     /// Replace Goose's native system prompt after `session/new`.
@@ -879,6 +907,16 @@ impl AcpClient {
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
         self.steering_supported
+    }
+
+    /// Whether the agent advertised `agentCapabilities.loadSession`.
+    pub fn load_session_supported(&self) -> bool {
+        self.load_session_supported
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_load_session_supported(&mut self, value: bool) {
+        self.load_session_supported = value;
     }
 
     /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
@@ -4279,6 +4317,78 @@ mod tests {
             !supported,
             "_meta.steering.supported: false must leave steering_supported false"
         );
+    }
+
+    async fn load_session_supported_after_initialize(init_result: &str) -> bool {
+        let script = format!(
+            "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \\
+             sleep 5",
+            result = init_result,
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client.load_session_supported()
+    }
+
+    #[tokio::test]
+    async fn initialize_records_load_session_supported_when_advertised() {
+        let supported = load_session_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":true}}"#,
+        )
+        .await;
+        assert!(
+            supported,
+            "agentCapabilities.loadSession: true must set load_session_supported"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_load_session_unsupported_when_absent() {
+        let supported = load_session_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{}}"#,
+        )
+        .await;
+        assert!(
+            !supported,
+            "absent loadSession must leave load_session_supported false"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_load_session_unsupported_when_explicitly_false() {
+        let supported = load_session_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":false}}"#,
+        )
+        .await;
+        assert!(
+            !supported,
+            "loadSession: false must leave load_session_supported false"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_wire_shape_and_replayed_update_does_not_wedge() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_restored","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replay"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client.load_session_supported());
+        client
+            .session_load("ses_restored", "/tmp", vec![])
+            .await
+            .expect("session_load should succeed after replayed update");
     }
 
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the

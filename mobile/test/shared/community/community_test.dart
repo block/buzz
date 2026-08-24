@@ -14,20 +14,21 @@ void main() {
       community.sensitiveActionPolicy,
       SensitiveActionPolicy.disabledByUser,
     );
+    expect(community.starterSetupIncomplete, isFalse);
   });
 
-  test('sensitive action policy round trips', () {
+  test('community settings round trip', () {
     final community = Community(
       id: 'one',
       name: 'Buzz',
       relayUrl: 'https://relay.test',
       sensitiveActionPolicy: SensitiveActionPolicy.enabled,
+      starterSetupIncomplete: true,
       addedAt: DateTime.utc(2026, 8, 5),
     );
 
-    expect(
-      Community.fromJson(community.toJson()).sensitiveActionPolicy,
-      SensitiveActionPolicy.enabled,
-    );
+    final roundTrip = Community.fromJson(community.toJson());
+    expect(roundTrip.sensitiveActionPolicy, SensitiveActionPolicy.enabled);
+    expect(roundTrip.starterSetupIncomplete, isTrue);
   });
 }

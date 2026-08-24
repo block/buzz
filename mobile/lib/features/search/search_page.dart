@@ -214,7 +214,7 @@ class SearchPage extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
-        bottomDividerOpacity: 0.06,
+        bottomDividerOpacity: 0.07,
         titleStyle: headerTitleStyle,
         // Keep this mounted through the search-field morph so it can fade in
         // beneath the returning field rather than popping in afterward.

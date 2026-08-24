@@ -66,5 +66,13 @@ export function useHuddleChannelMessages({
     [huddleThreadReplies.events, isHuddleTranscript, resolvedChannelMessages],
   );
 
-  return { resolvedMessages, threadSummaries };
+  return {
+    resolvedMessages,
+    threadSummaries,
+    // A summarized reply subtree failing must not leave the transcript reading
+    // as complete: surface the aggregate failure so the consumer can show a
+    // non-destructive retry alert alongside the rows that did load.
+    threadRepliesError: isHuddleTranscript && huddleThreadReplies.isError,
+    onRetryThreadReplies: huddleThreadReplies.refetch,
+  };
 }

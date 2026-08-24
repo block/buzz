@@ -37,6 +37,7 @@ import {
 } from "@/features/messages/lib/useRichTextEditor";
 import { FormattingToolbar } from "@/features/messages/ui/FormattingToolbar";
 import { MessageThreadTranscript } from "@/features/messages/ui/MessageThreadTranscript";
+import { ThreadRepliesErrorCard } from "@/features/messages/ui/MessageThreadReplyState";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useThreadRepliesForRoots } from "@/features/messages/useThreadReplies";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
@@ -363,6 +364,9 @@ export function ConversationThread({
         profiles={profiles}
         renderAfterMessage={renderSubmittedContext}
       />
+      {threadReplies.isError ? (
+        <ThreadRepliesErrorCard onRetry={threadReplies.refetch} />
+      ) : null}
       {agentWorking.working ? (
         <div className="flex items-center gap-2 pl-11 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
