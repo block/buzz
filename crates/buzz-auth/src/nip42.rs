@@ -14,8 +14,19 @@ use crate::error::AuthError;
 /// Normalize a relay URL for comparison.
 ///
 /// Uses the `url` crate for proper parsing rather than string manipulation.
-/// Normalizes localhost variants to 127.0.0.1 and strips trailing slashes
-/// (the `url` crate handles the latter automatically via path normalization).
+/// Normalizes localhost variants to 127.0.0.1, folds `ws://` onto `wss://`,
+/// and strips trailing slashes (the `url` crate handles the latter
+/// automatically via path normalization).
+///
+/// Scheme folding is required because the transport a client sees is not
+/// always the transport the relay is configured with. Behind a TLS terminator
+/// (Tailscale serve, nginx, Cloudflare) a client correctly signs
+/// `wss://<host>`, while the relay derives `ws://<host>` from its own
+/// plaintext listener — see `nip42_expected_relay_url`, which takes the scheme
+/// from the relay's own config and the host from the inbound request. The
+/// `relay` tag binds an AUTH event to a *relay*, and the host is what
+/// identifies it; the scheme only describes how this one hop was carried, and
+/// replay across relays is already prevented by the per-connection challenge.
 fn normalize_relay_url(raw: &str) -> String {
     let mut parsed = match Url::parse(raw) {
         Ok(u) => u,
@@ -26,6 +37,10 @@ fn normalize_relay_url(raw: &str) -> String {
         if host == "localhost" || host == "::1" {
             let _ = parsed.set_host(Some("127.0.0.1"));
         }
+    }
+    // Treat a TLS-terminated hop as equivalent to the plaintext listener behind it.
+    if parsed.scheme() == "ws" {
+        let _ = parsed.set_scheme("wss");
     }
     let path = parsed.path().trim_end_matches('/').to_string();
     parsed.set_path(&path);
@@ -179,5 +194,50 @@ mod tests {
         let a = normalize_relay_url("wss://relay.example.com/");
         let b = normalize_relay_url("wss://relay.example.com");
         assert_eq!(a, b);
+    }
+
+    /// A relay behind a TLS terminator sees the client's `wss://` while
+    /// deriving `ws://` from its own plaintext listener. Same host, same
+    /// relay — the scheme must not split them.
+    #[test]
+    fn ws_and_wss_are_equivalent_for_the_same_host() {
+        let a = normalize_relay_url("ws://relay.example.com");
+        let b = normalize_relay_url("wss://relay.example.com");
+        assert_eq!(a, b);
+    }
+
+    /// The exact live failure: Desktop and mobile sign `wss://<tailnet host>`
+    /// while the relay expects `ws://<tailnet host>` because its own
+    /// `RELAY_URL` is plaintext. Before the scheme fold this returned
+    /// `RelayUrlMismatch`, surfacing as "the pairing relay rejected
+    /// authentication" on the phone and "relay closed waiting for EOSE" on
+    /// the Desktop.
+    #[test]
+    fn tls_terminated_client_matches_plaintext_relay_expectation() {
+        let keys = Keys::generate();
+        let challenge = generate_challenge();
+        let event = make_auth_event(&keys, &challenge, "wss://relay.example.com");
+        assert!(verify_nip42_event(&event, &challenge, "ws://relay.example.com").is_ok());
+    }
+
+    /// Folding the scheme must not fold the host: a different relay is still
+    /// a different relay, which is the property the `relay` tag exists for.
+    #[test]
+    fn scheme_fold_does_not_weaken_host_binding() {
+        let keys = Keys::generate();
+        let challenge = generate_challenge();
+        let event = make_auth_event(&keys, &challenge, "ws://evil.example.com");
+        assert!(matches!(
+            verify_nip42_event(&event, &challenge, "wss://relay.example.com"),
+            Err(AuthError::RelayUrlMismatch)
+        ));
+    }
+
+    /// Nor the port — `ws://host:3000` and `wss://host:3100` are distinct.
+    #[test]
+    fn scheme_fold_does_not_weaken_port_binding() {
+        let a = normalize_relay_url("ws://relay.example.com:3000");
+        let b = normalize_relay_url("wss://relay.example.com:3100");
+        assert_ne!(a, b);
     }
 }

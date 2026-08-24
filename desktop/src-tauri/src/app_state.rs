@@ -22,27 +22,27 @@ pub struct AppState {
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
     pub http_client: reqwest::Client,
-    /// A no-redirect client for authenticated relay media fetches (download,
-    /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
-    /// origin, but the app-wide `http_client` follows redirects by default, so
-    /// a relay `/media/` URL returning a 3xx to an off-origin or private host
-    /// would forward the minted media Authorization header across origins —
-    /// a redirect-hop SSRF. This client treats any 3xx as a non-success
-    /// response (surfaced as an error) so the auth token never leaves the
-    /// validated relay origin.
+    /// A no-redirect client for authenticated relay media fetches (download, clipboard copy,
+    /// snapshot, editor). Every caller pre-validates the URL origin, but the app-wide
+    /// `http_client` follows redirects by default, so a relay `/media/` URL returning a 3xx to
+    /// an off-origin or private host would forward the minted media Authorization header across
+    /// origins — a redirect-hop SSRF. This client treats any 3xx as a non-success response
+    /// (surfaced as an error) so the auth token never leaves the validated relay origin.
     pub media_fetch_client: reqwest::Client,
     pub relay_url_override: Mutex<Option<String>>,
+    /// Community id paired with `relay_url_override` for `apply_workspace`'s edit-vs-switch check.
+    pub active_workspace_id: Mutex<Option<String>>,
     pub workspace_apply_lock: Arc<AsyncMutex<()>>,
     pub workspace_apply_generation: AtomicU64,
-    /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
+    /// Eligible-for-restore flag; `apply_workspace` consumes it after installing the workspace relay/identity, so agents never start against the fallback relay.
     pub managed_agent_restore_pending: AtomicBool,
     /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
-    /// Serializes every managed-runtime transition that changes the protected
-    /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
-    /// Never perform network I/O while holding this lock.
+    /// Serializes every managed-runtime transition that changes the protected PID set:
+    /// spawn/register, adoption, stop, shutdown, and sweep snapshots. Never perform network I/O
+    /// while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
@@ -131,7 +131,6 @@ pub struct AppState {
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
     pub archive_db: crate::archive::ArchiveDb,
 }
-
 /// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
 /// env var was present and valid and MUST win over any persisted/keyring key
 /// (the dev/CI/harness override). `None` means absent or malformed — callers
@@ -204,6 +203,7 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
+        active_workspace_id: Mutex::new(None),
         workspace_apply_lock: Arc::new(AsyncMutex::new(())),
         workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),
