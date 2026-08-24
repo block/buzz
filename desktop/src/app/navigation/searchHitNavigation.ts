@@ -4,6 +4,7 @@ import type { SearchHit } from "@/shared/api/types";
 
 type SearchHitNavigationActions = {
   force?: boolean;
+  query?: string;
   goChannel: (
     channelId: string,
     options?: {
@@ -31,7 +32,7 @@ export async function openSearchHitWithNavigation(
 
   const isLifecycleBound = Boolean(actions.signal);
   if (!isLifecycleBound) {
-    cacheSearchHitEvent(hit);
+    cacheSearchHitEvent(hit, actions.query);
   }
 
   const destination = await resolveDestination(hit);
@@ -42,7 +43,7 @@ export async function openSearchHitWithNavigation(
   if (isLifecycleBound) {
     // Delay community-scoped writes for notification routing until async
     // destination resolution completes and its owner is still current.
-    cacheSearchHitEvent(hit);
+    cacheSearchHitEvent(hit, actions.query);
   }
 
   if (destination.kind === "forum-post") {

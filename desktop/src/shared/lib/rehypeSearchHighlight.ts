@@ -6,6 +6,8 @@
  * ReactMarkdown's architecture — no post-render tree walking needed.
  */
 
+import { SEARCH_MATCH_HIGHLIGHT_CLASS } from "@/shared/lib/searchHighlightStyle";
+
 // Minimal HAST types — matches the pattern in rehypeImageGallery.ts.
 interface HastText {
   type: "text";
@@ -43,7 +45,7 @@ export default function rehypeSearchHighlight({ query }: { query: string }) {
     const trimmed = query.trim();
     if (trimmed.length < 2) return;
 
-    const pattern = new RegExp(`(${escapeRegExp(trimmed)})`, "i");
+    const pattern = new RegExp(`(${escapeRegExp(trimmed)})`, "gi");
 
     function walk(nodes: HastNode[]): HastNode[] {
       const result: HastNode[] = [];
@@ -56,18 +58,16 @@ export default function rehypeSearchHighlight({ query }: { query: string }) {
             continue;
           }
 
-          for (let i = 0; i < parts.length; i++) {
-            const part = parts[i];
+          for (const part of parts) {
             if (!part) continue;
 
-            if (i % 2 === 1) {
-              // Odd indices from split-with-capture are always the match.
+            if (part.toLowerCase() === trimmed.toLowerCase()) {
               result.push({
                 type: "element",
                 tagName: "mark",
                 properties: {
-                  className:
-                    "rounded-xs bg-primary/20 text-foreground dark:bg-primary/30",
+                  className: SEARCH_MATCH_HIGHLIGHT_CLASS,
+                  "data-search-match": "true",
                 },
                 children: [{ type: "text", value: part }],
               });

@@ -58,6 +58,22 @@ test("search-hit navigation preserves forced message routing while active", asyn
   assert.equal(getCachedSearchHitEvent("message")?.id, "message");
 });
 
+test("search-hit navigation retains the query for destination highlighting", async () => {
+  clearSearchHitEventCache();
+  const { consumeCachedSearchHitQuery } = await import(
+    "./searchHitEventCache.ts"
+  );
+
+  await openSearchHitWithNavigation(plainMessage, {
+    goChannel: async () => true,
+    goForumPost: async () => false,
+    query: "  Mentions  ",
+  });
+
+  assert.equal(consumeCachedSearchHitQuery("message"), "Mentions");
+  assert.equal(consumeCachedSearchHitQuery("message"), null);
+});
+
 test("cancelled search-hit navigation cannot repopulate cache or route", async () => {
   clearSearchHitEventCache();
   let resolveLookup;

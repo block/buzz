@@ -3,6 +3,8 @@ import * as React from "react";
 
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { getMinimumSearchQueryLength } from "@/features/search/hooks";
+import { parseSearchOperators } from "@/features/search/lib/parseSearchOperators";
+import { buildSearchResultPreview } from "@/features/search/lib/searchMatch";
 import { useSearchResults } from "@/features/search/useSearchResults";
 import {
   resultIcon,
@@ -15,6 +17,7 @@ import {
   getChannelScopeLabel,
   SearchDialogInputRow,
 } from "@/features/search/ui/SearchScopeControls";
+import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchText";
 import { useSearchMenuKeyboardNavigation } from "@/features/search/ui/useSearchMenuKeyboardNavigation";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -36,7 +39,7 @@ type TopbarSearchProps = {
   currentChannelId?: string | null;
   focusRequest?: number;
   onOpenChannel: (channelId: string) => void;
-  onOpenResult: (hit: SearchHit) => void;
+  onOpenResult: (hit: SearchHit, query: string) => void;
   onOpenUser?: (user: UserSearchResult) => void | Promise<void>;
   onBrowseChannels?: () => void | Promise<void>;
   onCreateAgent?: () => void | Promise<void>;
@@ -71,19 +74,6 @@ type SearchHitContextLabel = {
   channelLabel: string | null;
   text: string;
 };
-
-function truncateResultText(content: string, maxLength = 96) {
-  const trimmed = content.trim();
-  if (trimmed.length === 0) {
-    return "No message body.";
-  }
-
-  if (trimmed.length <= maxLength) {
-    return trimmed;
-  }
-
-  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
-}
 
 function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
@@ -436,6 +426,7 @@ export function TopbarSearch({
     scopeChannelId,
   });
   const trimmedQuery = query.trim();
+  const highlightQuery = parseSearchOperators(trimmedQuery).text;
   const isIconVariant = variant === "icon";
   const currentChannel = currentChannelId
     ? (channelLookup.get(currentChannelId) ?? null)
@@ -581,7 +572,7 @@ export function TopbarSearch({
         return;
       }
 
-      onOpenResult(result.hit);
+      onOpenResult(result.hit, highlightQuery);
     },
     [
       onBrowseChannels,
@@ -592,6 +583,7 @@ export function TopbarSearch({
       onOpenUser,
       openAfterExit,
       setQuery,
+      highlightQuery,
     ],
   );
 
@@ -697,7 +689,7 @@ export function TopbarSearch({
           ? result.action.description
           : result.kind === "user"
             ? getUserSecondaryLabel(result.user)
-            : truncateResultText(result.hit.content);
+            : buildSearchResultPreview(result.hit.content, highlightQuery);
     const trailingLabel =
       result.kind === "channel"
         ? getChannelSuggestionMeta(result.channel)
@@ -771,7 +763,10 @@ export function TopbarSearch({
               ) : null}
               {preview ? (
                 <span className="col-start-1 mt-1.5 block min-w-0 truncate text-sm leading-5 text-muted-foreground">
-                  {preview}
+                  <HighlightedSearchText
+                    query={highlightQuery}
+                    text={preview}
+                  />
                 </span>
               ) : null}
             </span>

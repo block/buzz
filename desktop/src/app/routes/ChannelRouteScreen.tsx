@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
+import {
+  getCachedSearchHitEvent,
+  consumeCachedSearchHitQuery,
+} from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useOpenChannelDirectoryQuery } from "@/features/channels/openChannelDirectory";
@@ -132,23 +135,38 @@ export function ChannelRouteScreen({
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     return cachedTarget ? [cachedTarget] : [];
   });
+  const [searchHighlight, setSearchHighlight] = React.useState<{
+    messageId: string;
+    query: string;
+  } | null>(() => {
+    const messageId = targetMessageId ?? targetReplyId ?? selectedPostId;
+    const query = consumeCachedSearchHitQuery(messageId);
+    return messageId && query ? { messageId, query } : null;
+  });
 
-  // Reset spliced target events when the channel context changes (channel
-  // switch or entering/leaving a forum post). Tied to channel identity rather
-  // than the route target so clearing the `messageId` param mid-channel keeps
-  // the deep-linked row in view. Seeded with the mount key so the initial
+  // Reset spliced target events and search highlighting when the channel
+  // changes. Tied to channel identity rather
+  // than the route target so clearing the `messageId` param or resolving a
+  // forum post mid-channel keeps the clicked highlight in view. Seeded with
+  // the mount key so the initial
   // cache-seeded events survive first commit; only a genuine channel change
   // clears them. Declared before the fetch effect so a channel switch clears
   // stale events before the new target is fetched.
-  const previousResetKeyRef = React.useRef<string>(
-    `${channelId}::${selectedPostId ?? ""}`,
-  );
+  const previousResetKeyRef = React.useRef<string>(channelId);
   React.useEffect(() => {
-    const resetKey = `${channelId}::${selectedPostId ?? ""}`;
-    if (previousResetKeyRef.current === resetKey) return;
-    previousResetKeyRef.current = resetKey;
+    if (previousResetKeyRef.current === channelId) return;
+    previousResetKeyRef.current = channelId;
     setTargetMessageEvents([]);
-  }, [channelId, selectedPostId]);
+    setSearchHighlight(null);
+  }, [channelId]);
+
+  React.useEffect(() => {
+    const messageId = targetMessageId ?? targetReplyId ?? selectedPostId;
+    const query = consumeCachedSearchHitQuery(messageId);
+    if (messageId && query) {
+      setSearchHighlight({ messageId, query });
+    }
+  }, [targetMessageId, targetReplyId, selectedPostId]);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -234,6 +252,8 @@ export function ChannelRouteScreen({
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
+      targetSearchMessageId={searchHighlight?.messageId}
+      targetSearchQuery={searchHighlight?.query}
     />
   );
 }

@@ -147,6 +147,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelTab,
   profilePanelView,
   targetMessageId,
+  targetSearchMessageId,
+  targetSearchQuery,
   threadAllMessages,
   threadHeadMessage,
   threadMessages,
@@ -169,6 +171,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     currentPubkey,
   );
   const mainComposerMedia = useMediaUpload({ deferUploadsUntilSend: true });
+  const searchMatchingMessageIds = React.useMemo(
+    () =>
+      targetSearchMessageId ? new Set([targetSearchMessageId]) : undefined,
+    [targetSearchMessageId],
+  );
   const [isMainDeferredEditPending, setMainDeferredEditPending] =
     React.useState(false);
   const isNonMemberView =
@@ -629,6 +636,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               }
               onTargetReached={onTargetReached}
               onToggleReaction={onToggleReaction}
+              searchMatchingMessageIds={searchMatchingMessageIds}
+              searchQuery={targetSearchQuery}
               targetMessageId={targetMessageId}
               splitThreadPanelOpen={
                 useSplitAuxiliaryPane &&
@@ -828,6 +837,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
+                searchMessageId={targetSearchMessageId}
+                searchQuery={targetSearchQuery}
                 threadHead={threadHeadMessage}
                 videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}

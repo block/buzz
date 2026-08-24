@@ -346,6 +346,30 @@ test("opens sidebar search with the shortcut and loads the exact result", async 
   );
 });
 
+test("highlights the query in search results and the opened message", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("SHIPPED");
+
+  const result = page.getByTestId("search-result-mock-engineering-shipped");
+  await expect(result).toBeVisible();
+  await expect(result.locator("mark")).toHaveText("shipped");
+  await expect(result.locator("mark")).toHaveClass(/bg-yellow-300/);
+
+  await result.click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-engineering-shipped"]');
+  await expect(message).toBeVisible();
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "shipped",
+  );
+});
+
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 

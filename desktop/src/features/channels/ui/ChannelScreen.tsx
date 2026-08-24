@@ -96,6 +96,8 @@ export function ChannelScreen({
   targetForumReplyId,
   targetMessageEvents,
   targetMessageId,
+  targetSearchMessageId,
+  targetSearchQuery,
 }: ChannelScreenProps) {
   const queryClient = useQueryClient();
   const { goHome } = useAppNavigation();
@@ -830,6 +832,8 @@ export function ChannelScreen({
                 profilePanelView={profilePanelView}
                 selectedPostId={selectedForumPostId}
                 targetReplyId={targetForumReplyId}
+                targetSearchMessageId={targetSearchMessageId}
+                targetSearchQuery={targetSearchQuery}
               />
             ) : (
               <React.Suspense
@@ -951,6 +955,8 @@ export function ChannelScreen({
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
+                  targetSearchMessageId={targetSearchMessageId}
+                  targetSearchQuery={targetSearchQuery}
                   threadAllMessages={displayedThreadAllMessages}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}

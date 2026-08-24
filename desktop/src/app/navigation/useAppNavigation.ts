@@ -376,6 +376,8 @@ export function useAppNavigation() {
          * Used by desktop-notification activation so a click is never
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
+        /** Search text to highlight after opening this result. */
+        query?: string;
         /** Stop notification-driven routing when its owning lifecycle ends. */
         signal?: AbortSignal;
       },
@@ -384,6 +386,7 @@ export function useAppNavigation() {
         force: behavior?.force,
         goChannel,
         goForumPost,
+        query: behavior?.query,
         signal: behavior?.signal,
       }),
     [goChannel, goForumPost],
