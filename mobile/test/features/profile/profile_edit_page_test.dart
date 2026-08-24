@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
@@ -667,6 +668,58 @@ void main() {
     expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
   });
 
+  testWidgets('keeps the local animation visible after profile Save', (
+    tester,
+  ) async {
+    final notifier = _FakeProfileNotifier(updatesProfileState: true);
+    final uploadService = _FakeMediaUploadService();
+    addTearDown(uploadService.dispose);
+    final frame = Uint8List.fromList(
+      image.encodePng(
+        image.Image(width: 8, height: 8)..setPixelRgba(4, 4, 255, 0, 0, 255),
+      ),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: ProfileEditPage(
+          animatedAvatarCaptureBuilder:
+              ({required height, required onPrepareChanged}) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  onPrepareChanged(
+                    () async => ProfileAnimatedAvatarDraft(
+                      animation: frame,
+                      poster: frame,
+                    ),
+                  );
+                });
+                return const SizedBox(
+                  key: ValueKey('fake-animated-avatar-review'),
+                );
+              },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Animated'));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('progressive-animated-avatar-local-handoff')),
+      findsOneWidget,
+    );
+    expect(notifier.savedAvatarUrls.single, contains('#buzz-anim='));
+  });
+
   testWidgets('saves a desktop-compatible emoji avatar', (tester) async {
     final notifier = _FakeProfileNotifier();
     await tester.pumpWidget(
@@ -860,10 +913,12 @@ class _FakeProfileNotifier extends ProfileNotifier {
       about: 'Building Buzz',
     ),
     this.failedAvatarSaves = 0,
+    this.updatesProfileState = false,
   });
 
   final UserProfile profile;
   int failedAvatarSaves;
+  final bool updatesProfileState;
   final savedDisplayNames = <String>[];
   final savedDescriptions = <String>[];
   final savedAvatarUrls = <String>[];
@@ -908,6 +963,18 @@ class _FakeProfileNotifier extends ProfileNotifier {
       throw Exception('profile publish failed');
     }
     savedAvatarUrls.add(avatarUrl);
+    if (updatesProfileState) {
+      final current = state.requireValue!;
+      state = AsyncData(
+        UserProfile(
+          pubkey: current.pubkey,
+          displayName: current.displayName,
+          avatarUrl: avatarUrl,
+          about: current.about,
+          nip05Handle: current.nip05Handle,
+        ),
+      );
+    }
   }
 }
 

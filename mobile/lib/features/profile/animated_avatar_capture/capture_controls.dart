@@ -1,5 +1,39 @@
 part of '../animated_avatar_capture.dart';
 
+const _animatedAvatarPreviewSize = 220.0;
+const _animatedAvatarPersonTranslation = 48.0;
+const _animatedAvatarShapeSize = 172.0;
+const _animatedAvatarShapeYOffset = 20.625;
+const _animatedAvatarShapeTranslation = 51.5625;
+const _animatedAvatarOutputScale = _outputSize / _animatedAvatarPreviewSize;
+const _animatedAvatarOutlineOffsets = [
+  (-3, 0),
+  (3, 0),
+  (0, -3),
+  (0, 3),
+  (-2, -2),
+  (2, -2),
+  (-2, 2),
+  (2, 2),
+];
+
+int _animatedAvatarShapeX(double offset) =>
+    (_outputSize / 2 +
+            offset *
+                _animatedAvatarShapeTranslation *
+                _animatedAvatarOutputScale)
+        .round();
+
+int _animatedAvatarShapeY(double offset) =>
+    (_outputSize / 2 +
+            (_animatedAvatarShapeYOffset +
+                    offset * _animatedAvatarShapeTranslation) *
+                _animatedAvatarOutputScale)
+        .round();
+
+int _animatedAvatarShapeRadius(double scale) =>
+    (_animatedAvatarShapeSize / 2 * _animatedAvatarOutputScale * scale).round();
+
 class _AnimatedRecordButton extends StatelessWidget {
   const _AnimatedRecordButton({required this.busy, required this.onPressed});
 

@@ -229,6 +229,17 @@ class ProfileEditPage extends HookConsumerWidget {
         requireCurrentCommunity();
         await ref.read(profileProvider.notifier).updateAvatarUrl(nextAvatar);
         requireCurrentCommunity();
+        if (nextDraft is ProfileAnimatedAvatarDraft) {
+          ref
+              .read(profileAvatarHandoffProvider.notifier)
+              .show(
+                ProfileAvatarHandoff(
+                  avatarUrl: nextAvatar,
+                  animation: nextDraft.animation,
+                  poster: nextDraft.poster,
+                ),
+              );
+        }
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
       } on ProfileCommunityChangedException {
         await discardStaleEditor();
@@ -256,6 +267,7 @@ class ProfileEditPage extends HookConsumerWidget {
     final activeDraft = avatarDraftMode.value == avatarMode.value
         ? avatarDraft.value
         : null;
+    final avatarHandoff = ref.watch(profileAvatarHandoffProvider);
 
     return PopScope(
       canPop: !isEditingAvatar.value,
@@ -420,6 +432,7 @@ class ProfileEditPage extends HookConsumerWidget {
                 children: [
                   _ProfilePhotoEditor(
                     profile: profile,
+                    handoff: avatarHandoff,
                     onEditPhoto: profileHydrated ? openAvatarEditor : null,
                   ),
                   AppListCard(
@@ -498,36 +511,57 @@ String _fieldValue(String? value) {
   return trimmed.isEmpty ? 'Not set' : trimmed;
 }
 
-class _ProfilePhotoEditor extends StatelessWidget {
-  const _ProfilePhotoEditor({required this.profile, required this.onEditPhoto});
+class _ProfilePhotoEditor extends ConsumerWidget {
+  const _ProfilePhotoEditor({
+    required this.profile,
+    required this.handoff,
+    required this.onEditPhoto,
+  });
 
   final UserProfile? profile;
+  final ProfileAvatarHandoff? handoff;
   final VoidCallback? onEditPhoto;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      PlayingAvatarImage(
-        key: const ValueKey('profile-edit-avatar'),
-        imageUrl: profile?.avatarUrl,
-        radius: ProfileEditPage._avatarRadius,
-        backgroundColor: context.colors.primaryContainer,
-        fallback: Text(
-          profile?.initial ?? '?',
-          style: context.textTheme.displaySmall?.copyWith(
-            color: context.colors.onPrimaryContainer,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeHandoff = handoff?.avatarUrl == profile?.avatarUrl
+        ? handoff
+        : null;
+    return Column(
+      children: [
+        PlayingAvatarImage(
+          key: const ValueKey('profile-edit-avatar'),
+          imageUrl: profile?.avatarUrl,
+          radius: ProfileEditPage._avatarRadius,
+          backgroundColor: context.colors.primaryContainer,
+          loadingImage: activeHandoff == null
+              ? null
+              : MemoryImage(activeHandoff.animation),
+          loadingPosterImage: activeHandoff == null
+              ? null
+              : MemoryImage(activeHandoff.poster),
+          onAnimationReady: activeHandoff == null
+              ? null
+              : () => ref
+                    .read(profileAvatarHandoffProvider.notifier)
+                    .clear(activeHandoff.avatarUrl),
+          fallback: Text(
+            profile?.initial ?? '?',
+            style: context.textTheme.displaySmall?.copyWith(
+              color: context.colors.onPrimaryContainer,
+            ),
           ),
         ),
-      ),
-      const SizedBox(height: Grid.twelve),
-      _ProfileActionPill(
-        key: const ValueKey('profile-edit-photo-pill'),
-        semanticLabel: 'Edit profile photo',
-        label: 'Edit Photo',
-        onTap: onEditPhoto,
-      ),
-    ],
-  );
+        const SizedBox(height: Grid.twelve),
+        _ProfileActionPill(
+          key: const ValueKey('profile-edit-photo-pill'),
+          semanticLabel: 'Edit profile photo',
+          label: 'Edit Photo',
+          onTap: onEditPhoto,
+        ),
+      ],
+    );
+  }
 }
 
 class _ProfileActionPill extends StatelessWidget {

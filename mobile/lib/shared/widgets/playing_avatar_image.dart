@@ -13,6 +13,9 @@ class PlayingAvatarImage extends StatelessWidget {
     required this.radius,
     required this.fallback,
     this.backgroundColor,
+    this.loadingImage,
+    this.loadingPosterImage,
+    this.onAnimationReady,
   });
 
   /// The still-image URL or encoded animated-avatar descriptor.
@@ -24,12 +27,39 @@ class PlayingAvatarImage extends StatelessWidget {
   /// Optional background shown behind still-image content.
   final Color? backgroundColor;
 
+  /// A local image shown while the persisted animation warms up.
+  final ImageProvider? loadingImage;
+
+  /// A local poster shown when motion is disabled while remote media loads.
+  final ImageProvider? loadingPosterImage;
+
+  /// Called after the persisted animation produces its first frame.
+  final VoidCallback? onAnimationReady;
+
   /// Content shown while media is unavailable or still loading.
   final Widget fallback;
 
   @override
   Widget build(BuildContext context) {
     final descriptor = parseAnimatedAvatarUrl(imageUrl);
+    if (descriptor != null &&
+        MediaQuery.disableAnimationsOf(context) &&
+        loadingPosterImage != null) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: Colors.transparent,
+        child: ClipOval(
+          child: SizedBox.square(
+            dimension: radius * 2,
+            child: Image(
+              image: loadingPosterImage!,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+            ),
+          ),
+        ),
+      );
+    }
     if (descriptor == null || MediaQuery.disableAnimationsOf(context)) {
       return AvatarImage(
         imageUrl: descriptor?.posterUrl ?? imageUrl,
@@ -48,6 +78,8 @@ class PlayingAvatarImage extends StatelessWidget {
           child: ProgressiveAnimatedAvatar(
             descriptor: descriptor,
             fallback: fallback,
+            loadingImage: loadingImage,
+            onAnimationReady: onAnimationReady,
           ),
         ),
       ),

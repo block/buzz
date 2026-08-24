@@ -339,7 +339,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       final previewTop = activeSection.value == _AnimatedReviewSection.color
           ? -avatarBackgroundPreviewShift
           : 0.0;
-      final controlsTop = previewTop + 220;
+      final controlsTop = previewTop + _animatedAvatarPreviewSize;
       return SizedBox(
         height: height,
         child: Stack(
@@ -354,7 +354,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
               left: 0,
               right: 0,
               top: previewTop,
-              height: 220,
+              height: _animatedAvatarPreviewSize,
               child: Center(
                 child: _RepositionablePreviewSemantics(
                   offset: offset.value,
@@ -382,7 +382,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                           .toDouble();
                     },
                     child: SizedBox.square(
-                      dimension: 220,
+                      dimension: _animatedAvatarPreviewSize,
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
@@ -393,13 +393,17 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                                 Center(
                                   child: Transform.translate(
                                     offset:
-                                        const Offset(0, 20.625) +
-                                        shapeOffset.value * 51.5625,
+                                        const Offset(
+                                          0,
+                                          _animatedAvatarShapeYOffset,
+                                        ) +
+                                        shapeOffset.value *
+                                            _animatedAvatarShapeTranslation,
                                     child: Transform.scale(
                                       scale: shapeScale.value,
                                       child: Container(
-                                        width: 172,
-                                        height: 172,
+                                        width: _animatedAvatarShapeSize,
+                                        height: _animatedAvatarShapeSize,
                                         decoration: BoxDecoration(
                                           color: Color(backdropColor.value),
                                           shape: BoxShape.circle,
@@ -410,7 +414,9 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                                 ),
                                 _AnimatedPersonPreview(
                                   bytes: selectedFrame,
-                                  offset: offset.value * 48,
+                                  offset:
+                                      offset.value *
+                                      _animatedAvatarPersonTranslation,
                                   scale: scale.value,
                                   outline: personOutline.value,
                                   outlineColor: _personOutlineColor(
@@ -893,8 +899,8 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
           height: _outputSize,
           numChannels: 4,
         );
-        const previewSize = 220.0;
-        const previewTranslation = 48.0;
+        const previewSize = _animatedAvatarPreviewSize;
+        const previewTranslation = _animatedAvatarPersonTranslation;
         final translationScale = _outputSize / previewSize;
         image.compositeImage(
           person,
@@ -916,9 +922,9 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
         final color = request.backdropColor;
         image.fillCircle(
           frame,
-          x: (_outputSize / 2 + request.shapeOffsetX * 60).round(),
-          y: (_outputSize / 2 + 24 + request.shapeOffsetY * 60).round(),
-          radius: (100 * request.shapeScale).round(),
+          x: _animatedAvatarShapeX(request.shapeOffsetX),
+          y: _animatedAvatarShapeY(request.shapeOffsetY),
+          radius: _animatedAvatarShapeRadius(request.shapeScale),
           color: image.ColorRgba8(
             (color >> 16) & 0xff,
             (color >> 8) & 0xff,
@@ -936,16 +942,7 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
               ..b = (outlineColor.b * 255).round()
               ..a = (pixel.a * 0.92).round();
           }
-          for (final (x, y) in const [
-            (-2, 0),
-            (2, 0),
-            (0, -2),
-            (0, 2),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-          ]) {
+          for (final (x, y) in _animatedAvatarOutlineOffsets) {
             image.compositeImage(frame, outline, dstX: x, dstY: y);
           }
         }

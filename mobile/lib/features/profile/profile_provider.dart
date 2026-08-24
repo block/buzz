@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -16,6 +17,50 @@ class ProfileCommunityChangedException extends StateError {
   ProfileCommunityChangedException()
     : super('Profile update cancelled because the active community changed.');
 }
+
+/// Keeps a freshly saved animated avatar local until its remote first frame is
+/// ready, preserving the editor-to-profile visual handoff.
+@immutable
+class ProfileAvatarHandoff {
+  /// Creates a local handoff for [avatarUrl].
+  const ProfileAvatarHandoff({
+    required this.avatarUrl,
+    required this.animation,
+    required this.poster,
+  });
+
+  /// The persisted animated-avatar descriptor this handoff belongs to.
+  final String avatarUrl;
+
+  /// The locally encoded animation shown while remote media warms up.
+  final Uint8List animation;
+
+  /// The locally encoded poster used when motion is disabled.
+  final Uint8List poster;
+}
+
+/// Owns the temporary local avatar shown across the save route transition.
+class ProfileAvatarHandoffNotifier extends Notifier<ProfileAvatarHandoff?> {
+  @override
+  ProfileAvatarHandoff? build() {
+    ref.watch(relayConfigProvider);
+    return null;
+  }
+
+  /// Starts a handoff for a freshly published animated avatar.
+  void show(ProfileAvatarHandoff handoff) => state = handoff;
+
+  /// Clears the handoff once the matching remote animation is ready.
+  void clear(String avatarUrl) {
+    if (state?.avatarUrl == avatarUrl) state = null;
+  }
+}
+
+/// The freshly saved local animated avatar, while its remote copy warms up.
+final profileAvatarHandoffProvider =
+    NotifierProvider<ProfileAvatarHandoffNotifier, ProfileAvatarHandoff?>(
+      ProfileAvatarHandoffNotifier.new,
+    );
 
 /// The current user's profile (kind:0 metadata) loaded over the relay
 /// WebSocket. Returns null when no nsec is configured or when the user has

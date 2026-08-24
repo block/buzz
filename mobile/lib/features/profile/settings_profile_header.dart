@@ -34,6 +34,10 @@ class SettingsProfileHeader extends HookConsumerWidget {
     final hasStatus = status != null && !status.isEmpty;
     final presence = ref.watch(presenceProvider).value ?? 'offline';
     final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
+    final handoff = ref.watch(profileAvatarHandoffProvider);
+    final activeHandoff = handoff?.avatarUrl == profile?.avatarUrl
+        ? handoff
+        : null;
     final stoppedAnimationUrl = useState<String?>(null);
     final avatarUrl = animatedAvatar == null
         ? profile?.avatarUrl
@@ -71,10 +75,24 @@ class SettingsProfileHeader extends HookConsumerWidget {
                         key: ValueKey(animatedAvatar.animationUrl),
                         descriptor: animatedAvatar,
                         fallback: _AvatarFallback(initial: profile?.initial),
+                        loadingImage: activeHandoff == null
+                            ? null
+                            : MemoryImage(activeHandoff.animation),
+                        onAnimationReady: activeHandoff == null
+                            ? null
+                            : () => ref
+                                  .read(profileAvatarHandoffProvider.notifier)
+                                  .clear(activeHandoff.avatarUrl),
                       )
-                    : AvatarImageContent(
+                    : activeHandoff == null
+                    ? AvatarImageContent(
                         imageUrl: avatarUrl,
                         fallback: _AvatarFallback(initial: profile?.initial),
+                      )
+                    : Image(
+                        image: MemoryImage(activeHandoff.poster),
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
                       ),
               ),
             ),
