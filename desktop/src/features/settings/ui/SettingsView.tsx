@@ -314,9 +314,10 @@ export function SettingsView({
 
       <SidebarInset
         className={cn(
-          "isolate relative min-h-0 min-w-0 overflow-hidden bg-sidebar motion-safe:transition-opacity motion-safe:duration-200",
+          "isolate relative min-h-0 min-w-0 overflow-hidden bg-background motion-safe:transition-opacity motion-safe:duration-200",
           isLoaded ? "opacity-100" : "opacity-0",
         )}
+        data-buzz-content-backdrop
         data-buzz-shadow-viewport
         data-testid="settings-view"
       >

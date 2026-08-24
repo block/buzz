@@ -34,13 +34,10 @@ export function AppShellChannelSurface({
       <SidebarInset
         ref={mainInsetRef}
         className={cn(
-          "isolate z-0 min-h-0 min-w-0 overflow-hidden",
-          isHuddleRoom ? "bg-background" : "bg-sidebar",
+          "isolate z-0 min-h-0 min-w-0 overflow-hidden bg-background",
           hasCollapsedSidebarGutter && "pl-2",
         )}
-        data-buzz-content-surface={isHuddleRoom ? true : undefined}
-        data-buzz-content-unframed={isHuddleRoom ? true : undefined}
-        data-buzz-glass-inset
+        data-buzz-content-backdrop
         data-buzz-shadow-viewport
         style={chromeCssVarDefaults as React.CSSProperties}
       >
