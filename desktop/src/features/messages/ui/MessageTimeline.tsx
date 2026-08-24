@@ -94,6 +94,8 @@ type MessageTimelineProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onOpenThread?: (message: TimelineMessage) => void;
+  onExpandInlineThreadReplies?: (message: TimelineMessage) => void;
+  onOpenInlineThreadPanel?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -123,6 +125,8 @@ type MessageTimelineProps = {
   unreadCount?: number;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  /** Per-reply unread counts for collapsed inline thread branches. */
+  threadReplyUnreadCounts?: ReadonlyMap<string, number>;
 };
 
 /** Stable empty reference used as the `useDeferredValue` initial value so the
@@ -193,6 +197,8 @@ const MessageTimelineBase = React.forwardRef<
     onMarkRead,
     onReply,
     onOpenThread,
+    onExpandInlineThreadReplies,
+    onOpenInlineThreadPanel,
     channelName,
     channelType,
     isSendingVideoReviewComment = false,
@@ -209,6 +215,7 @@ const MessageTimelineBase = React.forwardRef<
     firstUnreadMessageId = null,
     unreadCount = 0,
     threadUnreadCounts,
+    threadReplyUnreadCounts,
   }: MessageTimelineProps,
   ref,
 ) {
@@ -671,6 +678,8 @@ const MessageTimelineBase = React.forwardRef<
       onMarkRead={onMarkRead}
       onReply={onReply}
       onOpenThread={onOpenThread}
+      onExpandInlineThreadReplies={onExpandInlineThreadReplies}
+      onOpenInlineThreadPanel={onOpenInlineThreadPanel}
       isSendingVideoReviewComment={isSendingVideoReviewComment}
       onSendVideoReviewComment={onSendVideoReviewComment}
       onStartReached={loadOlderViaVirtualizer}
@@ -687,6 +696,7 @@ const MessageTimelineBase = React.forwardRef<
       searchQuery={searchQuery}
       useVirtualizer={useTimelineVirtualizer}
       threadUnreadCounts={threadUnreadCounts}
+      threadReplyUnreadCounts={threadReplyUnreadCounts}
       unfollowThreadById={unfollowThreadById}
     />
   ) : null;

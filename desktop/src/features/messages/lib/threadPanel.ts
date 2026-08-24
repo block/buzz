@@ -27,6 +27,10 @@ export type TimelineThreadSummary = {
 export type MainTimelineEntry = {
   message: TimelineMessage;
   summary: TimelineThreadSummary | null;
+  inlineThread?: {
+    isPending: boolean;
+    replies: MainTimelineEntry[];
+  };
 };
 
 export type ThreadDescendantStats = {
@@ -315,6 +319,78 @@ export function hasNestedThreadBranches(entries: readonly MainTimelineEntry[]) {
   return entries.some(
     (entry) => entry.message.depth > 1 || entry.summary !== null,
   );
+}
+
+/**
+ * Removes broadcast replies and their descendants from a message graph before
+ * building an inline thread projection. The selected root is preserved even
+ * when it is itself a broadcasted reply rendered as a top-level row.
+ */
+export function filterBroadcastReplySubtreeMessages<
+  T extends Pick<TimelineMessage, "id" | "parentId" | "tags">,
+>(messages: readonly T[], preservedRootId?: string | null): T[] {
+  let hasBroadcastReply = false;
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const broadcastReplyIds = new Set<string>();
+
+  for (const message of messages) {
+    if (
+      message.id !== preservedRootId &&
+      isBroadcastReply(message.tags ?? [])
+    ) {
+      hasBroadcastReply = true;
+      broadcastReplyIds.add(message.id);
+    }
+  }
+
+  if (!hasBroadcastReply) {
+    return messages as T[];
+  }
+
+  return messages.filter((message) => {
+    let currentId: string | null | undefined = message.id;
+    let hops = 0;
+    const maxHops = messages.length + 1;
+    while (currentId && hops < maxHops) {
+      if (broadcastReplyIds.has(currentId)) {
+        return false;
+      }
+      currentId = messageById.get(currentId)?.parentId ?? null;
+      hops += 1;
+    }
+    return true;
+  });
+}
+
+/**
+ * Removes broadcast replies and their expanded descendants from a visible
+ * thread projection so broadcasted replies remain top-level-only.
+ */
+export function filterBroadcastThreadSubtrees(
+  entries: readonly MainTimelineEntry[],
+): MainTimelineEntry[] {
+  let filtered: MainTimelineEntry[] | null = null;
+  let skippedBroadcastDepth: number | null = null;
+
+  entries.forEach((entry, index) => {
+    const depth = entry.message.depth;
+    if (skippedBroadcastDepth !== null) {
+      if (depth > skippedBroadcastDepth) {
+        return;
+      }
+      skippedBroadcastDepth = null;
+    }
+
+    if (isBroadcastReply(entry.message.tags ?? [])) {
+      filtered ??= entries.slice(0, index);
+      skippedBroadcastDepth = depth;
+      return;
+    }
+
+    filtered?.push(entry);
+  });
+
+  return filtered ?? (entries as MainTimelineEntry[]);
 }
 
 function appendExpandedReplies(params: {

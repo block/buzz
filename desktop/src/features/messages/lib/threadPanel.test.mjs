@@ -8,6 +8,8 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
   buildThreadSummaryFromVisibleEntries,
+  filterBroadcastReplySubtreeMessages,
+  filterBroadcastThreadSubtrees,
   hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
@@ -185,6 +187,170 @@ test("buildThreadPanelData hides collapsed summaries for expanded replies", () =
 
   assert.equal(collapsed.visibleReplies[0].summary?.replyCount, 1);
   assert.equal(expanded.visibleReplies[0].summary, null);
+});
+
+test("buildThreadPanelData keeps collapsed descendants out of visible replies", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const branch = message({
+    id: "branch",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+  const child = message({
+    id: "child",
+    createdAt: 3,
+    parentId: "branch",
+    rootId: "root",
+    depth: 2,
+  });
+
+  const panelData = buildThreadPanelData(
+    [root, branch, child],
+    "root",
+    "root",
+    new Set(),
+  );
+
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => entry.message.id),
+    ["branch"],
+  );
+  assert.equal(panelData.visibleReplies[0].summary?.replyCount, 1);
+});
+
+test("filterBroadcastThreadSubtrees removes expanded descendants with their broadcast parent", () => {
+  const normal = {
+    message: message({ id: "normal", depth: 1 }),
+    summary: null,
+  };
+  const broadcast = {
+    message: message({
+      id: "broadcast",
+      depth: 1,
+      tags: [
+        ["e", "root", "", "reply"],
+        ["broadcast", "1"],
+      ],
+    }),
+    summary: null,
+  };
+  const child = {
+    message: message({
+      id: "child",
+      depth: 2,
+      parentId: "broadcast",
+      rootId: "root",
+    }),
+    summary: null,
+  };
+  const sibling = {
+    message: message({
+      id: "sibling",
+      depth: 1,
+      parentId: "root",
+      rootId: "root",
+    }),
+    summary: null,
+  };
+
+  const filtered = filterBroadcastThreadSubtrees([
+    normal,
+    broadcast,
+    child,
+    sibling,
+  ]);
+
+  assert.deepEqual(
+    filtered.map((entry) => entry.message.id),
+    ["normal", "sibling"],
+  );
+});
+
+test("filterBroadcastReplySubtreeMessages removes collapsed broadcast descendants before summaries build", () => {
+  const root = message({ id: "root" });
+  const normal = message({
+    id: "normal",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+  const broadcast = message({
+    id: "broadcast",
+    createdAt: 3,
+    parentId: "normal",
+    rootId: "root",
+    depth: 2,
+    tags: [
+      ["e", "root", "", "root"],
+      ["e", "normal", "", "reply"],
+      ["broadcast", "1"],
+    ],
+  });
+  const child = message({
+    id: "child",
+    createdAt: 4,
+    parentId: "broadcast",
+    rootId: "root",
+    depth: 3,
+  });
+  const sibling = message({
+    id: "sibling",
+    createdAt: 5,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+
+  const filteredMessages = filterBroadcastReplySubtreeMessages([
+    root,
+    normal,
+    broadcast,
+    child,
+    sibling,
+  ]);
+  const panelData = buildThreadPanelData(
+    filteredMessages,
+    "root",
+    null,
+    new Set(),
+  );
+
+  assert.deepEqual(
+    filteredMessages.map((entry) => entry.id),
+    ["root", "normal", "sibling"],
+  );
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => entry.message.id),
+    ["normal", "sibling"],
+  );
+  assert.equal(panelData.visibleReplies[0].summary, null);
+});
+
+test("filterBroadcastReplySubtreeMessages preserves a selected broadcast root", () => {
+  const root = message({
+    id: "broadcast",
+    tags: [
+      ["e", "parent-root", "", "reply"],
+      ["broadcast", "1"],
+    ],
+  });
+  const child = message({
+    id: "child",
+    createdAt: 2,
+    parentId: "broadcast",
+    rootId: "broadcast",
+    depth: 1,
+  });
+
+  assert.deepEqual(
+    filterBroadcastReplySubtreeMessages([root, child], "broadcast").map(
+      (entry) => entry.id,
+    ),
+    ["broadcast", "child"],
+  );
 });
 
 test("buildThreadSummaryFromVisibleEntries counts visible rows and hidden descendants", () => {

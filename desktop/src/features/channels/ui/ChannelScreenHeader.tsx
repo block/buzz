@@ -8,6 +8,7 @@ import { getChannelDescription } from "@/features/channels/lib/channelDescriptio
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { ThreadTimelineModeToggle } from "@/features/channels/ui/ThreadTimelineModeToggle";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -93,6 +94,10 @@ export function ChannelScreenHeader({
       <SquareTerminal />
     </Button>
   ) : null;
+  const threadTimelineModeToggle =
+    activeChannel && activeChannel.channelType !== "forum" ? (
+      <ThreadTimelineModeToggle />
+    ) : null;
   const channelActions = activeChannel ? (
     showJoinButton ? (
       <Button
@@ -118,6 +123,7 @@ export function ChannelScreenHeader({
   ) : null;
   const actions = activeChannel ? (
     <div className="flex items-center gap-1">
+      {threadTimelineModeToggle}
       {terminalButton}
       {channelActions}
     </div>

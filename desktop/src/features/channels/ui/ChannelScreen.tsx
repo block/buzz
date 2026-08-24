@@ -73,6 +73,7 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useThreadTimelineMode } from "@/features/channels/lib/threadTimelineModePreference";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
@@ -164,6 +165,9 @@ export function ChannelScreen({
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
   const isHuddleTranscript = useIsHuddleTranscript(activeChannelId);
+  const threadTimelineMode = useThreadTimelineMode();
+  const showSelectedThreadInline =
+    threadTimelineMode === "inline" && !isHuddleTranscript;
   const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
   const effectiveOpenThreadHeadId = useHuddleThreadIsolation({
     closeThread: setOpenThreadHeadId,
@@ -426,7 +430,9 @@ export function ChannelScreen({
     personaLookup,
     respondToLookup,
     relaySelfPubkey,
+    excludeBroadcastReplySubtrees: showSelectedThreadInline,
   });
+  const visibleThreadReplies = threadPanelData.visibleReplies;
   const {
     firstUnreadMessageId,
     getFirstReplyIdForMessage,
@@ -448,7 +454,8 @@ export function ChannelScreen({
     openThreadHeadId: effectiveOpenThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
-    openThreadMessages: threadPanelData.visibleReplies,
+    openThreadMessages: visibleThreadReplies,
+    suppressBroadcastThreadReplies: showSelectedThreadInline,
     clearChannelUnreadSource,
     getChannelReadAt,
     getMessageReadAt,
@@ -669,14 +676,14 @@ export function ChannelScreen({
     threadReplyTargetMessage,
   });
   const hasAuxiliaryPanel = Boolean(
-    effectiveOpenThreadHeadId ||
+    (effectiveOpenThreadHeadId && !showSelectedThreadInline) ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
       channelManagementOpen,
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
-  const displayedThreadMessages = threadPanelData.visibleReplies;
+  const displayedThreadMessages = visibleThreadReplies;
   const displayedThreadReplyTargetMessage = threadPanelData.replyTargetMessage;
   const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
     ? threadFirstUnreadReplyId

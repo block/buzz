@@ -27,7 +27,12 @@ import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { DayDivider } from "./DayDivider";
-import { MessageRowItem, SystemRow } from "./TimelineMessageRow";
+import {
+  InlineThreadLoadingRow,
+  InlineThreadReplyRowItem,
+  MessageRowItem,
+  SystemRow,
+} from "./TimelineMessageRow";
 import { TimelineRowShell } from "./TimelineRowShell";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
@@ -74,6 +79,8 @@ type TimelineMessageListProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onOpenThread?: (message: TimelineMessage) => void;
+  onExpandInlineThreadReplies?: (message: TimelineMessage) => void;
+  onOpenInlineThreadPanel?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -100,6 +107,8 @@ type TimelineMessageListProps = {
   searchQuery?: string;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  /** Per-reply unread counts for collapsed inline thread branches. */
+  threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   /** Content rendered as the first virtual row before channel history. */
   leadingContent?: React.ReactNode;
   /** Hide date boundaries for a huddle's live transcript. */
@@ -146,6 +155,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onMarkRead,
   onReply,
   onOpenThread,
+  onExpandInlineThreadReplies,
+  onOpenInlineThreadPanel,
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
   onToggleReaction,
@@ -155,6 +166,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchMatchingMessageIds,
   searchQuery,
   threadUnreadCounts,
+  threadReplyUnreadCounts,
   unfollowThreadById,
   leadingContent,
   historyExhausted = false,
@@ -270,6 +282,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onMarkUnread={onMarkUnread}
               onReply={onReply}
               onOpenThread={onOpenThread}
+              onOpenInlineThreadPanel={onOpenInlineThreadPanel}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
               searchActiveMessageId={searchActiveMessageId}
@@ -277,6 +290,36 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               searchQuery={searchQuery}
               threadUnreadCounts={threadUnreadCounts}
               unfollowThreadById={unfollowThreadById}
+              videoReviewContext={videoReviewContextById.get(
+                item.entry.message.id,
+              )}
+            />
+          );
+        case "inline-thread-loading":
+          return <InlineThreadLoadingRow />;
+        case "inline-thread-reply":
+          return (
+            <InlineThreadReplyRowItem
+              channelId={channelId}
+              currentPubkey={currentPubkey}
+              entry={item.entry}
+              footer={messageFooters?.[item.entry.message.id] ?? null}
+              hideAgentAccessBadges={hideAgentAccessBadges}
+              huddleMemberPubkeys={huddleMemberPubkeys}
+              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+              isContinuation={item.isContinuation}
+              isFollowedByContinuation={item.isFollowedByContinuation}
+              isUnread={isMessageUnreadById?.(item.entry.message.id)}
+              onDelete={onDelete}
+              onEdit={onEdit}
+              onExpandInlineThreadReplies={onExpandInlineThreadReplies}
+              onMarkRead={onMarkRead}
+              onMarkUnread={onMarkUnread}
+              onOpenInlineThreadPanel={onOpenInlineThreadPanel}
+              onToggleReaction={onToggleReaction}
+              profiles={profiles}
+              rootEntry={item.rootEntry}
+              threadReplyUnreadCounts={threadReplyUnreadCounts}
               videoReviewContext={videoReviewContextById.get(
                 item.entry.message.id,
               )}
@@ -300,6 +343,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       messageFooters,
       onDelete,
       onEdit,
+      onExpandInlineThreadReplies,
+      onOpenInlineThreadPanel,
       onMarkRead,
       onMarkUnread,
       onReply,
@@ -311,6 +356,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       searchMatchingMessageIds,
       searchQuery,
       threadUnreadCounts,
+      threadReplyUnreadCounts,
       unfollowThreadById,
       videoReviewContextById,
     ],
@@ -369,7 +415,9 @@ function timelineItemMessageIds(item: TimelineNonDayItem): string[] {
   if (item.kind === "system-group") {
     return item.entries.map((entry) => entry.message.id);
   }
-  return item.kind === "message" || item.kind === "system"
+  return item.kind === "message" ||
+    item.kind === "system" ||
+    item.kind === "inline-thread-reply"
     ? [item.entry.message.id]
     : [];
 }

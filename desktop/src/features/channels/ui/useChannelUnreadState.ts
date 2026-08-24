@@ -16,6 +16,7 @@ import {
 import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
+  filterBroadcastReplySubtreeMessages,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
 import {
@@ -35,6 +36,7 @@ type UseChannelUnreadStateOptions = {
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
   openThreadMessages?: MainTimelineEntry[];
+  suppressBroadcastThreadReplies?: boolean;
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
   clearChannelUnreadSource: (
@@ -67,6 +69,7 @@ export function useChannelUnreadState({
   threadReplyTargetId,
   expandedThreadReplyIds,
   openThreadMessages,
+  suppressBroadcastThreadReplies = false,
   getChannelReadAt,
   getMessageReadAt,
   clearChannelUnreadSource,
@@ -146,13 +149,30 @@ export function useChannelUnreadState({
     () => buildDirectReplyIdsByParentId(timelineMessages),
     [timelineMessages],
   );
+  const threadReadTimelineMessages = React.useMemo(
+    () =>
+      suppressBroadcastThreadReplies
+        ? filterBroadcastReplySubtreeMessages(
+            timelineMessages,
+            openThreadHeadId,
+          )
+        : timelineMessages,
+    [openThreadHeadId, suppressBroadcastThreadReplies, timelineMessages],
+  );
+  const visibleDirectReplyIdsByParentId = React.useMemo(
+    () =>
+      suppressBroadcastThreadReplies
+        ? buildDirectReplyIdsByParentId(threadReadTimelineMessages)
+        : directReplyIdsByParentId,
+    [
+      directReplyIdsByParentId,
+      suppressBroadcastThreadReplies,
+      threadReadTimelineMessages,
+    ],
+  );
   const repliesByRootId = React.useMemo(
     () => buildRepliesByRootId(timelineMessages),
     [timelineMessages],
-  );
-  const getFirstReplyIdForMessage = React.useCallback(
-    (messageId: string) => directReplyIdsByParentId.get(messageId)?.[0] ?? null,
-    [directReplyIdsByParentId],
   );
   const getReplyDescendantIdsForMessage = React.useCallback(
     (messageId: string) =>
@@ -162,6 +182,15 @@ export function useChannelUnreadState({
   const createdAtByMessageId = React.useMemo(
     () => buildCreatedAtByMessageId(timelineMessages),
     [timelineMessages],
+  );
+  const getVisibleDirectReplyIdsForMessage = React.useCallback(
+    (messageId: string) => visibleDirectReplyIdsByParentId.get(messageId) ?? [],
+    [visibleDirectReplyIdsByParentId],
+  );
+  const getFirstReplyIdForMessage = React.useCallback(
+    (messageId: string) =>
+      getVisibleDirectReplyIdsForMessage(messageId)[0] ?? null,
+    [getVisibleDirectReplyIdsForMessage],
   );
   const messageById = React.useMemo(
     () => new Map(timelineMessages.map((message) => [message.id, message])),
@@ -318,8 +347,11 @@ export function useChannelUnreadState({
     () =>
       openThreadHeadId
         ? computeThreadReplyUnreadCounts({
-            timelineMessages,
-            subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
+            timelineMessages: threadReadTimelineMessages,
+            subtreeReplyIds: collectReplyDescendantIds(
+              openThreadHeadId,
+              visibleDirectReplyIdsByParentId,
+            ),
             visibleReplyIds: threadMessages.map((entry) => entry.message.id),
             expandedReplyIds: expandedThreadReplyIds,
             getReadAt: getMessageReadAt,
@@ -330,10 +362,10 @@ export function useChannelUnreadState({
     [
       openThreadHeadId,
       threadMessages,
-      timelineMessages,
+      threadReadTimelineMessages,
       getMessageReadAt,
       expandedThreadReplyIds,
-      getReplyDescendantIdsForMessage,
+      visibleDirectReplyIdsByParentId,
       currentPubkey,
       isMsgForcedUnread,
       readStateVersion,
@@ -430,7 +462,7 @@ export function useChannelUnreadState({
   // anchor to a reply first revealed by expansion.
   const markRevealedRepliesRead = React.useCallback(
     (messageId: string) => {
-      for (const replyId of directReplyIdsByParentId.get(messageId) ?? []) {
+      for (const replyId of getVisibleDirectReplyIdsForMessage(messageId)) {
         const createdAt = createdAtByMessageId.get(replyId);
         if (createdAt !== undefined) {
           captureDividerReadState(replyId);
@@ -441,7 +473,7 @@ export function useChannelUnreadState({
     [
       captureDividerReadState,
       createdAtByMessageId,
-      directReplyIdsByParentId,
+      getVisibleDirectReplyIdsForMessage,
       markMessageRead,
     ],
   );

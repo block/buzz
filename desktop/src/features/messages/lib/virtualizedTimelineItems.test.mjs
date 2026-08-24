@@ -25,6 +25,17 @@ function messageItem(key) {
   };
 }
 
+function inlineThreadReplyItem(rootKey, key) {
+  return {
+    kind: "inline-thread-reply",
+    key: `inline-thread-reply:${rootKey}:${key}`,
+    entry: { message: { id: key } },
+    rootEntry: { message: { id: rootKey } },
+    isContinuation: false,
+    isFollowedByContinuation: false,
+  };
+}
+
 function group(dayKey, headingTimestamp, itemKeys) {
   return {
     key: dayKey,
@@ -110,6 +121,36 @@ test("same-day prepend into the oldest day admits shift with a clean cache", () 
     group("day-B", DAY_B, ["b1"]),
   ]);
   assertShiftAdmittedAndCacheClean(previous, next);
+});
+
+test("inline thread rows preserve virtualizer suffix keys across prepends", () => {
+  const previous = keysOf([
+    {
+      key: "day-A",
+      headingTimestamp: DAY_A,
+      items: [messageItem("root"), inlineThreadReplyItem("root", "reply")],
+    },
+    group("day-B", DAY_B, ["b1"]),
+  ]);
+  const next = keysOf([
+    {
+      key: "day-A",
+      headingTimestamp: DAY_A,
+      items: [
+        messageItem("older"),
+        messageItem("root"),
+        inlineThreadReplyItem("root", "reply"),
+      ],
+    },
+    group("day-B", DAY_B, ["b1"]),
+  ]);
+
+  assertShiftAdmittedAndCacheClean(previous, next);
+  assert.deepEqual(next.slice(1, 4), [
+    "root",
+    "inline-thread-reply:root:reply",
+    "day-divider:day-B",
+  ]);
 });
 
 test("cross-day prepend materializes the newly proven divider as pure prefix", () => {

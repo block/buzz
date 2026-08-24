@@ -24,6 +24,7 @@ export function useIndependentThreadPanel(args: {
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
   relaySelfPubkey: string | null | undefined;
+  excludeBroadcastReplySubtrees?: boolean;
 }) {
   // Depend on the individual fields, NOT the `args` object — callers pass a
   // fresh object literal every render, so `[args]` never memoizes and the
@@ -41,6 +42,9 @@ export function useIndependentThreadPanel(args: {
         args.rootId,
         args.replyTargetId,
         args.expandedReplyIds,
+        {
+          excludeBroadcastReplySubtrees: args.excludeBroadcastReplySubtrees,
+        },
         args.activeChannel,
         args.currentPubkey,
         args.currentAvatarUrl,
@@ -66,6 +70,7 @@ export function useIndependentThreadPanel(args: {
       args.personaLookup,
       args.respondToLookup,
       args.relaySelfPubkey,
+      args.excludeBroadcastReplySubtrees,
     ],
   );
 }
