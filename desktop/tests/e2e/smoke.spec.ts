@@ -338,7 +338,7 @@ test("opens sidebar search with the shortcut and loads the exact result", async 
   await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(
-    /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9\?messageId=mock-engineering-shipped$/,
+    /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9\?messageId=mock-engineering-shipped&searchNavigationId=mock-engineering-shipped%3A[^&]+$/,
   );
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
   await expect(page.getByTestId("message-timeline")).toContainText(
