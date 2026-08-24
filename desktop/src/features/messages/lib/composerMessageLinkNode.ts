@@ -159,16 +159,17 @@ function selectionContainsComposerMessageLinkNode(view: EditorView): boolean {
 
 function selectionCanCarryMark(view: EditorView, markType: MarkType): boolean {
   const { from, to } = view.state.selection;
-  let canCarryMark = false;
+  let containsInlineContent = false;
+  let allInlineContentCanCarryMark = true;
   view.state.doc.nodesBetween(from, to, (node, _pos, parent) => {
-    if (canCarryMark) return false;
-    if (node.isInline && parent?.type.allowsMarkType(markType)) {
-      canCarryMark = true;
-      return false;
+    if (!node.isInline) return true;
+    containsInlineContent = true;
+    if (!parent?.type.allowsMarkType(markType)) {
+      allInlineContentCanCarryMark = false;
     }
     return true;
   });
-  return canCarryMark;
+  return containsInlineContent && allInlineContentCanCarryMark;
 }
 
 function applyLinkToSelection(view: EditorView, href: string): boolean {

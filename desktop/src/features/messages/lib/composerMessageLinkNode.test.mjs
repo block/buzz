@@ -296,6 +296,27 @@ test("paste handler falls through when selected text cannot carry link marks", (
   });
 });
 
+test("paste handler falls through when any selected text cannot carry link marks", () => {
+  const doc = document(
+    paragraph(text("ordinary")),
+    codeBlock(text("const value = 1;")),
+  );
+  const view = createMockView(stateFromDocument(doc, 1, doc.content.size - 1));
+  const initialDoc = toPlainJson(view.state.doc);
+  const initialSelection = view.state.selection.toJSON();
+  const event = createPasteEvent("https://example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, false);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(view.focusCalled, false);
+  assert.deepEqual(toPlainJson(view.state.doc), initialDoc);
+  assert.deepEqual(view.state.selection.toJSON(), initialSelection);
+});
+
 test("paste handler collapses an all-selection to inline content", () => {
   const doc = document(paragraph(text("select all")));
   const view = createMockView(allSelectionStateFromDocument(doc));
