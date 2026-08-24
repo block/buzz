@@ -117,8 +117,58 @@ function unwrapExactBuzzLink(text: string): string | null {
 }
 
 function unwrapExactHttpLink(text: string): string | null {
+  if (!text || /\s/.test(text)) return null;
   const match = /^(?:<(https?:\/\/[^\s<>]+)>|(https?:\/\/\S+))$/i.exec(text);
   return match?.[1] ?? match?.[2] ?? null;
+}
+
+/**
+ * Resolves a clipboard payload that is exactly a supported link into the href
+ * the composer should apply when linkifying selected text on paste.
+ */
+export function resolveExactLinkPaste(
+  text: string,
+  resolveChannelName: ComposerMessageLinkNodeOptions["resolveChannelName"],
+): { href: string } | null {
+  const buzzHref = unwrapExactBuzzLink(text);
+  if (buzzHref) {
+    const attrs = resolveComposerMessageLinkAttributes(
+      buzzHref,
+      resolveChannelName,
+    );
+    return attrs ? { href: attrs.href } : null;
+  }
+
+  const httpHref = unwrapExactHttpLink(text);
+  return httpHref ? { href: httpHref } : null;
+}
+
+function selectionContainsComposerMessageLinkNode(view: EditorView): boolean {
+  const { from, to } = view.state.selection;
+  let containsMessageLink = false;
+  view.state.doc.nodesBetween(from, to, (node) => {
+    if (containsMessageLink) return false;
+    if (node.type.name === COMPOSER_MESSAGE_LINK_NODE_NAME) {
+      containsMessageLink = true;
+      return false;
+    }
+    return true;
+  });
+  return containsMessageLink;
+}
+
+function applyLinkToSelection(view: EditorView, href: string): boolean {
+  const { from, to } = view.state.selection;
+  const linkMark = view.state.schema.marks.link;
+  if (!linkMark) return false;
+
+  let transaction = view.state.tr.addMark(from, to, linkMark.create({ href }));
+  transaction = transaction.setSelection(
+    TextSelection.create(transaction.doc, to),
+  );
+  view.dispatch(transaction.setStoredMarks([]).scrollIntoView());
+  view.focus();
+  return true;
 }
 
 function replaceSelectionWithNode(view: EditorView, node: ProseMirrorNode) {
@@ -140,6 +190,17 @@ export function createComposerLinkPasteHandler(
 ) {
   return (view: EditorView, event: ClipboardEvent): boolean => {
     const text = event.clipboardData?.getData("text/plain") ?? "";
+    const exactLinkPaste = resolveExactLinkPaste(text, resolveChannelName);
+    if (
+      exactLinkPaste &&
+      !view.state.selection.empty &&
+      !selectionContainsComposerMessageLinkNode(view)
+    ) {
+      if (!applyLinkToSelection(view, exactLinkPaste.href)) return false;
+      event.preventDefault();
+      return true;
+    }
+
     const buzzHref = unwrapExactBuzzLink(text);
     const buzzLinkType =
       view.state.schema.nodes[COMPOSER_MESSAGE_LINK_NODE_NAME];

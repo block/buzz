@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
 
+import { Schema } from "@tiptap/pm/model";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
+
 import {
   ComposerMessageLinkNode,
+  createComposerLinkPasteHandler,
   registerComposerMessageLinkMarkdownIt,
   resolveComposerMessageLinkAttributes,
+  resolveExactLinkPaste,
 } from "./composerMessageLinkNode.ts";
 
 const requireFromTiptap = createRequire(import.meta.resolve("tiptap-markdown"));
@@ -69,6 +74,218 @@ test("resolves channel and entity links as composer chips", () => {
     resolveComposerMessageLinkAttributes(ISSUE_HREF, () => undefined),
     { channelName: "", href: ISSUE_HREF },
   );
+});
+
+const resolveKnownChannel = (channelId) =>
+  channelId === CHANNEL_ID ? "general" : undefined;
+const exactLinkPaste = (text) =>
+  resolveExactLinkPaste(text, resolveKnownChannel);
+
+const EXACT_LINK_PASTE_ACCEPTED_CASES = [
+  ["exact http", "https://example.com", "https://example.com"],
+  [
+    "wrapped http",
+    "<https://example.com/docs?q=1>",
+    "https://example.com/docs?q=1",
+  ],
+  ["exact message", HREF, HREF],
+  ["wrapped message", `<${HREF}>`, HREF],
+  ["channel", CHANNEL_HREF, CHANNEL_HREF],
+  [
+    "channel message",
+    CHANNEL_MESSAGE_HREF,
+    `buzz://message?channel=${CHANNEL_ID}&id=${CHANNEL_MESSAGE_ID}`,
+  ],
+  ["repo", REPO_HREF, REPO_HREF],
+  ["project", PROJECT_HREF, PROJECT_HREF],
+  ["pull request", PR_HREF, PR_HREF],
+  ["issue", ISSUE_HREF, ISSUE_HREF],
+];
+
+for (const [label, input, expectedHref] of EXACT_LINK_PASTE_ACCEPTED_CASES) {
+  test(`exact link paste resolves ${label}`, () => {
+    assert.deepEqual(exactLinkPaste(input), { href: expectedHref });
+  });
+}
+
+test("exact link paste canonicalizes Buzz links", () => {
+  assert.deepEqual(
+    exactLinkPaste(
+      `BUZZ://channel/${CHANNEL_ID.toUpperCase()}/${CHANNEL_MESSAGE_ID.toUpperCase()}`,
+    ),
+    {
+      href: `buzz://message?channel=${CHANNEL_ID}&id=${CHANNEL_MESSAGE_ID}`,
+    },
+  );
+});
+
+for (const input of [
+  "https://example.com and words",
+  " https://example.com",
+  "https://example.com ",
+  "https://example.com\n",
+  "<https://example.com> trailing",
+  "www.example.com",
+  "ftp://example.com",
+  "not a url",
+  `See ${HREF}`,
+  `buzz://channel/${CHANNEL_ID}/not-a-message-id`,
+]) {
+  test(`exact link paste rejects ${input}`, () => {
+    assert.equal(exactLinkPaste(input), null);
+  });
+}
+
+const editorSchema = new Schema({
+  nodes: {
+    doc: { content: "block+" },
+    paragraph: { content: "inline*", group: "block" },
+    text: { group: "inline" },
+    composerMessageLink: {
+      atom: true,
+      attrs: { channelName: { default: "" }, href: { default: "" } },
+      group: "inline",
+      inline: true,
+      selectable: true,
+    },
+  },
+  marks: {
+    link: { attrs: { href: {} }, inclusive: false },
+  },
+});
+
+const paragraph = (...content) =>
+  editorSchema.nodes.paragraph.create(null, content);
+const document = (...content) => editorSchema.nodes.doc.create(null, content);
+const text = (value, marks = []) => editorSchema.text(value, marks);
+const composerChip = (href = HREF) =>
+  editorSchema.nodes.composerMessageLink.create({
+    channelName: "general",
+    href,
+  });
+
+function createPasteEvent(value) {
+  let prevented = false;
+  return {
+    clipboardData: { getData: (type) => (type === "text/plain" ? value : "") },
+    get defaultPrevented() {
+      return prevented;
+    },
+    preventDefault() {
+      prevented = true;
+    },
+  };
+}
+
+function createMockView(state) {
+  const view = {
+    dispatch(transaction) {
+      view.state = view.state.apply(transaction);
+    },
+    focusCalled: false,
+    focus() {
+      view.focusCalled = true;
+    },
+    state,
+  };
+  return view;
+}
+
+function stateFromDocument(doc, from, to = from) {
+  return EditorState.create({
+    doc,
+    selection: TextSelection.create(doc, from, to),
+  });
+}
+
+function toPlainJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+test("paste handler links selected text instead of replacing it", () => {
+  const doc = document(paragraph(text("read this")));
+  const view = createMockView(stateFromDocument(doc, 1, 10));
+  const event = createPasteEvent("https://example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, true);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(view.focusCalled, true);
+  assert.equal(view.state.doc.textContent, "read this");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content[0].marks, [
+    { attrs: { href: "https://example.com" }, type: "link" },
+  ]);
+  assert.equal(view.state.selection.empty, true);
+  assert.equal(view.state.selection.from, 10);
+  assert.deepEqual(view.state.storedMarks, []);
+});
+
+test("paste handler canonicalizes Buzz links over selected text", () => {
+  const doc = document(paragraph(text("selected")));
+  const view = createMockView(stateFromDocument(doc, 1, 9));
+  const event = createPasteEvent(CHANNEL_MESSAGE_HREF);
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, true);
+  assert.equal(view.state.doc.textContent, "selected");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content[0].marks, [
+    {
+      attrs: {
+        href: `buzz://message?channel=${CHANNEL_ID}&id=${CHANNEL_MESSAGE_ID}`,
+      },
+      type: "link",
+    },
+  ]);
+});
+
+test("paste handler replaces selected text when it contains a composer chip", () => {
+  const doc = document(
+    paragraph(text("before "), composerChip(), text(" after")),
+  );
+  const view = createMockView(stateFromDocument(doc, 1, doc.content.size - 1));
+  const event = createPasteEvent("https://example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, true);
+  assert.equal(view.state.doc.textContent, "https://example.com ");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content, [
+    {
+      marks: [{ attrs: { href: "https://example.com" }, type: "link" }],
+      text: "https://example.com",
+      type: "text",
+    },
+    { text: " ", type: "text" },
+  ]);
+});
+
+test("paste handler preserves caret paste behavior", () => {
+  const doc = document(paragraph(text("go ")));
+  const view = createMockView(stateFromDocument(doc, 4));
+  const event = createPasteEvent(CHANNEL_HREF);
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, true);
+  assert.equal(view.state.doc.textContent, "go  ");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content, [
+    { text: "go ", type: "text" },
+    {
+      attrs: { channelName: "general", href: CHANNEL_HREF },
+      type: "composerMessageLink",
+    },
+    { text: " ", type: "text" },
+  ]);
 });
 
 function captureMarkdownRule() {
