@@ -24,10 +24,10 @@ const _cameraControlSize = 64.0;
 const _shutterSize = 115.0;
 const _shutterCoreSize = _shutterSize - Grid.xxs * 2;
 const _reviewControlWidth = 112.0;
-const _collapsedControlOffset = 52.0;
 const _expandedControlOffset = 119.5;
 const _reviewControlGap = Grid.twelve;
 const _captureMotionDuration = Duration(milliseconds: 180);
+const _shutterExitDuration = Duration(milliseconds: 150);
 
 /// Builds the inline still-photo camera used by the profile avatar editor.
 typedef ImageAvatarCaptureBuilder =
@@ -199,7 +199,10 @@ class ImageAvatarCapture extends HookConsumerWidget {
         final prepared = await ref
             .read(mediaUploadServiceProvider)
             .prepareImageBytes(photo);
-        final cropped = await compute(_centerCropCameraImage, prepared);
+        final cropped = await compute(_centerCropCameraImage, (
+          bytes: prepared,
+          mirror: active.description.lensDirection == CameraLensDirection.front,
+        ));
         if (context.mounted) capturedBytes.value = cropped;
       } catch (_) {
         if (context.mounted) {
@@ -351,12 +354,16 @@ class ImageAvatarCapture extends HookConsumerWidget {
               curve: Curves.easeOutCubic,
               builder: (context, progress, _) => LayoutBuilder(
                 builder: (context, constraints) {
+                  final collapsedControlOffset =
+                      (constraints.maxWidth + Grid.half * 3) / 8;
                   final sideOffset =
-                      _collapsedControlOffset +
-                      (_expandedControlOffset - _collapsedControlOffset) *
+                      collapsedControlOffset +
+                      (_expandedControlOffset - collapsedControlOffset) *
                           progress;
                   return TweenAnimationBuilder<double>(
-                    tween: Tween(end: captured == null ? 0 : 1),
+                    tween: Tween(
+                      end: captured == null || isClosing.value ? 0 : 1,
+                    ),
                     duration: reduceMotion
                         ? Duration.zero
                         : _captureMotionDuration,
@@ -380,9 +387,11 @@ class ImageAvatarCapture extends HookConsumerWidget {
                                 effectiveSideOffset -
                                 sideWidth / 2,
                             width: sideWidth,
-                            height: _cameraControlSize,
+                            height: _shutterSize,
                             child: _MorphingCameraAction(
-                              key: const ValueKey('image-camera-left-action'),
+                              controlKey: const ValueKey(
+                                'image-camera-left-action',
+                              ),
                               width: sideWidth,
                               icon: isClosing.value
                                   ? LucideIcons.camera
@@ -390,11 +399,21 @@ class ImageAvatarCapture extends HookConsumerWidget {
                               iosIcon: isClosing.value
                                   ? IosGlassNavigationIcon.camera
                                   : IosGlassNavigationIcon.close,
-                              label: captured == null ? null : 'Retry',
-                              semanticLabel: captured == null
-                                  ? isClosing.value
-                                        ? 'Camera'
-                                        : 'Close camera'
+                              label: captured != null && !isClosing.value
+                                  ? 'Retry'
+                                  : null,
+                              transitionLabel: isClosing.value
+                                  ? 'Camera'
+                                  : null,
+                              transitionLabelMaxWidth: 96,
+                              transitionProgress: isClosing.value
+                                  ? 1 - progress
+                                  : 0,
+                              showEnabledAppearance: isClosing.value,
+                              semanticLabel: isClosing.value
+                                  ? 'Camera'
+                                  : captured == null
+                                  ? 'Close camera'
                                   : 'Retry',
                               onTap:
                                   isFlipping.value ||
@@ -406,22 +425,36 @@ class ImageAvatarCapture extends HookConsumerWidget {
                                   : retake,
                             ),
                           ),
-                          Transform.scale(
-                            scale:
-                                (0.73 + 0.27 * progress) *
-                                (1 - 0.28 * reviewProgress),
-                            child: Opacity(
-                              opacity: progress * (1 - reviewProgress),
-                              child: IgnorePointer(
-                                ignoring: captured != null,
-                                child: _ShutterButton(
-                                  busy: isProcessingCapture.value,
-                                  onTap: captureEnabled
-                                      ? () => unawaited(capture())
-                                      : null,
+                          TweenAnimationBuilder<double>(
+                            tween: Tween(end: controlsExpanded.value ? 1 : 0),
+                            duration: reduceMotion
+                                ? Duration.zero
+                                : isClosing.value
+                                ? _shutterExitDuration
+                                : _captureMotionDuration,
+                            curve: Curves.easeOutCubic,
+                            builder: (context, shutterProgress, _) =>
+                                Transform.scale(
+                                  scale:
+                                      (0.73 + 0.27 * shutterProgress) *
+                                      (1 - 0.28 * reviewProgress),
+                                  child: Opacity(
+                                    key: const ValueKey(
+                                      'image-camera-shutter-exit-opacity',
+                                    ),
+                                    opacity:
+                                        shutterProgress * (1 - reviewProgress),
+                                    child: IgnorePointer(
+                                      ignoring: captured != null,
+                                      child: _ShutterButton(
+                                        busy: isProcessingCapture.value,
+                                        onTap: captureEnabled
+                                            ? () => unawaited(capture())
+                                            : null,
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
                           ),
                           Positioned(
                             left:
@@ -429,9 +462,11 @@ class ImageAvatarCapture extends HookConsumerWidget {
                                 effectiveSideOffset -
                                 sideWidth / 2,
                             width: sideWidth,
-                            height: _cameraControlSize,
+                            height: _shutterSize,
                             child: _MorphingCameraAction(
-                              key: const ValueKey('image-camera-right-action'),
+                              controlKey: const ValueKey(
+                                'image-camera-right-action',
+                              ),
                               width: sideWidth,
                               icon: isClosing.value
                                   ? LucideIcons.images
@@ -439,11 +474,21 @@ class ImageAvatarCapture extends HookConsumerWidget {
                               iosIcon: isClosing.value
                                   ? IosGlassNavigationIcon.photoLibrary
                                   : IosGlassNavigationIcon.rotateCamera,
-                              label: captured == null ? null : 'Use Photo',
-                              semanticLabel: captured == null
-                                  ? isClosing.value
-                                        ? 'Photo Library'
-                                        : 'Flip camera'
+                              label: captured != null && !isClosing.value
+                                  ? 'Use Photo'
+                                  : null,
+                              transitionLabel: isClosing.value
+                                  ? 'Photo Library'
+                                  : null,
+                              transitionLabelMaxWidth: 104,
+                              transitionProgress: isClosing.value
+                                  ? 1 - progress
+                                  : 0,
+                              showEnabledAppearance: isClosing.value,
+                              semanticLabel: isClosing.value
+                                  ? 'Photo Library'
+                                  : captured == null
+                                  ? 'Flip camera'
                                   : 'Use Photo',
                               onTap: isClosing.value
                                   ? null
@@ -512,86 +557,148 @@ class _CameraPreview extends StatelessWidget {
 
 class _MorphingCameraAction extends StatelessWidget {
   const _MorphingCameraAction({
-    super.key,
+    required this.controlKey,
     required this.width,
     required this.icon,
     required this.iosIcon,
     required this.label,
+    required this.transitionLabel,
+    required this.transitionLabelMaxWidth,
+    required this.transitionProgress,
+    required this.showEnabledAppearance,
     required this.semanticLabel,
     required this.onTap,
   });
 
+  final Key controlKey;
   final double width;
   final IconData icon;
   final IosGlassNavigationIcon iosIcon;
   final String? label;
+  final String? transitionLabel;
+  final double transitionLabelMaxWidth;
+  final double transitionProgress;
+  final bool showEnabledAppearance;
   final String semanticLabel;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
+    Widget control;
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return IosGlassNavigationButton(
-        icon: iosIcon,
-        label: label,
-        semanticLabel: semanticLabel,
-        onPressed: onTap,
-        width: width,
-        height: _cameraControlSize,
-        controlSize: _cameraControlSize,
-        fillWidth: true,
-        foregroundColor: context.colors.onSurface,
+      control = IgnorePointer(
+        ignoring: onTap == null,
+        child: IosGlassNavigationButton(
+          icon: iosIcon,
+          label: label,
+          semanticLabel: semanticLabel,
+          onPressed: onTap ?? (showEnabledAppearance ? () {} : null),
+          width: width,
+          height: _cameraControlSize,
+          controlSize: _cameraControlSize,
+          fillWidth: true,
+          foregroundColor: context.colors.onSurface,
+        ),
       );
-    }
-    return Semantics(
-      label: semanticLabel,
-      button: true,
-      enabled: onTap != null,
-      child: ExcludeSemantics(
-        child: Material(
-          color: context.colors.surfaceContainerHighest,
-          shape: const StadiumBorder(),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: onTap,
-            child: SizedBox(
-              width: width,
-              height: _cameraControlSize,
-              child: Center(
-                child: AnimatedSwitcher(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : _captureMotionDuration,
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeOutCubic,
-                  child: label == null
-                      ? Icon(
-                          icon,
-                          key: ValueKey('camera-action-icon-${iosIcon.name}'),
-                          size: 26,
-                          color: onTap == null
-                              ? context.colors.onSurface.withValues(alpha: 0.38)
-                              : context.colors.onSurface,
-                        )
-                      : Text(
-                          label!,
-                          key: ValueKey(label),
-                          maxLines: 1,
-                          style: context.textTheme.labelMedium?.copyWith(
-                            color: onTap == null
+    } else {
+      final dimmed = onTap == null && !showEnabledAppearance;
+      control = Semantics(
+        label: semanticLabel,
+        button: true,
+        enabled: onTap != null,
+        child: ExcludeSemantics(
+          child: Material(
+            color: context.colors.surfaceContainerHighest,
+            shape: const StadiumBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onTap,
+              child: SizedBox(
+                width: width,
+                height: _cameraControlSize,
+                child: Center(
+                  child: AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : const Duration(milliseconds: 120),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeOutCubic,
+                    child: label == null
+                        ? Icon(
+                            icon,
+                            key: ValueKey('camera-action-icon-${iosIcon.name}'),
+                            size: 26,
+                            color: dimmed
                                 ? context.colors.onSurface.withValues(
                                     alpha: 0.38,
                                   )
                                 : context.colors.onSurface,
-                            fontWeight: FontWeight.w600,
+                          )
+                        : Text(
+                            label!,
+                            key: ValueKey(label),
+                            maxLines: 1,
+                            style: context.textTheme.labelMedium?.copyWith(
+                              color: dimmed
+                                  ? context.colors.onSurface.withValues(
+                                      alpha: 0.38,
+                                    )
+                                  : context.colors.onSurface,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
-                        ),
+                  ),
                 ),
               ),
             ),
           ),
         ),
-      ),
+      );
+    }
+
+    final labelProgress = transitionProgress.clamp(0.0, 1.0);
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned(
+          key: controlKey,
+          left: 0,
+          right: 0,
+          top: (_shutterSize - _cameraControlSize) / 2,
+          height: _cameraControlSize,
+          child: Transform.translate(
+            offset: Offset(0, 1.5 * labelProgress),
+            child: control,
+          ),
+        ),
+        if (transitionLabel != null)
+          Positioned(
+            left: 0,
+            right: 0,
+            top: _shutterSize - 20,
+            height: 20,
+            child: Opacity(
+              key: ValueKey('camera-transition-label-${transitionLabel!}'),
+              opacity: labelProgress,
+              child: Transform.translate(
+                offset: Offset(0, 2 * (1 - labelProgress)),
+                child: OverflowBox(
+                  minWidth: 0,
+                  maxWidth: transitionLabelMaxWidth,
+                  maxHeight: 20,
+                  child: Text(
+                    transitionLabel!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -671,9 +778,10 @@ class _ShutterButton extends StatelessWidget {
   }
 }
 
-Uint8List _centerCropCameraImage(Uint8List bytes) {
-  final decoded = image.decodeImage(bytes);
+Uint8List _centerCropCameraImage(({Uint8List bytes, bool mirror}) request) {
+  var decoded = image.decodeImage(request.bytes);
   if (decoded == null) throw const FormatException('Invalid camera image');
+  if (request.mirror) decoded = image.flipHorizontal(decoded);
   final side = min(decoded.width, decoded.height);
   final cropped = image.copyCrop(
     decoded,
@@ -692,3 +800,10 @@ Uint8List _centerCropCameraImage(Uint8List bytes) {
         );
   return Uint8List.fromList(image.encodeJpg(resized, quality: 92));
 }
+
+/// Prepares a camera image with the same mirroring and crop used by capture.
+@visibleForTesting
+Uint8List prepareCameraImageForTesting(
+  Uint8List bytes, {
+  required bool mirror,
+}) => _centerCropCameraImage((bytes: bytes, mirror: mirror));

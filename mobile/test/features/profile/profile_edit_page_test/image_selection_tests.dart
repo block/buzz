@@ -140,14 +140,52 @@ void runProfileEditImageSelectionTests() {
       find.byKey(const ValueKey('camera-action-icon-photoLibrary')),
       findsOneWidget,
     );
+    expect(find.text('Camera'), findsOneWidget);
+    expect(find.text('Photo Library'), findsOneWidget);
+    final cameraIcon = tester.widget<Icon>(
+      find.byKey(const ValueKey('camera-action-icon-camera')),
+    );
+    expect(cameraIcon.color?.a, 1);
     expect(closed, isFalse);
 
-    await tester.pump(const Duration(milliseconds: 90));
+    await tester.pump(const Duration(milliseconds: 60));
+    expect(
+      tester
+          .widget<Opacity>(
+            find.byKey(const ValueKey('image-camera-shutter-exit-opacity')),
+          )
+          .opacity,
+      0,
+    );
+    expect(closed, isFalse);
+
+    await tester.pump(const Duration(milliseconds: 30));
     expect(closed, isTrue);
     expect(
       tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
       const Size.square(220),
     );
+  });
+
+  test('front camera output keeps the mirrored preview orientation', () {
+    final source = image.Image(width: 2, height: 2);
+    for (var y = 0; y < 2; y++) {
+      source.setPixelRgb(0, y, 255, 0, 0);
+      source.setPixelRgb(1, y, 0, 0, 255);
+    }
+    final encoded = Uint8List.fromList(image.encodePng(source));
+
+    final regular = image.decodeJpg(
+      prepareCameraImageForTesting(encoded, mirror: false),
+    )!;
+    final mirrored = image.decodeJpg(
+      prepareCameraImageForTesting(encoded, mirror: true),
+    )!;
+    final regularLeft = regular.getPixel(40, 256);
+    final mirroredLeft = mirrored.getPixel(40, 256);
+
+    expect(regularLeft.r, greaterThan(regularLeft.b));
+    expect(mirroredLeft.b, greaterThan(mirroredLeft.r));
   });
 
   testWidgets('provides haptics when closing or accepting a camera photo', (
