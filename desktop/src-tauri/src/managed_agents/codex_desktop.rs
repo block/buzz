@@ -553,9 +553,43 @@ fn path_codex_app_server_candidates(executable: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+#[cfg(windows)]
+fn windows_appx_codex_candidates() -> Vec<PathBuf> {
+    // Codex installed from the Microsoft Store keeps its runtime under the
+    // package install directory rather than %LOCALAPPDATA%\\OpenAI\\Codex\\bin.
+    // Query AppX instead of guessing the versioned WindowsApps directory.
+    let script = r#"
+$ErrorActionPreference='SilentlyContinue'
+Get-AppxPackage -Name OpenAI.Codex,OpenAI.CodexBeta |
+  ForEach-Object { Join-Path $_.InstallLocation 'app\resources\codex.exe' }
+"#;
+    Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn codex_app_server_candidates(executable: &str) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
+
+    #[cfg(windows)]
+    candidates.extend(windows_appx_codex_candidates());
 
     #[cfg(target_os = "macos")]
     candidates.extend(macos_codex_app_server_candidates());
@@ -788,8 +822,27 @@ pub async fn restore_codex_runtime(app: AppHandle) {
         .map(|config| config.enabled)
         .unwrap_or(false)
     {
-        if let Err(error) = enable_codex_shared_runtime(&app).await {
-            eprintln!("buzz-desktop: failed to restore Codex shared runtime: {error}");
+        // Codex Desktop may still be updating/materializing its runtime bundle
+        // during Buzz startup. Retry briefly so a transient missing executable
+        // does not permanently leave the shared runtime unavailable until the
+        // user manually opens the setup panel.
+        let mut last_error = None;
+        for attempt in 0..15 {
+            match enable_codex_shared_runtime(&app).await {
+                Ok(status) if status.state == CodexSharedRuntimeState::Ready => return,
+                Ok(status) => {
+                    last_error = status.detail;
+                }
+                Err(error) => last_error = Some(error),
+            }
+            if attempt < 14 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+        if let Some(error) = last_error {
+            eprintln!(
+                "buzz-desktop: failed to restore Codex shared runtime after retries: {error}"
+            );
         }
     }
 }
