@@ -5405,4 +5405,17 @@ mod tests {
             "unresolved metadata must not render a Description field; got: {prompt}"
         );
     }
+
+    #[test]
+    fn push_is_unaffected_by_pre_push_processed_event_gate() {
+        // The durable-dedupe gate lives before `queue.push` in lib.rs. This
+        // crate-local queue still accepts any event it is given.
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let accepted = queue.push(make_queued(Uuid::new_v4(), "already processed elsewhere"));
+        assert!(
+            accepted,
+            "queue.push must still accept events; the store gate is pre-push"
+        );
+        assert_eq!(pending_count(&queue), 1);
+    }
 }

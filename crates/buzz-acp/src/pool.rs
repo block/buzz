@@ -641,6 +641,9 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Optional durable session-binding store. `None` keeps today's in-memory
+    /// bindings and processed-event dedupe.
+    pub session_store: Option<std::sync::Arc<dyn crate::session_store::SessionStore>>,
 }
 
 impl AgentPool {
@@ -1732,6 +1735,175 @@ fn send_prompt_result(
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
+fn context_key_for_source(
+    source: &PromptSource,
+    worker_index: usize,
+) -> crate::session_store::ContextKey {
+    match source {
+        PromptSource::Channel(cid) => {
+            crate::session_store::ContextKey::Channel(*cid).for_worker(worker_index)
+        }
+        PromptSource::Heartbeat => {
+            crate::session_store::ContextKey::Heartbeat.for_worker(worker_index)
+        }
+    }
+}
+
+fn context_key_label(key: &crate::session_store::ContextKey) -> String {
+    match key {
+        crate::session_store::ContextKey::Channel(cid) => format!("channel {cid}"),
+        crate::session_store::ContextKey::Heartbeat => "heartbeat".to_string(),
+        crate::session_store::ContextKey::Wire(raw) => raw.clone(),
+    }
+}
+
+async fn store_remove_binding(ctx: &PromptContext, key: &crate::session_store::ContextKey) {
+    let Some(store) = ctx.session_store.as_ref() else {
+        return;
+    };
+    if let Err(error) = store.remove_binding(key).await {
+        tracing::warn!(%error, key = %context_key_label(key), "session store remove_binding failed");
+    }
+}
+
+async fn invalidate_source_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    source: &PromptSource,
+) {
+    let key = context_key_for_source(source, agent.index);
+    agent.state.invalidate(source);
+    store_remove_binding(ctx, &key).await;
+}
+
+async fn store_save_binding(
+    ctx: &PromptContext,
+    key: &crate::session_store::ContextKey,
+    session_id: &str,
+) {
+    let Some(store) = ctx.session_store.as_ref() else {
+        return;
+    };
+    if let Err(error) = store.save_binding(key, session_id).await {
+        tracing::warn!(%error, key = %context_key_label(key), "session store save_binding failed");
+    }
+}
+
+async fn store_retire_channel_bindings(ctx: &PromptContext, channel_id: uuid::Uuid) {
+    let Some(store) = ctx.session_store.as_ref() else {
+        return;
+    };
+    if let Err(error) = store.remove_bindings_for_channel(channel_id).await {
+        tracing::warn!(
+            %error,
+            %channel_id,
+            "session store remove_bindings_for_channel failed"
+        );
+    }
+}
+
+async fn store_mark_events_processed(
+    ctx: &PromptContext,
+    channel_id: uuid::Uuid,
+    event_ids: &std::collections::HashSet<String>,
+) {
+    let Some(store) = ctx.session_store.as_ref() else {
+        return;
+    };
+    let ids: Vec<String> = event_ids.iter().cloned().collect();
+    if let Err(error) = store.mark_events_processed(channel_id, &ids).await {
+        tracing::warn!(%error, %channel_id, "session store mark_events_processed failed");
+    }
+}
+
+/// Attempt to re-attach a stored binding via `session/load`.
+///
+/// Returns `Some(session_id)` on success. On missing binding, missing
+/// capability, or load failure the binding is discarded (when present) and
+/// the caller falls through to `session/new`.
+async fn try_restore_stored_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    key: &crate::session_store::ContextKey,
+    channel_id: Option<uuid::Uuid>,
+    channel_type: Option<&str>,
+) -> Option<String> {
+    let store = ctx.session_store.as_ref()?;
+    let binding = match store.load_binding(key).await {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(%error, key = %context_key_label(key), "session store load_binding failed");
+            return None;
+        }
+    };
+    if !agent.acp.load_session_supported() {
+        tracing::warn!(
+            "discarding stale session binding for {}; starting a fresh session",
+            context_key_label(key)
+        );
+        let _ = store.remove_binding(key).await;
+        return None;
+    }
+    let mcp_servers = mcp_servers_with_git_origin(
+        &ctx.mcp_servers,
+        channel_id,
+        channel_type,
+        ctx.session_title.as_deref(),
+    );
+    match agent
+        .acp
+        .session_load(&binding.session_id, &ctx.cwd, mcp_servers)
+        .await
+    {
+        Ok(()) => {
+            if let Err(error) = store.touch_binding(key).await {
+                tracing::warn!(%error, "session store touch_binding failed");
+            }
+            if let Some(cid) = channel_id {
+                let delivered = store
+                    .processed_event_ids_for_channel(cid)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, %cid, "session store processed_event_ids_for_channel failed");
+                        Vec::new()
+                    });
+                agent.state.sessions.insert(cid, binding.session_id.clone());
+                agent.state.deliveries.insert(
+                    cid,
+                    ChannelDeliveryState {
+                        standing_context_sent: true,
+                        delivered_event_ids: delivered.into_iter().collect(),
+                    },
+                );
+            } else {
+                agent.state.heartbeat_session = Some(binding.session_id.clone());
+            }
+            Some(binding.session_id)
+        }
+        Err(error) => {
+            if matches!(
+                error,
+                crate::acp::AcpError::AgentExited | crate::acp::AcpError::Io(_)
+            ) {
+                tracing::warn!(
+                    %error,
+                    "session/load failed because the agent exited; keeping binding for {}",
+                    context_key_label(key)
+                );
+                return None;
+            }
+            tracing::warn!(
+                %error,
+                "discarding stale session binding for {}; starting a fresh session",
+                context_key_label(key)
+            );
+            let _ = store.remove_binding(key).await;
+            None
+        }
+    }
+}
+
 /// 1. Resolve or create a session (channel or heartbeat).
 /// 2. Send `initial_message` on new channel sessions (if configured).
 /// 3. Fetch conversation context if needed (thread reply or DM).
@@ -1956,6 +2128,18 @@ pub async fn run_prompt_task(
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
+            } else if let Some(sid) = {
+                let key = crate::session_store::ContextKey::Channel(*cid).for_worker(agent.index);
+                try_restore_stored_session(
+                    &mut agent,
+                    &ctx,
+                    &key,
+                    Some(*cid),
+                    origin_channel_type.as_deref(),
+                )
+                .await
+            } {
+                (sid, false)
             } else {
                 // The title is channel-qualified (`Agent · #channel`) so one
                 // agent in several channels doesn't produce identical session
@@ -1988,6 +2172,14 @@ pub async fn run_prompt_task(
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
                         agent.acp.notify_session_spawned(&sid);
+                        store_retire_channel_bindings(&ctx, *cid).await;
+                        store_save_binding(
+                            &ctx,
+                            &crate::session_store::ContextKey::Channel(*cid)
+                                .for_worker(agent.index),
+                            &sid,
+                        )
+                        .await;
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
@@ -2025,6 +2217,11 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => {
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
+            } else if let Some(sid) = {
+                let key = crate::session_store::ContextKey::Heartbeat.for_worker(agent.index);
+                try_restore_stored_session(&mut agent, &ctx, &key, None, None).await
+            } {
+                (sid, false)
             } else {
                 match create_session_and_apply_model(
                     &mut agent,
@@ -2049,6 +2246,12 @@ pub async fn run_prompt_task(
                         agent.state.heartbeat_session = Some(sid.clone());
                         // Seed a zero usage baseline: buzz-acp spawned this session.
                         agent.acp.notify_session_spawned(&sid);
+                        store_save_binding(
+                            &ctx,
+                            &crate::session_store::ContextKey::Heartbeat.for_worker(agent.index),
+                            &sid,
+                        )
+                        .await;
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
@@ -2205,7 +2408,7 @@ pub async fn run_prompt_task(
                                 Some(acp_stop_to_core(&stop_reason)),
                             )
                             .await;
-                            agent.state.invalidate(&source);
+                            invalidate_source_session(&mut agent, &ctx, &source).await;
                         }
                         Err(AcpError::AgentExited) => {
                             agent.state.invalidate_all();
@@ -2224,7 +2427,7 @@ pub async fn run_prompt_task(
                                 target: "pool::session",
                                 "cancel_with_cleanup failed during initial_message timeout: {e}"
                             );
-                            agent.state.invalidate(&source);
+                            invalidate_source_session(&mut agent, &ctx, &source).await;
                         }
                     }
                     send_prompt_result(
@@ -2260,7 +2463,7 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    invalidate_source_session(&mut agent, &ctx, &source).await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2504,7 +2707,7 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.state.invalidate(&source);
+                                invalidate_source_session(&mut agent, &ctx, &source).await;
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2535,13 +2738,13 @@ pub async fn run_prompt_task(
                                 let failure = classify_control_cancel_failure(
                                     &ctx,
                                     error,
-                                    control_signal,
+                                    control_signal.clone(),
                                     batch,
                                 );
                                 if failure.invalidate_all {
                                     agent.state.invalidate_all();
                                 } else {
-                                    agent.state.invalidate(&source);
+                                    invalidate_source_session(&mut agent, &ctx, &source).await;
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2603,12 +2806,28 @@ pub async fn run_prompt_task(
                                 standing_sent,
                                 &pending_delivered_event_ids,
                             );
+                            store_mark_events_processed(
+                                &ctx,
+                                *cid,
+                                &pending_delivered_event_ids,
+                            )
+                            .await;
                         }
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
                             &control_signal,
                         );
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
+                        ) {
+                            store_remove_binding(
+                                &ctx,
+                                &context_key_for_source(&source, agent.index),
+                            )
+                            .await;
+                        }
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2646,6 +2865,7 @@ pub async fn run_prompt_task(
                     standing_sent,
                     &pending_delivered_event_ids,
                 );
+                store_mark_events_processed(&ctx, *cid, &pending_delivered_event_ids).await;
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
             }
@@ -2679,7 +2899,7 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.state.invalidate(&source);
+                invalidate_source_session(&mut agent, &ctx, &source).await;
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -2790,7 +3010,7 @@ pub async fn run_prompt_task(
                         target: "pool::prompt",
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    invalidate_source_session(&mut agent, &ctx, &source).await;
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -2845,7 +3065,7 @@ pub async fn run_prompt_task(
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
             if !matches!(e, AcpError::AgentError { .. }) {
-                agent.state.invalidate(&source);
+                invalidate_source_session(&mut agent, &ctx, &source).await;
             }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -4702,6 +4922,7 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_store::SessionStore;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
@@ -6460,12 +6681,13 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "next-turn".into(),
         )
         .await;
-        let mut result = result_rx.recv().await.expect("next prompt result");
+        let result = result_rx.recv().await.expect("next prompt result");
         assert!(matches!(
             result.outcome,
             PromptOutcome::Ok(StopReason::EndTurn)
         ));
-        result.agent.acp.shutdown().await;
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
         server.abort();
 
         let request: serde_json::Value =
@@ -7953,7 +8175,573 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            session_store: None,
         }
+    }
+
+    struct FailingStore;
+
+    #[async_trait::async_trait]
+    impl crate::session_store::SessionStore for FailingStore {
+        async fn load_binding(
+            &self,
+            _key: &crate::session_store::ContextKey,
+        ) -> Result<
+            Option<crate::session_store::SessionBinding>,
+            crate::session_store::SessionStoreError,
+        > {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn save_binding(
+            &self,
+            _key: &crate::session_store::ContextKey,
+            _session_id: &str,
+        ) -> Result<(), crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn touch_binding(
+            &self,
+            _key: &crate::session_store::ContextKey,
+        ) -> Result<(), crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn remove_binding(
+            &self,
+            _key: &crate::session_store::ContextKey,
+        ) -> Result<(), crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn remove_bindings_for_channel(
+            &self,
+            _channel_id: Uuid,
+        ) -> Result<(), crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn mark_events_processed(
+            &self,
+            _channel_id: Uuid,
+            _event_ids: &[String],
+        ) -> Result<(), crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn is_event_processed(
+            &self,
+            _event_id: &str,
+        ) -> Result<bool, crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+        async fn processed_event_ids_for_channel(
+            &self,
+            _channel_id: Uuid,
+        ) -> Result<Vec<String>, crate::session_store::SessionStoreError> {
+            Err(crate::session_store::SessionStoreError::Io("boom".into()))
+        }
+    }
+
+    async fn spawn_capture_agent(script: &str) -> (AcpClient, std::path::PathBuf) {
+        let capture =
+            std::env::temp_dir().join(format!("buzz-acp-store-{}.ndjson", Uuid::new_v4()));
+        let quoted = capture.to_string_lossy().replace('\'', "'\\''");
+        let wrapped = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted}'
+  count=$((count + 1))
+  {body}
+done"#,
+            quoted = quoted,
+            body = script,
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), wrapped], &[], false)
+            .await
+            .expect("spawn capture agent");
+        (acp, capture)
+    }
+
+    fn store_test_agent(acp: AcpClient) -> OwnedAgent {
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    fn worker_channel_key(
+        channel_id: Uuid,
+        worker_index: usize,
+    ) -> crate::session_store::ContextKey {
+        crate::session_store::ContextKey::Channel(channel_id).for_worker(worker_index)
+    }
+
+    fn read_methods(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|v| v.get("method")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_store_writes_binding_on_create() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"created-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let agent = store_test_agent(acp);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let channel_id = Uuid::new_v4();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "create".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        let binding = store
+            .load_binding(&worker_channel_key(channel_id, 0))
+            .await
+            .unwrap()
+            .expect("binding written");
+        assert_eq!(binding.session_id, "created-sid");
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_restore_uses_session_load_and_skips_baseline() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let channel_id = Uuid::new_v4();
+        store
+            .save_binding(&worker_channel_key(channel_id, 0), "stored-sid")
+            .await
+            .unwrap();
+        store
+            .mark_events_processed(channel_id, &["already-done".into()])
+            .await
+            .unwrap();
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/load" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{}}"
+  elif [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"fresh-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let mut agent = store_test_agent(acp);
+        agent.acp.set_load_session_supported(true);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "restore".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("stored-sid")
+        );
+        let delivery = result.agent.state.deliveries.get(&channel_id).unwrap();
+        assert!(delivery.standing_context_sent);
+        assert!(delivery.delivered_event_ids.contains("already-done"));
+        let methods = read_methods(&capture);
+        assert!(
+            methods.contains(&"session/load".to_string()),
+            "expected session/load, got {methods:?}"
+        );
+        assert!(
+            !methods.contains(&"session/new".to_string()),
+            "restore must not create a fresh session: {methods:?}"
+        );
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_load_failure_removes_binding_and_creates_fresh() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let channel_id = Uuid::new_v4();
+        store
+            .save_binding(&worker_channel_key(channel_id, 0), "stale-sid")
+            .await
+            .unwrap();
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/load" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"error\":{\"code\":-32000,\"message\":\"gone\"}}"
+  elif [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"fresh-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let mut agent = store_test_agent(acp);
+        agent.acp.set_load_session_supported(true);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "load-fail".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        let binding = store
+            .load_binding(&worker_channel_key(channel_id, 0))
+            .await
+            .unwrap()
+            .expect("fresh binding");
+        assert_eq!(binding.session_id, "fresh-sid");
+        let methods = read_methods(&capture);
+        assert!(methods.contains(&"session/load".to_string()));
+        assert!(methods.contains(&"session/new".to_string()));
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_rotation_removes_binding() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"rot-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let agent = store_test_agent(acp);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        ctx.max_turns_per_session = 1;
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let channel_id = Uuid::new_v4();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "rotate".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        assert!(
+            store
+                .load_binding(&worker_channel_key(channel_id, 0))
+                .await
+                .unwrap()
+                .is_none(),
+            "rotation must delete the binding"
+        );
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_agent_exit_keeps_binding() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let channel_id = Uuid::new_v4();
+        store
+            .save_binding(&worker_channel_key(channel_id, 0), "keep-sid")
+            .await
+            .unwrap();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "keep-sid".into());
+        state.invalidate_all();
+        assert!(state.sessions.is_empty());
+        let binding = store
+            .load_binding(&worker_channel_key(channel_id, 0))
+            .await
+            .unwrap()
+            .expect("binding survives agent exit");
+        assert_eq!(binding.session_id, "keep-sid");
+    }
+
+    #[tokio::test]
+    async fn session_store_errors_degrade_to_in_memory_behavior() {
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"ok-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let agent = store_test_agent(acp);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(std::sync::Arc::new(FailingStore));
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(Uuid::new_v4())),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "degrade".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(
+            matches!(result.outcome, PromptOutcome::Ok(_)),
+            "store errors must not fail the turn"
+        );
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_worker_does_not_restore_another_workers_binding() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let channel_id = Uuid::new_v4();
+        store
+            .save_binding(&worker_channel_key(channel_id, 0), "worker0-sid")
+            .await
+            .unwrap();
+        store
+            .save_binding(
+                &crate::session_store::ContextKey::Channel(channel_id),
+                "unscoped-sid",
+            )
+            .await
+            .unwrap();
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/load" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{}}"
+  elif [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"worker1-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let mut agent = store_test_agent(acp);
+        agent.index = 1;
+        agent.acp.set_load_session_supported(true);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "cross-worker".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        let methods = read_methods(&capture);
+        assert!(
+            !methods.contains(&"session/load".to_string()),
+            "worker 1 must not load worker 0 or unscoped bindings: {methods:?}"
+        );
+        assert!(methods.contains(&"session/new".to_string()));
+        assert!(
+            store
+                .load_binding(&worker_channel_key(channel_id, 0))
+                .await
+                .unwrap()
+                .is_none(),
+            "fresh create must retire superseded sibling-worker bindings"
+        );
+        assert!(
+            store
+                .load_binding(&crate::session_store::ContextKey::Channel(channel_id))
+                .await
+                .unwrap()
+                .is_none(),
+            "fresh create must retire unscoped channel bindings"
+        );
+        assert_eq!(
+            store
+                .load_binding(&worker_channel_key(channel_id, 1))
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            "worker1-sid"
+        );
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_restore_forwards_git_origin_mcp_env() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let channel_id = Uuid::new_v4();
+        store
+            .save_binding(&worker_channel_key(channel_id, 0), "stored-sid")
+            .await
+            .unwrap();
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/load" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{}}"
+  elif [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"fresh-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi"#,
+        )
+        .await;
+        let mut agent = store_test_agent(acp);
+        agent.acp.set_load_session_supported(true);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        ctx.mcp_servers = vec![test_mcp_server()];
+        ctx.channel_info = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "stream-chan".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "restore-origin".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        let payload = std::fs::read_to_string(&capture).unwrap_or_default();
+        assert!(
+            payload.contains("session/load"),
+            "expected session/load in {payload}"
+        );
+        assert!(
+            payload.contains("BUZZ_GIT_ORIGIN_CHANNEL_ID"),
+            "restore must inject git-origin env: {payload}"
+        );
+        assert!(
+            payload.contains(&channel_id.to_string()),
+            "restore git-origin must use the channel id: {payload}"
+        );
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
+    }
+
+    #[tokio::test]
+    async fn session_store_prompt_error_removes_binding() {
+        let store = std::sync::Arc::new(crate::session_store::InMemorySessionStore::new());
+        let (acp, capture) = spawn_capture_agent(
+            r#"method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  if [ "$method" = "session/new" ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{\"sessionId\":\"err-sid\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count-1)),\"result\":{}}"
+  fi"#,
+        )
+        .await;
+        let agent = store_test_agent(acp);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.session_store = Some(store.clone());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let channel_id = Uuid::new_v4();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "prompt-error".into(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("result");
+        assert!(
+            matches!(result.outcome, PromptOutcome::Error(_)),
+            "expected prompt error"
+        );
+        assert!(
+            store
+                .load_binding(&worker_channel_key(channel_id, 0))
+                .await
+                .unwrap()
+                .is_none(),
+            "for-cause invalidate must delete the binding"
+        );
+        let mut agent = result.agent;
+        agent.acp.shutdown().await;
+        let _ = std::fs::remove_file(&capture);
     }
 
     // ── huddle instructions ─────────────────────────────────────────────────

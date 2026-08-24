@@ -9,6 +9,8 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+/// Durable session-binding + processed-event store (IDs and timestamps only).
+pub mod session_store;
 mod setup_mode;
 mod usage;
 
@@ -43,6 +45,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use session_store::skip_if_already_processed;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -1081,13 +1084,14 @@ async fn publish_relay_observer_event(
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
 const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
 
-fn handle_relay_observer_control_event(
+async fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
     event_publisher: RelayEventPublisher,
+    session_store: Option<&dyn session_store::SessionStore>,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -1131,7 +1135,7 @@ fn handle_relay_observer_control_event(
             handle_cancel_turn_control(&payload, pool, observer);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(&payload, pool, observer, session_store).await;
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -1334,11 +1338,14 @@ fn handle_cancel_turn_control(
 ///
 /// Idle path: validate against the cached catalog *before* invalidating
 /// (pre-cancel guard), then set `desired_model` + invalidate. The override
-/// takes visible effect on the agent's next turn.
-fn handle_switch_model_control(
+/// takes visible effect on the agent's next turn. A successful idle switch
+/// also retires durable bindings so the next prompt cannot `session/load`
+/// the deliberately retired session.
+async fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
+    session_store: Option<&dyn session_store::SessionStore>,
 ) {
     let Some(channel_id) = payload
         .get("channelId")
@@ -1387,7 +1394,18 @@ fn handle_switch_model_control(
     } else {
         // Idle path: validate against the cached catalog before invalidating.
         match pool.switch_idle_agent_model(channel_id, model_id, request_id.clone()) {
-            IdleSwitchResult::Switched => "switched",
+            IdleSwitchResult::Switched => {
+                if let Some(store) = session_store {
+                    if let Err(error) = store.remove_bindings_for_channel(channel_id).await {
+                        tracing::warn!(
+                            %error,
+                            %channel_id,
+                            "session store remove_binding failed on idle switch_model"
+                        );
+                    }
+                }
+                "switched"
+            }
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
         }
@@ -1958,6 +1976,30 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    let session_store: Option<std::sync::Arc<dyn session_store::SessionStore>> =
+        if let Some(path) = config.session_store_path.as_ref() {
+            match session_store::sqlite::SqliteSessionStore::open(
+                path,
+                session_store::StoreScope::new(
+                    config.keys.public_key().to_hex(),
+                    &config.relay_url,
+                    config::normalize_agent_command_identity(&config.agent_command),
+                ),
+            ) {
+                Ok(store) => Some(std::sync::Arc::new(store)),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        path = %path.display(),
+                        "failed to open session store; continuing without durable bindings"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
@@ -2221,6 +2263,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        session_store: session_store.clone(),
     });
 
     if !config.memory_enabled {
@@ -2611,7 +2654,9 @@ async fn tokio_main() -> Result<()> {
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
-                                );
+                                    session_store.as_deref(),
+                                )
+                                .await;
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -2715,6 +2760,17 @@ async fn tokio_main() -> Result<()> {
                                     } else {
                                         0
                                     };
+                                    if let Some(store) = session_store.as_ref() {
+                                        if let Err(error) =
+                                            store.remove_bindings_for_channel(ch).await
+                                        {
+                                            tracing::warn!(
+                                                %error,
+                                                %ch,
+                                                "session store remove_binding failed on membership removal"
+                                            );
+                                        }
+                                    }
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -2842,6 +2898,20 @@ async fn tokio_main() -> Result<()> {
                                             );
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            if let Some(store) = session_store.as_ref() {
+                                                if let Err(error) = store
+                                                    .remove_bindings_for_channel(
+                                                        buzz_event.channel_id,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        %error,
+                                                        channel_id = %buzz_event.channel_id,
+                                                        "session store remove_binding failed on !rotate"
+                                                    );
+                                                }
+                                            }
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -2917,6 +2987,9 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            if skip_if_already_processed(session_store.as_deref(), &event_id_hex).await {
+                                continue;
+                            }
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
@@ -6795,6 +6868,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -7019,6 +7093,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -8709,5 +8784,125 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod session_store_dedupe_tests {
+    use super::session_store::{skip_if_already_processed, InMemorySessionStore, SessionStore};
+
+    #[tokio::test]
+    async fn processed_event_is_skipped_unmarked_passes() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        assert!(
+            !skip_if_already_processed(None, "evt-1").await,
+            "no store means never skip"
+        );
+        assert!(!skip_if_already_processed(Some(&store), "evt-1").await);
+        store
+            .mark_events_processed(channel_id, &["evt-1".to_string()])
+            .await
+            .unwrap();
+        assert!(skip_if_already_processed(Some(&store), "evt-1").await);
+        assert!(!skip_if_already_processed(Some(&store), "evt-2").await);
+    }
+}
+
+#[cfg(test)]
+mod session_store_idle_switch_tests {
+    use super::*;
+    use session_store::{ContextKey, InMemorySessionStore, SessionStore};
+
+    async fn dummy_agent(channel_id: uuid::Uuid) -> OwnedAgent {
+        // Inert `cat` subprocess — the idle switch path never talks to ACP.
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn cat as inert agent"),
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "retired-sid".into());
+        agent
+    }
+
+    #[tokio::test]
+    async fn session_store_idle_switch_model_removes_channel_bindings() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        let key = ContextKey::Channel(channel_id).for_worker(0);
+        store.save_binding(&key, "retired-sid").await.unwrap();
+
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(channel_id).await)]);
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "new-model",
+            }),
+            &mut pool,
+            None,
+            Some(&store),
+        )
+        .await;
+
+        assert!(
+            store.load_binding(&key).await.unwrap().is_none(),
+            "idle switch must retire durable bindings so restore cannot resurrect them"
+        );
+        if let Some(mut agent) = pool.try_claim(Some(channel_id)) {
+            agent.acp.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn session_store_unsupported_idle_switch_keeps_channel_bindings() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        let key = ContextKey::Channel(channel_id).for_worker(0);
+        store.save_binding(&key, "keep-sid").await.unwrap();
+
+        let mut agent = dummy_agent(channel_id).await;
+        agent.model_capabilities = Some(crate::pool::AgentModelCapabilities {
+            config_options_raw: vec![],
+            available_models_raw: Some(serde_json::json!([])),
+            thought_level_config_id: None,
+        });
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        handle_switch_model_control(
+            &serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "modelId": "missing-model",
+            }),
+            &mut pool,
+            None,
+            Some(&store),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .load_binding(&key)
+                .await
+                .unwrap()
+                .expect("rejected switch must not delete the binding")
+                .session_id,
+            "keep-sid"
+        );
+        if let Some(mut agent) = pool.try_claim(Some(channel_id)) {
+            agent.acp.shutdown().await;
+        }
     }
 }
