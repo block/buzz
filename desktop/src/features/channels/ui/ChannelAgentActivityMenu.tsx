@@ -120,6 +120,7 @@ export function ChannelAgentActivityMenu({
       {handoffAgent ? (
         <AgentHandoffDialog
           agent={{ name: handoffAgent.name, pubkey: handoffAgent.pubkey }}
+          availableAgents={agents}
           channelId={channelId}
           history=""
           initialMode="received"

@@ -495,6 +495,7 @@ export function AgentSessionThreadPanel({
           <ManagedAgentSessionPanel
             agent={agent}
             channelId={sessionChannelId}
+            channelName={channel?.name ?? null}
             className="border-0 bg-transparent px-0 py-2 shadow-none"
             emptyDescription={
               sessionChannelId

@@ -46,6 +46,7 @@ type ManagedAgentSessionPanelProps = {
   };
   autoTail?: boolean;
   channelId?: string | null;
+  channelName?: string | null;
   className?: string;
   emptyDescription?: string;
   emptyState?: AgentSessionTranscriptEmptyState;
@@ -64,6 +65,7 @@ export function ManagedAgentSessionPanel({
   agent,
   autoTail = false,
   channelId = null,
+  channelName = null,
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
   emptyState = "idle",
@@ -143,6 +145,7 @@ export function ManagedAgentSessionPanel({
           agent={agent}
           history={formatHandoffHistory(displayTranscript)}
           channelId={channelId}
+          channelName={channelName}
           connectionState={connectionState}
           eventCount={displayEvents.length}
           hasObserver={hasObserver}
@@ -178,6 +181,7 @@ function SessionHeader({
   agent,
   history,
   channelId,
+  channelName,
   connectionState,
   eventCount,
   hasObserver,
@@ -186,6 +190,7 @@ function SessionHeader({
   agent: Pick<ManagedAgent, "pubkey" | "name">;
   history: string;
   channelId: string | null;
+  channelName: string | null;
   connectionState: ConnectionState;
   eventCount: number;
   hasObserver: boolean;
@@ -216,6 +221,7 @@ function SessionHeader({
           agent={agent}
           history={history}
           channelId={channelId}
+          channelName={channelName}
         />
       </div>
     </div>

@@ -26,8 +26,15 @@ import {
 
 type AgentHandoffDialogProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name">;
+  availableAgents?: ReadonlyArray<
+    Pick<ManagedAgent, "pubkey" | "name"> & {
+      ownerPubkey?: string | null;
+      deleted?: boolean;
+    }
+  >;
   history: string;
   channelId?: string | null;
+  channelName?: string | null;
   initialMode?: "send" | "received";
   trigger?: React.ReactNode;
   open?: boolean;
@@ -36,8 +43,10 @@ type AgentHandoffDialogProps = {
 
 export function AgentHandoffDialog({
   agent,
+  availableAgents: channelAgents,
   history,
   channelId = null,
+  channelName = null,
   initialMode = "send",
   trigger,
   open: controlledOpen,
@@ -146,13 +155,18 @@ export function AgentHandoffDialog({
     openSend();
   }
 
-  const availableAgents = relayAgents.filter(
-    (candidate) =>
-      candidate.pubkey !== agent.pubkey &&
-      !candidate.deleted &&
-      channelId !== null &&
-      candidate.channelIds.includes(channelId),
-  );
+  const availableAgents = channelAgents
+    ? channelAgents.filter(
+        (candidate) => candidate.pubkey !== agent.pubkey && !candidate.deleted,
+      )
+    : relayAgents.filter(
+        (candidate) =>
+          candidate.pubkey !== agent.pubkey &&
+          !candidate.deleted &&
+          channelId !== null &&
+          (candidate.channelIds.includes(channelId) ||
+            (channelName !== null && candidate.channels.includes(channelName))),
+      );
 
   return (
     <>
