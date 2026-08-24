@@ -25,6 +25,7 @@ quickstart: false
 image:
   repository: ghcr.io/block/buzz
   tag: ""                        # empty → .Chart.AppVersion
+  digest: ""                     # optional immutable sha256 digest; overrides tag
   pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -79,6 +80,9 @@ mediaBaseUrl: ""
 # 64-char lowercase hex Nostr pubkey of the relay operator. Required when
 # relay.requireRelayMembership=true (the production default).
 ownerPubkey: ""
+# Optional key in secrets.existingSecret containing the relay owner pubkey.
+# Use this when the operator identity is managed by ExternalSecrets.
+ownerPubkeySecretKey: ""
 
 # ── Chart-managed secrets ────────────────────────────────────────────────────
 # Production / GitOps path: create a Secret out-of-band with these keys and

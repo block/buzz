@@ -1,0 +1,103 @@
+name: Keycloak Client Setup (buzz)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: 'Keycloak client_id (derives SSM paths + redirect URIs)'
+        required: true
+        default: buzz
+        type: string
+      public_client:
+        description: 'Public PKCE client (true for SPAs/frontends; false for oauth2-proxy/confidential)'
+        required: false
+        default: false
+        type: boolean
+      reconcile_existing_client:
+        description: 'Reconcile existing Keycloak client config (redirect URIs, web origins, PKCE, client type, secret/public mode)'
+        required: false
+        default: false
+        type: boolean
+      extra_redirect_uris:
+        description: 'JSON array of extra redirect URIs'
+        required: false
+        default: '[]'
+        type: string
+      callback_path:
+        description: 'OAuth2 callback path (default /oauth2/callback)'
+        required: false
+        default: '/oauth2/callback'
+        type: string
+      group_members:
+        description: 'Users to ensure in /<client_id>-admins'
+        required: false
+        default: '[]'
+        type: string
+      super_admin_members:
+        description: 'Users to ensure in /super-admins'
+        required: false
+        default: '[]'
+        type: string
+
+  workflow_call:
+    inputs:
+      client_id:
+        description: 'Keycloak client_id (derives SSM paths + redirect URIs)'
+        required: true
+        type: string
+      public_client:
+        description: 'Public PKCE client (true for SPAs/frontends; false for oauth2-proxy/confidential)'
+        required: false
+        type: boolean
+        default: false
+      reconcile_existing_client:
+        description: 'Reconcile existing Keycloak client config (redirect URIs, web origins, PKCE, client type, secret/public mode)'
+        required: false
+        type: boolean
+        default: false
+      extra_redirect_uris:
+        description: 'JSON array of extra redirect URIs'
+        required: false
+        type: string
+        default: '[]'
+      callback_path:
+        description: 'OAuth2 callback path (default /oauth2/callback)'
+        required: false
+        type: string
+        default: '/oauth2/callback'
+      group_members:
+        description: 'Users to ensure in /<client_id>-admins'
+        required: false
+        type: string
+        default: '[]'
+      super_admin_members:
+        description: 'Users to ensure in /super-admins'
+        required: false
+        type: string
+        default: '[]'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  keycloak-client-setup:
+    uses: lolmeida/github-actions/.github/workflows/keycloak-client-setup.yml@v1
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      client_id: ${{ inputs.client_id }}
+      keycloak_url: https://keycloak.lolmeida.com
+      realm: peah
+      domain: lolmeida.com
+      public_client: ${{ inputs.public_client }}
+      reconcile_existing_client: ${{ inputs.reconcile_existing_client }}
+      extra_redirect_uris: ${{ inputs.extra_redirect_uris }}
+      callback_path: ${{ inputs.callback_path }}
+      group_members: ${{ inputs.group_members }}
+      super_admin_members: ${{ inputs.super_admin_members }}
+      aws_region: eu-central-1
+      aws_iam_role: arn:aws:iam::904727092208:role/github-actions-buzz-dispatch
+      admin_username_ssm_path: /shared/keycloak/ADMIN_USERNAME
+      admin_password_ssm_path: /shared/keycloak/ADMIN_PASSWORD

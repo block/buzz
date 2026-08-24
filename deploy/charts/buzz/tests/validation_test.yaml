@@ -18,7 +18,7 @@ tests:
       externalPostgresql.url: postgres://u:p@h:5432/d
     asserts:
       - failedTemplate:
-          errorPattern: "ownerPubkey is required when relay.requireRelayMembership=true"
+          errorPattern: "ownerPubkey or ownerPubkeySecretKey with secrets.existingSecret is required when relay.requireRelayMembership=true"
 
   - it: fails when ownerPubkey is not 64 lowercase hex (schema-level)
     set:

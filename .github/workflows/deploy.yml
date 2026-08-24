@@ -1,0 +1,86 @@
+name: Deploy Buzz via GitOps (GHAR)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (ex: 1.2.3 or latest)"
+        required: true
+        type: string
+      app_name:
+        description: "ArgoCD app name"
+        required: false
+        default: apps-prod-buzz
+        type: string
+      sync_enabled:
+        description: "Run ArgoCD sync after updating values"
+        required: false
+        default: true
+        type: boolean
+      wait:
+        description: "Wait for ArgoCD sync completion"
+        required: false
+        default: true
+        type: boolean
+      runs_on:
+        description: "Runner label used by GHAR"
+        required: false
+        default: ubuntu-latest
+        type: string
+      prune:
+        description: "Prune resources not in desired state"
+        required: false
+        default: false
+        type: boolean
+
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (ex: 1.2.3)"
+        required: true
+        type: string
+      app_name:
+        description: "ArgoCD app name"
+        required: false
+        default: apps-prod-buzz
+        type: string
+      sync_enabled:
+        description: "Run ArgoCD sync after updating values"
+        required: false
+        default: true
+        type: boolean
+      wait:
+        description: "Wait for ArgoCD sync completion"
+        required: false
+        default: true
+        type: boolean
+      runs_on:
+        description: "Runner label used by GHAR"
+        required: false
+        default: ubuntu-latest
+        type: string
+      prune:
+        description: "Prune resources not in desired state"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  deploy:
+    uses: lolmeida/github-actions/.github/workflows/gitops-deploy.yml@v1
+    with:
+      app_name: ${{ inputs.app_name }}
+      image_tag: ${{ inputs.image_tag }}
+      values_file: deploy/charts/buzz/values.yaml
+      sync_enabled: ${{ inputs.sync_enabled }}
+      wait: ${{ inputs.wait }}
+      prune: ${{ inputs.prune }}
+      runs_on: ${{ inputs.runs_on }}
+      aws_iam_role: arn:aws:iam::904727092208:role/github-actions-buzz-dispatch
+      aws_region: eu-central-1
+      ssm_server_path: /argocd/server
+      ssm_token_path: /argocd/auth-token
