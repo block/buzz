@@ -53,6 +53,7 @@ import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/browse_channels_sheet.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
@@ -62,7 +63,7 @@ part 'channels_page/community.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 
-enum _QuickAction { createChannel, newDm }
+enum _QuickAction { createChannel, newDm, browseChannels }
 
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;

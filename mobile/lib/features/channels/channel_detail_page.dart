@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:math' show cos, max, min, pi;
+import 'dart:ui' show ImageFilter, lerpDouble;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -79,7 +81,9 @@ part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
+part 'channel_detail_page/huddle_participant_cluster.dart';
 part 'channel_detail_page/huddle_call_participants.dart';
+part 'channel_detail_page/huddle_participant_overlay.dart';
 part 'channel_detail_page/huddle_call_controls.dart';
 part 'channel_detail_page/huddle_drawer.dart';
 part 'channel_detail_page/huddle_reactions.dart';

@@ -7,6 +7,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     required this.fallbackLabel,
     required this.active,
     required this.speakerLevel,
+    required this.onTap,
     this.isSelf = false,
     this.frameSize = _huddleAvatarFrameSize,
   });
@@ -16,6 +17,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
   final String? fallbackLabel;
   final bool active;
   final double speakerLevel;
+  final VoidCallback? onTap;
   final bool isSelf;
   final double frameSize;
 
@@ -56,31 +58,28 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       originRegistry.register(pubkey, originKey);
       return () => originRegistry.unregister(pubkey, originKey);
     }, [originRegistry, pubkey, originKey]);
-    final showsLabel = useState(false);
-    final profileName = profile?.displayName?.trim();
-    final directoryName = fallbackLabel?.trim();
-    final label = isSelf
-        ? 'You'
-        : (profileName?.isNotEmpty == true ? profileName : null) ??
-              (directoryName?.isNotEmpty == true ? directoryName : null) ??
-              (pubkey.isEmpty ? 'Participant' : shortPubkey(pubkey));
-    void toggleLabel() => showsLabel.value = !showsLabel.value;
+    final label = _huddleParticipantLabel(
+      pubkey: pubkey,
+      profile: profile,
+      fallbackLabel: fallbackLabel,
+      isSelf: isSelf,
+    );
 
     return SizedBox(
       width: frameSize,
       child: Semantics(
         label: active ? '$label, speaking' : label,
-        hint: showsLabel.value
-            ? 'Tap to hide participant name'
-            : 'Tap to show participant name',
-        button: true,
-        onTap: toggleLabel,
+        hint: onTap == null ? null : 'Tap to focus participant',
+        button: onTap != null,
+        onTap: onTap,
         excludeSemantics: true,
         child: GestureDetector(
           key: ValueKey('huddle-participant-avatar-$pubkey'),
-          behavior: HitTestBehavior.opaque,
+          behavior: onTap == null
+              ? HitTestBehavior.deferToChild
+              : HitTestBehavior.opaque,
           excludeFromSemantics: true,
-          onTap: toggleLabel,
+          onTap: onTap,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -136,54 +135,24 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                   ),
                 ),
               ),
-              AnimatedSwitcher(
-                key: ValueKey('huddle-participant-label-reveal-$pubkey'),
-                duration: reducedMotion
-                    ? Duration.zero
-                    : const Duration(milliseconds: 180),
-                reverseDuration: reducedMotion
-                    ? Duration.zero
-                    : const Duration(milliseconds: 140),
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeInCubic,
-                layoutBuilder: (currentChild, previousChildren) => Stack(
-                  alignment: Alignment.topCenter,
-                  children: [...previousChildren, ?currentChild],
-                ),
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: SizeTransition(
-                    sizeFactor: animation,
-                    axisAlignment: -1,
-                    child: child,
-                  ),
-                ),
-                child: showsLabel.value
-                    ? Padding(
-                        key: ValueKey('huddle-participant-label-$pubkey'),
-                        padding: const EdgeInsets.only(top: Grid.half),
-                        child: SizedBox(
-                          width: frameSize,
-                          child: Text(
-                            label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: context.textTheme.labelLarge?.copyWith(
-                              color: context.colors.onSurface,
-                              fontWeight: active ? FontWeight.w600 : null,
-                            ),
-                          ),
-                        ),
-                      )
-                    : SizedBox(
-                        key: ValueKey('huddle-participant-label-empty-$pubkey'),
-                      ),
-              ),
             ],
           ),
         ),
       ),
     );
   }
+}
+
+String _huddleParticipantLabel({
+  required String pubkey,
+  required UserProfile? profile,
+  required String? fallbackLabel,
+  required bool isSelf,
+}) {
+  if (isSelf) return 'You';
+  final profileName = profile?.displayName?.trim();
+  final directoryName = fallbackLabel?.trim();
+  return (profileName?.isNotEmpty == true ? profileName : null) ??
+      (directoryName?.isNotEmpty == true ? directoryName : null) ??
+      (pubkey.isEmpty ? 'Participant' : shortPubkey(pubkey));
 }
