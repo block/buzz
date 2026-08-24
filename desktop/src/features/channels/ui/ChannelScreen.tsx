@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
@@ -45,6 +46,7 @@ import { buildMessageComposerEditTarget } from "@/features/messages/lib/draftMen
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHeadCache";
 import {
   resolveTimelineLoadingLatch,
   selectTimelineLoadingState,
@@ -95,6 +97,7 @@ export function ChannelScreen({
   targetMessageEvents,
   targetMessageId,
 }: ChannelScreenProps) {
+  const queryClient = useQueryClient();
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const {
@@ -607,7 +610,12 @@ export function ChannelScreen({
         isPlaceholderData: messagesQuery.isPlaceholderData,
         dataLength: messagesQuery.data?.length ?? null,
       },
-      hasSettledThisChannel,
+      // A persisted head only counts as hydrated when it has rows to paint
+      // (channelHeadCache.ts), so this bypass never settles onto an empty
+      // placeholder while the authoritative refresh is still in flight.
+      hasSettledThisChannel ||
+        (activeChannelId !== null &&
+          hasPersistedHydratedChannel(queryClient, activeChannelId)),
     );
   const { settledChannelId, isLoading: isTimelineLoading } =
     resolveTimelineLoadingLatch(

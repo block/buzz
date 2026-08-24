@@ -402,9 +402,14 @@ test("regular message bolds inactive channel without numeric badge", async ({
   );
 });
 
-test("top-level @mention bolds the channel without a row badge", async ({
+test("top-level @mention shows a red numeric badge on its channel", async ({
   page,
 }) => {
+  // slack-ochin maps the generic destructive pair to white-on-white. The
+  // notification pair must remain independently red and readable.
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "slack-ochin");
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -413,13 +418,18 @@ test("top-level @mention bolds the channel without a row badge", async ({
 
   await page.evaluate(
     ({ pubkey, mentionPubkey }) => {
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "random",
-        content: "Hey @tyler check this out",
-        kind: 40002,
-        pubkey,
-        mentionPubkeys: [mentionPubkey],
-      });
+      for (const content of [
+        "Hey @tyler check this out",
+        "One more for @tyler",
+      ]) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "random",
+          content,
+          kind: 40002,
+          pubkey,
+          mentionPubkeys: [mentionPubkey],
+        });
+      }
     },
     {
       pubkey: TEST_IDENTITIES.alice.pubkey,
@@ -431,9 +441,38 @@ test("top-level @mention bolds the channel without a row badge", async ({
     "font-weight",
     "700",
   );
-  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  const mentionBadge = page.getByTestId("channel-unread-random");
+  await expect(mentionBadge).toHaveText("2 unread notifications");
+  await expect(mentionBadge).toHaveClass(/bg-notification/);
+  await expect(mentionBadge).toHaveCSS("background-color", "rgb(202, 43, 75)");
+  await expect(mentionBadge).toHaveCSS("color", "rgb(255, 245, 247)");
+  const badgeContrast = await mentionBadge.evaluate((element) => {
+    const parseRgb = (value: string) =>
+      (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const luminance = (color: number[]) =>
+      color
+        .map((channel) => {
+          const value = channel / 255;
+          return value <= 0.04045
+            ? value / 12.92
+            : ((value + 0.055) / 1.055) ** 2.4;
+        })
+        .reduce(
+          (sum, channel, index) =>
+            sum + channel * [0.2126, 0.7152, 0.0722][index],
+          0,
+        );
+    const style = getComputedStyle(element);
+    const foreground = luminance(parseRgb(style.color));
+    const background = luminance(parseRgb(style.backgroundColor));
+    return (
+      (Math.max(foreground, background) + 0.05) /
+      (Math.min(foreground, background) + 0.05)
+    );
+  });
+  expect(badgeContrast).toBeGreaterThanOrEqual(4.5);
   await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
-  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 2));
 });
 
 test("numeric badge increments for DM message", async ({ page }) => {
@@ -496,7 +535,7 @@ test("interested thread reply shows the channel preview dot without incrementing
   await waitForBadgeState(page, baselineBadge);
 });
 
-test("broadcast reply bolds the channel without a thread dot", async ({
+test("broadcast reply shows a numeric channel badge without a thread dot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -525,7 +564,9 @@ test("broadcast reply bolds the channel without a thread dot", async ({
     "font-weight",
     "700",
   );
-  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await expect(page.getByTestId("channel-unread-random")).toHaveText(
+    "1 unread notification",
+  );
   await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });

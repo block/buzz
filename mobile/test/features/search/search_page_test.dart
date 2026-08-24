@@ -930,6 +930,43 @@ void main() {
     expect(content.agentMentionPubkeys, contains(agentPubkey));
     expect(find.byIcon(LucideIcons.bot), findsOneWidget);
   });
+
+  testWidgets('does not label an unjoined channel as having zero members', (
+    tester,
+  ) async {
+    final state = SearchState(
+      query: 'community',
+      channelResults: [
+        Channel(
+          id: 'community-help',
+          name: 'community-help',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'Help from the community',
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          memberCount: 0,
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('0 members'), findsNothing);
+  });
 }
 
 class _FakeSearchNotifier extends SearchNotifier {
