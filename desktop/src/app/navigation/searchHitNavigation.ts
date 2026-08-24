@@ -10,13 +10,18 @@ type SearchHitNavigationActions = {
     options?: {
       force?: boolean;
       messageId?: string;
+      searchNavigationId?: string;
       threadRootId?: string | null;
     },
   ) => Promise<unknown>;
   goForumPost: (
     channelId: string,
     postId: string,
-    options?: { force?: boolean; replyId?: string },
+    options?: {
+      force?: boolean;
+      replyId?: string;
+      searchNavigationId?: string;
+    },
   ) => Promise<unknown>;
   signal?: AbortSignal;
 };
@@ -31,8 +36,11 @@ export async function openSearchHitWithNavigation(
   }
 
   const isLifecycleBound = Boolean(actions.signal);
+  const searchNavigationId = actions.query
+    ? `${hit.eventId}:${crypto.randomUUID()}`
+    : undefined;
   if (!isLifecycleBound) {
-    cacheSearchHitEvent(hit, actions.query);
+    cacheSearchHitEvent(hit, actions.query, searchNavigationId);
   }
 
   const destination = await resolveDestination(hit);
@@ -43,19 +51,21 @@ export async function openSearchHitWithNavigation(
   if (isLifecycleBound) {
     // Delay community-scoped writes for notification routing until async
     // destination resolution completes and its owner is still current.
-    cacheSearchHitEvent(hit, actions.query);
+    cacheSearchHitEvent(hit, actions.query, searchNavigationId);
   }
 
   if (destination.kind === "forum-post") {
     return actions.goForumPost(destination.channelId, destination.postId, {
       force: actions.force,
       replyId: destination.replyId,
+      searchNavigationId,
     });
   }
 
   return actions.goChannel(destination.channelId, {
     force: actions.force,
     messageId: destination.messageId,
+    searchNavigationId,
     threadRootId: destination.threadRootId,
   });
 }

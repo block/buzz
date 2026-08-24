@@ -51,6 +51,7 @@ test("search-hit navigation preserves forced message routing while active", asyn
       options: {
         force: true,
         messageId: "message",
+        searchNavigationId: undefined,
         threadRootId: "thread-root",
       },
     },
@@ -58,20 +59,46 @@ test("search-hit navigation preserves forced message routing while active", asyn
   assert.equal(getCachedSearchHitEvent("message")?.id, "message");
 });
 
-test("search-hit navigation retains the query for destination highlighting", async () => {
+test("search-hit navigation retains the query and marks repeated route activations", async () => {
   clearSearchHitEventCache();
   const { consumeCachedSearchHitQuery } = await import(
     "./searchHitEventCache.ts"
   );
+  const calls = [];
 
   await openSearchHitWithNavigation(plainMessage, {
-    goChannel: async () => true,
+    goChannel: async (channelId, options) => {
+      calls.push({ channelId, options });
+      return true;
+    },
     goForumPost: async () => false,
     query: "  Mentions  ",
   });
 
-  assert.equal(consumeCachedSearchHitQuery("message"), "Mentions");
-  assert.equal(consumeCachedSearchHitQuery("message"), null);
+  const searchNavigationId = calls[0].options.searchNavigationId;
+  assert.match(searchNavigationId, /^message:/);
+  assert.deepEqual(consumeCachedSearchHitQuery(searchNavigationId), {
+    eventId: "message",
+    query: "Mentions",
+  });
+  assert.equal(consumeCachedSearchHitQuery(searchNavigationId), null);
+});
+
+test("forum-post search navigation marks same-route activations", async () => {
+  clearSearchHitEventCache();
+  const forumPost = { ...forumComment, eventId: "post", kind: 45001 };
+  const calls = [];
+
+  await openSearchHitWithNavigation(forumPost, {
+    goChannel: async () => false,
+    goForumPost: async (channelId, postId, options) => {
+      calls.push({ channelId, postId, options });
+      return true;
+    },
+    query: "mentions",
+  });
+
+  assert.match(calls[0].options.searchNavigationId, /^post:/);
 });
 
 test("cancelled search-hit navigation cannot repopulate cache or route", async () => {

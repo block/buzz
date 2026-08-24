@@ -23,6 +23,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
   channelId: string;
+  searchNavigationId: string | null;
   selectedPostId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
@@ -103,6 +104,7 @@ async function fetchRouteTargetEvents(
 export function ChannelRouteScreen({
   autoSendDraftKey,
   channelId,
+  searchNavigationId,
   selectedPostId,
   targetMessageId,
   targetReplyId,
@@ -138,11 +140,7 @@ export function ChannelRouteScreen({
   const [searchHighlight, setSearchHighlight] = React.useState<{
     messageId: string;
     query: string;
-  } | null>(() => {
-    const messageId = targetMessageId ?? targetReplyId ?? selectedPostId;
-    const query = consumeCachedSearchHitQuery(messageId);
-    return messageId && query ? { messageId, query } : null;
-  });
+  } | null>(null);
 
   // Reset spliced target events and search highlighting when the channel
   // changes. Tied to channel identity rather
@@ -161,12 +159,18 @@ export function ChannelRouteScreen({
   }, [channelId]);
 
   React.useEffect(() => {
-    const messageId = targetMessageId ?? targetReplyId ?? selectedPostId;
-    const query = consumeCachedSearchHitQuery(messageId);
-    if (messageId && query) {
-      setSearchHighlight({ messageId, query });
+    if (!searchNavigationId) {
+      return;
     }
-  }, [targetMessageId, targetReplyId, selectedPostId]);
+
+    const highlight = consumeCachedSearchHitQuery(searchNavigationId);
+    if (highlight) {
+      setSearchHighlight({
+        messageId: highlight.eventId,
+        query: highlight.query,
+      });
+    }
+  }, [searchNavigationId]);
 
   React.useEffect(() => {
     let isCancelled = false;

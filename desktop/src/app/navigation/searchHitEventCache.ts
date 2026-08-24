@@ -2,22 +2,35 @@ import type { RelayEvent, SearchHit } from "@/shared/api/types";
 
 const MAX_CACHED_EVENTS = 200;
 const searchHitEventCache = new Map<string, RelayEvent>();
-const searchHitQueryCache = new Map<string, string>();
+const searchHitQueryCache = new Map<
+  string,
+  { eventId: string; query: string }
+>();
 
 function trimCache() {
-  if (searchHitEventCache.size <= MAX_CACHED_EVENTS) {
-    return;
-  }
-
-  const overflow = searchHitEventCache.size - MAX_CACHED_EVENTS;
-  let removed = 0;
+  const eventOverflow = searchHitEventCache.size - MAX_CACHED_EVENTS;
+  let removedEvents = 0;
   for (const key of searchHitEventCache.keys()) {
-    if (removed >= overflow) {
+    if (removedEvents >= eventOverflow) {
       break;
     }
     searchHitEventCache.delete(key);
-    searchHitQueryCache.delete(key);
-    removed++;
+    for (const [navigationId, entry] of searchHitQueryCache) {
+      if (entry.eventId === key) {
+        searchHitQueryCache.delete(navigationId);
+      }
+    }
+    removedEvents++;
+  }
+
+  const queryOverflow = searchHitQueryCache.size - MAX_CACHED_EVENTS;
+  let removedQueries = 0;
+  for (const navigationId of searchHitQueryCache.keys()) {
+    if (removedQueries >= queryOverflow) {
+      break;
+    }
+    searchHitQueryCache.delete(navigationId);
+    removedQueries++;
   }
 }
 
@@ -36,14 +49,18 @@ export function buildSearchHitEvent(hit: SearchHit): RelayEvent {
 export function cacheSearchHitEvent(
   hit: SearchHit,
   query?: string,
+  searchNavigationId = hit.eventId,
 ): RelayEvent {
   const event = buildSearchHitEvent(hit);
   searchHitEventCache.set(event.id, event);
   const trimmedQuery = query?.trim();
   if (trimmedQuery) {
-    searchHitQueryCache.set(event.id, trimmedQuery);
+    searchHitQueryCache.set(searchNavigationId, {
+      eventId: event.id,
+      query: trimmedQuery,
+    });
   } else {
-    searchHitQueryCache.delete(event.id);
+    searchHitQueryCache.delete(searchNavigationId);
   }
   trimCache();
   return event;
@@ -65,13 +82,13 @@ export function getCachedSearchHitEvent(
 }
 
 export function consumeCachedSearchHitQuery(
-  eventId: string | null | undefined,
-): string | null {
-  if (!eventId) {
+  searchNavigationId: string | null | undefined,
+): { eventId: string; query: string } | null {
+  if (!searchNavigationId) {
     return null;
   }
 
-  const query = searchHitQueryCache.get(eventId) ?? null;
-  searchHitQueryCache.delete(eventId);
-  return query;
+  const entry = searchHitQueryCache.get(searchNavigationId) ?? null;
+  searchHitQueryCache.delete(searchNavigationId);
+  return entry;
 }

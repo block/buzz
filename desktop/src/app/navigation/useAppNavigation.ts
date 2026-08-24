@@ -251,6 +251,8 @@ export function useAppNavigation() {
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
         messageId?: string;
+        /** Search result id that makes repeated same-route activations observable. */
+        searchNavigationId?: string;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
         thread?: string;
@@ -269,6 +271,9 @@ export function useAppNavigation() {
                   messageId: options.messageId,
                   threadRootId: options.threadRootId ?? undefined,
                 }
+              : {}),
+            ...(options?.searchNavigationId
+              ? { searchNavigationId: options.searchNavigationId }
               : {}),
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
@@ -306,6 +311,8 @@ export function useAppNavigation() {
         force?: boolean;
         replace?: boolean;
         replyId?: string;
+        /** Search result id that makes repeated same-route activations observable. */
+        searchNavigationId?: string;
       },
     ) =>
       commitNavigation(
@@ -315,7 +322,12 @@ export function useAppNavigation() {
             channelId,
             postId,
           },
-          search: options?.replyId ? { replyId: options.replyId } : {},
+          search: {
+            ...(options?.replyId ? { replyId: options.replyId } : {}),
+            ...(options?.searchNavigationId
+              ? { searchNavigationId: options.searchNavigationId }
+              : {}),
+          },
         },
         {
           force: options?.force,

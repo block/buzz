@@ -6,6 +6,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ForumPostRouteSearch = {
   replyId?: string;
+  searchNavigationId?: string;
 };
 
 function validateForumPostSearch(
@@ -15,6 +16,11 @@ function validateForumPostSearch(
     replyId:
       typeof search.replyId === "string" && search.replyId.length > 0
         ? search.replyId
+        : undefined,
+    searchNavigationId:
+      typeof search.searchNavigationId === "string" &&
+      search.searchNavigationId.length > 0
+        ? search.searchNavigationId
         : undefined,
   };
 }
@@ -41,6 +47,7 @@ function ForumPostRouteComponent() {
       <ChannelRouteScreen
         autoSendDraftKey={null}
         channelId={channelId}
+        searchNavigationId={search.searchNavigationId ?? null}
         selectedPostId={postId}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}

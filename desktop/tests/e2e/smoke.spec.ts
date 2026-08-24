@@ -370,6 +370,48 @@ test("highlights the query in search results and the opened message", async ({
   );
 });
 
+test("highlights the clicked forum post when its route is already open", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await expect(
+    page.locator('[data-forum-event-id="mock-forum-release-thread"]'),
+  ).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("checklist");
+
+  const result = page.getByTestId("search-result-mock-forum-release-thread");
+  await expect(result).toBeVisible();
+  await result.click();
+
+  const post = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(post.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+});
+
+test("does not expose stale search results with a newly typed query", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  const input = page.getByTestId("search-dialog-input");
+  await input.fill("shipped");
+  await expect(
+    page.getByTestId("search-result-mock-engineering-shipped"),
+  ).toBeVisible();
+
+  await input.fill("mentions");
+  await expect(
+    page.getByTestId("search-result-mock-engineering-shipped"),
+  ).toHaveCount(0);
+});
+
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 

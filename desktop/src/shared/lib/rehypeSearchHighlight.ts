@@ -6,6 +6,7 @@
  * ReactMarkdown's architecture — no post-render tree walking needed.
  */
 
+import { splitSearchMatches } from "@/features/search/lib/searchMatch";
 import { SEARCH_MATCH_HIGHLIGHT_CLASS } from "@/shared/lib/searchHighlightStyle";
 
 // Minimal HAST types — matches the pattern in rehypeImageGallery.ts.
@@ -36,32 +37,21 @@ function isText(node: HastNode): node is HastText {
   return node.type === "text";
 }
 
-function escapeRegExp(string: string): string {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 export default function rehypeSearchHighlight({ query }: { query: string }) {
   return (tree: HastRoot) => {
-    const trimmed = query.trim();
-    if (trimmed.length < 2) return;
-
-    const pattern = new RegExp(`(${escapeRegExp(trimmed)})`, "gi");
-
     function walk(nodes: HastNode[]): HastNode[] {
       const result: HastNode[] = [];
 
       for (const node of nodes) {
         if (isText(node)) {
-          const parts = node.value.split(pattern);
-          if (parts.length === 1) {
+          const parts = splitSearchMatches(node.value, query);
+          if (!parts.some((part) => part.isMatch)) {
             result.push(node);
             continue;
           }
 
           for (const part of parts) {
-            if (!part) continue;
-
-            if (part.toLowerCase() === trimmed.toLowerCase()) {
+            if (part.isMatch) {
               result.push({
                 type: "element",
                 tagName: "mark",
@@ -69,10 +59,10 @@ export default function rehypeSearchHighlight({ query }: { query: string }) {
                   className: SEARCH_MATCH_HIGHLIGHT_CLASS,
                   "data-search-match": "true",
                 },
-                children: [{ type: "text", value: part }],
+                children: [{ type: "text", value: part.text }],
               });
             } else {
-              result.push({ type: "text", value: part });
+              result.push({ type: "text", value: part.text });
             }
           }
         } else if (isElement(node)) {

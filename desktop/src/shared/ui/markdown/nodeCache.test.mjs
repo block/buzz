@@ -227,6 +227,14 @@ test("hardLineBreaks changes the parse and the cache key", () => {
   assert.equal(withoutBreaks, withoutBreaksAgain);
 });
 
+test("single-character scoped search highlights the destination", () => {
+  const html = renderToStaticMarkup(
+    renderCachedMarkdown({ ...BASE, content: "A plan", searchQuery: "a" }),
+  );
+
+  assert.equal((html.match(/data-search-match="true"/g) ?? []).length, 2);
+});
+
 test("active search queries bypass the cache and highlight every match", () => {
   clearMarkdownNodeCache();
   const input = {

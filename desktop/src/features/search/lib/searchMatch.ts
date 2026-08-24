@@ -8,17 +8,34 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Split text around every case-insensitive literal match of the query. */
+/**
+ * Terms used by desktop prefix search. Completed whitespace-delimited terms
+ * match whole words; the trailing term also matches word prefixes.
+ */
+export function getSearchHighlightTerms(query: string): string[] {
+  const terms = query
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.replace(/^[^\p{L}\p{N}_]+|[^\p{L}\p{N}_+]+$/gu, ""))
+    .filter(Boolean);
+
+  return [...new Set(terms.map((term) => term.toLocaleLowerCase()))].sort(
+    (left, right) => right.length - left.length,
+  );
+}
+
+/** Split text around every case-insensitive token/prefix match of the query. */
 export function splitSearchMatches(
   text: string,
   query: string,
 ): SearchMatchPart[] {
-  const trimmedQuery = query.trim();
-  if (!trimmedQuery) {
+  const terms = getSearchHighlightTerms(query);
+  if (terms.length === 0) {
     return [{ isMatch: false, key: "0", text }];
   }
 
-  const pattern = new RegExp(`(${escapeRegExp(trimmedQuery)})`, "gi");
+  const pattern = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "giu");
+  const termSet = new Set(terms);
   let offset = 0;
   return text
     .split(pattern)
@@ -27,7 +44,7 @@ export function splitSearchMatches(
       const key = `${offset}-${part.length}`;
       offset += part.length;
       return {
-        isMatch: part.toLowerCase() === trimmedQuery.toLowerCase(),
+        isMatch: termSet.has(part.toLocaleLowerCase()),
         key,
         text: part,
       };
@@ -35,9 +52,9 @@ export function splitSearchMatches(
 }
 
 /**
- * Build a compact result excerpt that keeps the first literal match visible.
- * Context is biased slightly before the match so the result still reads like
- * a sentence while avoiding a snippet whose matching word is offscreen.
+ * Build a compact result excerpt that keeps the first matching search term
+ * visible. Context is biased before the match so the excerpt still reads like
+ * a sentence while avoiding a match that is clipped offscreen.
  */
 export function buildSearchResultPreview(
   content: string,
@@ -52,10 +69,11 @@ export function buildSearchResultPreview(
     return text;
   }
 
-  const trimmedQuery = query.trim();
-  const matchIndex = trimmedQuery
-    ? text.toLowerCase().indexOf(trimmedQuery.toLowerCase())
-    : -1;
+  const normalizedText = text.toLocaleLowerCase();
+  const matchIndex = getSearchHighlightTerms(query).reduce((earliest, term) => {
+    const index = normalizedText.indexOf(term);
+    return index >= 0 && (earliest < 0 || index < earliest) ? index : earliest;
+  }, -1);
   if (matchIndex < 0) {
     return `${text.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
   }

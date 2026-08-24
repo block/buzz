@@ -19,6 +19,24 @@ test("splitSearchMatches treats regex punctuation literally", () => {
   ]);
 });
 
+test("splitSearchMatches highlights non-adjacent prefix-search terms", () => {
+  assert.deepEqual(splitSearchMatches("agent status mentions", "agent ment"), [
+    { isMatch: true, key: "0-5", text: "agent" },
+    { isMatch: false, key: "5-8", text: " status " },
+    { isMatch: true, key: "13-4", text: "ment" },
+    { isMatch: false, key: "17-4", text: "ions" },
+  ]);
+});
+
+test("splitSearchMatches supports one-character scoped search", () => {
+  assert.deepEqual(splitSearchMatches("A plan", "a"), [
+    { isMatch: true, key: "0-1", text: "A" },
+    { isMatch: false, key: "1-3", text: " pl" },
+    { isMatch: true, key: "4-1", text: "a" },
+    { isMatch: false, key: "5-1", text: "n" },
+  ]);
+});
+
 test("buildSearchResultPreview keeps a late match visible", () => {
   const content = `${"prefix ".repeat(30)}mentions appear here ${"suffix ".repeat(20)}`;
   const preview = buildSearchResultPreview(content, "mentions", 96);
