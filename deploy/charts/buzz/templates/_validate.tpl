@@ -10,11 +10,18 @@ surface at template time regardless of which manifest helm renders first.
   {{- fail "relayUrl is required: set --set relayUrl=wss://your.domain" -}}
 {{- end -}}
 
-{{/* Multiple replicas require Redis, whether fixed or autoscaled. */}}
+{{/* Redis and Valkey subcharts are mutually exclusive — both compose REDIS_URL
+     into the same chart Secret, so enabling both is ambiguous. Pick one. */}}
+{{- if and .Values.redis.enabled .Values.valkey.enabled -}}
+  {{- fail "redis.enabled and valkey.enabled cannot both be true — they are interchangeable RESP backends composing the same REDIS_URL. Enable exactly one (or neither, and set externalRedis.url)." -}}
+{{- end -}}
+
+{{/* Multiple replicas require a key-value backend (Redis or Valkey), whether
+     fixed or autoscaled — buzz-pubsub fans out across pods through it. */}}
 {{- $minimumReplicas := include "buzz.minimumReplicas" . | int -}}
 {{- if gt $minimumReplicas 1 -}}
-  {{- if and (not .Values.redis.enabled) (not .Values.externalRedis.url) (not .Values.secrets.existingSecret) -}}
-    {{- fail (printf "minimum replica count %d requires Redis for buzz-pubsub. Enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." $minimumReplicas) -}}
+  {{- if and (not .Values.redis.enabled) (not .Values.valkey.enabled) (not .Values.externalRedis.url) (not .Values.secrets.existingSecret) -}}
+    {{- fail (printf "minimum replica count %d requires Redis or Valkey for buzz-pubsub. Enable redis.enabled=true or valkey.enabled=true, set externalRedis.url (any RESP-compatible endpoint, e.g. managed Valkey/ElastiCache), or provide secrets.existingSecret with key REDIS_URL." $minimumReplicas) -}}
   {{- end -}}
 {{- end -}}
 

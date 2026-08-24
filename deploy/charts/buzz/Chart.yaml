@@ -7,7 +7,7 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.7
+version: 0.1.8
 appVersion: "0.1.0"
 home: https://github.com/block/buzz
 sources:
@@ -24,7 +24,7 @@ maintainers:
 annotations:
   artifacthub.io/changes: |
     - kind: added
-      description: Generic init-container, volume, volume-mount, command, and args extension points for the relay Pod.
+      description: Optional Valkey subchart (valkey.enabled) as a drop-in, permissively-licensed RESP alternative to the Redis subchart.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point
@@ -40,3 +40,11 @@ dependencies:
     version: "0.30.x"
     repository: oci://registry-1.docker.io/cloudpirates
     condition: redis.enabled
+  # Opt-in permissive (BSD-3) alternative to the Redis subchart. Valkey is a
+  # drop-in RESP-compatible fork; the relay's redis-rs client dials it unmodified
+  # via REDIS_URL. Mutually exclusive with redis (see _validate.tpl). Off by
+  # default — Redis remains the eval default.
+  - name: valkey
+    version: "0.24.x"
+    repository: oci://registry-1.docker.io/cloudpirates
+    condition: valkey.enabled
