@@ -261,6 +261,8 @@ mod tests {
                 status: "offline".to_string(),
                 respond_to: None,
                 respond_to_allowlist: Vec::new(),
+                device_id: None,
+                device_label: None,
             },
             RelayAgentInfo {
                 pubkey: "c".repeat(64),
@@ -273,6 +275,8 @@ mod tests {
                 status: "online".to_string(),
                 respond_to: None,
                 respond_to_allowlist: Vec::new(),
+                device_id: None,
+                device_label: None,
             },
         ];
 
@@ -299,6 +303,8 @@ mod tests {
             status: "online".to_string(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
+            device_id: None,
+            device_label: None,
         }];
 
         retain_agents_allowed_by_build(&mut agents, false);

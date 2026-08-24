@@ -138,6 +138,29 @@ pub(crate) fn run_boot_reset(app_data_dir: &Path) -> ResetOutcome {
     run_boot_reset_with_keychain(ctx)
 }
 
+/// Phase 2 as `setup()` needs it: resolve the app-data dir, prime the nest
+/// path, and run the wipe.
+///
+/// `init_nest_dir` has to happen here rather than inside
+/// `run_boot_migrations`, because `run_boot_reset` calls `nest_dir()` and the
+/// wipe runs *before* migrations. Returns a default (no-op) outcome when the
+/// platform cannot give us an app-data dir, which is the same thing an absent
+/// sentinel produces.
+pub(crate) fn run_boot_reset_for_app(app_handle: &tauri::AppHandle) -> ResetOutcome {
+    use tauri::Manager as _;
+
+    let Ok(data_dir) = app_handle.path().app_data_dir() else {
+        return ResetOutcome::default();
+    };
+    let is_dev = data_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(crate::migration::is_dev_data_dir_name)
+        .unwrap_or(false);
+    crate::managed_agents::init_nest_dir(is_dev);
+    run_boot_reset(&data_dir)
+}
+
 /// Deterministic trash path: `<original>.reset-trash`. Unlike PID-based names,
 /// any boot can discover and clean trash from a prior crashed attempt.
 fn trash_path(original: &Path) -> PathBuf {

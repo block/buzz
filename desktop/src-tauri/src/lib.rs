@@ -6,6 +6,7 @@ mod builderlab;
 mod channel_head_cache;
 mod commands;
 mod deep_link;
+mod device_identity;
 mod egress_guard;
 mod event_sync;
 mod events;
@@ -247,20 +248,7 @@ pub fn run() {
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
             // completes atomically on crash recovery.
-            //
-            // init_nest_dir is called early here (normally it runs inside
-            // run_boot_migrations) so reset::run_boot_reset can call nest_dir().
-            let reset_outcome = if let Ok(data_dir) = app_handle.path().app_data_dir() {
-                let is_dev_for_reset = data_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(crate::migration::is_dev_data_dir_name)
-                    .unwrap_or(false);
-                crate::managed_agents::init_nest_dir(is_dev_for_reset);
-                crate::reset::run_boot_reset(&data_dir)
-            } else {
-                crate::reset::ResetOutcome::default()
-            };
+            let reset_outcome = crate::reset::run_boot_reset_for_app(&app_handle);
 
             if reset_outcome.failed {
                 // Surface reset-failed state — skip identity resolution and
@@ -278,6 +266,12 @@ pub fn run() {
                 migration::run_boot_migrations_after_reset(&app_handle);
             } else {
                 migration::run_boot_migrations(&app_handle);
+            }
+
+            // Stable per-install device identity. Non-fatal: without it the
+            // app simply publishes no device label on its agents.
+            if let Err(e) = device_identity::ensure(&app_handle) {
+                eprintln!("buzz-desktop: device identity unavailable: {e}");
             }
 
             // Resolve persisted identity key (env var → file → generate+save).
@@ -713,6 +707,9 @@ pub fn run() {
             persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
+            device_identity::get_device_identity,
+            device_identity::set_device_label,
+            device_identity::get_device_name_suggestion,
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,

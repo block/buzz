@@ -877,6 +877,8 @@ fn inbound_managed_agent_content(
         parallelism: 1,
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        device_id: None,
+        device_label: None,
     }
 }
 
