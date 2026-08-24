@@ -46,28 +46,38 @@ test("keeps a top-level mention when the event omits its structural author tag",
   );
 });
 
-test("excludes a loaded reply target author but keeps sdk-shaped reply mentions", () => {
+test("filters desktop structural self-tags by identity", () => {
   const parent = message(1, []);
   assert.deepEqual(
     getRecentMentionPubkeys([
       parent,
       {
         ...message(2, [
-          ["p", AUTHOR],
+          ["p", REPLY_AUTHOR],
           ["p", LATEST_FIRST],
         ]),
-        id: "reply-with-target",
-        parentId: parent.id,
-        pubkey: REPLY_AUTHOR,
-      },
-      {
-        ...message(3, [["p", LATEST_LAST]]),
-        id: "reply-without-target",
+        id: "desktop-reply",
         parentId: parent.id,
         pubkey: REPLY_AUTHOR,
       },
     ]),
-    [LATEST_LAST, LATEST_FIRST],
+    [LATEST_FIRST],
+  );
+});
+
+test("keeps an sdk-shaped reply mention that matches the parent author", () => {
+  const parent = message(1, []);
+  assert.deepEqual(
+    getRecentMentionPubkeys([
+      parent,
+      {
+        ...message(2, [["p", AUTHOR]]),
+        id: "sdk-reply",
+        parentId: parent.id,
+        pubkey: REPLY_AUTHOR,
+      },
+    ]),
+    [AUTHOR],
   );
 });
 
