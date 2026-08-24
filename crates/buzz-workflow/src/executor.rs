@@ -6,8 +6,9 @@
 //! - Sequential step dispatch
 //! - Execution trace updates in DB
 //!
-//! Action dispatch uses placeholder implementations that log intent.
-//! Real event emission is wired in WF-07/08 (relay integration).
+//! Action dispatch emits real side effects through the relay `ActionSink`:
+//! channel messages, NIP-17 DMs, channel topics, reactions, webhooks,
+//! approval gates (suspension + resume), and delays.
 
 use std::collections::HashMap;
 
@@ -530,8 +531,9 @@ fn resolve_send_message_channel(
 
 /// Dispatch a resolved action and return its output.
 ///
-/// For MVP, most actions log their intent and return a success output.
-/// Real event emission is wired in WF-07/08 (relay integration).
+/// Actions emit real side effects through the relay `ActionSink` (channel
+/// messages, NIP-17 DMs, channel topics, reactions, webhooks, approval
+/// gates, and delays).
 ///
 /// `RequestApproval` mints a pending approval through the action sink (DB
 /// record + kind:46010 event) and returns `StepResult::Suspended` — the
