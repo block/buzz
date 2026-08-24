@@ -2152,7 +2152,7 @@ async fn handle_a_tag_deletion(
         .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
     let pubkey_hex = parts[1];
     let d_tag = parts[2];
-    let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
+    let _actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
         // kind:30350 revocation is exclusively a higher-generation inactive replacement.
@@ -2160,11 +2160,19 @@ async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
+            // The workflow's owner is the coordinate's pubkey (parts[1]), which
+            // is the kind:30620 event's author. It equals the deletion actor for
+            // a self-delete, but differs when an agent deletes on behalf of its
+            // owner — matching on the actor would miss both the `workflows` row
+            // and the event. Use the coordinate pubkey for both deletions.
+            let owner_pubkey = hex::decode(pubkey_hex)
+                .map_err(|e| anyhow::anyhow!("invalid pubkey hex in a-tag {pubkey_hex}: {e}"))?;
+
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
                 let channel_id = state
                     .db
-                    .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
+                    .delete_workflow_for_owner(tenant.community(), wf_id, &owner_pubkey)
                     .await
                     .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
                 if let Some(channel_id) = channel_id {
@@ -2172,28 +2180,63 @@ async fn handle_a_tag_deletion(
                         .workflow_engine
                         .invalidate_channel_workflows(tenant.community(), channel_id);
                 }
-                tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                // The desktop lists workflows from the kind:30620 event (see
+                // get_channel_workflows), not the `workflows` table — so the
+                // event must be soft-deleted too, or the deleted workflow
+                // resurrects on the next list refresh (#6554).
+                let event_soft_deleted = state
+                    .db
+                    .soft_delete_by_coordinate(
+                        tenant.community(),
+                        buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                        &owner_pubkey,
+                        d_tag,
+                        event.created_at.as_secs() as i64,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to soft-delete workflow event {wf_id}: {e}")
+                    })?;
+                tracing::info!(workflow_id = %wf_id, event_soft_deleted, "Workflow deleted via NIP-09 a-tag (UUID)");
             } else {
                 // Name-based lookup
                 match state
                     .db
-                    .find_workflow_by_owner_and_name(tenant.community(), &actor_bytes, d_tag)
+                    .find_workflow_by_owner_and_name(tenant.community(), &owner_pubkey, d_tag)
                     .await
                 {
                     Ok(Some(wf)) => {
                         let channel_id = state
                             .db
-                            .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
+                            .delete_workflow_for_owner(tenant.community(), wf.id, &owner_pubkey)
                             .await
                             .map_err(|e| {
-                                anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
+                                anyhow::anyhow!("failed to delete {}: {e}", wf.id)
                             })?;
                         if let Some(channel_id) = channel_id {
                             state
                                 .workflow_engine
                                 .invalidate_channel_workflows(tenant.community(), channel_id);
                         }
-                        tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
+                        // The event's `d` tag is the workflow UUID, not its
+                        // name, so soft-delete by the resolved `wf.id`.
+                        let event_soft_deleted = state
+                            .db
+                            .soft_delete_by_coordinate(
+                                tenant.community(),
+                                buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                                &owner_pubkey,
+                                &wf.id.to_string(),
+                                event.created_at.as_secs() as i64,
+                            )
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "failed to soft-delete workflow event {}: {e}",
+                                    wf.id
+                                )
+                            })?;
+                        tracing::info!(workflow_id = %wf.id, name = d_tag, event_soft_deleted, "Workflow deleted via NIP-09 a-tag (name)");
                     }
                     Ok(None) => {
                         tracing::warn!(

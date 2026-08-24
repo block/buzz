@@ -2446,4 +2446,96 @@ mod tests {
             "same owner's workflow in a different channel must be untouched"
         );
     }
+
+    /// Regression for #6554: the desktop lists workflows from the kind:30620
+    /// *event* (see `get_channel_workflows`), not the `workflows` table. A
+    /// NIP-09 `a`-tag delete that only drops the table row leaves the event
+    /// behind, so the workflow resurrects on the next list refresh. The delete
+    /// path must soft-delete the kind:30620 event too.
+    ///
+    /// This test pins the DB-layer contract the handler relies on: after
+    /// `delete_workflow_for_owner` + `soft_delete_by_coordinate`, a
+    /// `deleted_at IS NULL` query (the shape the list uses) must no longer
+    /// return the event.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_clears_workflow_event_so_list_stops_returning_it() {
+        use buzz_core::kind::KIND_WORKFLOW_DEF;
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xc1; 32];
+        ensure_user(&pool, community, &owner).await.expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+
+        let workflow_id = Uuid::new_v4();
+        let def = r#"{"name":"f1","trigger":{"on":"message_posted"},"steps":[]}"#;
+        upsert_workflow(
+            &pool,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "f1",
+            def,
+            &[0u8; 32],
+        )
+        .await
+        .expect("upsert workflow");
+
+        // The kind:30620 event is what the UI list actually reads.
+        let keys = Keys::from_secret_key(&nostr::SecretKey::from_slice(&owner).unwrap());
+        let wf_event = EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            def,
+        )
+        .tags(vec![
+            Tag::parse(["d", &workflow_id.to_string()]).expect("d tag"),
+            Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign workflow event");
+        let (_, inserted) =
+            insert_event(&pool, community, &wf_event, Some(channel_id)).await.expect("insert event");
+        assert!(inserted, "kind:30620 event must be inserted");
+
+        // Before delete: the event is visible to the list query.
+        let visible_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND kind = $2 AND d_tag = $3 AND deleted_at IS NULL")
+                .bind(community.as_uuid())
+                .bind(KIND_WORKFLOW_DEF as i32)
+                .bind(workflow_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count before");
+        assert_eq!(visible_before, 1, "event must be visible before delete");
+
+        // The delete sequence the relay handler performs (table row + event).
+        delete_workflow_for_owner(&pool, community, workflow_id, &owner)
+            .await
+            .expect("delete table row");
+        let event_soft_deleted = soft_delete_by_coordinate(
+            &pool,
+            community,
+            KIND_WORKFLOW_DEF as i32,
+            &owner,
+            &workflow_id.to_string(),
+            wf_event.created_at.as_secs() as i64,
+        )
+        .await
+        .expect("soft-delete event");
+        assert!(event_soft_deleted, "event coordinate must be soft-deleted");
+
+        // After delete: the event is no longer returned by the list query.
+        let visible_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND kind = $2 AND d_tag = $3 AND deleted_at IS NULL")
+                .bind(community.as_uuid())
+                .bind(KIND_WORKFLOW_DEF as i32)
+                .bind(workflow_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count after");
+        assert_eq!(visible_after, 0, "event must be gone so the list stops returning it");
+    }
 }
