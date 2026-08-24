@@ -533,6 +533,9 @@ pub struct Config {
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
+    /// Whether this adapter cannot publish through the Buzz CLI and therefore
+    /// relies on the harness to publish its ACP final text.
+    pub final_text_fallback_enabled: bool,
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
@@ -800,6 +803,21 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
     }
 }
 
+/// Whether Buzz must publish the agent's final ACP text itself.
+///
+/// This is deliberately an explicit adapter allowlist, not a best-effort
+/// duplicate check. Adapters that can run `buzz` publish their own replies and
+/// may emit progress chunks before their final answer; enabling the fallback
+/// for them can double-post or publish that progress as a reply. Hermes blocks
+/// Buzz credentials from its tool-shell environment, so its ACP text is the
+/// supported delivery path until the adapter changes that security model.
+pub(crate) fn supports_final_text_fallback(command: &str) -> bool {
+    matches!(
+        normalize_agent_command_identity(command).as_str(),
+        "hermes" | "hermes-agent" | "hermes-acp"
+    )
+}
+
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
 /// network access in Codex's macOS Seatbelt sandbox.
 ///
@@ -988,6 +1006,7 @@ impl Config {
         }
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let final_text_fallback_enabled = supports_final_text_fallback(&agent_command);
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1140,6 +1159,7 @@ impl Config {
             relay_url: args.relay_url,
             agent_command,
             agent_args,
+            final_text_fallback_enabled,
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
@@ -1523,6 +1543,7 @@ mod tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
+            final_text_fallback_enabled: false,
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
@@ -1742,6 +1763,28 @@ mod tests {
             assert!(
                 default_agent_env(command).is_empty(),
                 "non-Hermes command must have no env defaults: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn final_text_fallback_is_allowlisted_to_hermes() {
+        for command in [
+            "hermes",
+            "hermes-agent",
+            "/usr/local/bin/hermes-acp",
+            r"C:\\Users\\test\\AppData\\Roaming\\npm\\hermes-acp.cmd",
+        ] {
+            assert!(
+                supports_final_text_fallback(command),
+                "{command} must enable the Hermes final-text fallback"
+            );
+        }
+
+        for command in ["codex-acp", "claude-agent-acp", "goose", "custom-acp"] {
+            assert!(
+                !supports_final_text_fallback(command),
+                "{command} must retain agent-authored reply delivery"
             );
         }
     }
