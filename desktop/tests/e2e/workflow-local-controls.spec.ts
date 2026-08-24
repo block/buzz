@@ -446,6 +446,67 @@ test("Escape closes a filter picker before its inspector", async ({ page }) => {
   }
 });
 
+test("does not select stale picker results when Enter outruns deferred filtering", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "agents",
+      content: "Deferred message candidate",
+      id: "d".repeat(64),
+    });
+  });
+  await page.getByTestId("open-workflows-view").click();
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
+  const channelList = page.getByTestId("channel-combobox-list");
+  if (!(await channelList.isVisible())) {
+    await dialog.getByRole("combobox", { name: "Channel" }).click();
+  }
+  await channelList
+    .getByRole("option", { name: "agents", exact: true })
+    .click();
+  await selectTrigger(page, dialog, "Reaction Added");
+
+  await dialog.getByText("Author", { exact: true }).locator("..").click();
+  const authorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await expect(dialog.getByRole("option").first()).toBeVisible();
+  await authorSearch.evaluate((input: HTMLInputElement) => {
+    input.value = "no-such-author";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+    );
+  });
+
+  await dialog.getByText("Message", { exact: true }).locator("..").click();
+  const messageSearch = dialog.getByRole("combobox", {
+    name: "Search messages or paste a message ID",
+  });
+  await expect(
+    dialog.getByRole("option", { name: /Deferred message/ }),
+  ).toBeVisible();
+  await messageSearch.evaluate((input: HTMLInputElement) => {
+    input.value = "no-such-message";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+    );
+  });
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const definition = parseYaml(
+    await dialog.getByRole("textbox", { name: "Workflow YAML" }).inputValue(),
+  );
+  expect(definition.trigger.filter).toBeUndefined();
+});
+
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
   page,
 }) => {

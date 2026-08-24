@@ -61,7 +61,8 @@ export function WorkflowMessagePicker({
   const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
-  const deferredQuery = React.useDeferredValue(query.trim());
+  const trimmedQuery = query.trim();
+  const deferredQuery = React.useDeferredValue(trimmedQuery);
   const normalizedQuery = deferredQuery.toLowerCase();
   const selectedId = normalizeMessageEventId(value);
   const directId = normalizeMessageEventId(query);
@@ -248,6 +249,7 @@ export function WorkflowMessagePicker({
             setActiveIndex(null);
           }}
           onKeyDown={(event) => {
+            const currentQuery = event.currentTarget.value.trim();
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
               event.preventDefault();
               if (visibleCandidates.length > 0) {
@@ -261,13 +263,15 @@ export function WorkflowMessagePicker({
                   );
                 });
               }
-            } else if (
-              event.key === "Enter" &&
-              visibleCandidates[activeIndex ?? 0]
-            ) {
+            } else if (event.key === "Enter") {
+              const currentDirectId = normalizeMessageEventId(currentQuery);
+              if (currentQuery !== deferredQuery && !currentDirectId) return;
+              const candidate = currentDirectId
+                ? allCandidates.find(({ id }) => id === currentDirectId)
+                : visibleCandidates[activeIndex ?? 0];
+              if (!candidate) return;
               event.preventDefault();
               if (invalidDirectResult) return;
-              const candidate = visibleCandidates[activeIndex ?? 0];
               onChange(candidate.id === selectedId ? "" : candidate.id);
             } else if (event.key === "Escape") {
               event.preventDefault();

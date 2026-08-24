@@ -43,7 +43,8 @@ export function WorkflowAuthorPicker({
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
   const [columnCount, setColumnCount] = React.useState(2);
-  const deferredQuery = React.useDeferredValue(query.trim());
+  const trimmedQuery = query.trim();
+  const deferredQuery = React.useDeferredValue(trimmedQuery);
   const normalizedValue = parseDirectAuthorInput(value);
   const channelMembersQuery = useChannelMembersQuery(channelId ?? null);
   const relayMembersQuery = useRelayMembersQuery(true);
@@ -170,6 +171,7 @@ export function WorkflowAuthorPicker({
             setActiveIndex(null);
           }}
           onKeyDown={(event) => {
+            const currentQuery = event.currentTarget.value.trim();
             const delta =
               event.key === "ArrowDown"
                 ? columnCount
@@ -185,6 +187,7 @@ export function WorkflowAuthorPicker({
               moveActive(delta);
             } else if (
               event.key === "Enter" &&
+              currentQuery === deferredQuery &&
               visibleCandidates[activeIndex ?? 0]
             ) {
               event.preventDefault();
