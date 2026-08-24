@@ -622,6 +622,15 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn validate_message_body(content: &str, has_files: bool) -> Result<(), CliError> {
+    if content.trim().is_empty() && !has_files {
+        return Err(CliError::Usage(
+            "message content is empty; provide text or attach a file".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -631,6 +640,7 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    validate_message_body(&p.content, !p.files.is_empty())?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -1076,8 +1086,8 @@ mod tests {
         channel_id_from_event, cmd_get_thread, effective_message_kind, event_mention_pubkeys,
         find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags,
+        validate_message_body, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1113,6 +1123,23 @@ mod tests {
 
         assert!(matches!(error, CliError::Usage(_)));
         assert!(error.to_string().contains("invalid UUID"));
+    }
+
+    #[test]
+    fn empty_message_without_attachment_is_rejected() {
+        let error = validate_message_body("  \n\t", false).unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(error.to_string().contains("message content is empty"));
+    }
+
+    #[test]
+    fn empty_caption_with_attachment_is_allowed() {
+        assert!(validate_message_body("", true).is_ok());
+    }
+
+    #[test]
+    fn nonempty_message_without_attachment_is_allowed() {
+        assert!(validate_message_body("hello", false).is_ok());
     }
 
     #[test]
