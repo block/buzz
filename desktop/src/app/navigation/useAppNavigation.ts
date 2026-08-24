@@ -7,6 +7,11 @@ import {
 } from "@tanstack/react-router";
 
 import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
+import {
+  allowNavigation,
+  type GuardedNavigation,
+  traverseHistory,
+} from "@/app/navigation/navigationGuard";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -30,10 +35,19 @@ export function useAppNavigation() {
         state?: Record<string, unknown>;
       },
       behavior: NavigationBehavior = {},
+      guardedTarget?: GuardedNavigation,
     ) => {
       const nextLocation = router.buildLocation(next as never);
 
       if (location.href === nextLocation.href && !behavior.force) {
+        return false;
+      }
+
+      if (
+        !allowNavigation(
+          guardedTarget ?? { kind: "route", href: nextLocation.href },
+        )
+      ) {
         return false;
       }
 
@@ -258,8 +272,8 @@ export function useAppNavigation() {
         thread?: string;
         threadRootId?: string | null;
       },
-    ) =>
-      commitNavigation(
+    ) => {
+      return commitNavigation(
         {
           to: "/channels/$channelId",
           params: {
@@ -287,7 +301,16 @@ export function useAppNavigation() {
           replace: options?.replace,
           resetScroll: options?.messageId ? true : undefined,
         },
-      ),
+        options?.messageId
+          ? {
+              kind: "channel-message",
+              channelId,
+              messageId: options.messageId,
+              threadRootId: options.threadRootId ?? null,
+            }
+          : undefined,
+      );
+    },
     [commitNavigation],
   );
 
@@ -314,8 +337,8 @@ export function useAppNavigation() {
         /** Search result id that makes repeated same-route activations observable. */
         searchNavigationId?: string;
       },
-    ) =>
-      commitNavigation(
+    ) => {
+      return commitNavigation(
         {
           to: "/channels/$channelId/posts/$postId",
           params: {
@@ -334,7 +357,14 @@ export function useAppNavigation() {
           replace: options?.replace,
           resetScroll: false,
         },
-      ),
+        {
+          kind: "forum-post",
+          channelId,
+          postId,
+          replyId: options?.replyId ?? null,
+        },
+      );
+    },
     [commitNavigation],
   );
 
@@ -352,7 +382,7 @@ export function useAppNavigation() {
 
   const closeSettings = React.useCallback(() => {
     if (canGoBack) {
-      router.history.back();
+      traverseHistory(router.history, "back");
       return;
     }
 
@@ -361,7 +391,7 @@ export function useAppNavigation() {
 
   const closeWorkflowDetail = React.useCallback(() => {
     if (canGoBack) {
-      router.history.back();
+      traverseHistory(router.history, "back");
       return;
     }
 
@@ -371,7 +401,7 @@ export function useAppNavigation() {
   const closeForumPost = React.useCallback(
     (channelId: string) => {
       if (canGoBack) {
-        router.history.back();
+        traverseHistory(router.history, "back");
         return;
       }
 

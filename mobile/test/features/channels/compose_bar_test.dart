@@ -447,7 +447,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   Future<List<Channel>> build() async => _channels;
 
   @override
-  Future<void> refresh() async {
+  Future<void> refresh({bool fetchDirectory = false}) async {
     state = AsyncData(_channels);
   }
 

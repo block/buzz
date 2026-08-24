@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -99,6 +101,11 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
     if (!context.mounted) return;
 
+    _pushChannel(channel, link);
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+  }
+
+  void _pushChannel(Channel channel, BuzzDeepLink link) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
@@ -112,7 +119,6 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             ),
       ),
     );
-    ref.read(pendingDeepLinkProvider.notifier).consume();
   }
 
   void _maybeDispatchInvite(InviteDeepLink link) {
@@ -127,9 +133,31 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         ref.read(pendingDeepLinkProvider.notifier).consume();
         consumed = true;
         if (!navigatorContext.mounted) return;
-        final status = ref.read(inviteJoinProvider).status;
-        if (status == InviteJoinStatus.confirming) {
-          await showInviteJoinSheet(navigatorContext, ref);
+        final inviteState = ref.read(inviteJoinProvider);
+        final status = inviteState.status;
+        if (status == InviteJoinStatus.confirming ||
+            inviteState.isStarterSetupRecovery) {
+          final sheet = showInviteJoinSheet(navigatorContext);
+          if (status == InviteJoinStatus.claiming &&
+              inviteState.isStarterSetupRecovery) {
+            unawaited(
+              ref.read(inviteJoinProvider.notifier).startStarterSetupRecovery(),
+            );
+          }
+          final shouldFocusStarter = await sheet;
+          final focusChannelId = ref.read(inviteJoinProvider).focusChannelId;
+          if (shouldFocusStarter == true &&
+              focusChannelId != null &&
+              ref.read(pendingDeepLinkProvider) == null &&
+              navigatorContext.mounted) {
+            final channels = ref.read(channelsProvider).asData?.value;
+            final channel = channels
+                ?.where((candidate) => candidate.id == focusChannelId)
+                .firstOrNull;
+            if (channel != null) {
+              _pushChannel(channel, ChannelDeepLink(channelId: focusChannelId));
+            }
+          }
         } else if (status == InviteJoinStatus.switchedExisting) {
           messenger?.showSnackBar(
             const SnackBar(content: Text('Switched to this community')),

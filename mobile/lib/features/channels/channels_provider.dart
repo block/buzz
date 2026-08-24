@@ -906,7 +906,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  Future<void> refresh() async {
+  /// Refreshes memberships and, when [fetchDirectory], the open directory.
+  /// Invite starter recovery opts in to converge on another identity's
+  /// starters instead of attempting duplicate creation from memberships.
+  Future<void> refresh({bool fetchDirectory = false}) async {
     final sessionState = ref.read(relaySessionProvider);
     // Don't attempt to fetch when the session isn't connected — fetchHistory
     // would send REQs over an unauthenticated socket that either time out
@@ -915,7 +918,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // when the session transitions to connected.
     if (sessionState.status != SessionStatus.connected) return;
     try {
-      final channels = await _fetch(subscribeLive: true);
+      final channels = await _fetch(
+        subscribeLive: true,
+        fetchDirectory: fetchDirectory,
+      );
       state = AsyncData(channels);
     } on _StaleChannelRefresh {
       return;
