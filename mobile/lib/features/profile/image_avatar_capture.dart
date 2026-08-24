@@ -325,17 +325,24 @@ class ImageAvatarCapture extends HookConsumerWidget {
                         ? Image.memory(captured, fit: BoxFit.cover)
                         : controller.value != null
                         ? _CameraPreview(controller: controller.value!)
-                        : initialPreview ??
-                              Center(
-                                child: isInitializing.value
-                                    ? const BuzzLoadingIndicator(
-                                        semanticLabel: 'Starting camera',
-                                      )
-                                    : const Icon(
-                                        LucideIcons.cameraOff,
-                                        size: 32,
-                                      ),
-                              ),
+                        : initialPreview != null
+                        ? FittedBox(
+                            key: const ValueKey(
+                              'image-camera-initial-preview-scale',
+                            ),
+                            fit: BoxFit.cover,
+                            child: SizedBox.square(
+                              dimension: _avatarPreviewSize,
+                              child: initialPreview,
+                            ),
+                          )
+                        : Center(
+                            child: isInitializing.value
+                                ? const BuzzLoadingIndicator(
+                                    semanticLabel: 'Starting camera',
+                                  )
+                                : const Icon(LucideIcons.cameraOff, size: 32),
+                          ),
                   ),
                 ),
               ),
