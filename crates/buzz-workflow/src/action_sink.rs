@@ -113,4 +113,40 @@ pub trait ActionSink: Send + Sync {
         token: &str,
         expires_at: DateTime<Utc>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Send a private DM (WF-07): emit a NIP-17 gift-wrapped message
+    /// (kind:1059) from the relay keypair to `to_pubkey`.
+    ///
+    /// - `community_id`: the server-resolved community that owns the workflow
+    ///   run; the gift wrap is stored under *this* community.
+    /// - `to_pubkey`: 64-char hex pubkey of the recipient (the `to` field of
+    ///   the workflow step, already template-resolved).
+    /// - `text`: the DM body.
+    /// - `owner_pubkey`: the workflow owner's hex pubkey, carried as an
+    ///   attribution tag on the rumor (the relay keypair signs the envelope).
+    ///
+    /// Returns the minted event ID hex string on success.
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        to_pubkey: &str,
+        text: &str,
+        owner_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Set a channel's topic (WF-07): update `channels.topic` in the DB,
+    /// recording the workflow owner as `topic_set_by`.
+    ///
+    /// - `community_id`: the community that owns the channel.
+    /// - `channel_id`: UUID string of the target channel.
+    /// - `topic`: the new topic text.
+    /// - `owner_pubkey`: 64-char hex pubkey of the workflow owner, recorded as
+    ///   `topic_set_by`.
+    fn set_channel_topic(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        topic: &str,
+        owner_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionSinkError>> + Send + '_>>;
 }

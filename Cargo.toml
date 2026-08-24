@@ -69,7 +69,9 @@ kube = { version = "2.0", default-features = false, features = ["client", "rustl
 k8s-openapi = { version = "0.26", features = ["v1_31"] }
 
 # Nostr
-nostr = { version = "0.44", features = ["nip44", "nip98"] }
+# `nip59` enables NIP-17 gift-wrap construction (EventBuilder::private_msg),
+# used by the workflow SendDm action.
+nostr = { version = "0.44", features = ["nip44", "nip59", "nip98"] }
 
 # Serialization
 serde       = { version = "1", features = ["derive"] }

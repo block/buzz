@@ -646,16 +646,93 @@ pub async fn dispatch_action(
                     })))
                 }
 
-                SendDm { to, text: _ } => {
-                    warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-                    // TODO (WF-07): emit DM event.
-                    Err(WorkflowError::NotImplemented("SendDm".into()))
+                SendDm { to, text } => {
+                    // Resolve the workflow owner for attribution, scoped to the
+                    // run's community (mirrors SendMessage).
+                    let wf_run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "SendDm: failed to load workflow run {run_id}: {e}"
+                            ))
+                        })?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, wf_run.workflow_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "SendDm: failed to load workflow {}: {e}",
+                                wf_run.workflow_id
+                            ))
+                        })?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+                    info!(run_id = %run_id, step = step_id, to = %to, "SendDm → {to}");
+
+                    let event_id = engine
+                        .action_sink()?
+                        .send_dm(community_id, to, text, &owner_pubkey_hex)
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "sent": true,
+                        "event_id": event_id,
+                    })))
                 }
 
-                SetChannelTopic { topic: _ } => {
-                    warn!(run_id = %run_id, step = step_id, "SetChannelTopic not yet implemented");
-                    // TODO (WF-07): update channel topic via DB.
-                    Err(WorkflowError::NotImplemented("SetChannelTopic".into()))
+                SetChannelTopic { topic } => {
+                    // Resolve the workflow owner and destination channel,
+                    // scoped to the run's community.
+                    let wf_run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "SetChannelTopic: failed to load workflow run {run_id}: {e}"
+                            ))
+                        })?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, wf_run.workflow_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "SetChannelTopic: failed to load workflow {}: {e}",
+                                wf_run.workflow_id
+                            ))
+                        })?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+                    let channel_id = resolve_send_message_channel(
+                        None,
+                        &trigger_ctx.channel_id,
+                        workflow.channel_id,
+                    )?;
+
+                    info!(
+                        run_id = %run_id, step = step_id, channel = %channel_id,
+                        "SetChannelTopic → {topic}"
+                    );
+
+                    engine
+                        .action_sink()?
+                        .set_channel_topic(
+                            community_id,
+                            &channel_id,
+                            topic,
+                            &owner_pubkey_hex,
+                        )
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "updated": true,
+                        "topic": topic,
+                    })))
                 }
 
                 AddReaction { emoji } => {

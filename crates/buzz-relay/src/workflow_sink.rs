@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
+use buzz_core::kind::{KIND_GIFT_WRAP, KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::{hash_approval_token, CreateApprovalParams};
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
@@ -592,6 +592,169 @@ impl ActionSink for RelayActionSink {
             }
 
             Ok(event_id_hex)
+        })
+    }
+
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        to_pubkey: &str,
+        text: &str,
+        owner_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let to_pubkey = to_pubkey.to_owned();
+        let text = text.to_owned();
+        let owner_pubkey = owner_pubkey.to_owned();
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // The run carries its owning community; the DM belongs to *that*
+            // community. Fail closed if the community no longer maps to a host.
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // 1. Parse the recipient and the workflow owner (fail-closed on
+            //    malformed hex).
+            let receiver = nostr::PublicKey::from_hex(&to_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}"))
+            })?;
+            let owner = nostr::PublicKey::from_hex(&owner_pubkey)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid owner pubkey: {e}")))?;
+
+            // 2. Build the NIP-17 gift wrap (kind:1059): the relay keypair signs
+            //    the seal, the outer envelope is ephemeral-keyed, and the outer
+            //    `p` tag (recipient) is added by the builder. The workflow owner
+            //    is attributed on the rumor, plus a recursion-guard tag so the
+            //    DM never re-triggers a workflow.
+            let rumor_tags = vec![
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["p", &owner.to_hex()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("owner p tag: {e}")))?,
+            ];
+            let event = EventBuilder::private_msg(&state.relay_keypair, receiver, text, rumor_tags)
+                .await
+                .map_err(|e| ActionSinkError::EventBuild(format!("nip17 gift wrap: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            info!(
+                event_id = %event_id_hex,
+                to = %to_pubkey,
+                "Workflow SendDm: minted kind {KIND_GIFT_WRAP} gift wrap"
+            );
+
+            // 3. Persist the event — DMs are community-global (no channel), so
+            //    insert with channel/thread metadata absent. Mention indexing
+            //    for the outer recipient `p` tag happens inside
+            //    Db::insert_event_with_thread_metadata.
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(tenant.community(), &event, None, None)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            // 4. Post-persist side effects (fan-out, search, audit, push) —
+            //    only if actually inserted (idempotency guard).
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_GIFT_WRAP,
+                    &owner_pubkey,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn set_channel_topic(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        topic: &str,
+        owner_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionSinkError>> + Send + '_>> {
+        let channel_id = channel_id.to_owned();
+        let topic = topic.to_owned();
+        let owner_pubkey = owner_pubkey.to_owned();
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // 1. Parse and validate the channel — canonicalize UUID immediately.
+            let channel_uuid = Uuid::parse_str(&channel_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+            let channel_id_canonical = channel_uuid.to_string();
+
+            let channel = state
+                .db
+                .get_channel(tenant.community(), channel_uuid)
+                .await
+                .map_err(|e| match &e {
+                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                        ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
+                    }
+                    _ => ActionSinkError::Database(e.to_string()),
+                })?;
+
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(
+                    channel_id_canonical.clone(),
+                ));
+            }
+
+            // 2. Resolve the workflow owner as the topic-setter.
+            let owner_bytes = nostr::PublicKey::from_hex(&owner_pubkey)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid owner pubkey: {e}")))?
+                .to_bytes()
+                .to_vec();
+
+            // 3. Update the topic in the DB (records topic_set_by / topic_set_at).
+            info!(
+                channel_id = %channel_id_canonical,
+                "Workflow SetChannelTopic: updating topic"
+            );
+            state
+                .db
+                .set_topic(tenant.community(), channel_uuid, &topic, &owner_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(format!("set topic: {e}")))?;
+
+            Ok(())
         })
     }
 }

@@ -78,27 +78,6 @@ function runControlsSummary(step: StepFormState): string {
   return "Default";
 }
 
-function BackendSupportHint({ action }: { action: StepFormState["action"] }) {
-  switch (action) {
-    case "send_dm":
-      return (
-        <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700">
-          Backend note: `send_dm` is not executed yet, so runs fail at this
-          step.
-        </p>
-      );
-    case "set_channel_topic":
-      return (
-        <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700">
-          Backend note: `set_channel_topic` is not executed yet, so runs fail at
-          this step.
-        </p>
-      );
-    default:
-      return null;
-  }
-}
-
 function StepConfigFields({
   step,
   prefix,
@@ -201,7 +180,6 @@ function StepConfigFields({
     case "send_dm":
       return (
         <div className="space-y-2">
-          <BackendSupportHint action={step.action} />
           <div className="space-y-1.5">
             <FieldLabel htmlFor={`${prefix}-to`}>To (pubkey)</FieldLabel>
             <Input
@@ -294,7 +272,6 @@ function StepConfigFields({
     case "request_approval":
       return (
         <div className="space-y-2">
-          <BackendSupportHint action={step.action} />
           <div className="space-y-1.5">
             <FieldLabel htmlFor={`${prefix}-from`}>From (approver)</FieldLabel>
             <Input
@@ -357,7 +334,6 @@ function StepConfigFields({
     case "set_channel_topic":
       return (
         <div className="space-y-2">
-          <BackendSupportHint action={step.action} />
           <div className="space-y-1.5">
             <FieldLabel htmlFor={`${prefix}-topic`}>Topic</FieldLabel>
             <Input
