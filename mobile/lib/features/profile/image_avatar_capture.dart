@@ -21,8 +21,9 @@ const _avatarPreviewSize = 220.0;
 /// Diameter of the expanded circular viewfinder while taking a profile photo.
 const imageAvatarCameraPreviewSize = _avatarPreviewSize * 1.25;
 const _cameraControlSize = 64.0;
-const _shutterSize = 115.0;
-const _shutterCoreSize = _shutterSize - Grid.xxs * 2;
+const _cameraControlRailHeight = 115.0;
+const _shutterSize = _cameraControlSize * 1.25;
+const _shutterCoreSize = _shutterSize * (99 / 115);
 const _reviewControlWidth = 112.0;
 const _expandedControlOffset = 119.5;
 const _reviewControlGap = Grid.twelve;
@@ -352,7 +353,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
             left: 0,
             right: 0,
             bottom: 0,
-            height: _shutterSize,
+            height: _cameraControlRailHeight,
             child: TweenAnimationBuilder<double>(
               tween: Tween(end: controlsExpanded.value ? 1 : 0),
               duration: reduceMotion ? Duration.zero : _captureMotionDuration,
@@ -392,7 +393,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
                                 effectiveSideOffset -
                                 sideWidth / 2,
                             width: sideWidth,
-                            height: _shutterSize,
+                            height: _cameraControlRailHeight,
                             child: _MorphingCameraAction(
                               controlKey: const ValueKey(
                                 'image-camera-left-action',
@@ -467,7 +468,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
                                 effectiveSideOffset -
                                 sideWidth / 2,
                             width: sideWidth,
-                            height: _shutterSize,
+                            height: _cameraControlRailHeight,
                             child: _MorphingCameraAction(
                               controlKey: const ValueKey(
                                 'image-camera-right-action',
@@ -516,7 +517,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
             Positioned(
               left: 0,
               right: 0,
-              bottom: _shutterSize + Grid.xs,
+              bottom: _cameraControlRailHeight + Grid.xs,
               child: Semantics(
                 liveRegion: true,
                 child: Text(
@@ -669,7 +670,7 @@ class _MorphingCameraAction extends StatelessWidget {
           key: controlKey,
           left: 0,
           right: 0,
-          top: (_shutterSize - _cameraControlSize) / 2,
+          top: (_cameraControlRailHeight - _cameraControlSize) / 2,
           height: _cameraControlSize,
           child: Transform.translate(
             offset: Offset(0, 1.5 * labelProgress),
@@ -680,7 +681,7 @@ class _MorphingCameraAction extends StatelessWidget {
           Positioned(
             left: 0,
             right: 0,
-            top: _shutterSize - 20,
+            top: _cameraControlRailHeight - 20,
             height: 20,
             child: Opacity(
               key: ValueKey('camera-transition-label-${transitionLabel!}'),

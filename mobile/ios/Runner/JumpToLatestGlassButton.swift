@@ -169,6 +169,8 @@ final class NavigationGlassButtonFactory: NSObject, FlutterPlatformViewFactory {
 }
 
 final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
+  private static let shutterIconRatio: CGFloat = 80.0 / 115.0
+  private static let shutterInsetRatio: CGFloat = 20.0 / 115.0
   private let containerView: UIView
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
@@ -178,6 +180,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private var contentIcon = "back"
   private var buttonImage: UIImage?
   private var isBusy = false
+  private var controlSize: CGFloat = 40
 
   init(
     frame: CGRect,
@@ -203,7 +206,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       (arguments?["hitTargetHeight"] as? NSNumber)?.doubleValue ?? 48
     let controlWidth =
       (arguments?["controlWidth"] as? NSNumber)?.doubleValue ?? 40
-    let controlSize =
+    controlSize =
       (arguments?["controlSize"] as? NSNumber)?.doubleValue ?? 40
     let fillWidth = arguments?["fillWidth"] as? Bool ?? false
 
@@ -406,14 +409,18 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         }
     } else {
       button.configuration?.titleTextAttributesTransformer = nil
-      let iconInset: CGFloat = icon == "shutter" ? 20 : 8
+      let iconInset: CGFloat = icon == "shutter"
+        ? controlSize * Self.shutterInsetRatio
+        : 8
       button.configuration?.contentInsets = NSDirectionalEdgeInsets(
         top: iconInset,
         leading: iconInset,
         bottom: iconInset,
         trailing: iconInset
       )
-      let pointSize: CGFloat = icon == "shutter" ? 80 : 17
+      let pointSize: CGFloat = icon == "shutter"
+        ? controlSize * Self.shutterIconRatio
+        : 17
       buttonImage = UIImage(
         systemName: buttonIconName,
         withConfiguration: UIImage.SymbolConfiguration(

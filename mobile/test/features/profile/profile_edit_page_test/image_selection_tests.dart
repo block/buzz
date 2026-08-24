@@ -111,7 +111,7 @@ void runProfileEditImageSelectionTests() {
     );
     expect(
       tester.getSize(find.byKey(const ValueKey('image-camera-shutter-morph'))),
-      const Size.square(115),
+      const Size.square(80),
     );
     expect(find.bySemanticsLabel('Close camera'), findsOneWidget);
     expect(find.bySemanticsLabel('Flip camera'), findsOneWidget);
