@@ -197,12 +197,19 @@ export function imageLightboxZoomStateAtZoom(
   nextZoom: number,
 ): ImageLightboxZoomState {
   const zoom = clampImageLightboxZoom(nextZoom);
+  if (zoom === IMAGE_LIGHTBOX_MIN_ZOOM) {
+    return { zoom, zoomOffset: { x: 0, y: 0 } };
+  }
+
+  // Scale the stored offset by the zoom ratio so the image point currently
+  // at the frame center stays anchored there as the slider/wheel changes zoom.
+  const offsetScale = zoom / currentState.zoom;
   return {
     zoom,
-    zoomOffset:
-      zoom === IMAGE_LIGHTBOX_MIN_ZOOM
-        ? { x: 0, y: 0 }
-        : currentState.zoomOffset,
+    zoomOffset: {
+      x: currentState.zoomOffset.x * offsetScale,
+      y: currentState.zoomOffset.y * offsetScale,
+    },
   };
 }
 
