@@ -871,8 +871,20 @@ test("selecting a person mention inserts @Name into input", async ({
   );
   expect(iconMask).toContain("data:image/svg+xml");
   await expect(mentionChip).toHaveCSS("line-height", "18px");
-  expect(await mentionChip.evaluate((element) => element.clientHeight)).toBe(
-    await mentionChip.evaluate((element) => element.scrollHeight),
+  const paintedBounds = await mentionChip.evaluate((element) => {
+    const chip = element.getBoundingClientRect();
+    const editor = element.closest(".tiptap")?.getBoundingClientRect();
+    if (!editor) throw new Error("Mention chip is missing its editor");
+    return {
+      chipTop: chip.top,
+      chipBottom: chip.bottom,
+      editorTop: editor.top,
+      editorBottom: editor.bottom,
+    };
+  });
+  expect(paintedBounds.chipTop).toBeGreaterThanOrEqual(paintedBounds.editorTop);
+  expect(paintedBounds.chipBottom).toBeLessThanOrEqual(
+    paintedBounds.editorBottom,
   );
   const humanIconTranslateY = await mentionChip.evaluate(
     (element) =>

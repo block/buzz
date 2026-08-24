@@ -96,6 +96,7 @@
   @apply text-message font-normal tracking-normal;
   outline: none;
   min-height: 1lh;
+  padding-block: 0.0625rem;
 }
 
 .rich-text-composer .tiptap p {
