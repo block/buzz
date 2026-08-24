@@ -25,6 +25,29 @@ void runProfileEditImageSelectionTests() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('opens the inline camera around the existing avatar center', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final avatarCenter = tester.getCenter(
+      find.byKey(const ValueKey('avatar-editor-fixed-preview')),
+    );
+    await tester.tap(find.byKey(const ValueKey('image-source-camera')));
+    await tester.pump();
+
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('image-camera-preview-size'))),
+      avatarCenter,
+    );
+  });
+
   testWidgets('keeps the avatar compact until the camera is ready', (
     tester,
   ) async {
@@ -50,6 +73,7 @@ void runProfileEditImageSelectionTests() {
 
     final preview = find.byKey(const ValueKey('image-camera-preview-size'));
     expect(tester.getSize(preview), const Size.square(220));
+    expect(tester.getCenter(preview).dy, imageAvatarCameraPreviewSize / 2);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 180));
     expect(tester.getSize(preview), const Size.square(220));
@@ -140,12 +164,13 @@ void runProfileEditImageSelectionTests() {
         ),
       ),
     );
+    final preview = find.byKey(const ValueKey('image-camera-preview-size'));
+    final compactCenter = tester.getCenter(preview);
+    expect(tester.getSize(preview), const Size.square(220));
     await tester.pumpAndSettle();
 
-    expect(
-      tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
-      const Size.square(275),
-    );
+    expect(tester.getSize(preview), const Size.square(275));
+    expect(tester.getCenter(preview), compactCenter);
     expect(find.text('Retry'), findsOneWidget);
     expect(find.text('Use Photo'), findsOneWidget);
     expect(

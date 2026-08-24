@@ -228,6 +228,7 @@ class _EmojiMode extends HookConsumerWidget {
                       child: AvatarEditorOptionButton(
                         key: const ValueKey('emoji-editor-background'),
                         icon: LucideIcons.palette,
+                        iosIcon: IosGlassNavigationIcon.palette,
                         label: 'Background',
                         selected:
                             activeSection == _EmojiEditorSection.background,
@@ -241,6 +242,7 @@ class _EmojiMode extends HookConsumerWidget {
                       child: AvatarEditorOptionButton(
                         key: const ValueKey('emoji-editor-emoji'),
                         icon: LucideIcons.smile,
+                        iosIcon: IosGlassNavigationIcon.emoji,
                         label: 'Emoji',
                         selected: activeSection == _EmojiEditorSection.emoji,
                         onTap: () =>

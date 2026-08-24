@@ -1,9 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
+
+/// Space between avatar-editor controls and their labels.
+const avatarEditorOptionLabelGap = Grid.half;
 
 /// A labelled circular option used by the profile avatar editor rails.
 class AvatarEditorOptionButton extends StatelessWidget {
@@ -11,6 +16,7 @@ class AvatarEditorOptionButton extends StatelessWidget {
   const AvatarEditorOptionButton({
     super.key,
     required this.icon,
+    this.iosIcon,
     required this.label,
     required this.selected,
     required this.onTap,
@@ -19,6 +25,9 @@ class AvatarEditorOptionButton extends StatelessWidget {
 
   /// The symbol displayed inside the circular control.
   final IconData icon;
+
+  /// Native symbol used by the iOS liquid-glass control.
+  final IosGlassNavigationIcon? iosIcon;
 
   /// The text displayed beneath the control.
   final String label;
@@ -40,6 +49,59 @@ class AvatarEditorOptionButton extends StatelessWidget {
             unawaited(HapticFeedback.selectionClick());
             onTap!();
           };
+    Widget labelWidget() {
+      final width = labelMaxWidth;
+      if (width != null) {
+        return SizedBox(
+          height: 20,
+          child: OverflowBox(
+            maxWidth: width,
+            maxHeight: 20,
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.textTheme.labelSmall?.copyWith(
+                color: selected
+                    ? context.colors.onSurface
+                    : context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        );
+      }
+      return Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: context.textTheme.labelSmall?.copyWith(
+          color: selected
+              ? context.colors.onSurface
+              : context.colors.onSurfaceVariant,
+        ),
+      );
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.iOS && iosIcon != null) {
+      return Column(
+        children: [
+          IosGlassNavigationButton(
+            icon: iosIcon!,
+            semanticLabel: label,
+            onPressed: handleTap,
+            width: 64,
+            height: 64,
+            controlSize: 64,
+            foregroundColor: selected
+                ? context.colors.primary
+                : context.colors.onSurface,
+            isSelected: selected,
+          ),
+          const SizedBox(height: avatarEditorOptionLabelGap),
+          labelWidget(),
+        ],
+      );
+    }
     return Semantics(
       label: label,
       button: true,
@@ -75,36 +137,8 @@ class AvatarEditorOptionButton extends StatelessWidget {
                         : context.colors.onSurface,
                   ),
                 ),
-                const SizedBox(height: Grid.quarter),
-                if (labelMaxWidth case final width?)
-                  SizedBox(
-                    height: 20,
-                    child: OverflowBox(
-                      maxWidth: width,
-                      maxHeight: 20,
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: selected
-                              ? context.colors.onSurface
-                              : context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: selected
-                          ? context.colors.onSurface
-                          : context.colors.onSurfaceVariant,
-                    ),
-                  ),
+                const SizedBox(height: avatarEditorOptionLabelGap),
+                labelWidget(),
               ],
             ),
           ),

@@ -522,7 +522,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 ),
               ),
             AnimatedPositioned(
-              duration: reduceMotion
+              duration: isCapturingImage.value || reduceMotion
                   ? Duration.zero
                   : const Duration(milliseconds: 150),
               curve: Curves.easeOutCubic,
@@ -745,50 +745,12 @@ class _ImageSourceOption extends StatelessWidget {
   final double labelMaxWidth;
 
   @override
-  Widget build(BuildContext context) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return AvatarEditorOptionButton(
-        icon: icon,
-        label: label,
-        selected: false,
-        onTap: onTap,
-        labelMaxWidth: labelMaxWidth,
-      );
-    }
-    final handleTap = onTap == null
-        ? null
-        : () {
-            unawaited(HapticFeedback.selectionClick());
-            onTap!();
-          };
-    return Column(
-      children: [
-        IosGlassNavigationButton(
-          icon: iosIcon,
-          semanticLabel: label,
-          onPressed: handleTap,
-          width: 64,
-          height: 64,
-          controlSize: 64,
-          foregroundColor: context.colors.onSurface,
-        ),
-        const SizedBox(height: Grid.quarter),
-        SizedBox(
-          height: 20,
-          child: OverflowBox(
-            maxWidth: labelMaxWidth,
-            maxHeight: 20,
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => AvatarEditorOptionButton(
+    icon: icon,
+    iosIcon: iosIcon,
+    label: label,
+    selected: false,
+    onTap: onTap,
+    labelMaxWidth: labelMaxWidth,
+  );
 }

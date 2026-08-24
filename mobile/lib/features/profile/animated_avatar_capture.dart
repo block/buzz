@@ -18,6 +18,7 @@ import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
 import 'animated_avatar_orientation.dart';

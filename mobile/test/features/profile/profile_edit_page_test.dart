@@ -5,6 +5,7 @@ import 'package:buzz/features/profile/profile_edit_page.dart';
 import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
+import 'package:buzz/features/profile/animated_avatar_capture.dart';
 import 'package:buzz/features/profile/emoji_avatar_tile.dart';
 import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';

@@ -14,6 +14,10 @@ enum IosGlassNavigationIcon {
   close,
   camera,
   photoLibrary,
+  palette,
+  emoji,
+  person,
+  frame,
   rotateCamera,
   shutter,
 }
@@ -45,6 +49,7 @@ class IosGlassNavigationButton extends HookWidget {
     this.buttonCenterX,
     this.foregroundColor,
     this.isBusy = false,
+    this.isSelected = false,
     this.nativeViewSuppressed,
   });
 
@@ -61,6 +66,7 @@ class IosGlassNavigationButton extends HookWidget {
   final double? buttonCenterX;
   final Color? foregroundColor;
   final bool isBusy;
+  final bool isSelected;
   final ValueListenable<bool>? nativeViewSuppressed;
 
   @override
@@ -84,20 +90,31 @@ class IosGlassNavigationButton extends HookWidget {
       return () => channel.setMethodCallHandler(null);
     }, [nativeChannel.value]);
 
-    useEffect(() {
-      final channel = nativeChannel.value;
-      if (channel != null) {
-        unawaited(
-          channel.invokeMethod<void>('setAppearance', <String, Object>{
-            'brightness': brightness,
-            'foregroundColor': foregroundValue,
-            'enabled': enabled,
-            'busy': isBusy,
-          }),
-        );
-      }
-      return null;
-    }, [nativeChannel.value, brightness, foregroundValue, enabled, isBusy]);
+    useEffect(
+      () {
+        final channel = nativeChannel.value;
+        if (channel != null) {
+          unawaited(
+            channel.invokeMethod<void>('setAppearance', <String, Object>{
+              'brightness': brightness,
+              'foregroundColor': foregroundValue,
+              'enabled': enabled,
+              'busy': isBusy,
+              'selected': isSelected,
+            }),
+          );
+        }
+        return null;
+      },
+      [
+        nativeChannel.value,
+        brightness,
+        foregroundValue,
+        enabled,
+        isBusy,
+        isSelected,
+      ],
+    );
 
     useEffect(() {
       final channel = nativeChannel.value;
@@ -119,6 +136,7 @@ class IosGlassNavigationButton extends HookWidget {
           container: true,
           button: true,
           enabled: enabled,
+          selected: isSelected,
           label: semanticLabel,
           onTap: onPressed,
           child: ExcludeSemantics(
@@ -169,6 +187,14 @@ class IosGlassNavigationButton extends HookWidget {
                                 Icons.camera_alt_rounded,
                               IosGlassNavigationIcon.photoLibrary =>
                                 Icons.photo_library_rounded,
+                              IosGlassNavigationIcon.palette =>
+                                Icons.palette_rounded,
+                              IosGlassNavigationIcon.emoji =>
+                                Icons.emoji_emotions_rounded,
+                              IosGlassNavigationIcon.person =>
+                                Icons.person_rounded,
+                              IosGlassNavigationIcon.frame =>
+                                Icons.photo_size_select_actual_rounded,
                               IosGlassNavigationIcon.rotateCamera =>
                                 Icons.cameraswitch_rounded,
                               IosGlassNavigationIcon.shutter => Icons.circle,
@@ -192,6 +218,7 @@ class IosGlassNavigationButton extends HookWidget {
         'foregroundColor': foregroundValue,
         'enabled': enabled,
         'busy': isBusy,
+        'selected': isSelected,
         'controlSize': controlSize,
         'controlWidth': controlSize,
         'fillWidth': fillWidth,

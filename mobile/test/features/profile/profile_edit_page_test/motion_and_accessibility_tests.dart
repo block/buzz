@@ -381,6 +381,131 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(selectedTile.properties.selected, isTrue);
   });
 
+  testWidgets('uses liquid-glass avatar rail icons on iOS', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Row(
+          children: [
+            Expanded(
+              child: AvatarEditorOptionButton(
+                icon: Icons.palette,
+                iosIcon: IosGlassNavigationIcon.palette,
+                label: 'Background',
+                selected: true,
+                onTap: () {},
+              ),
+            ),
+            Expanded(
+              child: AvatarEditorOptionButton(
+                icon: Icons.face,
+                iosIcon: IosGlassNavigationIcon.emoji,
+                label: 'Emoji',
+                selected: false,
+                onTap: () {},
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final nativeIcons = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .map((params) => params['icon'])
+        .toList();
+    expect(nativeIcons, containsAll(['palette', 'emoji']));
+    final selectedControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .where((params) => params['selected'] == true)
+        .toList();
+    expect(selectedControls.single['icon'], 'palette');
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('doubles the avatar rail icon-to-label spacing', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: AvatarEditorOptionButton(
+          icon: Icons.palette,
+          label: 'Background',
+          selected: false,
+          onTap: () {},
+        ),
+      ),
+    );
+
+    final surface = find.byType(AnimatedContainer);
+    expect(
+      tester.getRect(find.text('Background')).top -
+          tester.getRect(surface).bottom,
+      avatarEditorOptionLabelGap,
+    );
+  });
+
+  testWidgets('uses liquid glass for animated capture and review on iOS', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: SizedBox(
+          height: 500,
+          child: AnimatedAvatarCapture(
+            key: ValueKey('animated-capture-glass-test'),
+            height: 500,
+            onPrepareChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    var nativeControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .toList();
+    expect(
+      nativeControls.any(
+        (params) => params['icon'] == 'shutter' && params['label'] == 'Record',
+      ),
+      isTrue,
+    );
+
+    final frame = Uint8List.fromList(
+      image.encodePng(image.Image(width: 8, height: 8)),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: SizedBox(
+          height: 500,
+          child: AnimatedAvatarCapture(
+            key: ValueKey('animated-review-glass-test'),
+            height: 500,
+            initialFrames: [frame, frame],
+            onPrepareChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    nativeControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .toList();
+    final reviewIcons = nativeControls
+        .map((params) => params['icon'])
+        .whereType<String>()
+        .toList();
+    expect(reviewIcons, containsAll(['person', 'palette', 'frame', 'camera']));
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('uses the shared animated background grid for emoji avatars', (
     tester,
   ) async {

@@ -19,39 +19,57 @@ class _AnimatedRecordButton extends StatelessWidget {
           curve: Curves.easeOutCubic,
           width: busy ? 64 : constraints.maxWidth,
           height: 64,
-          child: Material(
-            color: context.colors.onSurface,
-            borderRadius: BorderRadius.circular(Radii.full),
-            clipBehavior: Clip.antiAlias,
-            child: InkWell(
-              key: const ValueKey('animated-avatar-record'),
-              onTap: busy ? null : onPressed,
-              child: Center(
-                child: AnimatedSwitcher(
-                  duration: reduceMotion
-                      ? Duration.zero
-                      : const Duration(milliseconds: 150),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeOutCubic,
-                  child: busy
-                      ? BuzzLoadingIndicator(
-                          key: const ValueKey('animated-avatar-capturing'),
-                          size: 24,
-                          color: context.colors.surface,
-                          semanticLabel: 'Capturing animated avatar',
-                        )
-                      : Text(
-                          'Record',
-                          key: const ValueKey('animated-avatar-record-label'),
-                          style: context.textTheme.labelLarge?.copyWith(
-                            color: context.colors.surface,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+          child: defaultTargetPlatform == TargetPlatform.iOS
+              ? IosGlassNavigationButton(
+                  key: const ValueKey('animated-avatar-record'),
+                  icon: IosGlassNavigationIcon.shutter,
+                  label: busy ? null : 'Record',
+                  semanticLabel: 'Record animated avatar',
+                  onPressed: busy ? null : onPressed,
+                  width: busy ? 64 : constraints.maxWidth,
+                  height: 64,
+                  controlSize: 64,
+                  fillWidth: true,
+                  foregroundColor: context.colors.onSurface,
+                  isBusy: busy,
+                )
+              : Material(
+                  color: context.colors.onSurface,
+                  borderRadius: BorderRadius.circular(Radii.full),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    key: const ValueKey('animated-avatar-record'),
+                    onTap: busy ? null : onPressed,
+                    child: Center(
+                      child: AnimatedSwitcher(
+                        duration: reduceMotion
+                            ? Duration.zero
+                            : const Duration(milliseconds: 150),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeOutCubic,
+                        child: busy
+                            ? BuzzLoadingIndicator(
+                                key: const ValueKey(
+                                  'animated-avatar-capturing',
+                                ),
+                                size: 24,
+                                color: context.colors.surface,
+                                semanticLabel: 'Capturing animated avatar',
+                              )
+                            : Text(
+                                'Record',
+                                key: const ValueKey(
+                                  'animated-avatar-record-label',
+                                ),
+                                style: context.textTheme.labelLarge?.copyWith(
+                                  color: context.colors.surface,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ),
         ),
       ),
     );

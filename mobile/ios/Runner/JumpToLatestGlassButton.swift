@@ -323,10 +323,17 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let foregroundColor = colorValue.map(Self.color(from:))
     let enabled = arguments?["enabled"] as? Bool ?? true
     let busy = arguments?["busy"] as? Bool ?? false
+    let selected = arguments?["selected"] as? Bool ?? false
 
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
+    button.isSelected = selected
+    if selected {
+      button.accessibilityTraits.insert(.selected)
+    } else {
+      button.accessibilityTraits.remove(.selected)
+    }
     button.configuration?.showsActivityIndicator = busy
     button.configuration?.title = busy ? nil : buttonLabel
     if let foregroundColor {
@@ -352,11 +359,21 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "close": buttonIconName = "xmark"
     case "camera": buttonIconName = "camera"
     case "photoLibrary": buttonIconName = "photo.on.rectangle.angled"
+    case "palette": buttonIconName = "paintpalette"
+    case "emoji": buttonIconName = "face.smiling"
+    case "person": buttonIconName = "person"
+    case "frame": buttonIconName = "rectangle.stack"
     case "rotateCamera": buttonIconName = "arrow.triangle.2.circlepath.camera"
     case "shutter": buttonIconName = "circle.fill"
     default: buttonIconName = "chevron.backward"
     }
     if let buttonLabel {
+      button.configuration?.contentInsets = NSDirectionalEdgeInsets(
+        top: 8,
+        leading: 8,
+        bottom: 8,
+        trailing: 8
+      )
       button.configuration?.title = buttonLabel
       button.configuration?.image = nil
       button.configuration?.titleLineBreakMode = .byClipping
@@ -375,13 +392,13 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       button.configuration?.titleTextAttributesTransformer = nil
       if icon == "shutter" {
         button.configuration?.contentInsets = NSDirectionalEdgeInsets(
-          top: 8,
-          leading: 8,
-          bottom: 8,
-          trailing: 8
+          top: 16,
+          leading: 16,
+          bottom: 16,
+          trailing: 16
         )
       }
-      let pointSize: CGFloat = icon == "shutter" ? 99 : 17
+      let pointSize: CGFloat = icon == "shutter" ? 83 : 17
       button.configuration?.image = UIImage(
         systemName: buttonIconName,
         withConfiguration: UIImage.SymbolConfiguration(

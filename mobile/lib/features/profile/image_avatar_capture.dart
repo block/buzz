@@ -80,6 +80,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final selectedLens = useState(CameraLensDirection.front);
     final cameraGeneration = useState(0);
     final isInitializing = useState(initialCapturedBytes == null);
+    final isFlipping = useState(false);
     final isCapturing = useState(false);
     final isProcessingCapture = useState(false);
     final capturedBytes = useState<Uint8List?>(initialCapturedBytes);
@@ -225,21 +226,33 @@ class ImageAvatarCapture extends HookConsumerWidget {
       }
     }
 
-    void flipCamera() {
+    Future<void> flipCamera() async {
       if (isInitializing.value ||
+          isFlipping.value ||
           isCapturing.value ||
           cameras.value.length < 2) {
         return;
       }
+      final active = controller.value;
+      if (active == null) return;
       final nextLens = selectedLens.value == CameraLensDirection.front
           ? CameraLensDirection.back
           : CameraLensDirection.front;
-      if (!cameras.value.any((camera) => camera.lensDirection == nextLens)) {
-        return;
-      }
+      final matches = cameras.value.where(
+        (camera) => camera.lensDirection == nextLens,
+      );
+      if (matches.isEmpty) return;
       unawaited(HapticFeedback.selectionClick());
-      selectedLens.value = nextLens;
-      cameraGeneration.value++;
+      isFlipping.value = true;
+      error.value = null;
+      try {
+        await active.setDescription(matches.first);
+        if (context.mounted) selectedLens.value = nextLens;
+      } on CameraException {
+        if (context.mounted) error.value = 'Could not switch cameras.';
+      } finally {
+        if (context.mounted) isFlipping.value = false;
+      }
     }
 
     void retake() {
@@ -271,11 +284,13 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final captureEnabled =
         controller.value != null &&
         !isInitializing.value &&
+        !isFlipping.value &&
         !isCapturing.value &&
         !isClosing.value;
     final flipEnabled =
         cameras.value.length > 1 &&
         !isInitializing.value &&
+        !isFlipping.value &&
         !isCapturing.value &&
         !isClosing.value;
 
@@ -285,29 +300,37 @@ class ImageAvatarCapture extends HookConsumerWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          Align(
-            alignment: Alignment.topCenter,
-            child: AnimatedContainer(
-              key: const ValueKey('image-camera-preview-size'),
-              duration: reduceMotion ? Duration.zero : _captureMotionDuration,
-              curve: Curves.easeInOutCubic,
-              width: previewSize,
-              height: previewSize,
-              child: ClipOval(
-                child: ColoredBox(
-                  color: Colors.black,
-                  child: captured != null
-                      ? Image.memory(captured, fit: BoxFit.cover)
-                      : controller.value != null
-                      ? _CameraPreview(controller: controller.value!)
-                      : initialPreview ??
-                            Center(
-                              child: isInitializing.value
-                                  ? const BuzzLoadingIndicator(
-                                      semanticLabel: 'Starting camera',
-                                    )
-                                  : const Icon(LucideIcons.cameraOff, size: 32),
-                            ),
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            height: imageAvatarCameraPreviewSize,
+            child: Center(
+              child: AnimatedContainer(
+                key: const ValueKey('image-camera-preview-size'),
+                duration: reduceMotion ? Duration.zero : _captureMotionDuration,
+                curve: Curves.easeInOutCubic,
+                width: previewSize,
+                height: previewSize,
+                child: ClipOval(
+                  child: ColoredBox(
+                    color: Colors.black,
+                    child: captured != null
+                        ? Image.memory(captured, fit: BoxFit.cover)
+                        : controller.value != null
+                        ? _CameraPreview(controller: controller.value!)
+                        : initialPreview ??
+                              Center(
+                                child: isInitializing.value
+                                    ? const BuzzLoadingIndicator(
+                                        semanticLabel: 'Starting camera',
+                                      )
+                                    : const Icon(
+                                        LucideIcons.cameraOff,
+                                        size: 32,
+                                      ),
+                              ),
+                  ),
                 ),
               ),
             ),
@@ -362,7 +385,10 @@ class ImageAvatarCapture extends HookConsumerWidget {
                               semanticLabel: captured == null
                                   ? 'Close camera'
                                   : 'Retry',
-                              onTap: isCapturing.value || isClosing.value
+                              onTap:
+                                  isFlipping.value ||
+                                      isCapturing.value ||
+                                      isClosing.value
                                   ? null
                                   : captured == null
                                   ? () => unawaited(leaveCamera(null))
@@ -407,7 +433,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
                                   : captured != null
                                   ? () => unawaited(leaveCamera(captured))
                                   : flipEnabled
-                                  ? flipCamera
+                                  ? () => unawaited(flipCamera())
                                   : null,
                             ),
                           ),
