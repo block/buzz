@@ -2,7 +2,7 @@ import * as React from "react";
 import { ArrowRightLeft, BookOpen, Send } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
   getAgentHandoff,
@@ -55,7 +55,7 @@ export function AgentHandoffDialog({
   const [title, setTitle] = React.useState("");
   const [summary, setSummary] = React.useState("");
   const [body, setBody] = React.useState(history);
-  const managedAgents = useManagedAgentsQuery({ enabled: open }).data ?? [];
+  const relayAgents = useRelayAgentsQuery({ enabled: open }).data ?? [];
   const queryClient = useQueryClient();
   const received = useQuery({
     queryKey: ["agent-handoffs"],
@@ -104,7 +104,7 @@ export function AgentHandoffDialog({
     openSend();
   }
 
-  const availableAgents = managedAgents.filter(
+  const availableAgents = relayAgents.filter(
     (candidate) => candidate.pubkey !== agent.pubkey,
   );
 
@@ -225,9 +225,7 @@ export function AgentHandoffDialog({
               </label>
               {send.error ? (
                 <p className="text-sm text-destructive">
-                  {send.error instanceof Error
-                    ? send.error.message
-                    : String(send.error)}
+                  {formatHandoffError(send.error)}
                 </p>
               ) : null}
               <div className="flex justify-end gap-2">
@@ -321,4 +319,11 @@ function HandoffDetail({ record }: { record: AgentHandoffRecord }) {
       </pre>
     </section>
   );
+}
+
+function formatHandoffError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("unknown event kind")
+    ? "当前 relay 尚未支持 Agent handoff（kind 44201），需要先更新 relay 服务。"
+    : message;
 }
