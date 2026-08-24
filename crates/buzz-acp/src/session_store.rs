@@ -24,9 +24,11 @@
 //!
 //! The store is process-global. In-memory session maps are per-worker.
 //! Bindings are keyed by worker slot (`{index}:{context}`) so two adapter
-//! subprocesses never attach the same session id. `EventQueue`'s
-//! `in_flight_channels` gate still ensures one channel is processed by one
-//! worker at a time.
+//! subprocesses never attach the same session id. A fresh channel-session
+//! create retires every binding for that channel (including sibling-worker
+//! keys) before saving, so a later restart cannot restore a superseded
+//! history. `EventQueue`'s `in_flight_channels` gate still ensures one
+//! channel is processed by one worker at a time.
 //!
 //! # Adapters
 //!

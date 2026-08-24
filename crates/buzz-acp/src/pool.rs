@@ -1789,6 +1789,19 @@ async fn store_save_binding(
     }
 }
 
+async fn store_retire_channel_bindings(ctx: &PromptContext, channel_id: uuid::Uuid) {
+    let Some(store) = ctx.session_store.as_ref() else {
+        return;
+    };
+    if let Err(error) = store.remove_bindings_for_channel(channel_id).await {
+        tracing::warn!(
+            %error,
+            %channel_id,
+            "session store remove_bindings_for_channel failed"
+        );
+    }
+}
+
 async fn store_mark_events_processed(
     ctx: &PromptContext,
     channel_id: uuid::Uuid,
@@ -2159,6 +2172,7 @@ pub async fn run_prompt_task(
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
                         agent.acp.notify_session_spawned(&sid);
+                        store_retire_channel_bindings(&ctx, *cid).await;
                         store_save_binding(
                             &ctx,
                             &crate::session_store::ContextKey::Channel(*cid)
@@ -8587,14 +8601,21 @@ done"#,
             "worker 1 must not load worker 0 or unscoped bindings: {methods:?}"
         );
         assert!(methods.contains(&"session/new".to_string()));
-        assert_eq!(
+        assert!(
             store
                 .load_binding(&worker_channel_key(channel_id, 0))
                 .await
                 .unwrap()
+                .is_none(),
+            "fresh create must retire superseded sibling-worker bindings"
+        );
+        assert!(
+            store
+                .load_binding(&crate::session_store::ContextKey::Channel(channel_id))
+                .await
                 .unwrap()
-                .session_id,
-            "worker0-sid"
+                .is_none(),
+            "fresh create must retire unscoped channel bindings"
         );
         assert_eq!(
             store
