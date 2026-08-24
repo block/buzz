@@ -147,7 +147,11 @@ export function AgentHandoffDialog({
   }
 
   const availableAgents = relayAgents.filter(
-    (candidate) => candidate.pubkey !== agent.pubkey,
+    (candidate) =>
+      candidate.pubkey !== agent.pubkey &&
+      !candidate.deleted &&
+      channelId !== null &&
+      candidate.channelIds.includes(channelId),
   );
 
   return (
@@ -228,14 +232,21 @@ export function AgentHandoffDialog({
                 Receiving Agent
                 <select
                   className="h-9 rounded-md border bg-background px-3 text-sm"
+                  disabled={!channelId || availableAgents.length === 0}
                   onChange={(event) => setRecipient(event.target.value)}
                   value={recipient}
                 >
-                  <option value="">Select an Agent</option>
+                  <option value="">
+                    {!channelId
+                      ? "Open this handoff from a channel"
+                      : availableAgents.length === 0
+                        ? "No other active agents in this channel"
+                        : "Select an Agent"}
+                  </option>
                   {availableAgents.map((candidate) => (
                     <option key={candidate.pubkey} value={candidate.pubkey}>
                       {candidate.name}
-                      {candidate.deleted ? " [已删除]" : ""} ·{" "}
+                      {" · "}
                       {candidate.ownerPubkey
                         ? (ownerProfiles?.[candidate.ownerPubkey.toLowerCase()]
                             ?.displayName ??

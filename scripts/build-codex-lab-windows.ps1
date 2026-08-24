@@ -3,6 +3,7 @@ param(
     [switch]$SkipDependencyInstall,
     [switch]$SkipSidecarBuild,
     [switch]$SkipChecks,
+    [switch]$CleanNativeDependencies,
     [string]$OutputDirectory,
     [string]$BuildCacheDirectory
 )
@@ -265,6 +266,11 @@ $env:CXXFLAGS = "$ExistingCxxFlags $NativePathTrimFlag".Trim()
 # CMake/MSBuild FileTracker fails on deeply nested Cargo paths on some Windows
 # installations. A stable short cache also makes repeated packaging builds fast.
 $env:CARGO_TARGET_DIR = $CargoTargetDirectory
+# Keep incremental release artifacts in the stable build cache. This lets
+# Cargo rebuild only crates affected by local changes on repeated installer
+# builds. Pass -CleanNativeDependencies when native path metadata or a broken
+# C/C++ build cache requires a one-time clean rebuild.
+$env:CARGO_INCREMENTAL = "1"
 
 if (-not $SkipDependencyInstall) {
     Invoke-NativeCommand -FilePath "corepack.cmd" -Arguments @(
@@ -358,15 +364,19 @@ if (-not $SkipChecks) {
 }
 
 # Native build scripts do not consistently tell Cargo that CFLAGS changed.
-# Remove only the two native dependency caches that can embed absolute source
-# paths so the trim flag above is guaranteed to take effect in release output.
-Invoke-NativeCommand -FilePath "cargo.exe" -Arguments @(
-    "clean",
-    "--release",
-    "--target", $Target,
-    "-p", "audiopus_sys",
-    "-p", "aws-lc-sys"
-) -WorkingDirectory $TauriDirectory
+# Historically these two caches were removed on every build, which made even
+# small installer changes recompile the expensive C/C++ dependencies. Keep
+# them by default and provide an explicit escape hatch for cache repair or
+# intentional path-metadata regeneration.
+if ($CleanNativeDependencies) {
+    Invoke-NativeCommand -FilePath "cargo.exe" -Arguments @(
+        "clean",
+        "--release",
+        "--target", $Target,
+        "-p", "audiopus_sys",
+        "-p", "aws-lc-sys"
+    ) -WorkingDirectory $TauriDirectory
+}
 
 Invoke-NativeCommand -FilePath "corepack.cmd" -Arguments @(
     "pnpm",
