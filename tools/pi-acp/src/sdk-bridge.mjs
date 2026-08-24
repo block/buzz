@@ -6,6 +6,7 @@ import {
   getAgentDir,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import { createBuzzTools } from "./buzz-tools.mjs";
 import { attachJsonlReader, writeJsonl } from "./jsonl.mjs";
 
 function option(name) {
@@ -31,9 +32,20 @@ const budget = {
   checkpointTurnStarted: false,
   forcedAbort: false,
 };
+function resetEventBudget() {
+  Object.assign(budget, {
+    turns: 0,
+    tools: 0,
+    tokens: 0,
+    thresholdReached: false,
+    checkpointTurnStarted: false,
+    forcedAbort: false,
+  });
+}
 let session;
 let streaming = false;
 let disposed = false;
+let buzzContext = null;
 
 const budgetExtension = {
   name: "buzz-event-budget",
@@ -52,10 +64,12 @@ const budgetExtension = {
   },
 };
 
-const tools = (option("--tools") || process.env.PI_ACP_TOOLS || "read")
+const builtInTools = (option("--tools") || process.env.PI_ACP_TOOLS || "read")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
+const customTools = createBuzzTools({ getContext: () => buzzContext });
+const tools = [...builtInTools, ...customTools.map((tool) => tool.name)];
 const resourceLoader = new DefaultResourceLoader({
   cwd: process.cwd(),
   agentDir: getAgentDir(),
@@ -73,6 +87,7 @@ const ready = (async () => {
   const created = await createAgentSession({
     cwd: process.cwd(),
     tools,
+    customTools,
     resourceLoader,
     sessionManager: SessionManager.inMemory(process.cwd()),
   });
@@ -80,7 +95,10 @@ const ready = (async () => {
   session.subscribe((event) => {
     writeJsonl(process.stdout, event);
     if (event.type === "agent_start") streaming = true;
-    if (event.type === "agent_settled") streaming = false;
+    if (event.type === "agent_settled") {
+      streaming = false;
+      buzzContext = null;
+    }
     if (event.type === "turn_start" && budget.thresholdReached) {
       if (!budget.checkpointTurnStarted) budget.checkpointTurnStarted = true;
       else if (!budget.forcedAbort) {
@@ -151,6 +169,8 @@ async function handle(command) {
           response(command, false, undefined, "agent is already streaming");
           break;
         }
+        resetEventBudget();
+        buzzContext = command.buzzContext;
         response(command, true);
         void session.prompt(command.message).catch((error) => {
           process.stderr.write(
