@@ -24,6 +24,7 @@ import 'animated_avatar_capture.dart';
 import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
 import 'emoji_avatar_tile.dart';
+import 'image_avatar_capture.dart';
 import 'profile_avatar_crop_page.dart';
 import 'profile_avatar_draft.dart';
 
@@ -79,7 +80,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     required this.onModeChanged,
     required this.onDraftChanged,
     required this.onAnimatedPrepareChanged,
+    required this.onImageCameraActiveChanged,
     this.animatedCaptureBuilder,
+    this.imageCaptureBuilder,
   });
 
   /// The avatar URL shown until the user selects a new draft.
@@ -107,8 +110,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
   final ValueChanged<Future<ProfileAvatarDraft?> Function()?>
   onAnimatedPrepareChanged;
 
+  /// Reports whether the inline still camera currently owns the image editor.
+  final ValueChanged<bool> onImageCameraActiveChanged;
+
   /// Overrides the animated capture surface, primarily for tests.
   final AnimatedAvatarCaptureBuilder? animatedCaptureBuilder;
+
+  /// Overrides the still-image capture surface, primarily for tests.
+  final ImageAvatarCaptureBuilder? imageCaptureBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -128,6 +137,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final emojiSection = useState(_EmojiEditorSection.emoji);
     final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
+    final isCapturingImage = useState(false);
     final imageSelectionGeneration = useRef(0);
     final currentMode = useRef(mode)..value = mode;
     final error = useState<String?>(null);
@@ -154,6 +164,8 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       if (mode == ProfileAvatarMode.image) {
         imageSelectionGeneration.value++;
         isPickingImage.value = false;
+        isCapturingImage.value = false;
+        onImageCameraActiveChanged(false);
       }
       if (!reduceMotion) modeTransitionController.value = 0;
       onModeChanged(nextMode);
@@ -180,7 +192,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       );
     }
 
-    Future<void> selectImage({required bool camera}) async {
+    Future<void> selectGalleryImage() async {
       if (isPickingImage.value) return;
       final operation = ++imageSelectionGeneration.value;
       bool isCurrentOperation() =>
@@ -192,9 +204,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       try {
         final service = ref.read(mediaUploadServiceProvider);
         unawaited(HapticFeedback.lightImpact());
-        final picked = camera
-            ? await service.captureImage()
-            : await service.pickGalleryImage();
+        final picked = await service.pickGalleryImage();
         if (picked == null || !isCurrentOperation()) return;
         final preparedPhoto = await service.prepareImageBytes(picked);
         if (!context.mounted || !isCurrentOperation()) return;
@@ -216,11 +226,22 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       }
     }
 
+    void closeImageCamera() {
+      isCapturingImage.value = false;
+      onImageCameraActiveChanged(false);
+    }
+
+    void acceptCameraImage(Uint8List bytes) {
+      onDraftChanged(ProfileImageAvatarDraft(bytes));
+      closeImageCamera();
+    }
+
     final previewUrl = switch (draft) {
       ProfileUrlAvatarDraft(:final url) => url,
       _ => currentAvatarUrl,
     };
     final fixedPreviewContent = switch (mode) {
+      ProfileAvatarMode.image when isCapturingImage.value => null,
       ProfileAvatarMode.image when draft is ProfileImageAvatarDraft =>
         CircleAvatar(
           key: const ValueKey('avatar-editor-fixed-preview'),
@@ -332,20 +353,43 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         }
         final fixedContentTop =
             previewTop + _previewBlockSize + _previewControlGap;
+        final imageCameraTop =
+            basePreviewTop +
+            _previewBlockSize / 2 -
+            imageAvatarCameraPreviewSize / 2;
         final modeTop = mode == ProfileAvatarMode.animated
             ? basePreviewTop
+            : mode == ProfileAvatarMode.image && isCapturingImage.value
+            ? imageCameraTop
             : fixedContentTop;
         final modeHeight = max(
           0.0,
           viewportHeight - _editorControlsBottom - modeTop,
         );
         final modeContent = switch (mode) {
+          ProfileAvatarMode.image when isCapturingImage.value => KeyedSubtree(
+            key: const ValueKey('image-camera-mode'),
+            child:
+                imageCaptureBuilder?.call(
+                  height: modeHeight,
+                  onAccepted: acceptCameraImage,
+                  onClosed: closeImageCamera,
+                ) ??
+                ImageAvatarCapture(
+                  height: modeHeight,
+                  onAccepted: acceptCameraImage,
+                  onClosed: closeImageCamera,
+                ),
+          ),
           ProfileAvatarMode.image => _ImageMode(
             key: const ValueKey(0),
             height: modeHeight,
             isPicking: isPickingImage.value,
-            onCamera: () => unawaited(selectImage(camera: true)),
-            onLibrary: () => unawaited(selectImage(camera: false)),
+            onCamera: () {
+              isCapturingImage.value = true;
+              onImageCameraActiveChanged(true);
+            },
+            onLibrary: () => unawaited(selectGalleryImage()),
           ),
           ProfileAvatarMode.emoji => _EmojiMode(
             key: const ValueKey(1),

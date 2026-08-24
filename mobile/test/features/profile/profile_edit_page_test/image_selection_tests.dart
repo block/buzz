@@ -1,6 +1,118 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditImageSelectionTests() {
+  testWidgets('grows the inline camera viewfinder by 25dp', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Scaffold(
+          body: SizedBox(
+            height: 400,
+            child: ImageAvatarCapture(
+              height: 400,
+              onAccepted: (_) {},
+              onClosed: () {},
+              loadCameras: () async => const [],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final preview = find.byKey(const ValueKey('image-camera-preview-size'));
+    expect(tester.getSize(preview), const Size.square(220));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 180));
+    expect(tester.getSize(preview), const Size.square(245));
+    expect(find.bySemanticsLabel('Close camera'), findsOneWidget);
+    expect(find.bySemanticsLabel('Flip camera'), findsOneWidget);
+    expect(find.bySemanticsLabel('Take photo'), findsOneWidget);
+  });
+
+  testWidgets('shrinks a captured photo and accepts it with a check', (
+    tester,
+  ) async {
+    final bytes = Uint8List.fromList(
+      image.encodeJpg(image.Image(width: 8, height: 8)),
+    );
+    Uint8List? accepted;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Scaffold(
+          body: SizedBox(
+            height: 400,
+            child: ImageAvatarCapture(
+              height: 400,
+              initialCapturedBytes: bytes,
+              onAccepted: (value) => accepted = value,
+              onClosed: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
+      const Size.square(220),
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-shutter-morph'))),
+      const Size.square(64),
+    );
+    expect(
+      find.byKey(const ValueKey('image-camera-accept-icon')),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Retake photo'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('image-camera-shutter')));
+    expect(accepted, same(bytes));
+  });
+
+  testWidgets('accepts an inline camera photo before enabling profile Save', (
+    tester,
+  ) async {
+    final notifier = _FakeProfileNotifier();
+    final uploadService = _FakeMediaUploadService();
+    addTearDown(uploadService.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: ProfileEditPage(
+          imageAvatarCaptureBuilder:
+              ({required height, required onAccepted, required onClosed}) =>
+                  _FakeImageAvatarCapture(
+                    onAccepted: onAccepted,
+                    onClosed: onClosed,
+                  ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('image-source-camera')));
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('fake-image-camera')), findsOneWidget);
+    expect(find.byKey(const ValueKey('image-source-library')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('fake-image-camera-accept')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('fake-image-camera')), findsNothing);
+    expect(find.byKey(const ValueKey('image-source-camera')), findsOneWidget);
+    expect(find.byKey(const ValueKey('image-source-library')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+
+    expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
+    expect(uploadService.uploadCount, 1);
+  });
+
   testWidgets('duplicate avatar Back taps pop only the editor route', (
     tester,
   ) async {

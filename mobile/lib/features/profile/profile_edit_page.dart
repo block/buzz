@@ -21,6 +21,7 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'ios_profile_text_editor.dart';
+import 'image_avatar_capture.dart';
 import 'profile_avatar_editor.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_provider.dart';
@@ -33,6 +34,7 @@ class ProfileEditPage extends HookConsumerWidget {
     super.key,
     this.startInPhotoEditor = false,
     this.animatedAvatarCaptureBuilder,
+    this.imageAvatarCaptureBuilder,
   });
 
   /// Opens directly into the photo editor when launched from Settings.
@@ -40,6 +42,9 @@ class ProfileEditPage extends HookConsumerWidget {
 
   /// Overrides animated capture for focused integration tests.
   final AnimatedAvatarCaptureBuilder? animatedAvatarCaptureBuilder;
+
+  /// Overrides still-image capture for focused integration tests.
+  final ImageAvatarCaptureBuilder? imageAvatarCaptureBuilder;
 
   static const _avatarRadius = 64.0;
 
@@ -61,6 +66,7 @@ class ProfileEditPage extends HookConsumerWidget {
         useRef<Future<ProfileAvatarDraft?> Function()?>(null);
     final avatarSaveError = useState<String?>(null);
     final canPrepareAnimatedAvatar = useState(false);
+    final isImageCameraActive = useState(false);
     final avatarMode = useState(ProfileAvatarMode.image);
     final avatarTransition = useAnimationController(
       duration: reduceMotion
@@ -170,6 +176,7 @@ class ProfileEditPage extends HookConsumerWidget {
       avatarEditConfig.value = null;
       prepareAnimatedAvatar.value = null;
       canPrepareAnimatedAvatar.value = false;
+      isImageCameraActive.value = false;
       avatarMode.value = ProfileAvatarMode.image;
       isClosingAvatar.value = false;
     }
@@ -241,6 +248,7 @@ class ProfileEditPage extends HookConsumerWidget {
 
     final canSaveAvatar =
         profileHydrated &&
+        !isImageCameraActive.value &&
         (avatarMode.value == ProfileAvatarMode.animated
             ? canPrepareAnimatedAvatar.value
             : avatarDraftMode.value == avatarMode.value &&
@@ -367,8 +375,12 @@ class ProfileEditPage extends HookConsumerWidget {
                                 avatarDraftMode.value = null;
                               }
                             },
+                            onImageCameraActiveChanged: (active) {
+                              isImageCameraActive.value = active;
+                            },
                             animatedCaptureBuilder:
                                 animatedAvatarCaptureBuilder,
+                            imageCaptureBuilder: imageAvatarCaptureBuilder,
                           ),
                         ),
                       ),

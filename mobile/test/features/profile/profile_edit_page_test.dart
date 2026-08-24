@@ -6,6 +6,7 @@ import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/features/profile/emoji_avatar_tile.dart';
+import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -632,7 +633,14 @@ void main() {
           profileProvider.overrideWith(() => notifier),
           mediaUploadServiceProvider.overrideWithValue(uploadService),
         ],
-        child: const ProfileEditPage(),
+        child: ProfileEditPage(
+          imageAvatarCaptureBuilder:
+              ({required height, required onAccepted, required onClosed}) =>
+                  _FakeImageAvatarCapture(
+                    onAccepted: onAccepted,
+                    onClosed: onClosed,
+                  ),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -640,18 +648,15 @@ void main() {
     await tester.tap(find.text('Edit Photo'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Camera'));
-    await _waitForAvatarCropToLoad(tester);
-    expect(find.text('Position Photo'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 200)),
-    );
+    await tester.pump();
+    expect(find.byKey(const ValueKey('fake-image-camera')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('fake-image-camera-accept')));
     await tester.pumpAndSettle();
     expect(notifier.savedAvatarUrls, isEmpty);
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
     await tester.pumpAndSettle();
 
-    expect(notifier.savedAvatarUrls, ['https://relay.example/camera.png']);
+    expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
   });
 
   testWidgets('saves a desktop-compatible emoji avatar', (tester) async {
@@ -954,4 +959,33 @@ class _FakeMediaUploadService extends MediaUploadService {
       uploaded: 1,
     );
   }
+}
+
+class _FakeImageAvatarCapture extends StatelessWidget {
+  const _FakeImageAvatarCapture({
+    required this.onAccepted,
+    required this.onClosed,
+  });
+
+  final ValueChanged<Uint8List> onAccepted;
+  final VoidCallback onClosed;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    key: const ValueKey('fake-image-camera'),
+    children: [
+      TextButton(
+        key: const ValueKey('fake-image-camera-close'),
+        onPressed: onClosed,
+        child: const Text('Close fake camera'),
+      ),
+      TextButton(
+        key: const ValueKey('fake-image-camera-accept'),
+        onPressed: () => onAccepted(
+          Uint8List.fromList(image.encodeJpg(image.Image(width: 8, height: 8))),
+        ),
+        child: const Text('Accept fake photo'),
+      ),
+    ],
+  );
 }
