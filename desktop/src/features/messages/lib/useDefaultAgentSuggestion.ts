@@ -5,7 +5,16 @@ import type { ChannelType } from "@/shared/api/types";
 import type { MentionCandidate } from "./mentionCandidates";
 import { pickDefaultAgentSuggestion } from "./mentionSuggestionMapping";
 
-export function useDefaultAgentSuggestion(options: {
+export function useDefaultAgentSuggestion({
+  activePersonaIds,
+  agentProvenanceReady,
+  candidates,
+  channelType,
+  currentPubkey,
+  ownerProfiles,
+  profiles,
+  recentMentionPubkeys,
+}: {
   activePersonaIds: ReadonlySet<string>;
   agentProvenanceReady: boolean;
   candidates: readonly MentionCandidate[];
@@ -16,7 +25,26 @@ export function useDefaultAgentSuggestion(options: {
   recentMentionPubkeys?: readonly string[];
 }): () => MentionSuggestion | null {
   return React.useCallback(
-    () => pickDefaultAgentSuggestion(options),
-    [options],
+    () =>
+      pickDefaultAgentSuggestion({
+        activePersonaIds,
+        agentProvenanceReady,
+        candidates,
+        channelType,
+        currentPubkey,
+        ownerProfiles,
+        profiles,
+        recentMentionPubkeys,
+      }),
+    [
+      activePersonaIds,
+      agentProvenanceReady,
+      candidates,
+      channelType,
+      currentPubkey,
+      ownerProfiles,
+      profiles,
+      recentMentionPubkeys,
+    ],
   );
 }

@@ -12,6 +12,12 @@ export function getRecentMentionPubkeys(
 ): string[] {
   const seen = new Set<string>();
   const recent: string[] = [];
+  const authorPubkeyByMessageId = new Map(
+    messages.map((message) => [
+      message.id,
+      normalizePubkey(message.pubkey ?? ""),
+    ]),
+  );
 
   for (
     let messageIndex = messages.length - 1;
@@ -25,9 +31,11 @@ export function getRecentMentionPubkeys(
       firstPTagIndex >= 0
         ? normalizePubkey(tags[firstPTagIndex]?.[1] ?? "")
         : "";
+    const structuralPubkey = message.parentId
+      ? authorPubkeyByMessageId.get(message.parentId)
+      : normalizePubkey(message.pubkey ?? "");
     const structuralPTagIndex =
-      message.parentId != null ||
-      firstPTagPubkey === normalizePubkey(message.pubkey ?? "")
+      structuralPubkey && firstPTagPubkey === structuralPubkey
         ? firstPTagIndex
         : -1;
     for (

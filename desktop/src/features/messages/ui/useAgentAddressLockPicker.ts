@@ -201,6 +201,7 @@ export function useAgentAddressLockPicker({
             replaceFromOffset: 0,
             replaceToOffset: 0,
             insertText: `@${suggestion.displayName} `,
+            preserveSelection: true,
           });
         }
         audience.addPubkey(pubkey);
@@ -345,6 +346,7 @@ export function useAgentAddressLockPicker({
         replaceFromOffset: 0,
         replaceToOffset: 0,
         insertText: insertedText,
+        preserveSelection: true,
       });
       return `${insertedText}${text}`;
     },

@@ -81,6 +81,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
       replaceFromOffset: 0,
       replaceToOffset: 0,
       insertText: "@Agent Ada ",
+      preserveSelection: true,
     },
   ]);
   assert.equal(cancelCount, 0);

@@ -29,7 +29,7 @@ export function useAlwaysAddressShortcut({
     (event: React.KeyboardEvent): boolean => {
       if (
         !enabled ||
-        event.key.toLowerCase() !== "m" ||
+        event.code !== "KeyM" ||
         !hasPrimaryShortcutModifier(event) ||
         event.altKey ||
         !event.shiftKey

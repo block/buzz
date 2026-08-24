@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -55,6 +55,19 @@ function channelComposer(page: Page) {
 
 function threadComposer(page: Page) {
   return page.getByTestId("thread-composer-overlay");
+}
+
+async function readComposerCaret(input: Locator) {
+  return input.evaluate((element) => {
+    const selection = window.getSelection();
+    if (!selection?.anchorNode || !element.contains(selection.anchorNode)) {
+      return null;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.setEnd(selection.anchorNode, selection.anchorOffset);
+    return range.toString().length;
+  });
 }
 
 async function pressPrimaryShift(page: Page, key: "M") {
@@ -255,9 +268,13 @@ test("primary+Shift+M favors the most recently mentioned eligible agent", async 
 
   const input = channelComposer(page).getByTestId("message-input");
   await input.fill("draft text");
+  await input.press("ArrowLeft");
+  await input.press("ArrowLeft");
+  await expect.poll(() => readComposerCaret(input)).toBe(8);
   await pressPrimaryShift(page, "M");
 
   await expect(input).toHaveText("@Vogue draft text");
+  await expect.poll(() => readComposerCaret(input)).toBe(15);
   await pressPrimaryShift(page, "M");
   await expect(input).toHaveText("draft text");
   await pressPrimaryShift(page, "M");

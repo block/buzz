@@ -314,6 +314,19 @@ function MessageComposerImpl({
       allowedUnpinnedPubkeys?: readonly string[],
     ) => string
   >(() => "");
+  const restoreAddressedAgentMentionsFrameRef = React.useRef<number | null>(
+    null,
+  );
+  const channelIdRef = React.useRef(channelId);
+  channelIdRef.current = channelId;
+  React.useEffect(
+    () => () => {
+      if (restoreAddressedAgentMentionsFrameRef.current !== null) {
+        cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
+      }
+    },
+    [],
+  );
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -329,8 +342,16 @@ function MessageComposerImpl({
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
       if (newlyPinnedPubkeys.length === 0) return;
-      requestAnimationFrame(() =>
-        restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys),
+      const sentChannelId = channelId;
+      if (restoreAddressedAgentMentionsFrameRef.current !== null) {
+        cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
+      }
+      restoreAddressedAgentMentionsFrameRef.current = requestAnimationFrame(
+        () => {
+          restoreAddressedAgentMentionsFrameRef.current = null;
+          if (channelIdRef.current !== sentChannelId) return;
+          restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys);
+        },
       );
     },
     onInlineAgentMentionsSent: addInlineAgentMentionsToAudience,
@@ -411,6 +432,7 @@ function MessageComposerImpl({
         edit.replaceToOffset,
         edit.insertText,
         edit.customEmojiShortcode,
+        edit.preserveSelection,
       );
     },
     [richText.replacePlainTextRange],

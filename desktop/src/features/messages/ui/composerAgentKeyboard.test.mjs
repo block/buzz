@@ -59,6 +59,7 @@ test("primary+Shift+M addresses the default agent or toggles the tray selection"
   };
   const createEvent = () => ({
     altKey: false,
+    code: "KeyM",
     ctrlKey: !isMacPlatform(),
     key: "M",
     metaKey: isMacPlatform(),
@@ -134,6 +135,7 @@ test("primary+Shift+M removes the current locked agent before choosing a new def
     assert.equal(
       result.current({
         altKey: false,
+        code: "KeyM",
         ctrlKey: !isMacPlatform(),
         key: "m",
         metaKey: isMacPlatform(),
@@ -176,6 +178,7 @@ test("primary+Shift+M opens the picker when no default agent is ready", async ()
     assert.equal(
       result.current({
         altKey: false,
+        code: "KeyM",
         ctrlKey: !isMacPlatform(),
         key: "m",
         metaKey: isMacPlatform(),

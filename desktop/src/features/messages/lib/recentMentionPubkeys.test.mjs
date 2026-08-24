@@ -7,6 +7,7 @@ const AUTHOR = "a".repeat(64);
 const OLDER = "1".repeat(64);
 const LATEST_FIRST = "2".repeat(64);
 const LATEST_LAST = "3".repeat(64);
+const REPLY_AUTHOR = "4".repeat(64);
 
 function message(createdAt, tags) {
   return {
@@ -45,18 +46,28 @@ test("keeps a top-level mention when the event omits its structural author tag",
   );
 });
 
-test("excludes the first p tag on replies", () => {
+test("excludes a loaded reply target author but keeps sdk-shaped reply mentions", () => {
+  const parent = message(1, []);
   assert.deepEqual(
     getRecentMentionPubkeys([
+      parent,
       {
-        ...message(1, [
-          ["p", OLDER],
+        ...message(2, [
+          ["p", AUTHOR],
           ["p", LATEST_FIRST],
         ]),
-        parentId: "root",
+        id: "reply-with-target",
+        parentId: parent.id,
+        pubkey: REPLY_AUTHOR,
+      },
+      {
+        ...message(3, [["p", LATEST_LAST]]),
+        id: "reply-without-target",
+        parentId: parent.id,
+        pubkey: REPLY_AUTHOR,
       },
     ]),
-    [LATEST_FIRST],
+    [LATEST_LAST, LATEST_FIRST],
   );
 });
 
