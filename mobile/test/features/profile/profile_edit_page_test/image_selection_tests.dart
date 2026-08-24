@@ -48,7 +48,7 @@ void runProfileEditImageSelectionTests() {
     );
   });
 
-  testWidgets('keeps the avatar compact until the camera is ready', (
+  testWidgets('expands the avatar with the controls while camera loads', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -75,8 +75,13 @@ void runProfileEditImageSelectionTests() {
     expect(tester.getSize(preview), const Size.square(220));
     expect(tester.getCenter(preview).dy, imageAvatarCameraPreviewSize / 2);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 180));
-    expect(tester.getSize(preview), const Size.square(220));
+    await tester.pump(const Duration(milliseconds: 90));
+    final midSize = tester.getSize(preview).width;
+    expect(midSize, greaterThan(220));
+    expect(midSize, lessThan(275));
+    expect(tester.getCenter(preview).dy, imageAvatarCameraPreviewSize / 2);
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(tester.getSize(preview), const Size.square(275));
     expect(
       find.byKey(const ValueKey('existing-avatar-preview')),
       findsOneWidget,

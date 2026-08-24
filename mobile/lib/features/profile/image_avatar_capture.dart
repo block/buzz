@@ -285,9 +285,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
 
     final captured = capturedBytes.value;
     final previewSize = controlsExpanded.value
-        ? controller.value != null || captured != null
-              ? imageAvatarCameraPreviewSize
-              : _avatarPreviewSize
+        ? imageAvatarCameraPreviewSize
         : _avatarPreviewSize;
     final captureEnabled =
         controller.value != null &&
@@ -317,7 +315,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
               child: AnimatedContainer(
                 key: const ValueKey('image-camera-preview-size'),
                 duration: reduceMotion ? Duration.zero : _captureMotionDuration,
-                curve: Curves.easeInOutCubic,
+                curve: Curves.easeOutCubic,
                 width: previewSize,
                 height: previewSize,
                 child: ClipOval(
