@@ -45,6 +45,10 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// A workflow update used a revision that is no longer current.
+    #[error("workflow revision conflict: {0}")]
+    WorkflowRevisionConflict(uuid::Uuid),
+
     /// A serving write admitted before the lifecycle transition is still live.
     /// This is an ordinary retryable drain condition, not a safety violation.
     #[error(

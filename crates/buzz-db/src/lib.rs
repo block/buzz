@@ -4053,8 +4053,18 @@ impl Db {
         community_id: CommunityId,
         id: Uuid,
         owner_pubkey: &[u8],
+        expected_revision: Option<&[u8]>,
+        deletion_created_at_secs: i64,
     ) -> Result<Option<Uuid>> {
-        workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
+        workflow::delete_workflow_for_owner(
+            &self.pool,
+            community_id,
+            id,
+            owner_pubkey,
+            expected_revision,
+            deletion_created_at_secs,
+        )
+        .await
     }
 
     /// Find a workflow by owner pubkey and name within a community. Used for

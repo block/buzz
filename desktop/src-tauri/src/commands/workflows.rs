@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -15,8 +15,9 @@ use crate::{
 /// A workflow definition as the desktop frontend expects it. Mirrors the
 /// `RawWorkflow` type in `desktop/src/shared/api/tauriWorkflows.ts`.
 ///
-/// The relay stores a workflow as a single kind:30620 event whose content is
-/// the raw YAML. Everything the UI needs is derived from that event:
+/// The relay exposes current workflow state as kind:30623, with legacy
+/// kind:30620 definitions retained as a read fallback. Everything the UI needs
+/// is derived from that event:
 /// - `id` / `channel_id` from the `d` / `h` tags,
 /// - `definition` from parsing the YAML body into a free-form object,
 /// - `name` from `definition.name`,
@@ -29,7 +30,7 @@ use crate::{
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WorkflowWire {
     pub id: String,
-    /// Event id of the current kind:30620 revision, used for conflict-protected updates.
+    /// Accepted request event id used for conflict-protected updates.
     pub revision: String,
     pub name: String,
     pub owner_pubkey: String,
@@ -96,13 +97,13 @@ pub async fn get_channel_workflows(
     let events = query_relay(
         &state,
         &[serde_json::json!({
-            "kinds": [30620],
+            "kinds": [30623, 30620],
             "#h": [channel_id],
         })],
     )
     .await?;
 
-    Ok(events.iter().map(workflow_from_event).collect())
+    Ok(workflows_from_events(&events))
 }
 
 // Keep this aligned with the relay's aggregate explicit-`#h` request bound.
@@ -128,12 +129,12 @@ pub async fn get_channels_workflows(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkflowWire>, String> {
     let filter_batches = channel_workflow_filter_batches(channel_ids)?;
-    let mut seen_event_ids = HashSet::new();
+    let mut seen_workflow_ids = HashSet::new();
     let mut workflows = Vec::new();
 
     for filters in filter_batches {
         let events = query_relay(&state, &filters).await?;
-        append_unique_workflows(&mut workflows, &mut seen_event_ids, &events);
+        append_unique_workflows(&mut workflows, &mut seen_workflow_ids, &events);
     }
 
     Ok(workflows)
@@ -141,14 +142,13 @@ pub async fn get_channels_workflows(
 
 fn append_unique_workflows(
     workflows: &mut Vec<WorkflowWire>,
-    seen_event_ids: &mut HashSet<nostr::EventId>,
+    seen_workflow_ids: &mut HashSet<String>,
     events: &[nostr::Event],
 ) {
     workflows.extend(
-        events
-            .iter()
-            .filter(|event| seen_event_ids.insert(event.id))
-            .map(workflow_from_event),
+        workflows_from_events(events)
+            .into_iter()
+            .filter(|workflow| seen_workflow_ids.insert(workflow.id.clone())),
     );
 }
 
@@ -167,7 +167,7 @@ fn channel_workflow_filters(channel_ids: Vec<String>) -> Result<Vec<Value>, Stri
             let channel_id = uuid::Uuid::parse_str(channel_id.trim())
                 .map_err(|_| "invalid channel id".to_string())?;
             Ok(serde_json::json!({
-                "kinds": [30620],
+                "kinds": [30623, 30620],
                 "#h": [channel_id.to_string()],
             }))
         })
@@ -182,16 +182,15 @@ pub async fn get_workflow(
     let events = query_relay(
         &state,
         &[serde_json::json!({
-            "kinds": [30620],
-            "#d": [workflow_id],
-            "limit": 1
+            "kinds": [30623, 30620],
+            "#d": [workflow_id]
         })],
     )
     .await?;
 
-    events
-        .first()
-        .map(workflow_from_event)
+    workflows_from_events(&events)
+        .into_iter()
+        .next()
         .ok_or_else(|| "workflow not found".to_string())
 }
 
@@ -228,13 +227,7 @@ pub async fn create_workflow(
     // webhook-triggered workflows. Everything else in the save record is built
     // locally from the inputs we already hold — the relay's create response
     // only carries `{ workflow_id, webhook_secret? }`.
-    let webhook_secret = parse_command_response::<Value>(&result.message)
-        .ok()
-        .and_then(|v| {
-            v.get("webhook_secret")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
+    let webhook_secret = webhook_secret_from_message(&result.message);
 
     let now = now_secs();
     let workflow = workflow_record(
@@ -260,33 +253,36 @@ pub async fn update_workflow(
     expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
-    // Find the channel id (and creation time) from the existing workflow event
-    // so the new event carries the same `h` tag — kind:30620 is replaceable by
-    // (pubkey, d-tag).
+    // Resolve the relay's current projection so the command keeps the original
+    // workflow owner and channel coordinate.
     let prior = query_relay(
         &state,
         &[serde_json::json!({
-            "kinds": [30620],
-            "#d": [workflow_id.clone()],
-            "limit": 1
+            "kinds": [30623, 30620],
+            "#d": [workflow_id.clone()]
         })],
     )
     .await?;
 
-    let prior_event = prior
-        .first()
+    let prior_workflow = workflows_from_events(&prior)
+        .into_iter()
+        .next()
         .ok_or_else(|| "workflow not found".to_string())?;
-    if prior_event.id.to_hex() != expected_revision {
+    if prior_workflow.revision != expected_revision {
         return Err("workflow changed since it was loaded; refresh and try again".to_string());
     }
-    let channel_id = tag_value(prior_event, "h").ok_or_else(|| "workflow not found".to_string())?;
-    let created_at = prior_event.created_at.as_secs() as i64;
+    let channel_id = prior_workflow
+        .channel_id
+        .clone()
+        .ok_or_else(|| "workflow not found".to_string())?;
+    let created_at = prior_workflow.created_at;
 
-    let builder = events::build_workflow_definition(
+    let builder = events::build_workflow_update(
         &workflow_id,
         &channel_id,
+        &prior_workflow.owner_pubkey,
         &yaml_definition,
-        Some(&expected_revision),
+        &expected_revision,
     )?;
     let result = submit_event(builder, &state).await?;
 
@@ -295,7 +291,7 @@ pub async fn update_workflow(
         workflow_id,
         result.event_id,
         Some(channel_id),
-        current_pubkey_hex(&state)?,
+        prior_workflow.owner_pubkey,
         &yaml_definition,
         created_at,
         updated_at,
@@ -303,8 +299,7 @@ pub async fn update_workflow(
 
     Ok(WorkflowSaveWire {
         workflow,
-        // Updates never rotate the webhook secret.
-        webhook_secret: None,
+        webhook_secret: webhook_secret_from_message(&result.message),
     })
 }
 
@@ -313,7 +308,9 @@ pub async fn delete_workflow(
     workflow_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let builder = events::build_workflow_delete(&workflow_id, &current_pubkey_hex(&state)?)?;
+    let workflow = get_workflow(workflow_id.clone(), state.clone()).await?;
+    let builder =
+        events::build_workflow_delete(&workflow_id, &workflow.owner_pubkey, &workflow.revision)?;
     submit_event(builder, &state).await?;
     Ok(())
 }
@@ -450,16 +447,78 @@ fn workflow_record(
     }
 }
 
-/// Convert a kind:30620 workflow definition event into a [`WorkflowWire`].
+fn webhook_secret_from_message(message: &str) -> Option<String> {
+    parse_command_response::<Value>(message)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("webhook_secret")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+/// Fold relay-authored current state over legacy owner-authored definitions.
+/// A deleted state is authoritative and suppresses the legacy fallback.
+fn workflows_from_events(events: &[nostr::Event]) -> Vec<WorkflowWire> {
+    let mut state_heads: HashMap<String, &nostr::Event> = HashMap::new();
+    for event in events.iter().filter(|event| event.kind.as_u16() == 30623) {
+        let Some(workflow_id) = tag_value(event, "d") else {
+            continue;
+        };
+        match state_heads.get(&workflow_id) {
+            Some(current) if !workflow_state_is_newer(event, current) => {}
+            _ => {
+                state_heads.insert(workflow_id, event);
+            }
+        }
+    }
+    let projected_ids: HashSet<String> = state_heads.keys().cloned().collect();
+
+    events
+        .iter()
+        .filter(|event| {
+            let is_state = event.kind.as_u16() == 30623;
+            if is_state {
+                return tag_value(event, "d").is_some_and(|workflow_id| {
+                    state_heads
+                        .get(&workflow_id)
+                        .is_some_and(|head| head.id == event.id)
+                        && tag_value(event, "status").as_deref() != Some("deleted")
+                });
+            }
+            event.kind.as_u16() == 30620
+                && tag_value(event, "d").is_some_and(|id| !projected_ids.contains(&id))
+        })
+        .map(workflow_from_event)
+        .collect()
+}
+
+fn workflow_state_is_newer(candidate: &nostr::Event, current: &nostr::Event) -> bool {
+    candidate.created_at > current.created_at
+        || (candidate.created_at == current.created_at
+            && candidate.id.to_hex() < current.id.to_hex())
+}
+
+/// Convert a workflow definition or relay state event into a [`WorkflowWire`].
 fn workflow_from_event(ev: &nostr::Event) -> WorkflowWire {
     let id = tag_value(ev, "d").unwrap_or_default();
     let channel_id = tag_value(ev, "h");
     let ts = ev.created_at.as_secs() as i64;
+    let is_state = ev.kind.as_u16() == 30623;
     workflow_record(
         id,
-        ev.id.to_hex(),
+        if is_state {
+            tag_value(ev, "e").unwrap_or_else(|| ev.id.to_hex())
+        } else {
+            ev.id.to_hex()
+        },
         channel_id,
-        ev.pubkey.to_hex(),
+        if is_state {
+            tag_value(ev, "owner").unwrap_or_default()
+        } else {
+            ev.pubkey.to_hex()
+        },
         &ev.content,
         ts,
         ts,

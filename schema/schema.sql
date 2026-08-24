@@ -368,6 +368,9 @@ CREATE TABLE workflows (
     channel_id      UUID,
     definition      JSONB NOT NULL,
     definition_hash BYTEA NOT NULL,
+    revision_event_id BYTEA CHECK (
+        revision_event_id IS NULL OR octet_length(revision_event_id) = 32
+    ),
     status          workflow_status NOT NULL DEFAULT 'active',
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

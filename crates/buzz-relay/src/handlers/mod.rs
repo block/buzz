@@ -34,6 +34,8 @@ pub mod report;
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
+/// Relay-signed canonical workflow state projection.
+pub mod workflow_state;
 
 /// Extract an optional TTL (in seconds) from a Nostr event's `ttl` tag,
 /// applying the server-side override when configured.

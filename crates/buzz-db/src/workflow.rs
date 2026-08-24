@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -177,6 +177,8 @@ pub struct WorkflowRecord {
     pub definition: serde_json::Value,
     /// SHA-256 hash of the canonical definition JSON.
     pub definition_hash: Vec<u8>,
+    /// Accepted workflow request event id used for cross-author CAS.
+    pub revision_event_id: Option<Vec<u8>>,
     /// Current lifecycle status of the workflow definition.
     pub status: WorkflowStatus,
     /// Whether the workflow will fire on matching events.
@@ -357,6 +359,85 @@ pub async fn upsert_workflow(
     Ok(())
 }
 
+/// Insert a workflow with its first accepted request revision. Existing rows
+/// use compare-and-swap when `expected_revision` is present; a missing revision
+/// preserves the legacy same-author kind-30620 replacement path.
+///
+/// The transaction is supplied by the relay so the client request, workflow
+/// row, and relay-signed current-state projection can commit together.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_workflow_with_revision(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+    expected_revision: Option<&[u8]>,
+    next_revision: &[u8],
+) -> Result<WorkflowRecord> {
+    if expected_revision.is_some_and(|revision| revision.len() != 32) || next_revision.len() != 32 {
+        return Err(DbError::InvalidData(
+            "workflow revisions must be 32-byte event ids".to_string(),
+        ));
+    }
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO workflows
+            (community_id, id, name, owner_pubkey, channel_id, definition,
+             definition_hash, revision_event_id, status, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, 'active', TRUE)
+        ON CONFLICT (community_id, id) DO UPDATE
+        SET name = EXCLUDED.name,
+            definition = EXCLUDED.definition,
+            definition_hash = EXCLUDED.definition_hash,
+            revision_event_id = EXCLUDED.revision_event_id,
+            updated_at = NOW()
+        WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
+          AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
+          AND ($9::bytea IS NULL OR workflows.revision_event_id = $9)
+        RETURNING id, community_id, name, owner_pubkey, channel_id, definition,
+                  definition_hash, revision_event_id, status::text AS status,
+                  enabled, created_at, updated_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(name)
+    .bind(owner_pubkey)
+    .bind(channel_id)
+    .bind(definition_json)
+    .bind(definition_hash)
+    .bind(next_revision)
+    .bind(expected_revision)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(row) = row {
+        return row_to_workflow_record(row);
+    }
+
+    let existing: Option<(Vec<u8>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT owner_pubkey, channel_id FROM workflows WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match existing {
+        Some((owner, channel)) if owner == owner_pubkey && channel == channel_id => {
+            Err(DbError::WorkflowRevisionConflict(id))
+        }
+        Some(_) => Err(DbError::AccessDenied(format!(
+            "workflow {id} belongs to a different owner or channel"
+        ))),
+        None => Err(DbError::NotFound(format!("workflow {id}"))),
+    }
+}
+
 /// Fetch a single workflow by ID, scoped to its community.
 ///
 /// `workflows` is keyed `(community_id, id)`; the same workflow UUID can exist
@@ -370,7 +451,7 @@ pub async fn get_workflow(
 ) -> Result<WorkflowRecord> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, revision_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND id = $2
@@ -401,7 +482,7 @@ pub async fn list_channel_workflows(
 
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, revision_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND channel_id = $2
@@ -432,7 +513,7 @@ pub async fn list_enabled_channel_workflows(
 ) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, revision_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1
@@ -460,7 +541,7 @@ pub async fn list_enabled_channel_workflows(
 pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
+        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash, w.revision_event_id,
                w.status::text AS status, w.enabled, w.created_at, w.updated_at
         FROM workflows w
         JOIN communities c ON c.id = w.community_id
@@ -651,6 +732,61 @@ pub async fn update_workflow(
     Ok(())
 }
 
+/// Compare-and-swap a workflow definition using its accepted request revision.
+///
+/// Ownership and channel scope are intentionally not accepted as inputs: the
+/// update preserves both values already stored on the workflow row. The caller
+/// owns the surrounding transaction so it can persist the accepted request and
+/// relay-signed state event atomically with this mutation.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_workflow_if_revision(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    expected_revision: &[u8],
+    next_revision: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<WorkflowRecord> {
+    if expected_revision.len() != 32 || next_revision.len() != 32 {
+        return Err(DbError::InvalidData(
+            "workflow revisions must be 32-byte event ids".to_string(),
+        ));
+    }
+
+    let row = sqlx::query(
+        r#"
+        UPDATE workflows
+        SET name = $1,
+            definition = $2::jsonb,
+            definition_hash = $3,
+            revision_event_id = $4,
+            updated_at = NOW()
+        WHERE community_id = $5
+          AND id = $6
+          AND revision_event_id = $7
+        RETURNING id, community_id, name, owner_pubkey, channel_id, definition,
+                  definition_hash, revision_event_id, status::text AS status,
+                  enabled, created_at, updated_at
+        "#,
+    )
+    .bind(name)
+    .bind(definition_json)
+    .bind(definition_hash)
+    .bind(next_revision)
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(expected_revision)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    match row {
+        Some(row) => row_to_workflow_record(row),
+        None => Err(DbError::WorkflowRevisionConflict(workflow_id)),
+    }
+}
+
 /// Update a workflow's status (active -> disabled -> archived).
 ///
 /// NOTE: status gates trigger eligibility; see the cache-invalidation note on
@@ -774,20 +910,87 @@ pub async fn delete_workflow_for_owner(
     community_id: CommunityId,
     id: Uuid,
     owner_pubkey: &[u8],
+    expected_revision: Option<&[u8]>,
+    deletion_created_at_secs: i64,
 ) -> Result<Option<Uuid>> {
+    let mut tx = pool.begin().await?;
+    let channel_id = delete_workflow_for_owner_in_tx(
+        &mut tx,
+        community_id,
+        id,
+        owner_pubkey,
+        expected_revision,
+        deletion_created_at_secs,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(channel_id)
+}
+
+/// Delete a workflow with ownership and revision fencing inside the caller's
+/// transaction. This lets the relay commit the signed deletion request, domain
+/// mutation, and relay-authored tombstone as one unit.
+pub async fn delete_workflow_for_owner_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    id: Uuid,
+    owner_pubkey: &[u8],
+    expected_revision: Option<&[u8]>,
+    deletion_created_at_secs: i64,
+) -> Result<Option<Uuid>> {
+    if expected_revision.is_some_and(|revision| revision.len() != 32) {
+        return Err(DbError::InvalidData(
+            "workflow revisions must be 32-byte event ids".to_string(),
+        ));
+    }
     let row = sqlx::query(
-        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3 \
-         RETURNING channel_id",
+        r#"
+        DELETE FROM workflows AS workflow
+        WHERE workflow.community_id = $1
+          AND workflow.id = $2
+          AND workflow.owner_pubkey = $3
+          AND (
+                ($4::bytea IS NOT NULL AND workflow.revision_event_id = $4)
+                OR
+                ($4::bytea IS NULL AND (
+                    workflow.revision_event_id IS NULL
+                    OR EXISTS (
+                        SELECT 1 FROM events AS revision
+                        WHERE revision.community_id = workflow.community_id
+                          AND revision.id = workflow.revision_event_id
+                          AND revision.created_at <= to_timestamp($5)
+                    )
+                ))
+          )
+        RETURNING channel_id
+        "#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
     .bind(owner_pubkey)
-    .fetch_optional(pool)
+    .bind(expected_revision)
+    .bind(deletion_created_at_secs)
+    .fetch_optional(tx.as_mut())
     .await?;
 
     match row {
         Some(row) => Ok(row.try_get("channel_id")?),
-        None => Err(DbError::NotFound(format!("workflow {id}"))),
+        None => {
+            let existing_owner: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT owner_pubkey FROM workflows WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(id)
+            .fetch_optional(tx.as_mut())
+            .await?;
+            match existing_owner {
+                Some(owner) if owner == owner_pubkey => Err(DbError::WorkflowRevisionConflict(id)),
+                Some(_) => Err(DbError::AccessDenied(format!(
+                    "workflow {id} belongs to a different owner"
+                ))),
+                None => Err(DbError::NotFound(format!("workflow {id}"))),
+            }
+        }
     }
 }
 
@@ -1183,6 +1386,7 @@ fn row_to_workflow_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRecord> 
         channel_id,
         definition: row.try_get("definition")?,
         definition_hash: row.try_get("definition_hash")?,
+        revision_event_id: row.try_get("revision_event_id")?,
         status,
         enabled,
         created_at: row.try_get("created_at")?,
@@ -1247,7 +1451,7 @@ pub async fn find_by_owner_and_name(
 ) -> Result<Option<WorkflowRecord>> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, revision_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND owner_pubkey = $2 AND name = $3
@@ -1382,6 +1586,7 @@ mod tests {
             channel_id: Some(channel_id),
             definition: def.clone(),
             definition_hash: vec![0x01, 0x02, 0x03, 0x04],
+            revision_event_id: Some(vec![0x02; 32]),
             status: WorkflowStatus::Active,
             enabled: true,
             created_at: now,
@@ -1395,6 +1600,7 @@ mod tests {
         assert_eq!(record.channel_id, Some(channel_id));
         assert_eq!(record.definition, def);
         assert_eq!(record.definition_hash, vec![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(record.revision_event_id, Some(vec![0x02; 32]));
         assert_eq!(record.status, WorkflowStatus::Active);
         assert!(record.enabled);
     }
@@ -1412,6 +1618,7 @@ mod tests {
             channel_id: None,
             definition: serde_json::json!({}),
             definition_hash: vec![],
+            revision_event_id: None,
             status: WorkflowStatus::Active,
             enabled: true,
             created_at: now,
@@ -1434,6 +1641,7 @@ mod tests {
             channel_id: None,
             definition: serde_json::json!({}),
             definition_hash: vec![0xAA],
+            revision_event_id: None,
             status: WorkflowStatus::Active,
             enabled: true,
             created_at: now,
@@ -1463,6 +1671,7 @@ mod tests {
                 channel_id: None,
                 definition: serde_json::json!({}),
                 definition_hash: vec![],
+                revision_event_id: None,
                 status: status.clone(),
                 enabled: true,
                 created_at: now,
@@ -1483,6 +1692,7 @@ mod tests {
             channel_id: None,
             definition: serde_json::json!({}),
             definition_hash: vec![],
+            revision_event_id: None,
             status: WorkflowStatus::Active,
             enabled: false,
             created_at: now,
@@ -1774,7 +1984,7 @@ mod tests {
 
     use crate::user::ensure_user;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials from .env.example
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -1839,6 +2049,278 @@ mod tests {
         .await
         .expect("create workflow");
         (workflow_id, community)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_revision_update_is_compare_and_swap_and_preserves_ownership() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xa5; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = create_workflow(
+            &pool,
+            community,
+            Some(channel_id),
+            &owner,
+            "before",
+            r#"{"name":"before"}"#,
+            &[1; 32],
+        )
+        .await
+        .expect("create workflow");
+        let first_revision = vec![2; 32];
+        let next_revision = vec![3; 32];
+        sqlx::query(
+            "UPDATE workflows SET revision_event_id = $1 WHERE community_id = $2 AND id = $3",
+        )
+        .bind(&first_revision)
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("seed revision");
+
+        let mut tx = pool.begin().await.expect("begin update");
+        let updated = update_workflow_if_revision(
+            &mut tx,
+            community,
+            workflow_id,
+            &first_revision,
+            &next_revision,
+            "after",
+            r#"{"name":"after"}"#,
+            &[4; 32],
+        )
+        .await
+        .expect("matching revision updates");
+        tx.commit().await.expect("commit update");
+
+        assert_eq!(updated.owner_pubkey, owner);
+        assert_eq!(updated.channel_id, Some(channel_id));
+        assert_eq!(updated.revision_event_id, Some(next_revision.clone()));
+
+        let mut stale_tx = pool.begin().await.expect("begin stale update");
+        let stale = update_workflow_if_revision(
+            &mut stale_tx,
+            community,
+            workflow_id,
+            &first_revision,
+            &[5; 32],
+            "stale",
+            r#"{"name":"stale"}"#,
+            &[6; 32],
+        )
+        .await;
+        assert!(matches!(stale, Err(DbError::WorkflowRevisionConflict(id)) if id == workflow_id));
+        stale_tx.rollback().await.expect("rollback stale update");
+
+        let stored = get_workflow(&pool, community, workflow_id)
+            .await
+            .expect("load workflow");
+        assert_eq!(stored.name, "after");
+        assert_eq!(stored.owner_pubkey, vec![0xa5; 32]);
+        assert_eq!(stored.channel_id, Some(channel_id));
+        assert_eq!(stored.revision_event_id, Some(next_revision));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_revision_upsert_sets_initial_accepted_request() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xb5; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let revision = vec![0xc5; 32];
+        let mut tx = pool.begin().await.expect("begin create");
+
+        let created = upsert_workflow_with_revision(
+            &mut tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "created",
+            r#"{"name":"created"}"#,
+            &[0xd5; 32],
+            None,
+            &revision,
+        )
+        .await
+        .expect("create with initial revision");
+        tx.commit().await.expect("commit create");
+
+        assert_eq!(created.owner_pubkey, owner);
+        assert_eq!(created.channel_id, Some(channel_id));
+        assert_eq!(created.revision_event_id, Some(revision));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_revision_upsert_accepts_legacy_tagless_update() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xe5; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let first_revision = vec![0xf5; 32];
+        let next_revision = vec![0xa6; 32];
+
+        let mut create_tx = pool.begin().await.expect("begin create");
+        upsert_workflow_with_revision(
+            &mut create_tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "before",
+            r#"{"name":"before"}"#,
+            &[0xb6; 32],
+            None,
+            &first_revision,
+        )
+        .await
+        .expect("create workflow");
+        create_tx.commit().await.expect("commit create");
+
+        let mut update_tx = pool.begin().await.expect("begin legacy update");
+        let updated = upsert_workflow_with_revision(
+            &mut update_tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "after",
+            r#"{"name":"after"}"#,
+            &[0xc6; 32],
+            None,
+            &next_revision,
+        )
+        .await
+        .expect("tagless same-author update remains compatible");
+        update_tx.commit().await.expect("commit legacy update");
+
+        assert_eq!(updated.name, "after");
+        assert_eq!(updated.owner_pubkey, owner);
+        assert_eq!(updated.channel_id, Some(channel_id));
+        assert_eq!(updated.revision_event_id, Some(next_revision));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_delete_rejects_stale_revision() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xd6; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let current_revision = vec![0xe6; 32];
+        let mut tx = pool.begin().await.expect("begin create");
+        upsert_workflow_with_revision(
+            &mut tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "current",
+            r#"{"name":"current"}"#,
+            &[0xf6; 32],
+            None,
+            &current_revision,
+        )
+        .await
+        .expect("create workflow");
+        tx.commit().await.expect("commit create");
+
+        let stale = delete_workflow_for_owner(
+            &pool,
+            community,
+            workflow_id,
+            &owner,
+            Some(&[0xa7; 32]),
+            chrono::Utc::now().timestamp(),
+        )
+        .await;
+        assert!(matches!(stale, Err(DbError::WorkflowRevisionConflict(id)) if id == workflow_id));
+        assert!(get_workflow(&pool, community, workflow_id).await.is_ok());
+
+        assert_eq!(
+            delete_workflow_for_owner(
+                &pool,
+                community,
+                workflow_id,
+                &owner,
+                Some(&current_revision),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+            .expect("matching revision deletes"),
+            Some(channel_id)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_delete_rolls_back_with_enclosing_transaction() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xb7; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let revision = vec![0xc7; 32];
+        let mut create_tx = pool.begin().await.expect("begin create");
+        upsert_workflow_with_revision(
+            &mut create_tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "rollback",
+            r#"{"name":"rollback"}"#,
+            &[0xd7; 32],
+            None,
+            &revision,
+        )
+        .await
+        .expect("create workflow");
+        create_tx.commit().await.expect("commit create");
+
+        let mut delete_tx = pool.begin().await.expect("begin delete");
+        delete_workflow_for_owner_in_tx(
+            &mut delete_tx,
+            community,
+            workflow_id,
+            &owner,
+            Some(&revision),
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+        .expect("delete inside transaction");
+        delete_tx.rollback().await.expect("rollback delete");
+
+        assert_eq!(
+            get_workflow(&pool, community, workflow_id)
+                .await
+                .expect("rollback preserves workflow")
+                .revision_event_id,
+            Some(revision)
+        );
     }
 
     /// Confinement: a duplicate workflow UUID existing in both community A and
