@@ -100,8 +100,9 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    let http_client = state.http_client.current();
     if let Some(models) = discover_openrouter_models(
-        &state.http_client,
+        &http_client,
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
@@ -112,7 +113,7 @@ pub async fn get_agent_models(
     }
 
     if let Some(models) = discover_openai_compatible_models(
-        &state.http_client,
+        &http_client,
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
@@ -123,7 +124,7 @@ pub async fn get_agent_models(
     }
 
     if let Some(models) = discover_anthropic_models(
-        &state.http_client,
+        &http_client,
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
@@ -134,7 +135,7 @@ pub async fn get_agent_models(
     }
 
     if let Some(models) = discover_databricks_models(
-        &state.http_client,
+        &http_client,
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
@@ -238,6 +239,7 @@ pub async fn discover_agent_models(
         runtime_meta.and_then(|meta| meta.provider_env_var),
         &merged_env,
     );
+    let http_client = state.http_client.current();
 
     // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
     // client endpoint is started only after a live target is selected.
@@ -285,32 +287,26 @@ pub async fn discover_agent_models(
     }
 
     if let Some(models) =
-        discover_openrouter_models(&state.http_client, &effective_provider, &merged_env, None)
-            .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) = discover_openai_compatible_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        None,
-    )
-    .await?
+        discover_openrouter_models(&http_client, &effective_provider, &merged_env, None).await?
     {
         return Ok(models);
     }
 
     if let Some(models) =
-        discover_anthropic_models(&state.http_client, &effective_provider, &merged_env, None)
+        discover_openai_compatible_models(&http_client, &effective_provider, &merged_env, None)
             .await?
     {
         return Ok(models);
     }
 
+    if let Some(models) =
+        discover_anthropic_models(&http_client, &effective_provider, &merged_env, None).await?
+    {
+        return Ok(models);
+    }
+
     if let Some(models) = discover_databricks_models(
-        &state.http_client,
+        &http_client,
         &effective_provider,
         &merged_env,
         None,

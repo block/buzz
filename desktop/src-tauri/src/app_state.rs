@@ -16,12 +16,16 @@ pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, Resolve
 use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 
+#[path = "app_http_client.rs"]
+mod http_client;
+pub(crate) use http_client::{build_app_http_client, AppHttpClient};
+
 pub struct AppState {
     pub keys: Mutex<Keys>,
     /// Durable backend holding `keys`. Updated after the key write and before
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
-    pub http_client: reqwest::Client,
+    pub(crate) http_client: AppHttpClient,
     /// A no-redirect client for authenticated relay media fetches (download,
     /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
     /// origin, but the app-wide `http_client` follows redirects by default, so
@@ -192,12 +196,7 @@ pub fn build_app_state() -> AppState {
     AppState {
         keys: Mutex::new(keys),
         identity_storage: AtomicU8::new(identity_storage as u8),
-        http_client: reqwest::Client::builder()
-            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(1)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new()),
+        http_client: AppHttpClient::new(build_app_http_client()),
         media_fetch_client: build_media_fetch_client().expect(
             "media_fetch_client must build with redirect::Policy::none(); a \
              redirect-following fallback would forward the minted media auth \
