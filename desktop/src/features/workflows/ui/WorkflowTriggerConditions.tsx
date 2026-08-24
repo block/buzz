@@ -3,8 +3,11 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { WorkflowAuthorPicker } from "./WorkflowAuthorPicker";
 import { WorkflowEmojiField } from "./WorkflowEmojiField";
+import { useWorkflowAuthorPresentation } from "./useWorkflowAuthorPresentation";
 import { FieldLabel } from "./workflowFormPrimitives";
 import {
   buildConditionExpressions,
@@ -45,6 +48,10 @@ function compact(value: string): string {
     : `${trimmed.slice(0, 11)}…${trimmed.slice(-6)}`;
 }
 
+function fieldUsesFullHeightPicker(field: string): boolean {
+  return field === "trigger_author" || field === "trigger_message_id";
+}
+
 function fieldPlaceholder(field: string): string {
   if (field === "trigger_author") return "64-character hex pubkey";
   if (field === "trigger_message_id") return "64-character hex event ID";
@@ -58,6 +65,7 @@ export function WorkflowTriggerConditions({
   onConditionDraftsChange,
   triggerType,
   value,
+  workflowChannelId,
 }: {
   conditionDrafts: ParsedConditionExpression[] | null;
   disabled?: boolean;
@@ -68,6 +76,7 @@ export function WorkflowTriggerConditions({
     "message_posted" | "diff_posted" | "reaction_added"
   >;
   value: string;
+  workflowChannelId?: string | null;
 }) {
   const parsedValue = React.useMemo(
     () => parseConditionExpressions(value, triggerType),
@@ -81,6 +90,15 @@ export function WorkflowTriggerConditions({
   );
   const conditions = conditionDrafts ?? parsedValue ?? [];
   const localValue = React.useRef(value);
+  const authorCondition = conditions.find(
+    ({ field }) => field === "trigger_author",
+  );
+  const authorPresentation = useWorkflowAuthorPresentation({
+    filter: authorCondition
+      ? buildConditionExpressions([authorCondition])
+      : undefined,
+    on: triggerType,
+  });
 
   React.useEffect(() => {
     if (value === localValue.current) return;
@@ -109,10 +127,16 @@ export function WorkflowTriggerConditions({
   };
 
   const fields = conditionFieldsForTrigger(triggerType);
+  const fullHeightPickerExpanded =
+    mode === "basic" && fieldUsesFullHeightPicker(expandedField ?? "");
 
   return (
     <Tabs
-      className="space-y-3"
+      className={cn(
+        "space-y-3",
+        fullHeightPickerExpanded &&
+          "flex h-full min-h-0 flex-col space-y-0 gap-3",
+      )}
       onValueChange={(next) => setMode(next as "basic" | "advanced")}
       value={mode}
     >
@@ -168,7 +192,12 @@ export function WorkflowTriggerConditions({
           </button>
         </div>
       ) : (
-        <div className="divide-y divide-border/50">
+        <div
+          className={cn(
+            "divide-y divide-border/50",
+            fullHeightPickerExpanded && "flex min-h-0 flex-1 flex-col",
+          )}
+        >
           {fields.map((field) => {
             const existing = conditions.find(
               (condition) => condition.field === field.value,
@@ -179,8 +208,23 @@ export function WorkflowTriggerConditions({
             const summary = existing
               ? `${OPERATOR_LABELS[condition.operator]}${condition.value ? ` ${compact(condition.value)}` : ""}`
               : "Any";
+            const authorSummary =
+              existing &&
+              field.value === "trigger_author" &&
+              authorPresentation.pubkey &&
+              authorPresentation.label
+                ? authorPresentation.label
+                : null;
             return (
-              <div className={cn(expanded && "pb-4")} key={field.value}>
+              <div
+                className={cn(
+                  expanded && "pb-4",
+                  expanded &&
+                    fieldUsesFullHeightPicker(field.value) &&
+                    "flex min-h-0 flex-1 flex-col",
+                )}
+                key={field.value}
+              >
                 <button
                   aria-expanded={expanded}
                   className="flex min-h-12 w-full items-center gap-3 py-3 text-left transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-50"
@@ -193,9 +237,22 @@ export function WorkflowTriggerConditions({
                   <span className="min-w-0 flex-1 truncate text-base font-medium">
                     {field.label}
                   </span>
-                  <span className="max-w-44 truncate font-mono text-xs text-muted-foreground">
-                    {summary}
-                  </span>
+                  {authorSummary ? (
+                    <span className="flex min-w-0 max-w-44 items-center gap-1.5 text-xs text-muted-foreground">
+                      <UserAvatar
+                        avatarUrl={authorPresentation.avatarUrl}
+                        className="h-4 w-4 shrink-0"
+                        displayName={authorSummary}
+                        fallbackDelayMs={0}
+                        size="xs"
+                      />
+                      <span className="truncate">{authorSummary}</span>
+                    </span>
+                  ) : (
+                    <span className="max-w-44 truncate font-mono text-xs text-muted-foreground">
+                      {summary}
+                    </span>
+                  )}
                   <ChevronRight
                     className={cn(
                       "h-4 w-4 shrink-0 text-muted-foreground/70 transition-transform duration-150 motion-reduce:transition-none",
@@ -204,7 +261,13 @@ export function WorkflowTriggerConditions({
                   />
                 </button>
                 {expanded ? (
-                  <div className="animate-in space-y-3 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
+                  <div
+                    className={cn(
+                      "animate-in space-y-3 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none",
+                      fieldUsesFullHeightPicker(field.value) &&
+                        "flex min-h-0 flex-1 flex-col space-y-0 gap-3",
+                    )}
+                  >
                     <fieldset>
                       <legend className="sr-only">Match</legend>
                       <div className="grid grid-cols-2 gap-2.5">
@@ -258,6 +321,27 @@ export function WorkflowTriggerConditions({
                           }
                           value={condition.value}
                         />
+                      ) : field.value === "trigger_author" ? (
+                        <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+                          <FieldLabel htmlFor="wf-trigger-author-value">
+                            {field.label}
+                          </FieldLabel>
+                          <WorkflowAuthorPicker
+                            channelId={workflowChannelId}
+                            disabled={disabled}
+                            id="wf-trigger-author-value"
+                            onEscape={() => setExpandedField(null)}
+                            onChange={(pubkey) =>
+                              updateConditions([
+                                ...conditions.filter(
+                                  (item) => item.field !== field.value,
+                                ),
+                                { ...condition, value: pubkey },
+                              ])
+                            }
+                            value={condition.value}
+                          />
+                        </div>
                       ) : (
                         <div className="space-y-1.5">
                           <FieldLabel

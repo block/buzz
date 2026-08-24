@@ -432,25 +432,42 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await openTriggerInspector(dialog);
 
   await dialog.getByRole("button", { name: "Author pubkey" }).click();
-  await dialog.getByLabel("Author pubkey").fill("not-hex");
-  await expect(
-    dialog.getByText("Enter a 64-character hex pubkey."),
-  ).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
+  const authorResults = dialog.getByTestId("workflow-author-picker-results");
   await expect
     .poll(() =>
-      page.evaluate(
-        () =>
-          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
-            (call) => call.command === "create_workflow",
-          ).length,
-      ),
+      authorResults.evaluate((results) => {
+        const template = results.querySelector<HTMLElement>("[role=option]");
+        if (!template) return false;
+        for (let index = 0; index < 20; index += 1) {
+          const clone = template.cloneNode(true) as HTMLElement;
+          clone.dataset.scrollFixture = "true";
+          clone.removeAttribute("id");
+          results.append(clone);
+        }
+        return results.scrollHeight > results.clientHeight;
+      }),
     )
-    .toBe(0);
-  await dialog.getByLabel("Author pubkey").fill(author);
+    .toBe(true);
+  await authorResults.hover();
+  await page.mouse.wheel(0, 240);
+  await expect
+    .poll(() => authorResults.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  await authorResults.evaluate((results) => {
+    for (const fixture of results.querySelectorAll("[data-scroll-fixture]")) {
+      fixture.remove();
+    }
+    results.scrollTop = 0;
+  });
+  const authorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await authorSearch.fill(author);
+  await authorSearch.press("Enter");
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
-  await dialog.getByLabel("Author pubkey").fill("still-not-hex");
-  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const correctionEditor = dialog.getByRole("textbox", {
     name: "Workflow YAML",
@@ -462,8 +479,12 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
   await dialog.getByRole("button", { name: "Author pubkey" }).click();
-  await expect(dialog.getByLabel("Author pubkey")).toHaveValue("");
-  await dialog.getByLabel("Author pubkey").fill(author);
+  await dialog
+    .getByRole("combobox", { name: "Search authors or paste a public key" })
+    .fill(author);
+  await dialog
+    .getByRole("combobox", { name: "Search authors or paste a public key" })
+    .press("Enter");
   await dialog
     .getByRole("group", { name: "Match" })
     .getByRole("button", { name: "is not", exact: true })
@@ -487,7 +508,9 @@ test("round-trips manual author and reaction message IDs through save and reopen
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
   await reopened.getByRole("button", { name: "Author pubkey" }).click();
-  await expect(reopened.getByLabel("Author pubkey")).toHaveValue(author);
+  await expect(
+    reopened.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toHaveAttribute("aria-selected", "true");
   await reopened.getByRole("button", { name: "Message event ID" }).click();
   await expect(reopened.getByLabel("Message event ID")).toHaveValue(messageId);
   await reopened.getByRole("tab", { name: "YAML" }).click();

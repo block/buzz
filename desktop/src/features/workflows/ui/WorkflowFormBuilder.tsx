@@ -30,8 +30,9 @@ import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
 import { reactionConditionValue } from "./workflowReactionCondition";
 import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
+import { WorkflowRichTriggerDescription } from "./WorkflowRichTriggerDescription";
+import { useWorkflowAuthorPresentation } from "./useWorkflowAuthorPresentation";
 import { workflowStepDescription } from "./workflowStepDescription";
-import { workflowTriggerDescription } from "./workflowTriggerDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
 import {
@@ -67,12 +68,14 @@ function TriggerConfigFields({
   trigger,
   onConditionDraftsChange,
   onUpdate,
+  workflowChannelId,
 }: {
   conditionDrafts: ParsedConditionExpression[] | null;
   disabled?: boolean;
   trigger: TriggerConfig;
   onConditionDraftsChange: (drafts: ParsedConditionExpression[] | null) => void;
   onUpdate: (trigger: TriggerConfig) => void;
+  workflowChannelId?: string | null;
 }) {
   switch (trigger.on) {
     case "message_posted":
@@ -94,6 +97,7 @@ function TriggerConfigFields({
           }
           triggerType={trigger.on}
           value={reactionConditionValue(trigger)}
+          workflowChannelId={workflowChannelId}
         />
       );
     case "webhook":
@@ -220,7 +224,7 @@ function WorkflowNode({
   terminal,
   title,
 }: {
-  description: string;
+  description: React.ReactNode;
   disabled?: boolean;
   icon?: React.ReactNode;
   label: string;
@@ -614,10 +618,18 @@ export const WorkflowFormBuilder = React.forwardRef<
       )
       ?.value.trim();
   }, [formState.trigger]);
-  const triggerDescription = workflowTriggerDescription(formState.trigger);
-  const visibleTriggerDescription = triggerEmoji
-    ? "Reaction added"
-    : triggerDescription;
+  const authorPresentation = useWorkflowAuthorPresentation(formState.trigger);
+  const triggerDescription = authorPresentation.description;
+  const visibleTriggerDescription = triggerEmoji ? (
+    "Reaction added"
+  ) : (
+    <WorkflowRichTriggerDescription
+      avatarUrl={authorPresentation.avatarUrl}
+      description={triggerDescription}
+      label={authorPresentation.label}
+      loading={authorPresentation.loading}
+    />
+  );
   const TriggerIcon = {
     diff_posted: GitPullRequest,
     message_posted: MessageSquare,
@@ -889,6 +901,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                           >
                             <motion.div
                               animate="center"
+                              className="h-full min-h-0"
                               custom={selectionDirection}
                               exit="exit"
                               initial="enter"
@@ -905,7 +918,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                               variants={inspectorContentVariants}
                             >
                               {selectedNode.type === "trigger" ? (
-                                <div>
+                                <div className="h-full min-h-0">
                                   <TriggerConfigFields
                                     conditionDrafts={triggerConditionDrafts}
                                     disabled={disabled}
@@ -916,6 +929,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                                       updateFormState({ ...formState, trigger })
                                     }
                                     trigger={formState.trigger}
+                                    workflowChannelId={workflowChannelId}
                                   />
                                 </div>
                               ) : selectedStep ? (
