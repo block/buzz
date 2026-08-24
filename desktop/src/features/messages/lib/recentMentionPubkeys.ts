@@ -1,15 +1,21 @@
 import type { TimelineMessage } from "@/features/messages/types";
+import type { ChannelType } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 /**
  * Return explicitly addressed pubkeys from the loaded channel window, newest
- * first. Desktop-authored events may include the message author as a structural
+ * first. DM `p` tags fan out to every participant and cannot distinguish inline
+ * mentions, so DMs deliberately fall back to the non-recency ranking ladder.
+ * Desktop-authored stream events may include the message author as a structural
  * `p` tag, while SDK-authored events omit it. Filter by author identity rather
  * than tag position so an SDK mention of a reply target remains eligible.
  */
 export function getRecentMentionPubkeys(
   messages: readonly TimelineMessage[],
+  channelType?: ChannelType | null,
 ): string[] {
+  if (channelType === "dm") return [];
+
   const seen = new Set<string>();
   const recent: string[] = [];
 

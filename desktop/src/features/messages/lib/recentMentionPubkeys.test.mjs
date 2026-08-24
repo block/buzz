@@ -81,6 +81,22 @@ test("keeps an sdk-shaped reply mention that matches the parent author", () => {
   );
 });
 
+test("ignores DM participant fan-out tags", () => {
+  assert.deepEqual(
+    getRecentMentionPubkeys(
+      [
+        message(1, [
+          ["p", AUTHOR],
+          ["p", LATEST_FIRST],
+          ["p", LATEST_LAST],
+        ]),
+      ],
+      "dm",
+    ),
+    [],
+  );
+});
+
 test("deduplicates repeated mentions at their newest position", () => {
   assert.deepEqual(
     getRecentMentionPubkeys([
