@@ -24,6 +24,7 @@ import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
@@ -1508,6 +1509,61 @@ void main() {
     );
   });
 
+  testWidgets('browse action exposes retry when refresh supersedes loading', (
+    tester,
+  ) async {
+    final joinable = Channel(
+      id: 'superseded-directory',
+      name: 'community-help',
+      channelType: 'stream',
+      visibility: 'open',
+      description: 'Help from the community',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 0,
+    );
+    late _SupersededDirectoryNotifier notifier;
+    await tester.pumpWidget(
+      buildTestable(
+        disableAnimations: true,
+        overrides: [
+          channelsProvider.overrideWith(
+            () => notifier = _SupersededDirectoryNotifier(
+              initialChannels: testChannels,
+              retriedChannels: [...testChannels, joinable],
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const Key('quick-action-browse-channels-card')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+
+    notifier.supersedeLoadingDirectory();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BuzzLoadingIndicator), findsNothing);
+    expect(find.text('Couldn’t load open channels.'), findsOneWidget);
+    expect(find.byKey(const Key('browse-channels-retry')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('browse-channels-retry')));
+    await tester.pumpAndSettle();
+
+    expect(notifier.retryCount, 1);
+    expect(
+      find.byKey(const Key('browse-channel-superseded-directory')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('browse action scrolls and joins an offscreen channel', (
     tester,
   ) async {
@@ -2312,6 +2368,46 @@ class _RetryingDirectoryNotifier extends ChannelsNotifier {
         .read(channelDirectoryLoadStatusProvider.notifier)
         .markLoading(_activeDirectoryScope(ref));
     await Future<void>.delayed(Duration.zero);
+    state = AsyncData(retriedChannels);
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markLoaded(_activeDirectoryScope(ref));
+  }
+}
+
+class _SupersededDirectoryNotifier extends ChannelsNotifier {
+  _SupersededDirectoryNotifier({
+    required this.initialChannels,
+    required this.retriedChannels,
+  });
+
+  final List<Channel> initialChannels;
+  final List<Channel> retriedChannels;
+  final _directoryCompletion = Completer<void>();
+  int retryCount = 0;
+
+  @override
+  Future<List<Channel>> build() async => initialChannels;
+
+  @override
+  Future<void> ensureDirectoryLoaded() async {
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markLoading(_activeDirectoryScope(ref));
+    await _directoryCompletion.future;
+  }
+
+  /// Mirrors an ordinary refresh invalidating the active directory request.
+  void supersedeLoadingDirectory() {
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markError(_activeDirectoryScope(ref));
+    _directoryCompletion.complete();
+  }
+
+  @override
+  Future<void> retryDirectory() async {
+    retryCount++;
     state = AsyncData(retriedChannels);
     ref
         .read(channelDirectoryLoadStatusProvider.notifier)
