@@ -28,7 +28,7 @@ import {
   getWorkflowTriggerType,
 } from "./workflowDefinition";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
-import { useWorkflowAuthorPresentation } from "./useWorkflowAuthorPresentation";
+import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation";
 
 type WorkflowCardProps = {
   workflow: Workflow;
@@ -204,12 +204,13 @@ export function WorkflowCard({
     React.useState(0);
   const isEnabled = getWorkflowEnabled(workflow.definition);
   const configuredTrigger = getWorkflowTriggerConfig(workflow.definition);
-  const authorPresentation = useWorkflowAuthorPresentation(
+  const triggerPresentation = useWorkflowTriggerPresentation(
     configuredTrigger ?? { on: "message_posted" },
+    workflow.channelId,
   );
   const cardLabel = getWorkflowCardLabel(workflow.definition, {
     triggerDescription: configuredTrigger
-      ? authorPresentation.description
+      ? triggerPresentation.description
       : undefined,
   });
   const triggerType = getWorkflowTriggerType(workflow.definition);

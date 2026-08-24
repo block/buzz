@@ -463,6 +463,9 @@ test("round-trips manual author and reaction message IDs through save and reopen
     name: "Search authors or paste a public key",
   });
   await authorSearch.fill(author);
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toBeVisible();
   await authorSearch.press("Enter");
   await expect(
     dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
@@ -479,19 +482,28 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
   await dialog.getByRole("button", { name: "Author pubkey" }).click();
-  await dialog
-    .getByRole("combobox", { name: "Search authors or paste a public key" })
-    .fill(author);
-  await dialog
-    .getByRole("combobox", { name: "Search authors or paste a public key" })
-    .press("Enter");
+  const correctedAuthorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await correctedAuthorSearch.fill(author);
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toBeVisible();
+  await correctedAuthorSearch.press("Enter");
   await dialog
     .getByRole("group", { name: "Match" })
     .getByRole("button", { name: "is not", exact: true })
     .click();
 
   await dialog.getByRole("button", { name: "Message event ID" }).click();
-  await dialog.getByLabel("Message event ID").fill(messageId);
+  const messageSearch = dialog.getByRole("combobox", {
+    name: "Search messages or paste a message ID",
+  });
+  await messageSearch.fill(messageId);
+  await messageSearch.press("Enter");
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(messageId.slice(0, 12)) }),
+  ).toHaveAttribute("aria-selected", "true");
 
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
@@ -512,7 +524,11 @@ test("round-trips manual author and reaction message IDs through save and reopen
     reopened.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
   ).toHaveAttribute("aria-selected", "true");
   await reopened.getByRole("button", { name: "Message event ID" }).click();
-  await expect(reopened.getByLabel("Message event ID")).toHaveValue(messageId);
+  await expect(
+    reopened.getByRole("option", {
+      name: new RegExp(messageId.slice(0, 12)),
+    }),
+  ).toHaveAttribute("aria-selected", "true");
   await reopened.getByRole("tab", { name: "YAML" }).click();
   definition = parseYaml(
     await reopened.getByRole("textbox", { name: "Workflow YAML" }).inputValue(),

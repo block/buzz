@@ -7,7 +7,8 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { WorkflowAuthorPicker } from "./WorkflowAuthorPicker";
 import { WorkflowEmojiField } from "./WorkflowEmojiField";
-import { useWorkflowAuthorPresentation } from "./useWorkflowAuthorPresentation";
+import { WorkflowMessagePicker } from "./WorkflowMessagePicker";
+import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation";
 import { FieldLabel } from "./workflowFormPrimitives";
 import {
   buildConditionExpressions,
@@ -90,15 +91,15 @@ export function WorkflowTriggerConditions({
   );
   const conditions = conditionDrafts ?? parsedValue ?? [];
   const localValue = React.useRef(value);
-  const authorCondition = conditions.find(
-    ({ field }) => field === "trigger_author",
+  const triggerPresentation = useWorkflowTriggerPresentation(
+    {
+      filter: conditions.length
+        ? buildConditionExpressions(conditions)
+        : undefined,
+      on: triggerType,
+    },
+    workflowChannelId,
   );
-  const authorPresentation = useWorkflowAuthorPresentation({
-    filter: authorCondition
-      ? buildConditionExpressions([authorCondition])
-      : undefined,
-    on: triggerType,
-  });
 
   React.useEffect(() => {
     if (value === localValue.current) return;
@@ -211,9 +212,18 @@ export function WorkflowTriggerConditions({
             const authorSummary =
               existing &&
               field.value === "trigger_author" &&
-              authorPresentation.pubkey &&
-              authorPresentation.label
-                ? authorPresentation.label
+              triggerPresentation.pubkey &&
+              triggerPresentation.label
+                ? triggerPresentation.label
+                : null;
+            const messageSummary =
+              existing &&
+              field.value === "trigger_message_id" &&
+              triggerPresentation.messageId &&
+              triggerPresentation.messageLabel
+                ? triggerPresentation.messageLabel
+                    .trim()
+                    .replaceAll(/\s+/g, " ")
                 : null;
             return (
               <div
@@ -240,13 +250,17 @@ export function WorkflowTriggerConditions({
                   {authorSummary ? (
                     <span className="flex min-w-0 max-w-44 items-center gap-1.5 text-xs text-muted-foreground">
                       <UserAvatar
-                        avatarUrl={authorPresentation.avatarUrl}
+                        avatarUrl={triggerPresentation.avatarUrl}
                         className="h-4 w-4 shrink-0"
                         displayName={authorSummary}
                         fallbackDelayMs={0}
                         size="xs"
                       />
                       <span className="truncate">{authorSummary}</span>
+                    </span>
+                  ) : messageSummary ? (
+                    <span className="max-w-44 truncate text-xs text-muted-foreground">
+                      “{messageSummary}”
                     </span>
                   ) : (
                     <span className="max-w-44 truncate font-mono text-xs text-muted-foreground">
@@ -337,6 +351,28 @@ export function WorkflowTriggerConditions({
                                   (item) => item.field !== field.value,
                                 ),
                                 { ...condition, value: pubkey },
+                              ])
+                            }
+                            value={condition.value}
+                          />
+                        </div>
+                      ) : field.value === "trigger_message_id" ? (
+                        <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+                          <FieldLabel htmlFor="wf-trigger-message-id-value">
+                            {field.label}
+                          </FieldLabel>
+                          <WorkflowMessagePicker
+                            channelId={workflowChannelId}
+                            disabled={disabled}
+                            id="wf-trigger-message-id-value"
+                            key={workflowChannelId ?? "unscoped"}
+                            onEscape={() => setExpandedField(null)}
+                            onChange={(messageId) =>
+                              updateConditions([
+                                ...conditions.filter(
+                                  (item) => item.field !== field.value,
+                                ),
+                                { ...condition, value: messageId },
                               ])
                             }
                             value={condition.value}

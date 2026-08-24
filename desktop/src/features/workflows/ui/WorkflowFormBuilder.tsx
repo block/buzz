@@ -31,7 +31,7 @@ import { Textarea } from "@/shared/ui/textarea";
 import { reactionConditionValue } from "./workflowReactionCondition";
 import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
 import { WorkflowRichTriggerDescription } from "./WorkflowRichTriggerDescription";
-import { useWorkflowAuthorPresentation } from "./useWorkflowAuthorPresentation";
+import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation";
 import { workflowStepDescription } from "./workflowStepDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
@@ -618,16 +618,19 @@ export const WorkflowFormBuilder = React.forwardRef<
       )
       ?.value.trim();
   }, [formState.trigger]);
-  const authorPresentation = useWorkflowAuthorPresentation(formState.trigger);
-  const triggerDescription = authorPresentation.description;
+  const triggerPresentation = useWorkflowTriggerPresentation(
+    formState.trigger,
+    workflowChannelId,
+  );
+  const triggerDescription = triggerPresentation.description;
   const visibleTriggerDescription = triggerEmoji ? (
     "Reaction added"
   ) : (
     <WorkflowRichTriggerDescription
-      avatarUrl={authorPresentation.avatarUrl}
+      avatarUrl={triggerPresentation.avatarUrl}
       description={triggerDescription}
-      label={authorPresentation.label}
-      loading={authorPresentation.loading}
+      label={triggerPresentation.label}
+      loading={triggerPresentation.loading}
     />
   );
   const TriggerIcon = {
