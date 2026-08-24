@@ -55,8 +55,10 @@ export type OverviewContextPresentation = {
 type OverviewContextInput = {
   filter: ProjectsFilter;
   issues: ProjectIssue[];
+  projectReadModels?: Project[];
   projects: Project[];
   pullRequests: ProjectPullRequest[];
+  repositorySummaries?: Record<string, ProjectActivitySummary>;
   summaries?: Record<string, ProjectActivitySummary>;
 };
 
@@ -193,12 +195,15 @@ function overviewContextPeople({
   issues,
   projects,
   pullRequests,
+  repositorySummaries,
   summaries,
 }: OverviewContextInput) {
   const counts = workspaceActorCounts(issues, pullRequests);
   const commitAuthors = uniquePubkeys([
     ...peopleWithKind(counts, "commits"),
-    ...latestCommitAuthors(summaries),
+    ...latestCommitAuthors(
+      filter === "repositories" ? repositorySummaries : summaries,
+    ),
   ]);
 
   if (filter === "issues") return peopleWithKind(counts, "tasks");
@@ -215,12 +220,20 @@ function overviewContextPeople({
 export function projectsOverviewContext(
   input: OverviewContextInput,
 ): OverviewContextPresentation {
-  const { filter, issues, projects, pullRequests, summaries } = input;
+  const {
+    filter,
+    issues,
+    projectReadModels,
+    projects,
+    pullRequests,
+    summaries,
+  } = input;
+  const readModels = projectReadModels ?? projects;
   const summaryCounts = summaryWorkItemCounts(projects, summaries);
   const tasks = resolvedTaskActivity(issues, summaryCounts.issues);
   const reviews = resolvedReviewActivity(pullRequests, summaryCounts.prs);
-  const channelCount = uniqueProjectRelatedChannelCount(projects);
-  const repositories = repositoryCount(projects);
+  const channelCount = uniqueProjectRelatedChannelCount(readModels);
+  const repositories = repositoryCount(readModels);
   const people = overviewContextPeople(input);
 
   if (filter === "repositories") {

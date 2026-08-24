@@ -141,6 +141,62 @@ test("channels pod titles itself and omits a primary create action", () => {
   );
 });
 
+test("repository-only read models count toward repository and channel context", () => {
+  const explicitProject = makeProject();
+  const repositoryOnly = makeProject({
+    id: "repository-design-system",
+    name: "design-system",
+    repositories: [
+      {
+        id: "repo-design-system",
+        name: "design-system",
+        owner: REVIEW_AUTHOR,
+        channelId: CHANNEL_B,
+      },
+    ],
+  });
+  const repositorySummaries = {
+    "repo-design-system": {
+      latestCommit: { author: REVIEW_AUTHOR },
+    },
+  };
+
+  const repositories = projectsOverviewContext({
+    filter: "repositories",
+    issues: [],
+    projectReadModels: [explicitProject, repositoryOnly],
+    projects: [explicitProject],
+    pullRequests: [],
+    repositorySummaries,
+  });
+  const channels = projectsOverviewContext({
+    filter: "channels",
+    issues: [],
+    projectReadModels: [explicitProject, repositoryOnly],
+    projects: [explicitProject],
+    pullRequests: [],
+    repositorySummaries,
+  });
+
+  assert.deepEqual(
+    repositories.stats.map((stat) => [stat.label, stat.count]),
+    [
+      ["Repositories", 2],
+      ["Active tasks", 0],
+      ["Open reviews", 0],
+    ],
+  );
+  assert.deepEqual(repositories.people, [REVIEW_AUTHOR]);
+  assert.deepEqual(
+    channels.stats.map((stat) => [stat.label, stat.count]),
+    [
+      ["Channels", 2],
+      ["Projects", 1],
+      ["Repositories", 2],
+    ],
+  );
+});
+
 test("tasks pod breaks down active and completed work", () => {
   const context = projectsOverviewContext({
     filter: "issues",

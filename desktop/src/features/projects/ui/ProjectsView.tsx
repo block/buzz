@@ -604,8 +604,10 @@ export function ProjectsView() {
     onCreateProject: () => setCreateProjectOpen(true),
     onCreatePullRequest: () => setCreatePullRequestOpen(true),
     profiles,
+    projectReadModels,
     projects,
     pullRequests: contextPullRequests,
+    repositorySummaries: repositoryActivitySummariesQuery.data,
     summaries: activitySummariesQuery.data,
   };
   const contextOpen = isNarrowProjectsLayout

@@ -63,8 +63,10 @@ type ProjectsOverviewContextPanelProps = {
   onCreatePullRequest: () => void;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   profiles?: UserProfileLookup;
+  projectReadModels: Project[];
   projects: Project[];
   pullRequests: ProjectPullRequest[];
+  repositorySummaries?: Record<string, ProjectActivitySummary>;
   summaries?: Record<string, ProjectActivitySummary>;
 };
 
@@ -178,8 +180,10 @@ export function ProjectsOverviewContextPanel({
   onCreatePullRequest,
   onSelectSection,
   profiles,
+  projectReadModels,
   projects,
   pullRequests,
+  repositorySummaries,
   summaries,
 }: ProjectsOverviewContextPanelProps) {
   const selection = useProjectSelection();
@@ -195,11 +199,21 @@ export function ProjectsOverviewContextPanel({
       projectsOverviewContext({
         filter,
         issues,
+        projectReadModels,
         projects,
         pullRequests,
+        repositorySummaries,
         summaries,
       }),
-    [filter, issues, projects, pullRequests, summaries],
+    [
+      filter,
+      issues,
+      projectReadModels,
+      projects,
+      pullRequests,
+      repositorySummaries,
+      summaries,
+    ],
   );
   const actionHandler =
     context.action?.kind === "issue"
