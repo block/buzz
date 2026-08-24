@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { buildSearchResultPreview, splitSearchMatches } from "./searchMatch.ts";
 
-test("splitSearchMatches highlights every case-insensitive literal match", () => {
+test("splitSearchMatches highlights every case-insensitive lexeme match", () => {
   assert.deepEqual(splitSearchMatches("Mentions and mentions", "mentions"), [
     { isMatch: true, key: "0-8", text: "Mentions" },
     { isMatch: false, key: "8-5", text: " and " },
@@ -11,11 +11,38 @@ test("splitSearchMatches highlights every case-insensitive literal match", () =>
   ]);
 });
 
-test("splitSearchMatches treats regex punctuation literally", () => {
-  assert.deepEqual(splitSearchMatches("Use C++ (not C)", "C++"), [
-    { isMatch: false, key: "0-4", text: "Use " },
-    { isMatch: true, key: "4-3", text: "C++" },
-    { isMatch: false, key: "7-8", text: " (not C)" },
+test("splitSearchMatches normalizes punctuation into search lexemes", () => {
+  assert.deepEqual(splitSearchMatches("foo bar release", "foo-bar"), [
+    { isMatch: true, key: "0-3", text: "foo" },
+    { isMatch: false, key: "3-1", text: " " },
+    { isMatch: true, key: "4-3", text: "bar" },
+    { isMatch: false, key: "7-8", text: " release" },
+  ]);
+});
+
+test("splitSearchMatches keeps completed tokens on lexeme boundaries", () => {
+  assert.deepEqual(
+    splitSearchMatches("projectile notes about project planning", "project pl"),
+    [
+      {
+        isMatch: false,
+        key: "0-23",
+        text: "projectile notes about ",
+      },
+      { isMatch: true, key: "23-7", text: "project" },
+      { isMatch: false, key: "30-1", text: " " },
+      { isMatch: true, key: "31-2", text: "pl" },
+      { isMatch: false, key: "33-6", text: "anning" },
+    ],
+  );
+});
+
+test("splitSearchMatches preserves exact and prefix modes for a repeated term", () => {
+  assert.deepEqual(splitSearchMatches("foo foobar", "foo foo"), [
+    { isMatch: true, key: "0-3", text: "foo" },
+    { isMatch: false, key: "3-1", text: " " },
+    { isMatch: true, key: "4-3", text: "foo" },
+    { isMatch: false, key: "7-3", text: "bar" },
   ]);
 });
 
@@ -28,12 +55,10 @@ test("splitSearchMatches highlights non-adjacent prefix-search terms", () => {
   ]);
 });
 
-test("splitSearchMatches supports one-character scoped search", () => {
+test("splitSearchMatches keeps one-character prefixes on lexeme boundaries", () => {
   assert.deepEqual(splitSearchMatches("A plan", "a"), [
     { isMatch: true, key: "0-1", text: "A" },
-    { isMatch: false, key: "1-3", text: " pl" },
-    { isMatch: true, key: "4-1", text: "a" },
-    { isMatch: false, key: "5-1", text: "n" },
+    { isMatch: false, key: "1-5", text: " plan" },
   ]);
 });
 
@@ -45,6 +70,14 @@ test("buildSearchResultPreview keeps a late match visible", () => {
   assert.match(preview, /mentions/i);
   assert.match(preview, /^\.\.\./);
   assert.match(preview, /\.\.\.$/);
+});
+
+test("buildSearchResultPreview ignores an invalid completed-token substring", () => {
+  const content = `${"projectile filler ".repeat(20)}project planning release notes`;
+  const preview = buildSearchResultPreview(content, "project pl", 80);
+
+  assert.match(preview, /project planning/);
+  assert.match(preview, /^\.\.\./);
 });
 
 test("buildSearchResultPreview keeps the existing leading excerpt without a match", () => {

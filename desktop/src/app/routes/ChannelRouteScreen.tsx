@@ -141,6 +141,7 @@ export function ChannelRouteScreen({
     messageId: string;
     query: string;
   } | null>(null);
+  const activeSearchNavigationIdRef = React.useRef<string | null>(null);
 
   // Reset spliced target events and search highlighting when the channel
   // changes. Tied to channel identity rather
@@ -154,22 +155,31 @@ export function ChannelRouteScreen({
   React.useEffect(() => {
     if (previousResetKeyRef.current === channelId) return;
     previousResetKeyRef.current = channelId;
+    activeSearchNavigationIdRef.current = null;
     setTargetMessageEvents([]);
     setSearchHighlight(null);
   }, [channelId]);
 
   React.useEffect(() => {
     if (!searchNavigationId) {
+      activeSearchNavigationIdRef.current = null;
+      setSearchHighlight(null);
+      return;
+    }
+    if (activeSearchNavigationIdRef.current === searchNavigationId) {
       return;
     }
 
+    activeSearchNavigationIdRef.current = searchNavigationId;
     const highlight = consumeCachedSearchHitQuery(searchNavigationId);
-    if (highlight) {
-      setSearchHighlight({
-        messageId: highlight.eventId,
-        query: highlight.query,
-      });
-    }
+    setSearchHighlight(
+      highlight
+        ? {
+            messageId: highlight.eventId,
+            query: highlight.query,
+          }
+        : null,
+    );
   }, [searchNavigationId]);
 
   React.useEffect(() => {
