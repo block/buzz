@@ -5893,6 +5893,64 @@ void main() {
     });
 
     testWidgets(
+      'does not restart the profile subscription on speaker-level updates',
+      (tester) async {
+        // Regression: the logical-participant provider must select only
+        // roster-relevant session fields. Watching the whole session would
+        // recompute at the 50 ms speaker-level flush cadence, tearing down and
+        // recreating the kind-0 profile subscription ~20x/sec while anyone is
+        // speaking.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final relaySession = _ProfileSubscriptionRelaySession();
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+          },
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'speaker-level-profile-churn',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            relaySessionNotifier: relaySession,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        final baseline = relaySession.profileSubscriptions;
+        expect(baseline, greaterThan(0));
+
+        // Drive continuous speaker-level flushes: each frame within the 600 ms
+        // active window refreshes the level and schedules a 50 ms flush that
+        // republishes the whole session state.
+        for (var i = 0; i < 10; i++) {
+          transport.emitRemoteAudio(peerIndex: 2, sequence: i + 1);
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        await tester.pumpAndSettle();
+
+        expect(relaySession.profileSubscriptions, baseline);
+      },
+    );
+
+    testWidgets(
       'opens the sparse full-screen call with avatar and audio controls',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -13714,6 +13772,35 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
 
   void connect() {
     state = const SessionState(status: SessionStatus.connected);
+  }
+}
+
+class _ProfileSubscriptionRelaySession extends RelaySessionNotifier {
+  int profileSubscriptions = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => event;
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async {
+    if (filter.kinds.contains(0)) profileSubscriptions++;
+    return () {};
   }
 }
 

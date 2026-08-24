@@ -14,7 +14,19 @@ final _huddleParticipantProfileUpdatesProvider = NotifierProvider.autoDispose
 
 final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
     .family<List<String>, String>((ref, channelId) {
-      final session = ref.watch(huddleSessionProvider);
+      // Select only roster-relevant fields. Watching the whole session would
+      // recompute at the 50 ms speaker-level flush cadence, restarting the
+      // downstream profile subscription ~20x/sec while anyone is speaking.
+      final session = ref.watch(
+        huddleSessionProvider.select(
+          (state) => (
+            ephemeralChannelId: state.ephemeralChannelId,
+            currentPubkey: state.currentPubkey,
+            participantPubkeys: state.participantPubkeys,
+            wasAdmitted: state.wasAdmitted,
+          ),
+        ),
+      );
       final backingMembers =
           ref.watch(channelMembersProvider(channelId)).value ??
           const <ChannelMember>[];
