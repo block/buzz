@@ -173,6 +173,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
   private var buttonLabel: String?
+  private var buttonIconName = "chevron.backward"
 
   init(
     frame: CGRect,
@@ -196,20 +197,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       (arguments?["hitTargetWidth"] as? NSNumber)?.doubleValue ?? 48
     let hitTargetHeight =
       (arguments?["hitTargetHeight"] as? NSNumber)?.doubleValue ?? 48
-    let label = arguments?["label"] as? String
-    buttonLabel = label
-    let icon = arguments?["icon"] as? String
-    let symbolName: String
-    switch icon {
-    case "close": symbolName = "xmark"
-    case "rotateCamera": symbolName = "arrow.triangle.2.circlepath.camera"
-    case "shutter": symbolName = "circle.fill"
-    default: symbolName = "chevron.backward"
-    }
     let controlWidth =
       (arguments?["controlWidth"] as? NSNumber)?.doubleValue ?? 40
     let controlSize =
       (arguments?["controlSize"] as? NSNumber)?.doubleValue ?? 40
+    let fillWidth = arguments?["fillWidth"] as? Bool ?? false
 
     var configuration: UIButton.Configuration
     if #available(iOS 26.0, *) {
@@ -219,26 +211,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       configuration.baseBackgroundColor = UIColor.secondarySystemBackground
     }
     configuration.cornerStyle = .capsule
-    if let label {
-      configuration.title = label
-      configuration.titleLineBreakMode = .byClipping
-      configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
-        incoming in
-        var outgoing = incoming
-        let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
-        outgoing.font = UIFont.systemFont(ofSize: preferred.pointSize, weight: .semibold)
-        return outgoing
-      }
-    } else {
-      configuration.image = UIImage(
-        systemName: symbolName,
-        withConfiguration: UIImage.SymbolConfiguration(
-          pointSize: icon == "shutter" ? controlSize * 0.72 : 17,
-          weight: .semibold
-        )
-      )
-    }
     button.configuration = configuration
+    applyContent(from: arguments)
     button.titleLabel?.numberOfLines = 1
     button.titleLabel?.lineBreakMode = .byClipping
     button.hitTargetInsets = UIEdgeInsets(
@@ -258,6 +232,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     applyAppearance(from: args)
     channel.setMethodCallHandler { [weak self] call, result in
+      if call.method == "setContent" {
+        self?.applyContent(from: call.arguments)
+        result(nil)
+        return
+      }
       guard call.method == "setAppearance" else {
         result(FlutterMethodNotImplemented)
         return
@@ -268,14 +247,19 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     containerView.addSubview(button)
     NSLayoutConstraint.activate([
+      button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
+      button.heightAnchor.constraint(equalToConstant: controlSize),
+    ])
+    if fillWidth {
+      button.centerXAnchor.constraint(equalTo: containerView.centerXAnchor).isActive = true
+      button.widthAnchor.constraint(equalTo: containerView.widthAnchor).isActive = true
+    } else {
       button.centerXAnchor.constraint(
         equalTo: containerView.leadingAnchor,
         constant: buttonCenterX
-      ),
-      button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
-      button.widthAnchor.constraint(equalToConstant: controlWidth),
-      button.heightAnchor.constraint(equalToConstant: controlSize),
-    ])
+      ).isActive = true
+      button.widthAnchor.constraint(equalToConstant: controlWidth).isActive = true
+    }
   }
 
   func view() -> UIView {
@@ -352,6 +336,48 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       button.configuration?.baseBackgroundColor = Self.fallbackBackgroundColor(
         foregroundColor: foregroundColor,
         interfaceStyle: interfaceStyle
+      )
+    }
+    button.setNeedsUpdateConfiguration()
+  }
+
+  private func applyContent(from value: Any?) {
+    let arguments = value as? [String: Any]
+    let icon = arguments?["icon"] as? String
+    buttonLabel = arguments?["label"] as? String
+    if let accessibilityLabel = arguments?["accessibilityLabel"] as? String {
+      button.accessibilityLabel = accessibilityLabel
+    }
+    switch icon {
+    case "close": buttonIconName = "xmark"
+    case "rotateCamera": buttonIconName = "arrow.triangle.2.circlepath.camera"
+    case "shutter": buttonIconName = "circle.fill"
+    default: buttonIconName = "chevron.backward"
+    }
+    if let buttonLabel {
+      button.configuration?.title = buttonLabel
+      button.configuration?.image = nil
+      button.configuration?.titleLineBreakMode = .byClipping
+      button.configuration?.titleTextAttributesTransformer =
+        UIConfigurationTextAttributesTransformer { incoming in
+          var outgoing = incoming
+          let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
+          outgoing.font = UIFont.systemFont(
+            ofSize: preferred.pointSize,
+            weight: .semibold
+          )
+          return outgoing
+        }
+    } else {
+      button.configuration?.title = nil
+      button.configuration?.titleTextAttributesTransformer = nil
+      let pointSize: CGFloat = icon == "shutter" ? 50 : 17
+      button.configuration?.image = UIImage(
+        systemName: buttonIconName,
+        withConfiguration: UIImage.SymbolConfiguration(
+          pointSize: pointSize,
+          weight: .semibold
+        )
       )
     }
     button.setNeedsUpdateConfiguration()

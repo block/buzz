@@ -32,16 +32,16 @@ void runProfileEditImageSelectionTests() {
       findsOneWidget,
     );
     expect(
-      tester.getSize(find.byKey(const ValueKey('image-camera-close'))),
+      tester.getSize(find.byKey(const ValueKey('image-camera-left-action'))),
       const Size.square(64),
     );
     expect(
-      tester.getSize(find.byKey(const ValueKey('image-camera-flip'))),
+      tester.getSize(find.byKey(const ValueKey('image-camera-right-action'))),
       const Size.square(64),
     );
     expect(
       tester.getSize(find.byKey(const ValueKey('image-camera-shutter-morph'))),
-      const Size.square(100),
+      const Size.square(115),
     );
     expect(find.bySemanticsLabel('Close camera'), findsOneWidget);
     expect(find.bySemanticsLabel('Flip camera'), findsOneWidget);
@@ -71,7 +71,7 @@ void runProfileEditImageSelectionTests() {
     tester
         .widget<InkWell>(
           find.descendant(
-            of: find.byKey(const ValueKey('image-camera-close')),
+            of: find.byKey(const ValueKey('image-camera-left-action')),
             matching: find.byType(InkWell),
           ),
         )
@@ -123,6 +123,14 @@ void runProfileEditImageSelectionTests() {
     );
     expect(find.text('Retry'), findsOneWidget);
     expect(find.text('Use Photo'), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-left-action'))),
+      const Size(112, 64),
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-right-action'))),
+      const Size(112, 64),
+    );
 
     await tester.tap(find.text('Use Photo'));
     await tester.pump();

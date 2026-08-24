@@ -14,7 +14,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 
 const _avatarPreviewSize = 220.0;
@@ -22,8 +21,11 @@ const _avatarPreviewSize = 220.0;
 /// Diameter of the expanded circular viewfinder while taking a profile photo.
 const imageAvatarCameraPreviewSize = _avatarPreviewSize * 1.25;
 const _cameraControlSize = 64.0;
-const _shutterSize = 100.0;
-const _shutterCoreSize = 82.0;
+const _shutterSize = 115.0;
+const _shutterCoreSize = 94.0;
+const _reviewControlWidth = 112.0;
+const _collapsedControlOffset = 52.0;
+const _expandedControlOffset = 119.5;
 const _captureMotionDuration = Duration(milliseconds: 180);
 
 /// Builds the inline still-photo camera used by the profile avatar editor.
@@ -81,15 +83,26 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final isProcessingCapture = useState(false);
     final capturedBytes = useState<Uint8List?>(initialCapturedBytes);
     final controlsExpanded = useState(false);
+    final previewTransitionComplete = useState(reduceMotion);
     final isClosing = useState(false);
     final error = useState<String?>(null);
 
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) controlsExpanded.value = true;
+        if (!context.mounted) return;
+        controlsExpanded.value = true;
+        if (reduceMotion) {
+          previewTransitionComplete.value = true;
+        } else {
+          Future<void>.delayed(_captureMotionDuration, () {
+            if (context.mounted && !isClosing.value) {
+              previewTransitionComplete.value = true;
+            }
+          });
+        }
       });
       return null;
-    }, const []);
+    }, [reduceMotion]);
 
     useEffect(() {
       var disposed = false;
@@ -266,34 +279,19 @@ class ImageAvatarCapture extends HookConsumerWidget {
               child: ClipOval(
                 child: ColoredBox(
                   color: Colors.black,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      ?initialPreview,
-                      AnimatedOpacity(
-                        duration: reduceMotion
-                            ? Duration.zero
-                            : _captureMotionDuration,
-                        curve: Curves.easeOutCubic,
-                        opacity: captured != null || controller.value != null
-                            ? 1
-                            : 0,
-                        child: captured != null
-                            ? Image.memory(captured, fit: BoxFit.cover)
-                            : controller.value != null
-                            ? _CameraPreview(controller: controller.value!)
-                            : const SizedBox.shrink(),
-                      ),
-                      if (controller.value == null && captured == null)
-                        Center(
-                          child: isInitializing.value
-                              ? const BuzzLoadingIndicator(
-                                  semanticLabel: 'Starting camera',
-                                )
-                              : const Icon(LucideIcons.cameraOff, size: 32),
-                        ),
-                    ],
-                  ),
+                  child: captured != null
+                      ? Image.memory(captured, fit: BoxFit.cover)
+                      : previewTransitionComplete.value &&
+                            controller.value != null
+                      ? _CameraPreview(controller: controller.value!)
+                      : initialPreview ??
+                            Center(
+                              child: isInitializing.value
+                                  ? const BuzzLoadingIndicator(
+                                      semanticLabel: 'Starting camera',
+                                    )
+                                  : const Icon(LucideIcons.cameraOff, size: 32),
+                            ),
                 ),
               ),
             ),
@@ -307,73 +305,96 @@ class ImageAvatarCapture extends HookConsumerWidget {
               tween: Tween(end: controlsExpanded.value ? 1 : 0),
               duration: reduceMotion ? Duration.zero : _captureMotionDuration,
               curve: Curves.easeOutCubic,
-              builder: (context, progress, _) => Stack(
-                alignment: Alignment.center,
-                children: [
-                  AnimatedSwitcher(
+              builder: (context, progress, _) => LayoutBuilder(
+                builder: (context, constraints) {
+                  final sideOffset =
+                      _collapsedControlOffset +
+                      (_expandedControlOffset - _collapsedControlOffset) *
+                          progress;
+                  return TweenAnimationBuilder<double>(
+                    tween: Tween(end: captured == null ? 0 : 1),
                     duration: reduceMotion
                         ? Duration.zero
                         : _captureMotionDuration,
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeOutCubic,
-                    child: captured != null
-                        ? Opacity(
-                            opacity: progress,
-                            child: Transform.scale(
-                              scale: 0.96 + 0.04 * progress,
-                              child: _CapturedPhotoActions(
-                                key: const ValueKey(
-                                  'image-camera-review-actions',
+                    curve: Curves.easeInOutCubic,
+                    builder: (context, reviewProgress, _) {
+                      final sideWidth =
+                          _cameraControlSize +
+                          (_reviewControlWidth - _cameraControlSize) *
+                              reviewProgress;
+                      return Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Positioned(
+                            left:
+                                constraints.maxWidth / 2 -
+                                sideOffset -
+                                sideWidth / 2,
+                            width: sideWidth,
+                            height: _cameraControlSize,
+                            child: _MorphingCameraAction(
+                              key: const ValueKey('image-camera-left-action'),
+                              width: sideWidth,
+                              icon: LucideIcons.x,
+                              iosIcon: IosGlassNavigationIcon.close,
+                              label: captured == null ? null : 'Retry',
+                              semanticLabel: captured == null
+                                  ? 'Close camera'
+                                  : 'Retry',
+                              onTap: isCapturing.value || isClosing.value
+                                  ? null
+                                  : captured == null
+                                  ? () => unawaited(leaveCamera(null))
+                                  : retake,
+                            ),
+                          ),
+                          Transform.scale(
+                            scale:
+                                (0.73 + 0.27 * progress) *
+                                (1 - 0.28 * reviewProgress),
+                            child: Opacity(
+                              opacity: progress * (1 - reviewProgress),
+                              child: IgnorePointer(
+                                ignoring: captured != null,
+                                child: _ShutterButton(
+                                  busy: isProcessingCapture.value,
+                                  onTap: captureEnabled
+                                      ? () => unawaited(capture())
+                                      : null,
                                 ),
-                                onRetry: isClosing.value ? null : retake,
-                                onUsePhoto: isClosing.value
-                                    ? null
-                                    : () => unawaited(leaveCamera(captured)),
                               ),
                             ),
-                          )
-                        : Stack(
-                            key: const ValueKey('image-camera-live-actions'),
-                            alignment: Alignment.center,
-                            children: [
-                              Transform.translate(
-                                offset: Offset(-52 - 60 * progress, 0),
-                                child: _CameraIconButton(
-                                  key: const ValueKey('image-camera-close'),
-                                  icon: LucideIcons.x,
-                                  iosIcon: IosGlassNavigationIcon.close,
-                                  semanticLabel: 'Close camera',
-                                  onTap: isCapturing.value || isClosing.value
-                                      ? null
-                                      : () => unawaited(leaveCamera(null)),
-                                ),
-                              ),
-                              Transform.scale(
-                                scale: 0.73 + 0.27 * progress,
-                                child: Opacity(
-                                  opacity: progress,
-                                  child: _ShutterButton(
-                                    busy: isProcessingCapture.value,
-                                    onTap: captureEnabled
-                                        ? () => unawaited(capture())
-                                        : null,
-                                  ),
-                                ),
-                              ),
-                              Transform.translate(
-                                offset: Offset(52 + 60 * progress, 0),
-                                child: _CameraIconButton(
-                                  key: const ValueKey('image-camera-flip'),
-                                  icon: LucideIcons.switchCamera,
-                                  iosIcon: IosGlassNavigationIcon.rotateCamera,
-                                  semanticLabel: 'Flip camera',
-                                  onTap: flipEnabled ? flipCamera : null,
-                                ),
-                              ),
-                            ],
                           ),
-                  ),
-                ],
+                          Positioned(
+                            left:
+                                constraints.maxWidth / 2 +
+                                sideOffset -
+                                sideWidth / 2,
+                            width: sideWidth,
+                            height: _cameraControlSize,
+                            child: _MorphingCameraAction(
+                              key: const ValueKey('image-camera-right-action'),
+                              width: sideWidth,
+                              icon: LucideIcons.switchCamera,
+                              iosIcon: IosGlassNavigationIcon.rotateCamera,
+                              label: captured == null ? null : 'Use Photo',
+                              semanticLabel: captured == null
+                                  ? 'Flip camera'
+                                  : 'Use Photo',
+                              onTap: isClosing.value
+                                  ? null
+                                  : captured != null
+                                  ? () => unawaited(leaveCamera(captured))
+                                  : flipEnabled
+                                  ? flipCamera
+                                  : null,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                },
               ),
             ),
           ),
@@ -425,17 +446,21 @@ class _CameraPreview extends StatelessWidget {
   }
 }
 
-class _CameraIconButton extends StatelessWidget {
-  const _CameraIconButton({
+class _MorphingCameraAction extends StatelessWidget {
+  const _MorphingCameraAction({
     super.key,
+    required this.width,
     required this.icon,
     required this.iosIcon,
+    required this.label,
     required this.semanticLabel,
     required this.onTap,
   });
 
+  final double width;
   final IconData icon;
   final IosGlassNavigationIcon iosIcon;
+  final String? label;
   final String semanticLabel;
   final VoidCallback? onTap;
 
@@ -444,11 +469,13 @@ class _CameraIconButton extends StatelessWidget {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return IosGlassNavigationButton(
         icon: iosIcon,
+        label: label,
         semanticLabel: semanticLabel,
         onPressed: onTap,
-        width: _cameraControlSize,
+        width: width,
         height: _cameraControlSize,
         controlSize: _cameraControlSize,
+        fillWidth: true,
         foregroundColor: context.colors.onSurface,
       );
     }
@@ -459,18 +486,43 @@ class _CameraIconButton extends StatelessWidget {
       child: ExcludeSemantics(
         child: Material(
           color: context.colors.surfaceContainerHighest,
-          shape: const CircleBorder(),
+          shape: const StadiumBorder(),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: onTap,
-            child: SizedBox.square(
-              dimension: _cameraControlSize,
-              child: Icon(
-                icon,
-                size: 26,
-                color: onTap == null
-                    ? context.colors.onSurface.withValues(alpha: 0.38)
-                    : context.colors.onSurface,
+            child: SizedBox(
+              width: width,
+              height: _cameraControlSize,
+              child: Center(
+                child: AnimatedSwitcher(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : _captureMotionDuration,
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeOutCubic,
+                  child: label == null
+                      ? Icon(
+                          icon,
+                          key: const ValueKey('camera-action-icon'),
+                          size: 26,
+                          color: onTap == null
+                              ? context.colors.onSurface.withValues(alpha: 0.38)
+                              : context.colors.onSurface,
+                        )
+                      : Text(
+                          label!,
+                          key: ValueKey(label),
+                          maxLines: 1,
+                          style: context.textTheme.labelMedium?.copyWith(
+                            color: onTap == null
+                                ? context.colors.onSurface.withValues(
+                                    alpha: 0.38,
+                                  )
+                                : context.colors.onSurface,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
               ),
             ),
           ),
@@ -553,57 +605,6 @@ class _ShutterButton extends StatelessWidget {
       ),
     );
   }
-}
-
-class _CapturedPhotoActions extends StatelessWidget {
-  const _CapturedPhotoActions({
-    super.key,
-    required this.onRetry,
-    required this.onUsePhoto,
-  });
-
-  final VoidCallback? onRetry;
-  final VoidCallback? onUsePhoto;
-
-  @override
-  Widget build(BuildContext context) {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IosGlassNavigationAction(label: 'Retry', onPressed: onRetry),
-          const SizedBox(width: Grid.gutter),
-          IosGlassNavigationAction(
-            label: 'Use Photo',
-            width: 104,
-            onPressed: onUsePhoto,
-          ),
-        ],
-      );
-    }
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _ReviewButton(label: 'Retry', onTap: onRetry),
-        const SizedBox(width: Grid.gutter),
-        _ReviewButton(label: 'Use Photo', onTap: onUsePhoto),
-      ],
-    );
-  }
-}
-
-class _ReviewButton extends StatelessWidget {
-  const _ReviewButton({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) => FilledButton.tonal(
-    onPressed: onTap,
-    style: FilledButton.styleFrom(minimumSize: const Size(104, 52)),
-    child: Text(label),
-  );
 }
 
 Uint8List _centerCropCameraImage(Uint8List bytes) {

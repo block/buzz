@@ -30,9 +30,11 @@ class IosGlassNavigationButton extends HookWidget {
     required this.icon,
     required this.semanticLabel,
     required this.onPressed,
+    this.label,
     this.width = 48,
     this.height = 48,
     this.controlSize = 40,
+    this.fillWidth = false,
     this.buttonCenterX,
     this.foregroundColor,
     this.isBusy = false,
@@ -42,11 +44,13 @@ class IosGlassNavigationButton extends HookWidget {
   static const viewType = 'buzz/navigation_glass';
 
   final IosGlassNavigationIcon icon;
+  final String? label;
   final String semanticLabel;
   final VoidCallback? onPressed;
   final double width;
   final double height;
   final double controlSize;
+  final bool fillWidth;
   final double? buttonCenterX;
   final Color? foregroundColor;
   final bool isBusy;
@@ -88,6 +92,19 @@ class IosGlassNavigationButton extends HookWidget {
       return null;
     }, [nativeChannel.value, brightness, foregroundValue, enabled, isBusy]);
 
+    useEffect(() {
+      final channel = nativeChannel.value;
+      if (channel != null) {
+        final content = <String, Object>{
+          'icon': icon.name,
+          'accessibilityLabel': semanticLabel,
+        };
+        if (label != null) content['label'] = label!;
+        unawaited(channel.invokeMethod<void>('setContent', content));
+      }
+      return null;
+    }, [nativeChannel.value, icon, label, semanticLabel]);
+
     Widget buildControl({required bool suppressNativeView}) {
       if (suppressNativeView) {
         final resolvedButtonCenterX = buttonCenterX ?? width / 2;
@@ -126,6 +143,15 @@ class IosGlassNavigationButton extends HookWidget {
                               ),
                             ),
                           )
+                        : label != null
+                        ? Text(
+                            label!,
+                            maxLines: 1,
+                            style: context.textTheme.labelMedium?.copyWith(
+                              color: effectiveForeground,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          )
                         : Icon(
                             switch (icon) {
                               IosGlassNavigationIcon.back =>
@@ -148,22 +174,25 @@ class IosGlassNavigationButton extends HookWidget {
           ),
         );
       }
+      final creationParams = <String, Object>{
+        'icon': icon.name,
+        'accessibilityLabel': semanticLabel,
+        'brightness': brightness,
+        'foregroundColor': foregroundValue,
+        'enabled': enabled,
+        'busy': isBusy,
+        'controlSize': controlSize,
+        'controlWidth': controlSize,
+        'fillWidth': fillWidth,
+        'buttonCenterX': buttonCenterX ?? width / 2,
+        'hitTargetWidth': width,
+        'hitTargetHeight': height,
+      };
+      if (label != null) creationParams['label'] = label!;
       return UiKitView(
         viewType: viewType,
         hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-        creationParams: <String, Object>{
-          'icon': icon.name,
-          'accessibilityLabel': semanticLabel,
-          'brightness': brightness,
-          'foregroundColor': foregroundValue,
-          'enabled': enabled,
-          'busy': isBusy,
-          'controlSize': controlSize,
-          'controlWidth': controlSize,
-          'buttonCenterX': buttonCenterX ?? width / 2,
-          'hitTargetWidth': width,
-          'hitTargetHeight': height,
-        },
+        creationParams: creationParams,
         creationParamsCodec: const StandardMessageCodec(),
         onPlatformViewCreated: (viewId) {
           nativeChannel.value = MethodChannel('$viewType/$viewId');
