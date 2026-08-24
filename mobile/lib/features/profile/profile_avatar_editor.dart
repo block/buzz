@@ -241,7 +241,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       _ => currentAvatarUrl,
     };
     final fixedPreviewContent = switch (mode) {
-      ProfileAvatarMode.image when isCapturingImage.value => null,
       ProfileAvatarMode.image when draft is ProfileImageAvatarDraft =>
         CircleAvatar(
           key: const ValueKey('avatar-editor-fixed-preview'),
@@ -377,6 +376,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 ) ??
                 ImageAvatarCapture(
                   height: modeHeight,
+                  initialPreview: fixedPreview,
                   onAccepted: acceptCameraImage,
                   onClosed: closeImageCamera,
                 ),
@@ -486,7 +486,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 ),
               ),
             ),
-            if (fixedPreview != null)
+            if (fixedPreview != null && !isCapturingImage.value)
               AnimatedPositioned(
                 key: const ValueKey('avatar-preview-position'),
                 curve: Curves.easeOutCubic,

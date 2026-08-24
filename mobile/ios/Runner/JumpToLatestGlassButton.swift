@@ -199,9 +199,17 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let label = arguments?["label"] as? String
     buttonLabel = label
     let icon = arguments?["icon"] as? String
-    let symbolName = icon == "close" ? "xmark" : "chevron.backward"
+    let symbolName: String
+    switch icon {
+    case "close": symbolName = "xmark"
+    case "rotateCamera": symbolName = "arrow.triangle.2.circlepath.camera"
+    case "shutter": symbolName = "circle.fill"
+    default: symbolName = "chevron.backward"
+    }
     let controlWidth =
       (arguments?["controlWidth"] as? NSNumber)?.doubleValue ?? 40
+    let controlSize =
+      (arguments?["controlSize"] as? NSNumber)?.doubleValue ?? 40
 
     var configuration: UIButton.Configuration
     if #available(iOS 26.0, *) {
@@ -225,7 +233,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       configuration.image = UIImage(
         systemName: symbolName,
         withConfiguration: UIImage.SymbolConfiguration(
-          pointSize: 17,
+          pointSize: icon == "shutter" ? controlSize * 0.72 : 17,
           weight: .semibold
         )
       )
@@ -234,10 +242,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     button.titleLabel?.numberOfLines = 1
     button.titleLabel?.lineBreakMode = .byClipping
     button.hitTargetInsets = UIEdgeInsets(
-      top: max(0, (hitTargetHeight - 40) / 2),
-      left: max(0, buttonCenterX - 20),
-      bottom: max(0, (hitTargetHeight - 40) / 2),
-      right: max(0, hitTargetWidth - buttonCenterX - 20)
+      top: max(0, (hitTargetHeight - controlSize) / 2),
+      left: max(0, buttonCenterX - controlWidth / 2),
+      bottom: max(0, (hitTargetHeight - controlSize) / 2),
+      right: max(0, hitTargetWidth - buttonCenterX - controlWidth / 2)
     )
     button.accessibilityLabel = arguments?["accessibilityLabel"] as? String ?? "Back"
     button.translatesAutoresizingMaskIntoConstraints = false
@@ -266,7 +274,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       ),
       button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
       button.widthAnchor.constraint(equalToConstant: controlWidth),
-      button.heightAnchor.constraint(equalToConstant: 40),
+      button.heightAnchor.constraint(equalToConstant: controlSize),
     ])
   }
 

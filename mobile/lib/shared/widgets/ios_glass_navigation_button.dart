@@ -9,7 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../theme/theme.dart';
 
 /// The navigation glyph displayed by [IosGlassNavigationButton].
-enum IosGlassNavigationIcon { back, close }
+enum IosGlassNavigationIcon { back, close, rotateCamera, shutter }
 
 /// Leading width used by iOS channel-style headers.
 const iosGlassChannelHeaderLeadingWidth = 58.0;
@@ -32,8 +32,10 @@ class IosGlassNavigationButton extends HookWidget {
     required this.onPressed,
     this.width = 48,
     this.height = 48,
+    this.controlSize = 40,
     this.buttonCenterX,
     this.foregroundColor,
+    this.isBusy = false,
     this.nativeViewSuppressed,
   });
 
@@ -44,8 +46,10 @@ class IosGlassNavigationButton extends HookWidget {
   final VoidCallback? onPressed;
   final double width;
   final double height;
+  final double controlSize;
   final double? buttonCenterX;
   final Color? foregroundColor;
+  final bool isBusy;
   final ValueListenable<bool>? nativeViewSuppressed;
 
   @override
@@ -77,11 +81,12 @@ class IosGlassNavigationButton extends HookWidget {
             'brightness': brightness,
             'foregroundColor': foregroundValue,
             'enabled': enabled,
+            'busy': isBusy,
           }),
         );
       }
       return null;
-    }, [nativeChannel.value, brightness, foregroundValue, enabled]);
+    }, [nativeChannel.value, brightness, foregroundValue, enabled, isBusy]);
 
     Widget buildControl({required bool suppressNativeView}) {
       if (suppressNativeView) {
@@ -97,10 +102,10 @@ class IosGlassNavigationButton extends HookWidget {
               key: const ValueKey('ios-glass-navigation-flutter-fallback'),
               children: [
                 Positioned(
-                  left: resolvedButtonCenterX - 20,
-                  top: (height - 40) / 2,
-                  width: 40,
-                  height: 40,
+                  left: resolvedButtonCenterX - controlSize / 2,
+                  top: (height - controlSize) / 2,
+                  width: controlSize,
+                  height: controlSize,
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       color: context.colors.surface.withValues(alpha: 0.72),
@@ -111,13 +116,31 @@ class IosGlassNavigationButton extends HookWidget {
                         ),
                       ),
                     ),
-                    child: Icon(
-                      icon == IosGlassNavigationIcon.back
-                          ? Icons.arrow_back_ios_new_rounded
-                          : Icons.close_rounded,
-                      size: 20,
-                      color: effectiveForeground,
-                    ),
+                    child: isBusy
+                        ? Center(
+                            child: SizedBox.square(
+                              dimension: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: effectiveForeground,
+                              ),
+                            ),
+                          )
+                        : Icon(
+                            switch (icon) {
+                              IosGlassNavigationIcon.back =>
+                                Icons.arrow_back_ios_new_rounded,
+                              IosGlassNavigationIcon.close =>
+                                Icons.close_rounded,
+                              IosGlassNavigationIcon.rotateCamera =>
+                                Icons.cameraswitch_rounded,
+                              IosGlassNavigationIcon.shutter => Icons.circle,
+                            },
+                            size: icon == IosGlassNavigationIcon.shutter
+                                ? controlSize * 0.72
+                                : 22,
+                            color: effectiveForeground,
+                          ),
                   ),
                 ),
               ],
@@ -134,6 +157,9 @@ class IosGlassNavigationButton extends HookWidget {
           'brightness': brightness,
           'foregroundColor': foregroundValue,
           'enabled': enabled,
+          'busy': isBusy,
+          'controlSize': controlSize,
+          'controlWidth': controlSize,
           'buttonCenterX': buttonCenterX ?? width / 2,
           'hitTargetWidth': width,
           'hitTargetHeight': height,

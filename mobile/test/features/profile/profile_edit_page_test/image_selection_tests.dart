@@ -1,7 +1,7 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditImageSelectionTests() {
-  testWidgets('grows the inline camera viewfinder by 25dp', (tester) async {
+  testWidgets('grows the existing avatar cutout by 25 percent', (tester) async {
     await tester.pumpWidget(
       WidgetHelpers.testable(
         child: Scaffold(
@@ -10,6 +10,10 @@ void runProfileEditImageSelectionTests() {
             child: ImageAvatarCapture(
               height: 400,
               onAccepted: (_) {},
+              initialPreview: const ColoredBox(
+                key: ValueKey('existing-avatar-preview'),
+                color: Colors.pink,
+              ),
               onClosed: () {},
               loadCameras: () async => const [],
             ),
@@ -22,13 +26,74 @@ void runProfileEditImageSelectionTests() {
     expect(tester.getSize(preview), const Size.square(220));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 180));
-    expect(tester.getSize(preview), const Size.square(245));
+    expect(tester.getSize(preview), const Size.square(275));
+    expect(
+      find.byKey(const ValueKey('existing-avatar-preview')),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-close'))),
+      const Size.square(64),
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-flip'))),
+      const Size.square(64),
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-shutter-morph'))),
+      const Size.square(100),
+    );
     expect(find.bySemanticsLabel('Close camera'), findsOneWidget);
     expect(find.bySemanticsLabel('Flip camera'), findsOneWidget);
     expect(find.bySemanticsLabel('Take photo'), findsOneWidget);
   });
 
-  testWidgets('shrinks a captured photo and accepts it with a check', (
+  testWidgets('reverses the camera expansion before closing', (tester) async {
+    var closed = false;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Scaffold(
+          body: SizedBox(
+            height: 400,
+            child: ImageAvatarCapture(
+              height: 400,
+              onAccepted: (_) {},
+              onClosed: () => closed = true,
+              loadCameras: () async => const [],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 180));
+
+    tester
+        .widget<InkWell>(
+          find.descendant(
+            of: find.byKey(const ValueKey('image-camera-close')),
+            matching: find.byType(InkWell),
+          ),
+        )
+        .onTap!();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 90));
+    final midSize = tester
+        .getSize(find.byKey(const ValueKey('image-camera-preview-size')))
+        .width;
+    expect(midSize, greaterThan(220));
+    expect(midSize, lessThan(275));
+    expect(closed, isFalse);
+
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(closed, isTrue);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
+      const Size.square(220),
+    );
+  });
+
+  testWidgets('reviews a captured photo before scaling down to accept it', (
     tester,
   ) async {
     final bytes = Uint8List.fromList(
@@ -54,20 +119,26 @@ void runProfileEditImageSelectionTests() {
 
     expect(
       tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
+      const Size.square(275),
+    );
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('Use Photo'), findsOneWidget);
+
+    await tester.tap(find.text('Use Photo'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 90));
+    final midSize = tester
+        .getSize(find.byKey(const ValueKey('image-camera-preview-size')))
+        .width;
+    expect(midSize, greaterThan(220));
+    expect(midSize, lessThan(275));
+    expect(accepted, isNull);
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(accepted, same(bytes));
+    expect(
+      tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
       const Size.square(220),
     );
-    expect(
-      tester.getSize(find.byKey(const ValueKey('image-camera-shutter-morph'))),
-      const Size.square(64),
-    );
-    expect(
-      find.byKey(const ValueKey('image-camera-accept-icon')),
-      findsOneWidget,
-    );
-    expect(find.bySemanticsLabel('Retake photo'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('image-camera-shutter')));
-    expect(accepted, same(bytes));
   });
 
   testWidgets('accepts an inline camera photo before enabling profile Save', (
