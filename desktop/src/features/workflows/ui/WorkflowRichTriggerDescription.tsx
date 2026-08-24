@@ -1,6 +1,7 @@
 import { LoaderCircle } from "lucide-react";
 
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { splitWorkflowAuthorDescription } from "./workflowTriggerDescription";
 
 export function WorkflowRichTriggerDescription({
   avatarUrl,
@@ -26,11 +27,12 @@ export function WorkflowRichTriggerDescription({
     );
   }
 
-  const labelIndex = label ? description.lastIndexOf(label) : -1;
-  if (!label || labelIndex < 0) return description;
+  const segments = label
+    ? splitWorkflowAuthorDescription(description, label)
+    : null;
+  if (!label || !segments) return description;
 
-  const prefix = description.slice(0, labelIndex).trimEnd();
-  const suffix = description.slice(labelIndex + label.length).trimStart();
+  const { prefix, suffix } = segments;
   return (
     <span className="flex min-w-0 items-center gap-1.5">
       {prefix ? <span className="shrink-0">{prefix}</span> : null}
