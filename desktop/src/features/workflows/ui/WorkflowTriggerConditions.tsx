@@ -154,6 +154,11 @@ export function WorkflowTriggerConditions({
   const [expandedField, setExpandedField] = React.useState<string | null>(
     () => conditionFieldsForTrigger(triggerType)[0]?.value ?? null,
   );
+  const disclosureButtons = React.useRef(new Map<string, HTMLButtonElement>());
+  const collapsePicker = React.useCallback((field: string) => {
+    setExpandedField(null);
+    disclosureButtons.current.get(field)?.focus();
+  }, []);
   const conditions = conditionDrafts ?? parsedValue ?? [];
   const localValue = React.useRef(value);
   const triggerPresentation = useWorkflowTriggerPresentation(
@@ -307,6 +312,11 @@ export function WorkflowTriggerConditions({
                   onClick={() =>
                     setExpandedField(expanded ? null : field.value)
                   }
+                  ref={(button) => {
+                    if (button)
+                      disclosureButtons.current.set(field.value, button);
+                    else disclosureButtons.current.delete(field.value);
+                  }}
                   type="button"
                 >
                   <span className="min-w-0 flex-1 truncate text-base font-medium">
@@ -412,7 +422,7 @@ export function WorkflowTriggerConditions({
                           channelId={workflowChannelId}
                           disabled={disabled}
                           id="wf-trigger-author-value"
-                          onEscape={() => setExpandedField(null)}
+                          onEscape={() => collapsePicker(field.value)}
                           onChange={(pubkey) =>
                             updateConditions(
                               pubkey
@@ -435,7 +445,7 @@ export function WorkflowTriggerConditions({
                           disabled={disabled}
                           id="wf-trigger-message-id-value"
                           key={workflowChannelId ?? "unscoped"}
-                          onEscape={() => setExpandedField(null)}
+                          onEscape={() => collapsePicker(field.value)}
                           onChange={(messageId) =>
                             updateConditions(
                               messageId
