@@ -1,3 +1,4 @@
+use buzz_core_pkg::kind::KIND_STREAM_MESSAGE_DIFF;
 use tauri::State;
 
 use crate::{
@@ -212,14 +213,15 @@ pub async fn get_forum_thread(
     state: State<'_, AppState>,
 ) -> Result<ForumThreadResponse, String> {
     let _ = (limit, cursor);
-    // Two filters: the root event itself, plus any reply (kinds 9/45003)
-    // that references it via #e.
+    // Two filters: the root event itself, plus any reply (kinds 9/40008/45003)
+    // that references it via #e. Diff replies (40008) render as their own card
+    // in the thread, the same way they do in a stream timeline.
     let events = query_relay(
         &state,
         &[
             serde_json::json!({ "ids": [event_id.clone()], "kinds": [9, 40002, 45001, 45003] }),
             serde_json::json!({
-                "kinds": [9, 45003],
+                "kinds": [9, KIND_STREAM_MESSAGE_DIFF, 45003],
                 "#e": [event_id.clone()],
                 "#h": [channel_id.clone()],
             }),
