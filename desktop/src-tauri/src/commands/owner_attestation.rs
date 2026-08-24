@@ -116,6 +116,15 @@ impl FileIdentity {
             && self.gid == other.gid
             && self.mode == other.mode
     }
+
+    fn same_stable_file_identity(&self, other: &Self) -> bool {
+        self.dev == other.dev
+            && self.ino == other.ino
+            && self.uid == other.uid
+            && self.gid == other.gid
+            && self.mode == other.mode
+            && self.links == other.links
+    }
 }
 
 #[cfg(unix)]
@@ -168,7 +177,9 @@ pub async fn select_owner_attestation_request(
             let _ = tx.send(path);
         });
 
-    let selected = rx.await.map_err(|_| "request dialog cancelled".to_string())?;
+    let selected = rx
+        .await
+        .map_err(|_| "request dialog cancelled".to_string())?;
     let Some(file_path) = selected else {
         return Ok(None);
     };
@@ -177,10 +188,7 @@ pub async fn select_owner_attestation_request(
         .ok_or_else(|| "request dialog returned an invalid path".to_string())?
         .to_path_buf();
 
-    let owner_pubkey = app_handle
-        .state::<AppState>()
-        .signing_keys()?
-        .public_key();
+    let owner_pubkey = app_handle.state::<AppState>().signing_keys()?.public_key();
     let now = unix_time_now()?;
     tokio::task::spawn_blocking(move || inspect_request(&request_path, &owner_pubkey, now))
         .await
@@ -319,7 +327,9 @@ fn sign_request(
         || second.parent_identity != first.parent_identity
         || second.request != first.request
     {
-        return Err("request or custody directory changed before commit; nothing was written".into());
+        return Err(
+            "request or custody directory changed before commit; nothing was written".into(),
+        );
     }
     if owner_keys.public_key() != owner_pubkey {
         return Err("Desktop owner identity changed before commit; nothing was written".into());
@@ -442,9 +452,7 @@ fn load_and_validate_request_in(
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|error| {
-            format!("open regular non-symlink owner attestation request: {error}")
-        })?,
+        .map_err(|error| format!("open regular non-symlink owner attestation request: {error}"))?,
     );
     let metadata = file
         .metadata()
@@ -462,8 +470,7 @@ fn load_and_validate_request_in(
             request_identity.mode
         ));
     }
-    if request_identity.uid != custody.identity.uid
-        || request_identity.gid != custody.identity.gid
+    if request_identity.uid != custody.identity.uid || request_identity.gid != custody.identity.gid
     {
         return Err("request owner and group must match its custody directory".into());
     }
@@ -519,7 +526,9 @@ fn load_and_validate_request_in(
         request.agent_pubkey, request.conditions
     );
     if request.signing_preimage.as_bytes() != expected_preimage.as_bytes() {
-        return Err("signing_preimage does not byte-exactly bind agent_pubkey and conditions".into());
+        return Err(
+            "signing_preimage does not byte-exactly bind agent_pubkey and conditions".into(),
+        );
     }
     let expected_shape = [
         "auth".to_string(),
@@ -559,9 +568,10 @@ fn validate_normal_absolute_path(path: &Path, expected_name: &str) -> Result<(),
     if path.file_name().and_then(|value| value.to_str()) != Some(expected_name) {
         return Err(format!("path must end in {expected_name}"));
     }
-    if path.components().any(|component| {
-        matches!(component, Component::CurDir | Component::ParentDir)
-    }) {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
         return Err("path must not contain '.' or '..' components".into());
     }
     Ok(())
@@ -594,8 +604,7 @@ fn validate_agent_fingerprint(agent_pubkey: &str, fingerprint: &str) -> Result<(
     let normative_fingerprint = Sha256Hash::hash(&normative).to_string();
     if fingerprint != normative_fingerprint {
         return Err(
-            "agent public fingerprint must bind the normative 0x03-prefixed compressed key"
-                .into(),
+            "agent public fingerprint must bind the normative 0x03-prefixed compressed key".into(),
         );
     }
     Ok(())
@@ -647,7 +656,9 @@ fn parse_canonical_u32(value: &str, label: &str) -> Result<u64, String> {
         || !value.bytes().all(|byte| byte.is_ascii_digit())
         || (value.len() > 1 && value.starts_with('0'))
     {
-        return Err(format!("{label} must use canonical unsigned decimal encoding"));
+        return Err(format!(
+            "{label} must use canonical unsigned decimal encoding"
+        ));
     }
     let parsed = value
         .parse::<u64>()
@@ -691,6 +702,10 @@ fn verify_computed_tag(
 
 #[cfg(unix)]
 trait AtomicFileOps {
+    fn after_temp_sync(&self, _custody: &PinnedDirectory, _temp_name: &str) -> Result<(), Errno> {
+        Ok(())
+    }
+
     fn link_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno>;
     fn unlink_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno>;
     fn sync_directory(&self, custody: &PinnedDirectory) -> Result<(), Errno>;
@@ -741,22 +756,17 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
             rustix::fs::openat(
                 &custody.directory,
                 temp_name.as_str(),
-                OFlags::WRONLY
-                    | OFlags::CREATE
-                    | OFlags::EXCL
-                    | OFlags::NOFOLLOW
-                    | OFlags::CLOEXEC,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::RUSR | Mode::WUSR,
             )
             .map_err(|error| format!("create protected temporary attestation file: {error}"))?,
         );
         state = TempLinkState::Preparing;
 
-        let temp_identity = FileIdentity::from_metadata(
-            &temp.metadata().map_err(|error| {
+        let temp_identity =
+            FileIdentity::from_metadata(&temp.metadata().map_err(|error| {
                 format!("inspect protected temporary attestation file: {error}")
-            })?,
-        );
+            })?);
         if temp_identity.mode != 0o600
             || temp_identity.uid != custody.identity.uid
             || temp_identity.gid != custody.identity.gid
@@ -771,15 +781,23 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
             .map_err(|error| format!("write protected temporary attestation file: {error}"))?;
         temp.sync_all()
             .map_err(|error| format!("sync protected temporary attestation file: {error}"))?;
+        ops.after_temp_sync(custody, &temp_name)
+            .map_err(|error| format!("post-sync temporary-file check failed: {error}"))?;
 
         let persisted_file = open_relative_file(custody, &temp_name, "temporary attestation file")?;
-        let persisted_identity = FileIdentity::from_metadata(
-            &persisted_file.metadata().map_err(|error| {
+        let persisted_identity =
+            FileIdentity::from_metadata(&persisted_file.metadata().map_err(|error| {
                 format!("reinspect protected temporary attestation file: {error}")
-            })?,
-        );
-        if persisted_identity != temp_identity {
-            return Err("protected temporary attestation file identity changed before commit".into());
+            })?);
+        if !persisted_identity.same_stable_file_identity(&temp_identity) {
+            return Err(
+                "protected temporary attestation file identity changed before commit".into(),
+            );
+        }
+        if persisted_identity.len != bytes.len() as u64 {
+            return Err(
+                "protected temporary attestation file length mismatched before commit".into(),
+            );
         }
         let persisted = read_open_file(persisted_file, "temporary attestation file")?;
         if persisted.as_slice() != bytes {
@@ -848,7 +866,6 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
 
     if operation.is_err() && state == TempLinkState::Preparing {
         if let Err(cleanup_error) = ops.unlink_temp(custody, &temp_name) {
-            state = TempLinkState::CleanupAmbiguous;
             let operation_error = operation
                 .as_ref()
                 .expect_err("operation is known to be an error");
@@ -870,11 +887,7 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
 }
 
 #[cfg(unix)]
-fn open_relative_file(
-    custody: &PinnedDirectory,
-    name: &str,
-    label: &str,
-) -> Result<File, String> {
+fn open_relative_file(custody: &PinnedDirectory, name: &str, label: &str) -> Result<File, String> {
     rustix::fs::openat(
         &custody.directory,
         name,

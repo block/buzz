@@ -130,7 +130,10 @@ export function OwnerAttestationSettingsCard() {
           <SettingsOptionRow>
             <div className="min-w-0 space-y-1">
               <p className="font-medium">OWNER_ATTESTATION_REQUEST.json</p>
-              <p className="text-xs text-muted-foreground" data-settings-subcopy>
+              <p
+                className="text-xs text-muted-foreground"
+                data-settings-subcopy
+              >
                 Selection reads public request data only. It does not sign or
                 write anything.
               </p>
@@ -233,7 +236,10 @@ export function OwnerAttestationSettingsCard() {
             <SettingsOptionRow>
               <div className="min-w-0 space-y-1">
                 <p className="font-medium">No external effects</p>
-                <p className="text-xs text-muted-foreground" data-settings-subcopy>
+                <p
+                  className="text-xs text-muted-foreground"
+                  data-settings-subcopy
+                >
                   This operation does not create an agent, publish to a relay,
                   use the clipboard, contact Infisical or GitHub, mint a JWT or
                   token, or access VM112. The owner private key and signature
@@ -252,7 +258,10 @@ export function OwnerAttestationSettingsCard() {
             <SettingsOptionRow>
               <div className="min-w-0 space-y-1">
                 <p className="font-medium">Protected tag written once</p>
-                <p className="text-xs text-muted-foreground" data-settings-subcopy>
+                <p
+                  className="text-xs text-muted-foreground"
+                  data-settings-subcopy
+                >
                   The signature and tag value were not returned to the UI.
                 </p>
                 {publicValue(receipt.resultPath)}
@@ -275,7 +284,9 @@ export function OwnerAttestationSettingsCard() {
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Sign this exact owner attestation?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Sign this exact owner attestation?
+            </AlertDialogTitle>
             <AlertDialogDescription>
               Buzz will re-read the request, verify its byte hash, current
               validity, owner identity, file custody, and authorized target,

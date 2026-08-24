@@ -70,11 +70,8 @@ impl Fixture {
         let request = request.unwrap_or_else(|| self.request(&self.target_path));
         let bytes = serde_json::to_vec_pretty(&request).expect("request JSON");
         std::fs::write(&self.request_path, bytes).expect("write request");
-        std::fs::set_permissions(
-            &self.request_path,
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .expect("set request mode");
+        std::fs::set_permissions(&self.request_path, std::fs::Permissions::from_mode(0o644))
+            .expect("set request mode");
     }
 
     fn preview(&self) -> OwnerAttestationPreview {
@@ -106,11 +103,20 @@ fn nonempty_conditions_sign_and_verify_with_atomic_owner_only_custody() {
     let receipt = fixture.sign(&preview).expect("sign request");
 
     assert!(receipt.written);
-    assert_eq!(receipt.owner_pubkey, fixture.owner_keys.public_key().to_hex());
-    assert_ne!(fixture.owner_keys.public_key(), fixture.agent_keys.public_key());
+    assert_eq!(
+        receipt.owner_pubkey,
+        fixture.owner_keys.public_key().to_hex()
+    );
+    assert_ne!(
+        fixture.owner_keys.public_key(),
+        fixture.agent_keys.public_key()
+    );
     assert_eq!(preview.conditions, fixture.conditions);
     assert_eq!(preview.validity_seconds, 3_610);
-    assert_eq!(std::fs::read(&fixture.request_path).unwrap(), request_before);
+    assert_eq!(
+        std::fs::read(&fixture.request_path).unwrap(),
+        request_before
+    );
     let request_meta_after = std::fs::metadata(&fixture.request_path).unwrap();
     assert_eq!(request_meta_after.ino(), request_meta_before.ino());
     assert_eq!(request_meta_after.mtime(), request_meta_before.mtime());
@@ -120,11 +126,9 @@ fn nonempty_conditions_sign_and_verify_with_atomic_owner_only_custody() {
     );
 
     let tag_json = std::fs::read_to_string(&fixture.target_path).expect("protected tag");
-    let recovered = buzz_sdk_pkg::nip_oa::verify_auth_tag(
-        &tag_json,
-        &fixture.agent_keys.public_key(),
-    )
-    .expect("BIP340 verify");
+    let recovered =
+        buzz_sdk_pkg::nip_oa::verify_auth_tag(&tag_json, &fixture.agent_keys.public_key())
+            .expect("BIP340 verify");
     assert_eq!(recovered, fixture.owner_keys.public_key());
     let parts: Vec<String> = serde_json::from_str(&tag_json).expect("tag JSON");
     assert_eq!(parts.len(), 4);
@@ -152,13 +156,11 @@ fn existing_target_is_rejected_without_modification() {
     let fixture = Fixture::new();
     let preview = fixture.preview();
     std::fs::write(&fixture.target_path, b"preserve-me").unwrap();
-    std::fs::set_permissions(
-        &fixture.target_path,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    std::fs::set_permissions(&fixture.target_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let error = fixture.sign(&preview).expect_err("existing target must fail");
+    let error = fixture
+        .sign(&preview)
+        .expect_err("existing target must fail");
 
     assert!(error.contains("already exists"));
     assert_eq!(std::fs::read(&fixture.target_path).unwrap(), b"preserve-me");
@@ -410,6 +412,59 @@ fn request_requires_explicit_fingerprint_and_result_path() {
     assert!(!fixture.target_path.exists());
 }
 
+struct CountingSuccessOps {
+    link_calls: Cell<usize>,
+    unlink_calls: Cell<usize>,
+    sync_calls: Cell<usize>,
+}
+
+impl AtomicFileOps for CountingSuccessOps {
+    fn link_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        self.link_calls.set(self.link_calls.get() + 1);
+        RealAtomicFileOps.link_temp(custody, temp_name)
+    }
+
+    fn unlink_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        self.unlink_calls.set(self.unlink_calls.get() + 1);
+        RealAtomicFileOps.unlink_temp(custody, temp_name)
+    }
+
+    fn sync_directory(&self, custody: &PinnedDirectory) -> Result<(), Errno> {
+        self.sync_calls.set(self.sync_calls.get() + 1);
+        RealAtomicFileOps.sync_directory(custody)
+    }
+}
+
+struct StableIdentityMutationOps {
+    link_calls: Cell<usize>,
+    unlink_calls: Cell<usize>,
+}
+
+impl AtomicFileOps for StableIdentityMutationOps {
+    fn after_temp_sync(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        std::fs::set_permissions(
+            custody.path.join(temp_name),
+            std::fs::Permissions::from_mode(0o400),
+        )
+        .expect("mutate stable temp mode");
+        Ok(())
+    }
+
+    fn link_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        self.link_calls.set(self.link_calls.get() + 1);
+        RealAtomicFileOps.link_temp(custody, temp_name)
+    }
+
+    fn unlink_temp(&self, custody: &PinnedDirectory, temp_name: &str) -> Result<(), Errno> {
+        self.unlink_calls.set(self.unlink_calls.get() + 1);
+        RealAtomicFileOps.unlink_temp(custody, temp_name)
+    }
+
+    fn sync_directory(&self, custody: &PinnedDirectory) -> Result<(), Errno> {
+        RealAtomicFileOps.sync_directory(custody)
+    }
+}
+
 struct UnlinkFailureOps {
     unlink_calls: Cell<usize>,
     sync_calls: Cell<usize>,
@@ -512,6 +567,57 @@ fn restore_replaced_custody(original: &Path, moved: &Path) {
 }
 
 #[test]
+fn valid_post_write_identity_and_length_reach_linkat_success() {
+    let fixture = Fixture::new();
+    let custody = open_pinned_directory(&fixture.request_path).expect("pin custody directory");
+    let ops = CountingSuccessOps {
+        link_calls: Cell::new(0),
+        unlink_calls: Cell::new(0),
+        sync_calls: Cell::new(0),
+    };
+
+    atomic_create_secret_with_ops(&custody, b"test-auth-tag", &ops)
+        .expect("valid write must reach linkat");
+
+    assert_eq!(ops.link_calls.get(), 1);
+    assert_eq!(ops.unlink_calls.get(), 1);
+    assert_eq!(ops.sync_calls.get(), 1);
+    assert_eq!(
+        std::fs::read(&fixture.target_path).unwrap(),
+        b"test-auth-tag"
+    );
+}
+
+#[test]
+fn stable_temp_identity_mutation_fails_before_linkat() {
+    let fixture = Fixture::new();
+    let custody = open_pinned_directory(&fixture.request_path).expect("pin custody directory");
+    let ops = StableIdentityMutationOps {
+        link_calls: Cell::new(0),
+        unlink_calls: Cell::new(0),
+    };
+
+    let error = atomic_create_secret_with_ops(&custody, b"test-auth-tag", &ops)
+        .expect_err("stable identity mutation must fail");
+
+    assert!(error.contains("identity changed before commit"));
+    assert_eq!(ops.link_calls.get(), 0);
+    assert_eq!(ops.unlink_calls.get(), 1, "pre-commit cleanup runs once");
+    assert!(!fixture.target_path.exists());
+    assert_eq!(
+        std::fs::read_dir(fixture.request_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".BUZZ_AUTH_TAG."))
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn directory_replacement_before_commit_is_rejected_by_pinned_identity() {
     let fixture = Fixture::new();
     let custody = open_pinned_directory(&fixture.request_path).expect("pin custody directory");
@@ -548,7 +654,10 @@ fn directory_rename_during_link_is_detected_after_descriptor_relative_commit() {
     assert_eq!(ops.link_calls.get(), 1);
     assert!(error.contains("custody path verification failed"));
     assert!(error.contains("STOP and do not retry"));
-    assert_eq!(std::fs::read(moved.join(TARGET_FILE_NAME)).unwrap(), b"test-auth-tag");
+    assert_eq!(
+        std::fs::read(moved.join(TARGET_FILE_NAME)).unwrap(),
+        b"test-auth-tag"
+    );
     assert!(!original.join(TARGET_FILE_NAME).exists());
     restore_replaced_custody(&original, &moved);
 }
@@ -567,7 +676,11 @@ fn target_appearing_at_link_commit_wins_without_replacement() {
 
     assert!(error.contains("target appeared before commit"));
     assert_eq!(ops.link_calls.get(), 1);
-    assert_eq!(ops.unlink_calls.get(), 1, "pre-commit temp cleanup runs once");
+    assert_eq!(
+        ops.unlink_calls.get(),
+        1,
+        "pre-commit temp cleanup runs once"
+    );
     assert_eq!(
         std::fs::read(&fixture.target_path).unwrap(),
         b"preserve-race-winner"
@@ -600,8 +713,15 @@ fn unlink_fault_is_visible_and_never_retried_by_cleanup() {
     assert!(error.contains("temporary-link cleanup failed"));
     assert!(error.contains("STOP and do not retry"));
     assert_eq!(ops.unlink_calls.get(), 1, "cleanup must not retry in Drop");
-    assert_eq!(ops.sync_calls.get(), 0, "no operation follows ambiguous cleanup");
-    assert_eq!(std::fs::read(&fixture.target_path).unwrap(), b"test-auth-tag");
+    assert_eq!(
+        ops.sync_calls.get(),
+        0,
+        "no operation follows ambiguous cleanup"
+    );
+    assert_eq!(
+        std::fs::read(&fixture.target_path).unwrap(),
+        b"test-auth-tag"
+    );
     assert_eq!(
         std::fs::metadata(&fixture.target_path).unwrap().nlink(),
         2,
@@ -610,7 +730,12 @@ fn unlink_fault_is_visible_and_never_retried_by_cleanup() {
     let temp_files = std::fs::read_dir(fixture.request_path.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".BUZZ_AUTH_TAG."))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".BUZZ_AUTH_TAG.")
+        })
         .collect::<Vec<_>>();
     assert_eq!(temp_files.len(), 1, "ambiguous temp link is left untouched");
 }
@@ -631,7 +756,10 @@ fn directory_fsync_fault_is_visible_after_single_cleanup() {
     assert!(error.contains("STOP and do not retry"));
     assert_eq!(ops.unlink_calls.get(), 1);
     assert_eq!(ops.sync_calls.get(), 1);
-    assert_eq!(std::fs::read(&fixture.target_path).unwrap(), b"test-auth-tag");
+    assert_eq!(
+        std::fs::read(&fixture.target_path).unwrap(),
+        b"test-auth-tag"
+    );
     assert_eq!(
         std::fs::read_dir(fixture.request_path.parent().unwrap())
             .unwrap()
