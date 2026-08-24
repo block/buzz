@@ -1,5 +1,5 @@
 import { mergeAttributes, Node } from "@tiptap/core";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type { MarkType, Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Selection, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 
@@ -157,14 +157,26 @@ function selectionContainsComposerMessageLinkNode(view: EditorView): boolean {
   return containsMessageLink;
 }
 
+function selectionCanCarryMark(view: EditorView, markType: MarkType): boolean {
+  const { from, to } = view.state.selection;
+  let canCarryMark = false;
+  view.state.doc.nodesBetween(from, to, (node, _pos, parent) => {
+    if (canCarryMark) return false;
+    if (node.isInline && parent?.type.allowsMarkType(markType)) {
+      canCarryMark = true;
+      return false;
+    }
+    return true;
+  });
+  return canCarryMark;
+}
+
 function applyLinkToSelection(view: EditorView, href: string): boolean {
   const { from, to } = view.state.selection;
   const linkMark = view.state.schema.marks.link;
-  if (!linkMark) return false;
+  if (!linkMark || !selectionCanCarryMark(view, linkMark)) return false;
 
   let transaction = view.state.tr.addMark(from, to, linkMark.create({ href }));
-  if (!transaction.docChanged) return false;
-
   transaction = transaction.setSelection(
     Selection.near(transaction.doc.resolve(transaction.mapping.map(to)), -1),
   );

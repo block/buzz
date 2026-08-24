@@ -254,6 +254,29 @@ test("paste handler canonicalizes Buzz links over selected text", () => {
   ]);
 });
 
+test("paste handler consumes idempotent wrapped link over selected text", () => {
+  const href = "https://example.com";
+  const linkMark = editorSchema.marks.link.create({ href });
+  const doc = document(paragraph(text("already linked", [linkMark])));
+  const view = createMockView(stateFromDocument(doc, 1, 15));
+  const event = createPasteEvent(`<${href}>`);
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, true);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(view.focusCalled, true);
+  assert.equal(view.state.doc.textContent, "already linked");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content[0].marks, [
+    { attrs: { href }, type: "link" },
+  ]);
+  assert.equal(view.state.selection.empty, true);
+  assert.equal(view.state.selection.from, 15);
+  assert.deepEqual(view.state.storedMarks, []);
+});
+
 test("paste handler falls through when selected text cannot carry link marks", () => {
   const doc = document(codeBlock(text("const value = 1;")));
   const view = createMockView(stateFromDocument(doc, 1, 17));
