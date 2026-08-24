@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
+import { isObsidianOpenLink } from "@/shared/lib/obsidianLink";
 
 import { MaskedLinkTooltip } from "./MaskedLinkTooltip";
 import {
@@ -37,6 +38,12 @@ export function ExternalLinkAnchor({
   const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
+  const openHref = React.useCallback(() => {
+    if (!href) return;
+    void openUrl(href).catch(() => {
+      toast.error("Failed to open link");
+    });
+  }, [href]);
 
   const anchor = (
     <a
@@ -46,6 +53,14 @@ export function ExternalLinkAnchor({
         isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
       )}
       href={href}
+      onClick={(event) => {
+        anchorProps.onClick?.(event);
+        if (event.defaultPrevented || !href || !isObsidianOpenLink(href)) {
+          return;
+        }
+        event.preventDefault();
+        openHref();
+      }}
       onContextMenuCapture={(event) => {
         if (!href) return;
         event.preventDefault();
@@ -71,9 +86,7 @@ export function ExternalLinkAnchor({
               label: "Open link",
               onSelect: () => {
                 closeMenu();
-                void openUrl(href).catch(() => {
-                  toast.error("Failed to open link");
-                });
+                openHref();
               },
             },
             {

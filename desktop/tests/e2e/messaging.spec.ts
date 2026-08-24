@@ -414,6 +414,44 @@ test("send a message and see it in timeline", async ({ page }) => {
   );
 });
 
+test("validated Obsidian link opens through the native OS opener", async ({
+  page,
+}) => {
+  const link =
+    "obsidian://open?vault=holistics-digest&file=agent-cowork%2Fprojects%2Fanfra%2FANFRA_SETUP_END_TO_END.canvas";
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(`[Open in Obsidian](${link})`);
+  await page.getByTestId("send-message").click();
+
+  const anchor = page
+    .getByTestId("message-row")
+    .last()
+    .getByRole("link", { name: "Open in Obsidian" });
+  await expect(anchor).toHaveAttribute("href", link);
+  await anchor.click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const calls =
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: { url?: string };
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+        return calls
+          .filter(({ command }) => command === "plugin:opener|open_url")
+          .map(({ payload }) => payload.url);
+      }),
+    )
+    .toContain(link);
+});
+
 test("long autolink wraps without widening the timeline", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 600 });
 

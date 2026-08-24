@@ -538,6 +538,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { isChannelLink } from "../../features/messages/lib/channelLink.ts";
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
 import { parseEntityLink } from "../lib/entityLink.ts";
+import { isObsidianOpenLink } from "../lib/obsidianLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 const OWNER_HEX =
@@ -549,6 +550,7 @@ function buzzDeepLinkUrlTransform(value, key) {
   if (key !== "href") return defaultUrlTransform(value);
   if (isMessageLink(value) || isChannelLink(value)) return value;
   if (parseEntityLink(value).ok) return value;
+  if (isObsidianOpenLink(value)) return value;
   return defaultUrlTransform(value);
 }
 
@@ -609,6 +611,22 @@ test("messageLinkUrlTransform: still strips javascript: scheme", () => {
 test("messageLinkUrlTransform: passes http(s) through unchanged", () => {
   const html = renderMarkdown("[ext](https://example.com/path)");
   assert.match(html, /href="https:\/\/example\.com\/path"/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves validated Obsidian open links", () => {
+  const link =
+    "obsidian://open?vault=holistics-digest&file=agent-cowork%2Fprojects%2Fanfra%2FANFRA_SETUP_END_TO_END.canvas";
+  const html = renderMarkdown(`[Open in Obsidian](${link})`);
+  assert.match(html, /href="obsidian:\/\/open\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: strips other Obsidian actions", () => {
+  const html = renderMarkdown(
+    "[Create note](obsidian://new?vault=holistics-digest&name=unsafe)",
+  );
+  assert.match(html, /href=""/);
+  assert.doesNotMatch(html, /obsidian:\/\/new/);
 });
 
 test("messageLinkUrlTransform: preserves legacy buzz://message href", () => {

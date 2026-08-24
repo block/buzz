@@ -4,6 +4,7 @@ import { defaultUrlTransform } from "react-markdown";
 import { isChannelLink } from "@/features/messages/lib/channelLink";
 import { isMessageLink } from "@/features/messages/lib/messageLink";
 import { parseEntityLink } from "@/shared/lib/entityLink";
+import { isObsidianOpenLink } from "@/shared/lib/obsidianLink";
 
 export function useStableArray<T>(arr: T[]): T[] {
   const ref = React.useRef(arr);
@@ -179,12 +180,14 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
  *   message-link pill renderer).
  * - `buzz://pr|issue|repo` hrefs — preserved only when `parseEntityLink`
  *   succeeds, keeping the sanitizer active against arbitrary `buzz://` URIs.
+ * - Valid `obsidian://open` hrefs — preserved for the guarded OS-opener path.
  * - Everything else delegates to `defaultUrlTransform`.
  */
 export function buzzDeepLinkUrlTransform(value: string, key: string): string {
   if (key !== "href") return defaultUrlTransform(value);
   if (isMessageLink(value) || isChannelLink(value)) return value;
   if (parseEntityLink(value).ok) return value;
+  if (isObsidianOpenLink(value)) return value;
   return defaultUrlTransform(value);
 }
 

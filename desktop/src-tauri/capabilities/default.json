@@ -17,6 +17,14 @@
     "core:window:allow-close",
     "notification:default",
     "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "obsidian://open[?]file=*" },
+        { "url": "obsidian://open[?]path=*" },
+        { "url": "obsidian://open[?]vault=*" }
+      ]
+    },
     "websocket:default",
     "window-state:default",
     "dialog:default",
