@@ -204,8 +204,9 @@ class _ChannelBotRoleSubscription
 
   Future<void> _subscribe(String channelId, int subscriptionVersion) async {
     final session = ref.read(relaySessionProvider.notifier);
+    var subscriptionStatus = RelaySubscriptionStatus.retrying;
     try {
-      final unsubscribe = await session.subscribe(
+      final unsubscribe = await session.subscribeWithStatus(
         NostrFilter(
           kinds: const [39002],
           tags: {
@@ -228,6 +229,14 @@ class _ChannelBotRoleSubscription
             );
           }
         },
+        onStatusChanged: (status) {
+          subscriptionStatus = status;
+          if (!_isCurrent(subscriptionVersion)) return;
+          state = ChannelMembershipUpdateState(
+            version: state.version,
+            isReady: status == RelaySubscriptionStatus.ready,
+          );
+        },
       );
       if (!_isCurrent(subscriptionVersion)) {
         unsubscribe();
@@ -236,7 +245,7 @@ class _ChannelBotRoleSubscription
       _unsubscribe = unsubscribe;
       state = ChannelMembershipUpdateState(
         version: state.version,
-        isReady: true,
+        isReady: subscriptionStatus == RelaySubscriptionStatus.ready,
       );
     } catch (error) {
       if (_isCurrent(subscriptionVersion)) {

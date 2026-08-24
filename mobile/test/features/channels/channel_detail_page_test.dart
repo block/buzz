@@ -12870,6 +12870,17 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   }) async => const [];
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
