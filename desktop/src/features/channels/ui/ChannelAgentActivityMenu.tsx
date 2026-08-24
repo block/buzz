@@ -34,13 +34,17 @@ export function ChannelAgentActivityMenu({
   const selectedPubkey = openAgentSessionPubkey
     ? normalizePubkey(openAgentSessionPubkey)
     : null;
+  const [handoffAgent, setHandoffAgent] = React.useState<
+    ChannelAgentSessionAgent | null
+  >(null);
 
   if (agents.length === 0) {
     return null;
   }
 
   return (
-    <DropdownMenu modal={false}>
+    <>
+      <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button
           aria-label="Open agent activity"
@@ -80,25 +84,36 @@ export function ChannelAgentActivityMenu({
                   </span>
                 ) : null}
               </DropdownMenuItem>
-              <AgentHandoffDialog
-                agent={{ name: agent.name, pubkey: agent.pubkey }}
-                history=""
-                initialMode="received"
-                trigger={
-                  <DropdownMenuItem
-                    className="gap-2 pl-9"
-                    data-testid={`channel-agent-handoff-item-${agent.pubkey}`}
-                  >
-                    <span className="min-w-0 flex-1 truncate">
-                      Handoff history
-                    </span>
-                  </DropdownMenuItem>
-                }
-              />
+              <DropdownMenuItem
+                className="gap-2 pl-9"
+                data-testid={`channel-agent-handoff-item-${agent.pubkey}`}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setHandoffAgent(agent);
+                }}
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  Handoff history
+                </span>
+              </DropdownMenuItem>
             </React.Fragment>
           );
         })}
       </DropdownMenuContent>
-    </DropdownMenu>
+      </DropdownMenu>
+      {handoffAgent ? (
+        <AgentHandoffDialog
+          agent={{ name: handoffAgent.name, pubkey: handoffAgent.pubkey }}
+          history=""
+          initialMode="received"
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              setHandoffAgent(null);
+            }
+          }}
+          open
+        />
+      ) : null}
+    </>
   );
 }

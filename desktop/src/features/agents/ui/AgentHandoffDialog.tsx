@@ -26,6 +26,8 @@ type AgentHandoffDialogProps = {
   history: string;
   initialMode?: "send" | "received";
   trigger?: React.ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 };
 
 export function AgentHandoffDialog({
@@ -33,8 +35,20 @@ export function AgentHandoffDialog({
   history,
   initialMode = "send",
   trigger,
+  open: controlledOpen,
+  onOpenChange,
 }: AgentHandoffDialogProps) {
-  const [open, setOpen] = React.useState(false);
+  const [internalOpen, setInternalOpen] = React.useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = React.useCallback(
+    (nextOpen: boolean) => {
+      if (controlledOpen === undefined) {
+        setInternalOpen(nextOpen);
+      }
+      onOpenChange?.(nextOpen);
+    },
+    [controlledOpen, onOpenChange],
+  );
   const [mode, setMode] = React.useState<"send" | "received">(initialMode);
   const [selectedEvent, setSelectedEvent] = React.useState<string | null>(null);
   const [recipient, setRecipient] = React.useState("");
