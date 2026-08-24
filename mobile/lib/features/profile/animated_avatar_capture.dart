@@ -20,6 +20,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'avatar_background_grid.dart';
+import 'camera_disposal_barrier.dart';
 import 'avatar_editor_option_button.dart';
 import 'animated_avatar_orientation.dart';
 import 'profile_avatar_draft.dart';
@@ -58,6 +59,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
+    final controllerDisposal = useRef(CameraDisposalBarrier());
     final captureEpoch = useRef(0);
     final cameraGeneration = useState(0);
     final isInitializing = useState(true);
@@ -129,10 +131,17 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
 
       isInitializing.value = true;
 
+      Future<void> releaseController(CameraController? active) {
+        if (active == null) return controllerDisposal.value.settled;
+        return controllerDisposal.value.release(active.dispose);
+      }
+
       Future<void> initialize() async {
         CameraController? next;
         var installed = false;
         try {
+          await controllerDisposal.value.settled;
+          if (disposed) return;
           final cameras = await availableCameras();
           if (disposed || cameras.isEmpty) return;
           final selected = cameras.firstWhere(
@@ -150,14 +159,14 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           await next.initialize();
           await next.lockCaptureOrientation(DeviceOrientation.portraitUp);
           if (disposed) {
-            await next.dispose();
+            await releaseController(next);
             return;
           }
           controllerRef.value = next;
           controller.value = next;
           installed = true;
         } catch (_) {
-          if (!installed) await next?.dispose();
+          if (!installed && next != null) await releaseController(next);
           if (!disposed) error.value = 'Could not access the camera.';
         } finally {
           if (!disposed) isInitializing.value = false;
@@ -170,7 +179,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         captureEpoch.value++;
         final active = controllerRef.value;
         controllerRef.value = null;
-        unawaited(active?.dispose() ?? Future<void>.value());
+        unawaited(releaseController(active));
       };
     }, [lifecycle, frames.value.isEmpty, cameraGeneration.value]);
 
@@ -247,7 +256,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         if (context.mounted && identical(controller.value, active)) {
           controller.value = null;
         }
-        await active.dispose();
+        await controllerDisposal.value.release(active.dispose);
       }
 
       final timer = Timer.periodic(const Duration(milliseconds: 40), (_) {

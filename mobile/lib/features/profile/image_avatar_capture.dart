@@ -15,6 +15,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import 'camera_disposal_barrier.dart';
 
 const _avatarPreviewSize = 220.0;
 
@@ -78,7 +79,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final lifecycle = ref.watch(appLifecycleProvider);
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
-    final controllerDisposal = useRef<Future<void>>(Future<void>.value());
+    final controllerDisposal = useRef(CameraDisposalBarrier());
     final cameras = useState<List<CameraDescription>>(const []);
     final selectedLens = useState(CameraLensDirection.front);
     final cameraGeneration = useState(0);
@@ -96,18 +97,8 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final error = useState<String?>(null);
 
     Future<void> releaseController(CameraController? active) {
-      if (active == null) return controllerDisposal.value;
-      final previousDisposal = controllerDisposal.value;
-      final release = () async {
-        try {
-          await previousDisposal;
-        } catch (_) {
-          // A failed release must not prevent a replacement camera session.
-        }
-        await active.dispose();
-      }();
-      controllerDisposal.value = release;
-      return release;
+      if (active == null) return controllerDisposal.value.settled;
+      return controllerDisposal.value.release(active.dispose);
     }
 
     useEffect(() {
@@ -148,7 +139,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
         CameraController? next;
         var installed = false;
         try {
-          await controllerDisposal.value;
+          await controllerDisposal.value.settled;
           if (disposed || generation != cameraGeneration.value) return;
           final available = await loadCameras();
           if (disposed || generation != cameraGeneration.value) return;
@@ -183,7 +174,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
             unawaited(releaseController(previous));
           }
         } catch (_) {
-          if (!installed) await next?.dispose();
+          if (!installed && next != null) await releaseController(next);
           if (!disposed && generation == cameraGeneration.value) {
             final active = controllerRef.value;
             if (active != null) {
