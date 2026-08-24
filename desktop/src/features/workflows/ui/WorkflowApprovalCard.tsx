@@ -1,4 +1,6 @@
+import { useApprovalMutation } from "@/features/workflows/hooks";
 import type { WorkflowApproval } from "@/shared/api/types";
+import { Button } from "@/shared/ui/button";
 
 type WorkflowApprovalCardProps = {
   approval: WorkflowApproval;
@@ -6,6 +8,7 @@ type WorkflowApprovalCardProps = {
 
 export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
   const isExpired = new Date(approval.expiresAt) < new Date();
+  const approvalMutation = useApprovalMutation();
 
   if (approval.status !== "pending" || isExpired) {
     return null;
@@ -23,9 +26,40 @@ export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
       <p className="mb-2 text-xs text-muted-foreground">
         Expires: {new Date(approval.expiresAt).toLocaleString()}
       </p>
-      <p className="text-xs text-muted-foreground" role="status">
-        Approval actions are not yet available in Desktop.
-      </p>
+      {approvalMutation.isError ? (
+        <p className="mb-2 text-xs text-red-500" role="status">
+          {approvalMutation.error?.message}
+        </p>
+      ) : null}
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          data-testid="approve-approval"
+          disabled={approvalMutation.isPending}
+          onClick={() =>
+            approvalMutation.mutate({
+              token: approval.approvalRef,
+              action: "grant",
+            })
+          }
+        >
+          Approve
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          data-testid="deny-approval"
+          disabled={approvalMutation.isPending}
+          onClick={() =>
+            approvalMutation.mutate({
+              token: approval.approvalRef,
+              action: "deny",
+            })
+          }
+        >
+          Deny
+        </Button>
+      </div>
     </div>
   );
 }

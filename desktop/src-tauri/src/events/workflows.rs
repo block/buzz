@@ -38,13 +38,20 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
 }
 
 /// Kind 46030 — grant an approval token (with optional note).
+///
+/// The `d` tag carries the approval reference (the hex token hash /
+/// `approval_ref`). The relay's grant handler resolves the pending approval
+/// by community + token hash (`get_approval_by_stored_hash`), reading the
+/// reference from the `d` (or `e`) tag — a `t` tag is not a recognized
+/// reference and the grant would be rejected.
 pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = vec![tag(vec!["d", token])?];
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
-/// Kind 46031 — deny an approval token (with optional note).
+/// Kind 46031 — deny an approval token (with optional note). Same `d` tag
+/// reference contract as the grant.
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = vec![tag(vec!["d", token])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
