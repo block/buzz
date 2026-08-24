@@ -404,13 +404,29 @@ pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, S
 /// `buzz-sdk` uses `nostr 0.36` while the desktop crate uses `nostr 0.37`. Cross-version
 /// bridging is done via hex-encoded public keys and raw tag slices — both versions share the
 /// same wire format.
+#[allow(dead_code)] // Retained for unit tests that exercise the no-about path.
 fn build_profile_event(
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
-    let builder = crate::events::build_profile(Some(display_name), None, avatar_url, None, None)?;
+    build_profile_event_full(agent_keys, display_name, avatar_url, None, auth_tag_json)
+}
+
+/// Build a signed kind:0 profile event with an optional `about` field.
+///
+/// The `about` value is passed through verbatim — the caller (sync) is
+/// responsible for resolving whether to carry an existing about forward or
+/// use a fresh value.
+fn build_profile_event_full(
+    agent_keys: &nostr::Keys,
+    display_name: &str,
+    avatar_url: Option<&str>,
+    about: Option<&str>,
+    auth_tag_json: Option<&str>,
+) -> Result<nostr::Event, String> {
+    let builder = crate::events::build_profile(Some(display_name), None, avatar_url, about, None)?;
 
     let builder = if let Some(tag_json) = auth_tag_json {
         // Bridge nostr 0.37 PublicKey → nostr 0.36 PublicKey via hex encoding.
@@ -452,8 +468,27 @@ pub async fn sync_managed_agent_profile(
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
+    // The managed-agent record has no `about` field, so omitting it here would
+    // wipe any about the agent set itself (issue #4150). Query the relay for the
+    // current kind:0 profile and carry forward the fields this sync does not own.
+    let existing_about = {
+        let pubkey_hex = agent_keys.public_key().to_hex();
+        match query_agent_profile(state, relay_url, &pubkey_hex).await {
+            Ok(Some(info)) => info.about,
+            Ok(None) => None,
+            // A failed query must not swallow the owner's attempt to re-publish;
+            // log nothing here — the sync can still proceed with no merge.
+            Err(_) => None,
+        }
+    };
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
+    let event = build_profile_event_full(
+        agent_keys,
+        display_name,
+        avatar_url,
+        existing_about.as_deref(),
+        auth_tag,
+    )?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
@@ -526,6 +561,10 @@ pub async fn query_agent_profile(
             .get("picture")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        about: content
+            .get("about")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     }))
 }
 
@@ -534,6 +573,7 @@ pub async fn query_agent_profile(
 pub struct AgentProfileInfo {
     pub display_name: Option<String>,
     pub picture: Option<String>,
+    pub about: Option<String>,
 }
 
 // ── Signed-event submission ─────────────────────────────────────────────────
@@ -613,7 +653,8 @@ pub async fn submit_signed_event_with_keys(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_profile_event, classify_intercepted_response, effective_agent_relay_url,
+        build_profile_event, build_profile_event_full, classify_intercepted_response,
+        effective_agent_relay_url,
         extract_retry_in_hint, parse_command_response, relay_http_base_url,
         MALFORMED_RESPONSE_MESSAGE,
     };
@@ -977,6 +1018,46 @@ mod tests {
         assert_eq!(auth_tags.len(), 0, "expected no auth tags");
 
         assert_eq!(event.kind, nostr::Kind::Metadata);
+    }
+
+    /// `build_profile_event_full` must include the `about` field in the kind:0
+    /// JSON when `Some(about)` is provided, and omit it (so it does not clobber)
+    /// when `None` is provided. This protects the agent-set about from being
+    /// wiped by a managed-agent republish (issue #4150).
+    #[test]
+    fn profile_event_full_carries_about_field() {
+        let agent_keys = nostr::Keys::generate();
+        let event = build_profile_event_full(
+            &agent_keys,
+            "TestBot",
+            None,
+            Some("I like pears."),
+            None,
+        )
+        .expect("build with about should succeed");
+        let content: serde_json::Value =
+            serde_json::from_str(&event.content).expect("kind:0 content is JSON");
+        assert_eq!(
+            content.get("about").and_then(|v| v.as_str()),
+            Some("I like pears."),
+            "Some(about) must appear in the kind:0 JSON"
+        );
+        assert_eq!(
+            content.get("display_name").and_then(|v| v.as_str()),
+            Some("TestBot"),
+            "display_name must still flow through"
+        );
+
+        // None must *omit* the field entirely — inserting `"about": null` would
+        // wipe the relay-side value on republish.
+        let event = build_profile_event_full(&agent_keys, "TestBot", None, None, None)
+            .expect("build without about should succeed");
+        let content: serde_json::Value =
+            serde_json::from_str(&event.content).expect("kind:0 content is JSON");
+        assert!(
+            content.get("about").is_none(),
+            "None about must be omitted, not serialized as null"
+        );
     }
 
     #[test]
