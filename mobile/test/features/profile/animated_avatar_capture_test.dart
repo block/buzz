@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' show SemanticsAction;
 
 import 'package:buzz/features/profile/animated_avatar_orientation.dart';
@@ -185,6 +186,72 @@ void main() {
     expect(tester.getSemantics(position).value, '10 horizontal, 0 vertical');
     semantics.dispose();
   });
+
+  testWidgets('an existing Save callback uses the latest cutout position', (
+    tester,
+  ) async {
+    final source = image.Image(width: 256, height: 256, numChannels: 4);
+    image.fillRect(
+      source,
+      x1: 108,
+      y1: 108,
+      x2: 147,
+      y2: 147,
+      color: image.ColorRgba8(0, 255, 0, 255),
+    );
+    final frame = image.encodePng(source);
+    Future<ProfileAvatarDraft?> Function()? prepare;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appLifecycleProvider.overrideWith(_TestLifecycleNotifier.new),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: AnimatedAvatarCapture(
+              height: 600,
+              initialFrames: [frame],
+              onPrepareChanged: (value) => prepare = value,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final originalPrepare = prepare!;
+    final centered = await tester.runAsync(originalPrepare);
+
+    final positionWidget = tester.widget<Semantics>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == 'Avatar position',
+      ),
+    );
+    positionWidget.properties.customSemanticsActions!.entries
+        .firstWhere((entry) => entry.key.label == 'Move right')
+        .value();
+    await tester.pump();
+    final moved = await tester.runAsync(originalPrepare);
+
+    expect(
+      _greenCenterX((moved! as ProfileAnimatedAvatarDraft).poster),
+      greaterThan(
+        _greenCenterX((centered! as ProfileAnimatedAvatarDraft).poster) + 3,
+      ),
+    );
+  });
+}
+
+double _greenCenterX(Uint8List bytes) {
+  final decoded = image.decodePng(bytes)!;
+  final matchingX = <int>[];
+  for (final pixel in decoded) {
+    if (pixel.g > 200 && pixel.r < 30 && pixel.b < 30) {
+      matchingX.add(pixel.x);
+    }
+  }
+  return matchingX.reduce((left, right) => left + right) / matchingX.length;
 }
 
 class _TestLifecycleNotifier extends AppLifecycleNotifier {

@@ -94,6 +94,8 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
             shapeOffsetX: shapeOffset.value.dx,
             shapeOffsetY: shapeOffset.value.dy,
           );
+    final latestEncodeKey = useRef<_EncodeKey?>(null);
+    latestEncodeKey.value = encodeKey;
     useEffect(() {
       encodedCache.value = null;
       final key = encodeKey;
@@ -169,7 +171,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     }, [lifecycle, frames.value.isEmpty, cameraGeneration.value]);
 
     Future<ProfileAvatarDraft?> prepare() async {
-      final key = encodeKey;
+      final key = latestEncodeKey.value;
       if (key == null) return null;
       isProcessing.value = true;
       error.value = null;
