@@ -57,6 +57,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode } from "@/shared/api/types";
+import { isAgentActivityWindow } from "@/features/agents/lib/agentActivityWindow";
 import { ChannelScreenLoadingFallback } from "@/features/channels/ui/ChannelScreenLoadingFallback";
 import {
   useHuddleChannelMessages,
@@ -76,6 +77,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
+import { useOpenAgentActivityActions } from "./useOpenAgentActivityActions";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
@@ -95,6 +97,7 @@ export function ChannelScreen({
   targetMessageEvents,
   targetMessageId,
 }: ChannelScreenProps) {
+  const isDedicatedActivityWindow = isAgentActivityWindow();
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const {
@@ -214,6 +217,7 @@ export function ChannelScreen({
     activeChannelId,
     activeChannel?.isMember,
     activeReadAt,
+    !isDedicatedActivityWindow,
   );
   React.useEffect(() => {
     if (!activeChannelId) {
@@ -253,6 +257,7 @@ export function ChannelScreen({
     activeChannelId,
     activeChannelIsMember: activeChannel?.isMember,
     isHuddleTranscript,
+    enabled: !isDedicatedActivityWindow,
     markChannelRead,
     messages: messagesQuery.data,
     resolvedMessages,
@@ -302,6 +307,10 @@ export function ChannelScreen({
     welcomeGuideAgent,
   });
   const relayAgentsQuery = useRelayAgentsQuery();
+  const agentsLoading =
+    channelMembersQuery.isLoading ||
+    managedAgentsQuery.isLoading ||
+    relayAgentsQuery.isLoading;
   const relayAgents = relayAgentsQuery.data ?? [];
   const knownAgentPubkeys = React.useMemo(
     () =>
@@ -564,16 +573,14 @@ export function ChannelScreen({
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
-    agentsLoaded:
-      !channelMembersQuery.isLoading &&
-      !managedAgentsQuery.isLoading &&
-      !relayAgentsQuery.isLoading,
+    agentsLoaded: !agentsLoading,
     channelMembers,
     handleOpenThread,
     managedAgents: agentSessionCandidates,
     openAgentSessionPubkey,
     openThreadHeadId: effectiveOpenThreadHeadId,
     profilePanelPubkey,
+    preserveUnresolvedSession: isDedicatedActivityWindow,
     setChannelManagementOpen,
     setExpandedThreadReplyIds,
     setOpenAgentSessionChannelId,
@@ -583,6 +590,14 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
   });
+  const {
+    openInApp: handleOpenAgentActivity,
+    openInExternalWindow: handleOpenAgentActivityExternal,
+  } = useOpenAgentActivityActions(
+    activeCommunity?.id ?? null,
+    activeChannelId,
+    handleOpenAgentSession,
+  );
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,
@@ -688,9 +703,10 @@ export function ChannelScreen({
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
   const isSinglePanelView =
-    isNarrowPanelViewport &&
-    activeChannel?.channelType !== "forum" &&
-    hasAuxiliaryPanel;
+    isDedicatedActivityWindow ||
+    (isNarrowPanelViewport &&
+      activeChannel?.channelType !== "forum" &&
+      hasAuxiliaryPanel);
   const shouldCompactHeaderActions =
     hasAuxiliaryPanel &&
     channelContentWidthPx > 0 &&
@@ -772,7 +788,7 @@ export function ChannelScreen({
     ],
   );
   return (
-    <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
+    <AgentSessionProvider onOpenAgentSession={handleOpenAgentActivity}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
         <WelcomeAgentCreateDialog
           guideName={welcomeGuideAgent?.name ?? "your welcome guide"}
@@ -827,6 +843,7 @@ export function ChannelScreen({
               <React.Suspense
                 fallback={
                   <ChannelScreenLoadingFallback
+                    includeHeader={!isDedicatedActivityWindow}
                     isHuddleTranscript={isHuddleTranscript}
                   />
                 }
@@ -853,6 +870,7 @@ export function ChannelScreen({
                   onOpenMembers={handleOpenMembersSidebar}
                   isFetchingOlder={isFetchingOlder}
                   isHuddleTranscript={isHuddleTranscript}
+                  isDedicatedActivityWindow={isDedicatedActivityWindow}
                   entranceMessageId={welcomeEntranceMessageId}
                   onEntranceMessageComplete={handleWelcomeEntranceComplete}
                   welcomeKickoffStage={welcomeKickoffStage}
@@ -874,6 +892,7 @@ export function ChannelScreen({
                   isMessageUnreadById={isMessageUnread}
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
+                  isAgentSessionLoading={agentsLoading}
                   isSinglePanelView={isSinglePanelView}
                   isTimelineLoading={isTimelineLoading}
                   messages={timelineMessages}
@@ -911,7 +930,8 @@ export function ChannelScreen({
                   onMarkUnread={handleMessageMarkUnread}
                   onMarkRead={handleMessageMarkRead}
                   onExpandThreadReplies={handleExpandThreadReplies}
-                  onOpenAgentSession={handleOpenAgentSession}
+                  onOpenAgentSession={handleOpenAgentActivity}
+                  onOpenAgentSessionExternal={handleOpenAgentActivityExternal}
                   onOpenDm={handleOpenDm}
                   onOpenProfilePanel={handleOpenProfilePanel}
                   onResetThreadPanelWidth={handleThreadPanelWidthReset}
@@ -969,7 +989,7 @@ export function ChannelScreen({
           currentPubkey={currentPubkey}
           open={isMembersSidebarOpen}
           onOpenChange={setIsMembersSidebarOpen}
-          onViewActivity={handleOpenAgentSession}
+          onViewActivity={handleOpenAgentActivity}
           relayUrl={activeCommunity?.relayUrl}
         />
       </ProfilePanelProvider>

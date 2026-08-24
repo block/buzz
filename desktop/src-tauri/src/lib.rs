@@ -1,4 +1,5 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
+mod agent_activity_window;
 mod app_menu;
 mod app_state;
 mod archive;
@@ -50,6 +51,7 @@ mod unread_catch_up;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
+use agent_activity_window::open_agent_activity_window;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 #[doc(hidden)]
@@ -781,6 +783,7 @@ pub fn run() {
             get_huddle_state,
             close_huddle_companion,
             open_huddle_window,
+            open_agent_activity_window,
             push_audio_pcm,
             reconnect_huddle_audio,
             start_stt_pipeline,

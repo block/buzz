@@ -29,6 +29,7 @@ import { reconcileManagedAgentRuntimes } from "@/shared/api/tauriManagedAgents";
  */
 export function useManagedAgentRuntimeReconciliation(
   communities: readonly { relayUrl: string }[],
+  enabled = true,
 ): void {
   const queryClient = useQueryClient();
   // Canonical relay URLs that have reconciled cleanly — never re-hit.
@@ -42,6 +43,7 @@ export function useManagedAgentRuntimeReconciliation(
   );
 
   React.useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
 
     const clearRetryTimer = () => {
@@ -131,5 +133,5 @@ export function useManagedAgentRuntimeReconciliation(
       cancelled = true;
       clearRetryTimer();
     };
-  }, [communities, queryClient]);
+  }, [communities, enabled, queryClient]);
 }

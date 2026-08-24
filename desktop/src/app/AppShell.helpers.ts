@@ -2,6 +2,27 @@ import { isThreadReply } from "@/features/messages/lib/threading";
 import type { DesktopNotificationTarget } from "@/features/notifications/lib/desktop";
 import type { SearchHit } from "@/shared/api/types";
 
+export type MainOwnedEffects = {
+  agentRuntimeReconciliation: boolean;
+  autoRestart: boolean;
+  membershipNotifications: boolean;
+  presenceSession: boolean;
+  reminderNotifications: boolean;
+  markAsReadShortcuts: boolean;
+};
+
+export function mainOwnedEffects(isCompanionWindow: boolean): MainOwnedEffects {
+  const enabled = !isCompanionWindow;
+  return {
+    agentRuntimeReconciliation: enabled,
+    autoRestart: enabled,
+    membershipNotifications: enabled,
+    presenceSession: enabled,
+    reminderNotifications: enabled,
+    markAsReadShortcuts: enabled,
+  };
+}
+
 export type AppView =
   | "home"
   | "channel"

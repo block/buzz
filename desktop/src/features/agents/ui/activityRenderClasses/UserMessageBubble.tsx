@@ -8,9 +8,11 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { cn } from "@/shared/lib/cn";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { Markdown } from "@/shared/ui/markdown";
+import { activityWindowMarkdownInteractive } from "./activityWindowPresentation";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import type { TranscriptItem } from "../agentSessionTypes";
+import { isAgentActivityWindow } from "../../lib/agentActivityWindow";
 import { MessageLinkHoverCue } from "./MessageLinkHoverCue";
 import { useTranscriptBubbleOverflow } from "./useTranscriptBubbleOverflow";
 
@@ -33,12 +35,16 @@ export function UserMessageBubble({
   const { goChannel } = useAppNavigation();
   const { openProfilePanel } = useProfilePanel();
   const isCompactPreview = variant === "compactPreview";
-  const shouldClampBubble = !isCompactPreview;
+  const isDedicatedActivityWindow = isAgentActivityWindow();
+  const shouldClampBubble = !isCompactPreview && !isDedicatedActivityWindow;
   const [bubbleRef, hasBubbleOverflow] =
     useTranscriptBubbleOverflow(shouldClampBubble);
   const text = item.text.trim();
   const messageLink =
-    shouldClampBubble && item.channelId && item.messageId
+    shouldClampBubble &&
+    !isDedicatedActivityWindow &&
+    item.channelId &&
+    item.messageId
       ? { channelId: item.channelId, messageId: item.messageId }
       : null;
   const authorProfile = item.authorPubkey
@@ -98,7 +104,9 @@ export function UserMessageBubble({
       data-role="user-message"
       data-testid="transcript-user-message"
     >
-      {isCompactPreview ? null : item.authorPubkey && openProfilePanel ? (
+      {isCompactPreview ? null : item.authorPubkey &&
+        openProfilePanel &&
+        !isDedicatedActivityWindow ? (
         <button
           aria-label={`Open ${authorLabel} profile`}
           className="pointer-events-auto order-last ml-2 mt-1 size-7 shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -148,6 +156,8 @@ export function UserMessageBubble({
           <Markdown
             className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
             content={text || " "}
+            blockCode
+            interactive={activityWindowMarkdownInteractive()}
             mediaInset
           />
           {children}

@@ -1,7 +1,11 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
-import { deriveShellRoute, markAllReadSources } from "@/app/AppShell.helpers";
+import {
+  deriveShellRoute,
+  mainOwnedEffects,
+  markAllReadSources,
+} from "@/app/AppShell.helpers";
 import { useTerminalContext } from "@/app/useTerminalContext";
 import { AppShellProvider } from "@/app/AppShellContext";
 import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
@@ -44,6 +48,7 @@ import {
 } from "@/features/notifications/hooks";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { currentCompanionWindowKind } from "@/app/companionWindow";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { useManagedAgentRuntimeReconciliation } from "@/features/agents/useManagedAgentRuntimeReconciliation";
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
@@ -125,7 +130,12 @@ export function AppShell() {
     showHuddleInMainApp,
     viewHuddleChannel,
   } = useHuddlePresentation();
-  const hasCommunityRail = communitiesHook.communities.length > 1;
+  const companionWindowKind = currentCompanionWindowKind();
+  const isActivityWindow = companionWindowKind === "agent-activity";
+  const isCompanionWindow = companionWindowKind !== null;
+  const ownedEffects = mainOwnedEffects(isCompanionWindow);
+  const hasCommunityRail =
+    communitiesHook.communities.length > 1 && !isCompanionWindow;
   const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -140,7 +150,10 @@ export function AppShell() {
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
-  useManagedAgentRuntimeReconciliation(communitiesHook.communities); // sync storage snapshot
+  useManagedAgentRuntimeReconciliation(
+    communitiesHook.communities,
+    ownedEffects.agentRuntimeReconciliation,
+  );
   const {
     goAgents,
     goChannel,
@@ -192,30 +205,13 @@ export function AppShell() {
     communitiesHook.activeCommunity?.relayUrl,
   );
   useAgentsDataRefresh();
-  // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
-  useAutoRestartPolicy();
-  // Owner-global observer ingestion: receives + decrypts agent observer
-  // frames and keeps derived active-turn liveness in sync app-wide, so no
-  // individual screen/panel has to mount its own bridge for ingestion.
-  // Intentionally mounted without a `startupReady`/identity guard: before
-  // `currentPubkey` resolves the hook ingests managed agents only, and
-  // relay-owned agents join automatically once identity arrives. Adding a
-  // guard here would drop managed-agent coverage during startup.
+  useAutoRestartPolicy(ownedEffects.autoRestart);
   useAgentObserverIngestion();
-  // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
-  // deferred): seeds kind 24200 for fresh identities, no-ops for explicit
-  // opt-outs. Frames before the listener opens are permanently lost.
   const observerReconciled = useObserverArchiveReconciliation(
     identityQuery.data?.pubkey,
   );
-  // useArchiveSync must wait for reconciliation, or listeners could open
-  // before kind 24200 is guaranteed present in the subscription.
   useArchiveSync(observerReconciled);
-  // The archive batch now persists in Rust, so the agent-metrics invalidation
-  // signal arrives as a Tauri event rather than an in-process call.
   useArchiveAgentMetricsBridge();
-  // Kind 44200 is relay-persisted (durable) and stays deferred: missed
-  // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useAgentMetricArchiveSeed(deferredPubkey);
   const profileQuery = useProfileQuery();
@@ -223,8 +219,13 @@ export function AppShell() {
   usePresenceSubscription();
   useUserStatusSubscription();
   useCommunityEmojiLiveUpdates();
-  useMembershipNotifications(identityQuery.data?.pubkey);
-  const presenceSession = usePresenceSession(deferredPubkey);
+  const mainOwnedPubkey = ownedEffects.membershipNotifications
+    ? identityQuery.data?.pubkey
+    : undefined;
+  useMembershipNotifications(mainOwnedPubkey);
+  const presenceSession = usePresenceSession(
+    startupReady && ownedEffects.presenceSession ? mainOwnedPubkey : undefined,
+  );
   const selfStatusQuery = useUserStatusQuery(
     deferredPubkey ? [deferredPubkey] : [],
   );
@@ -235,7 +236,7 @@ export function AppShell() {
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   useReminderNotifications(
-    identityQuery.data?.pubkey,
+    ownedEffects.reminderNotifications ? mainOwnedPubkey : undefined,
     notificationSettings.settings,
     channels,
   );
@@ -350,7 +351,7 @@ export function AppShell() {
     handleThreadReplyDesktopNotification,
   } = useAppShellDesktopNotifications({
     channels,
-    enabled: !isHuddleRoom,
+    enabled: !isCompanionWindow,
     goChannel,
     goHome,
     notificationSettings: notificationSettings.settings,
@@ -387,8 +388,8 @@ export function AppShell() {
     muteThread,
     unmuteThread,
   } = useUnreadChannels(
-    isHuddleRoom ? EMPTY_CHANNELS : sidebarChannels,
-    isHuddleRoom ? null : activeChannel,
+    isCompanionWindow ? EMPTY_CHANNELS : sidebarChannels,
+    isCompanionWindow ? null : activeChannel,
     {
       pubkey: identityQuery.data?.pubkey,
       relayClient,
@@ -450,7 +451,7 @@ export function AppShell() {
       identityQuery.data?.pubkey,
       notificationSettings.settings,
       notificationSettings.setDesktopEnabled,
-      !isHuddleRoom,
+      !isCompanionWindow,
       selectedView === "home" && !settingsOpen,
       getChannelReadAt,
       readStateVersion,
@@ -654,13 +655,13 @@ export function AppShell() {
     [openSearchHit],
   );
   useAppShellLifecycleEffects({
-    desktopBadgeEnabled: !isHuddleRoom,
+    desktopBadgeEnabled: !isCompanionWindow,
     homeBadgeCountExcludingHighPriority,
     topLevelUnreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://` deep links only from the main window; the companion is dedicated to its active Huddle route.
-  useAppDeepLinks(!isHuddleRoom);
+  // Dispatch `buzz://` deep links only from the primary window; companions own their focused route.
+  useAppDeepLinks(!isCompanionWindow);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
@@ -669,7 +670,7 @@ export function AppShell() {
     activeChannelId: selectedView === "channel" ? selectedChannelId : null,
     canSearchCurrentChannel:
       selectedView === "channel" && Boolean(activeChannel),
-    disabled: settingsOpen || isHuddleRoom,
+    disabled: settingsOpen || isCompanionWindow,
     onBrowseChannels: handleOpenBrowseChannels,
     onCreateChannel: handleOpenCreateChannel,
     onGoHome: goHome,
@@ -680,18 +681,19 @@ export function AppShell() {
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
-    open: isHuddleRoom ? undefined : settingsOpen,
+    open: isCompanionWindow ? undefined : settingsOpen,
   });
   useMarkAsReadShortcuts({
     activeChannelId: activeChannel?.id ?? null,
     activeChannelLastMessageAt: activeChannel?.lastMessageAt,
+    enabled: ownedEffects.markAsReadShortcuts,
     markAllChannelsRead,
     markChannelRead,
     selectedView,
   });
   return (
     <PreventSleepProvider>
-      {!isHuddleRoom ? (
+      {!isCompanionWindow ? (
         <AppShellTrayMenu
           channels={channels}
           goChannel={goChannel}
@@ -743,6 +745,7 @@ export function AppShell() {
             isCompanionOpen={isHuddleCompanionOpen}
             isDrawerOpen={isHuddleDrawerOpen}
             isRoom={isHuddleRoom}
+            isPassiveWindow={isActivityWindow}
             onCompanionOpen={handleHuddleCompanionOpen}
             onHuddleStartPendingChange={handleHuddleStartPendingChange}
             onHuddleStarted={handleHuddleStarted}
@@ -750,7 +753,7 @@ export function AppShell() {
             onViewHuddleChannel={viewHuddleChannel}
             onVisibilityChange={handleHuddleVisibilityChange}
           >
-            {hasCommunityRail && !isHuddleRoom ? (
+            {hasCommunityRail ? (
               <CommunityRail
                 activeCommunityId={communitiesHook.activeCommunity?.id ?? null}
                 onAddCommunity={addCommunityDialog.openDialog}
@@ -766,7 +769,7 @@ export function AppShell() {
             >
               <AppProfilePanelProvider>
                 <AppWorkflowEditorOverlayProvider>
-                  {!settingsOpen && !isHuddleRoom ? (
+                  {!settingsOpen && !isCompanionWindow ? (
                     <AppTopChrome
                       canGoBack={canGoBack}
                       canGoForward={canGoForward}
@@ -817,7 +820,7 @@ export function AppShell() {
                     </div>
                   ) : (
                     <div className="relative flex min-h-0 flex-1 overflow-visible">
-                      {!isHuddleRoom ? (
+                      {!isCompanionWindow ? (
                         <AppSidebar
                           activeCommunity={communitiesHook.activeCommunity}
                           channels={sidebarChannels}
@@ -927,6 +930,7 @@ export function AppShell() {
                           hasCommunityRail={hasCommunityRail}
                           isHuddleRoom={isHuddleRoom}
                           isHuddleRoomStarting={isHuddleRoomStarting}
+                          unframed={isCompanionWindow}
                           mainInsetRef={mainInsetRef}
                           terminal={
                             <TerminalBootstrap {...effectiveTerminalContext} />
@@ -935,7 +939,7 @@ export function AppShell() {
                           <Outlet />
                         </AppShellChannelSurface>
                       </TerminalContextOverrideProvider>
-                      {!isHuddleRoom ? (
+                      {!isCompanionWindow ? (
                         <RelayConnectionOverlay
                           card={relayConnectionCard}
                           errorMessage={channelsErrorMessage}

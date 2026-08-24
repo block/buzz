@@ -39,6 +39,7 @@ type UseChannelAgentSessionsOptions = {
   openAgentSessionPubkey: string | null;
   openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
+  preserveUnresolvedSession?: boolean;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
   setOpenAgentSessionChannelId: PanelValueSetter;
@@ -163,6 +164,33 @@ export function getChannelAgentSessionAgents({
   });
 }
 
+export function shouldClearUnresolvedAgentSession({
+  agentSessionAgents,
+  agentsLoaded,
+  openAgentSessionPubkey,
+  preserveUnresolvedSession,
+  profilePanelPubkey,
+}: {
+  agentSessionAgents: ChannelAgentSessionAgent[];
+  agentsLoaded: boolean;
+  openAgentSessionPubkey: string | null;
+  preserveUnresolvedSession: boolean;
+  profilePanelPubkey: string | null;
+}): boolean {
+  return Boolean(
+    openAgentSessionPubkey &&
+      !preserveUnresolvedSession &&
+      agentsLoaded &&
+      normalizePubkey(profilePanelPubkey ?? "") !==
+        normalizePubkey(openAgentSessionPubkey) &&
+      !agentSessionAgents.some(
+        (agent) =>
+          normalizePubkey(agent.pubkey) ===
+          normalizePubkey(openAgentSessionPubkey),
+      ),
+  );
+}
+
 export function useChannelAgentSessions({
   activeChannel,
   activeChannelId,
@@ -173,6 +201,7 @@ export function useChannelAgentSessions({
   openAgentSessionPubkey,
   openThreadHeadId,
   profilePanelPubkey = null,
+  preserveUnresolvedSession = false,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
   setOpenAgentSessionChannelId,
@@ -298,15 +327,13 @@ export function useChannelAgentSessions({
     // agent queries have settled. Once loaded, a channel that legitimately has
     // zero agents will still auto-close a stale param.
     if (
-      openAgentSessionPubkey &&
-      agentsLoaded &&
-      normalizePubkey(profilePanelPubkey ?? "") !==
-        normalizePubkey(openAgentSessionPubkey) &&
-      !agentSessionAgents.some(
-        (agent) =>
-          normalizePubkey(agent.pubkey) ===
-          normalizePubkey(openAgentSessionPubkey),
-      )
+      shouldClearUnresolvedAgentSession({
+        agentSessionAgents,
+        agentsLoaded,
+        openAgentSessionPubkey,
+        preserveUnresolvedSession,
+        profilePanelPubkey,
+      })
     ) {
       returnTarget.clear();
       setOpenAgentSessionPubkey(null, { replace: true });
@@ -315,6 +342,7 @@ export function useChannelAgentSessions({
     agentSessionAgents,
     agentsLoaded,
     openAgentSessionPubkey,
+    preserveUnresolvedSession,
     profilePanelPubkey,
     returnTarget,
     setOpenAgentSessionPubkey,

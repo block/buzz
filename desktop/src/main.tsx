@@ -1,3 +1,4 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
@@ -10,8 +11,13 @@ import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
+import { loadCommunities } from "@/features/communities/communityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
-import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
+import {
+  companionCommunityBootstrap,
+  currentCompanionWindowKind,
+  isCompanionWindow,
+} from "@/app/companionWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
@@ -78,16 +84,57 @@ function configureDevE2eBridgeFromUrl() {
   );
 }
 
+function renderCompanionBootstrapError(message: string) {
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <main className="grid h-screen place-items-center bg-background p-8 text-center text-foreground">
+      <div className="max-w-sm space-y-3">
+        <h1 className="text-lg font-semibold">Couldn’t open activity</h1>
+        <p className="text-sm text-muted-foreground">{message}</p>
+        <button
+          className="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          onClick={() => void getCurrentWindow().close()}
+          type="button"
+        >
+          Close window
+        </button>
+      </div>
+    </main>,
+  );
+}
+
 function renderApp() {
+  const companionKind = currentCompanionWindowKind();
+  const companionCommunity = companionCommunityBootstrap(
+    companionKind,
+    window.location.hash,
+  );
+  if (companionCommunity.missingRequiredCommunity) {
+    renderCompanionBootstrapError(
+      "This window is missing its community context. Close it and try again.",
+    );
+    return;
+  }
+  if (
+    companionCommunity.initialActiveCommunityId &&
+    !loadCommunities().some(
+      ({ id }) => id === companionCommunity.initialActiveCommunityId,
+    )
+  ) {
+    renderCompanionBootstrapError(
+      "This community is no longer available. Close this window and open activity again from Buzz.",
+    );
+    return;
+  }
+
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       {/* block/buzz#5078 — catch any uncaught render error so a WebKit
           SecurityError from localStorage can't blank the whole window. */}
       <RootErrorBoundary>
-        <CommunitiesProvider>
-          <CommunityOnboardingProvider
-            enabled={huddleWindowChannelId() === null}
-          >
+        <CommunitiesProvider
+          initialActiveCommunityId={companionCommunity.initialActiveCommunityId}
+        >
+          <CommunityOnboardingProvider enabled={!isCompanionWindow()}>
             <ThemeProvider defaultTheme="buzz">
               <TooltipProvider>
                 <EmojiBurstProvider>

@@ -13,6 +13,9 @@ type ChannelComposerActivityAccessoryProps = {
   onOpenAgentSession: ComponentProps<
     typeof BotActivityComposerAction
   >["onOpenAgentSession"];
+  onOpenAgentSessionExternal: ComponentProps<
+    typeof BotActivityComposerAction
+  >["onOpenAgentSessionExternal"];
   openAgentSessionPubkey: ComponentProps<
     typeof BotActivityComposerAction
   >["openAgentSessionPubkey"];
@@ -27,6 +30,7 @@ export function ChannelComposerActivityAccessory({
   channel,
   currentPubkey,
   onOpenAgentSession,
+  onOpenAgentSessionExternal,
   openAgentSessionPubkey,
   profiles,
   typingPubkeys,
@@ -48,6 +52,7 @@ export function ChannelComposerActivityAccessory({
               agents={agents}
               channelId={channel?.id ?? null}
               onOpenAgentSession={onOpenAgentSession}
+              onOpenAgentSessionExternal={onOpenAgentSessionExternal}
               openAgentSessionPubkey={openAgentSessionPubkey}
               profiles={profiles}
               workingBotPubkeys={workingBotPubkeys}

@@ -7,6 +7,8 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
+import { activityWindowMarkdownInteractive } from "../activityRenderClasses/activityWindowPresentation";
+import { isAgentActivityWindow } from "../../lib/agentActivityWindow";
 import { MessageLinkHoverCue } from "../activityRenderClasses/MessageLinkHoverCue";
 import { TranscriptTimestamp } from "../activityRenderClasses/TranscriptTimestamp";
 import { useTranscriptBubbleOverflow } from "../activityRenderClasses/useTranscriptBubbleOverflow";
@@ -52,10 +54,12 @@ export function CompactMessageSummary({
   const { goChannel } = useAppNavigation();
   const { openProfilePanel } = useProfilePanel();
   const isCompactPreview = variant === "compactPreview";
-  const shouldClampBubble = !isCompactPreview;
+  const isDedicatedActivityWindow = isAgentActivityWindow();
+  const shouldClampBubble = !isCompactPreview && !isDedicatedActivityWindow;
+  const effectiveMessageLink = isDedicatedActivityWindow ? null : messageLink;
   const [bubbleRef, hasBubbleOverflow] =
     useTranscriptBubbleOverflow(shouldClampBubble);
-  const canOpenMessage = shouldClampBubble && messageLink !== null;
+  const canOpenMessage = shouldClampBubble && effectiveMessageLink !== null;
   const mutedTone = compactSummaryTone();
   const avatarClassName = cn(
     "mr-2 mt-1 shrink-0",
@@ -63,19 +67,19 @@ export function CompactMessageSummary({
   );
   const handleBubbleClick = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (!messageLink || isNestedInteractiveTarget(event)) return;
+      if (!effectiveMessageLink || isNestedInteractiveTarget(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      void goChannel(messageLink.channelId, {
-        messageId: messageLink.messageId,
+      void goChannel(effectiveMessageLink.channelId, {
+        messageId: effectiveMessageLink.messageId,
       });
     },
-    [goChannel, messageLink],
+    [effectiveMessageLink, goChannel],
   );
   const handleBubbleKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (
-        !messageLink ||
+        !effectiveMessageLink ||
         isNestedInteractiveTarget(event) ||
         (event.key !== "Enter" && event.key !== " ")
       ) {
@@ -84,11 +88,11 @@ export function CompactMessageSummary({
 
       event.preventDefault();
       event.stopPropagation();
-      void goChannel(messageLink.channelId, {
-        messageId: messageLink.messageId,
+      void goChannel(effectiveMessageLink.channelId, {
+        messageId: effectiveMessageLink.messageId,
       });
     },
-    [goChannel, messageLink],
+    [effectiveMessageLink, goChannel],
   );
   const bubbleLinkProps = canOpenMessage
     ? {
@@ -101,7 +105,7 @@ export function CompactMessageSummary({
   return (
     <>
       <div className="flex max-w-full flex-row items-start justify-start">
-        {openProfilePanel && !isCompactPreview ? (
+        {openProfilePanel && !isCompactPreview && !isDedicatedActivityWindow ? (
           <button
             aria-label={`Open ${displayName} profile`}
             className={cn(
@@ -160,8 +164,10 @@ export function CompactMessageSummary({
             {...bubbleLinkProps}
           >
             <Markdown
+              blockCode
               className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
               content={resolvedContent || "Message content unavailable."}
+              interactive={activityWindowMarkdownInteractive()}
             />
             {hasBubbleOverflow ? (
               <span
@@ -179,7 +185,7 @@ export function CompactMessageSummary({
           </div>
           <div className="inline-flex max-w-full items-center gap-1.5 px-1">
             <TranscriptTimestamp
-              messageLink={messageLink}
+              messageLink={effectiveMessageLink}
               timestamp={timestamp}
             />
             <button

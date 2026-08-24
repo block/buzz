@@ -2,13 +2,15 @@ import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingV
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 export function ChannelScreenLoadingFallback({
+  includeHeader = true,
   isHuddleTranscript,
 }: {
+  includeHeader?: boolean;
   isHuddleTranscript: boolean;
 }) {
   return isHuddleTranscript ? (
     <HuddleStartingView />
   ) : (
-    <ViewLoadingFallback includeHeader kind="channel" />
+    <ViewLoadingFallback includeHeader={includeHeader} kind="channel" />
   );
 }

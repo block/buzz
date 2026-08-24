@@ -23,7 +23,10 @@ import { CommunityThemeController } from "@/shared/theme/CommunityThemeControlle
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useCloseWindowShortcut } from "@/app/useCloseWindowShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
-import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
+import {
+  acceptsNativeDeepLinks,
+  currentCompanionWindowKind,
+} from "@/app/companionWindow";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -396,6 +399,7 @@ function CommunityApp({
     communityKey,
     sharedIdentity,
     isFindingCommunityAfterLeave,
+    currentCompanionWindowKind() === null,
   );
 
   const transitionCommunity = useCallback(
@@ -712,10 +716,12 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [activeCommunity, communityOnboarding.start],
   );
 
-  // Community links are app-global work. A Huddle companion loads the same
+  // Community links are app-global work. Companion windows load the same
   // React tree, but must never race the main window for the native pending-link
-  // queue or replace its dedicated transcript surface with onboarding.
-  const acceptsCommunityDeepLinks = huddleWindowChannelId() === null;
+  // queue or replace their dedicated surface with onboarding.
+  const acceptsCommunityDeepLinks = acceptsNativeDeepLinks(
+    currentCompanionWindowKind(),
+  );
   useEffect(() => {
     if (!acceptsCommunityDeepLinks) return;
 

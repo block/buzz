@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Hash, LogIn } from "lucide-react";
+import { Hash, LoaderCircle, LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
@@ -44,7 +44,10 @@ import {
   WelcomeComposerGuidanceLayer,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
-import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import {
+  mentionsKnownAgent,
+  shouldShowAgentSessionUnavailable,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -81,12 +84,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   historyExhausted,
   isFetchingOlder,
   isHuddleTranscript = false,
+  isDedicatedActivityWindow = false,
   followThreadById,
   isFollowingThread,
   isFollowingThreadById,
   isMessageUnreadById,
   isJoining = false,
   isSinglePanelView = false,
+  isAgentSessionLoading = false,
   isSending,
   isTimelineLoading,
   entranceMessageId = null,
@@ -118,6 +123,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onExpandThreadReplies,
   onJoinChannel,
   onOpenAgentSession,
+  onOpenAgentSessionExternal,
   onOpenDm,
   onOpenMembers,
   onOpenProfilePanel,
@@ -743,6 +749,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     channel={activeChannel}
                     currentPubkey={currentPubkey}
                     onOpenAgentSession={onOpenAgentSession}
+                    onOpenAgentSessionExternal={onOpenAgentSessionExternal}
                     openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
                     typingPubkeys={typingPubkeys}
@@ -845,6 +852,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
                       onOpenAgentSession={onOpenAgentSession}
+                      onOpenAgentSessionExternal={onOpenAgentSessionExternal}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
                       workingBotPubkeys={threadComposerBotTypingPubkeys}
@@ -872,15 +880,16 @@ export const ChannelPane = React.memo(function ChannelPane({
           })()
         ) : activeChannel && selectedAgent ? (
           (() => {
-            // When the panel was opened from a different channel than the
-            // currently active one, re-scope it to the active channel so
-            // that both the content/header AND channel-backed actions (e.g.
-            // Stop current turn) operate on the same channel object.
+            // In normal app navigation, re-scope a panel opened from another
+            // channel so its content and channel-backed actions stay aligned.
+            // A dedicated activity companion has an immutable channel scope,
+            // even when one of its links navigates the underlying route.
             const effectiveAgentSessionChannelId =
-              openAgentSessionChannelId &&
-              activeChannel.id !== openAgentSessionChannelId
-                ? activeChannelId
-                : openAgentSessionChannelId;
+              isDedicatedActivityWindow ||
+              !openAgentSessionChannelId ||
+              activeChannel.id === openAgentSessionChannelId
+                ? openAgentSessionChannelId
+                : activeChannelId;
             const panel = (
               <AgentSessionThreadPanel
                 agent={selectedAgent}
@@ -911,6 +920,34 @@ export const ChannelPane = React.memo(function ChannelPane({
             );
             return wrapAux(panel, "agent-session-thread-panel");
           })()
+        ) : shouldShowAgentSessionUnavailable({
+            isDedicatedActivityWindow,
+            openAgentSessionPubkey,
+            selectedAgent,
+          }) ? (
+          <div
+            className="flex min-h-0 flex-1 items-center justify-center p-8 text-center"
+            data-testid="agent-session-unavailable"
+          >
+            <div className="max-w-sm space-y-2">
+              {isAgentSessionLoading ? (
+                <LoaderCircle
+                  aria-hidden="true"
+                  className="mx-auto h-5 w-5 animate-spin text-muted-foreground"
+                />
+              ) : null}
+              <h1 className="text-lg font-semibold">
+                {isAgentSessionLoading
+                  ? "Loading agent activity…"
+                  : "Agent activity unavailable"}
+              </h1>
+              <p className="text-sm text-muted-foreground">
+                {isAgentSessionLoading
+                  ? "Buzz is finding this agent."
+                  : "This agent is no longer available in this community. You can close this window and open another activity feed from Buzz."}
+              </p>
+            </div>
+          </div>
         ) : profilePanelPubkey ? (
           (() => {
             const panel = (

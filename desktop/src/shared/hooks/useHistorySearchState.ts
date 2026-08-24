@@ -1,3 +1,4 @@
+import { pinCurrentAgentActivityCompanionSearch } from "@/app/companionWindow";
 import * as React from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
@@ -85,7 +86,10 @@ export function useHistorySearchState<K extends string>(keys: readonly K[]) {
                 nextSearch[key] = value;
               }
             }
-            return nextSearch;
+            return pinCurrentAgentActivityCompanionSearch(
+              previousSearch,
+              nextSearch,
+            );
           },
           replace: flush.replace,
           resetScroll: false,

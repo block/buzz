@@ -9,6 +9,7 @@ export function useMarkAsReadShortcuts({
   markAllChannelsRead,
   markChannelRead,
   selectedView,
+  enabled = true,
 }: {
   activeChannelId: string | null;
   activeChannelLastMessageAt: string | null | undefined;
@@ -18,8 +19,11 @@ export function useMarkAsReadShortcuts({
     lastMessageAt: string | null | undefined,
   ) => void;
   selectedView: string;
+  enabled?: boolean;
 }) {
   React.useEffect(() => {
+    if (!enabled) return;
+
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       if (event.defaultPrevented) return;
@@ -51,6 +55,7 @@ export function useMarkAsReadShortcuts({
   }, [
     activeChannelId,
     activeChannelLastMessageAt,
+    enabled,
     markAllChannelsRead,
     markChannelRead,
     selectedView,

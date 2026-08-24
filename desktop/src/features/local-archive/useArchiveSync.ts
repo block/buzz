@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
+import { isCompanionWindow } from "@/app/companionWindow";
 import {
   announceArchiveSyncEpoch,
   nextArchiveSyncLease,
@@ -60,7 +60,7 @@ export function useArchiveSync(ready: boolean): void {
   React.useEffect(() => {
     if (!ready) return;
     // Companion realms do not participate; see the ownership rule above.
-    if (huddleWindowChannelId() !== null) return;
+    if (isCompanionWindow()) return;
 
     const lease = nextArchiveSyncLease();
     let stopped = false;

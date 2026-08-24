@@ -11238,6 +11238,10 @@ export function maybeInstallE2eTauriMocks() {
           await emitMockHuddleState();
         }
         return null;
+      case "open_agent_activity_window":
+        // Browser E2E keeps the in-app fallback so existing interaction specs
+        // can inspect the feed without a second native webview.
+        return false;
       case "open_huddle_window":
         if ((activeConfig?.mock?.openHuddleWindowDelayMs ?? 0) > 0) {
           await new Promise((resolve) =>

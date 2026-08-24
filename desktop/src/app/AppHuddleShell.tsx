@@ -12,6 +12,7 @@ type AppHuddleShellProps = {
   isCompanionOpen: boolean;
   isDrawerOpen: boolean;
   isRoom: boolean;
+  isPassiveWindow?: boolean;
   onCompanionOpen: () => void;
   onHuddleStartPendingChange: (pending: boolean) => void;
   onHuddleStarted: (ephemeralChannelId: string) => void | Promise<void>;
@@ -48,6 +49,7 @@ export function AppHuddleShell({
   isCompanionOpen,
   isDrawerOpen,
   isRoom,
+  isPassiveWindow = false,
   onCompanionOpen,
   onHuddleStartPendingChange,
   onHuddleStarted,
@@ -57,7 +59,7 @@ export function AppHuddleShell({
 }: AppHuddleShellProps) {
   return (
     <HuddleProvider
-      ownsAudioSession={!isRoom}
+      ownsAudioSession={!isRoom && !isPassiveWindow}
       onHuddleStartPendingChange={
         isRoom ? undefined : onHuddleStartPendingChange
       }
@@ -91,7 +93,7 @@ export function AppHuddleShell({
               <BuzzTheme.GradientLayer />
               {children}
             </div>
-            {isRoom || !isCompanionOpen ? (
+            {!isPassiveWindow && (isRoom || !isCompanionOpen) ? (
               <div className="buzz-huddle-drawer-slot absolute inset-x-0 bottom-0 z-[2] h-(--buzz-huddle-drawer-height)">
                 <AppHuddleBar
                   mode={isRoom ? "room" : "main"}

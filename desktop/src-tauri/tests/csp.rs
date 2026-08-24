@@ -1,4 +1,5 @@
-//! Guards on the packaged-app Content-Security-Policy in `tauri.conf.json`.
+//! Guards on packaged-app security configuration in `tauri.conf.json` and
+//! `capabilities/default.json`.
 //!
 //! The CSP is only enforced on assets Tauri itself serves, so neither
 //! `just dev` (loads the Vite `devUrl`) nor the Playwright suite (runs under
@@ -12,6 +13,25 @@
 use std::collections::HashMap;
 
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+const DEFAULT_CAPABILITY: &str = include_str!("../capabilities/default.json");
+
+#[test]
+fn companion_windows_receive_the_default_capability() {
+    let capability: serde_json::Value =
+        serde_json::from_str(DEFAULT_CAPABILITY).expect("default capability is valid JSON");
+    let windows = capability["windows"]
+        .as_array()
+        .expect("default capability declares trusted windows");
+
+    for pattern in ["huddle-*", "agent-activity-*"] {
+        assert!(
+            windows
+                .iter()
+                .any(|window| window.as_str() == Some(pattern)),
+            "default capability must include trusted companion pattern {pattern}"
+        );
+    }
+}
 
 fn csp_directives() -> HashMap<String, Vec<String>> {
     let conf: serde_json::Value =

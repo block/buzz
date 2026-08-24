@@ -2081,6 +2081,9 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("auxiliary-panel-close")).toBeVisible();
   await expect(page.getByTestId("agent-transcript-now-summary")).toHaveCount(0);
   await page.getByTestId("agent-session-settings-menu-trigger").click();
+  await expect(
+    page.getByTestId("agent-session-open-external-window"),
+  ).toContainText("Pop-out window");
   await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();
   await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
   await page.keyboard.press("Escape");
@@ -2088,6 +2091,16 @@ test("shows and clears activity indicators for active channel agents", async ({
     "No ACP activity yet",
   );
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
+  await page.getByTestId("auxiliary-panel-close").click();
+  await page
+    .getByTestId("bot-activity-composer-trigger")
+    .click({ button: "right" });
+  await expect(
+    page.getByTestId(
+      `bot-activity-open-external-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toContainText("Pop-out window");
+  await page.keyboard.press("Escape");
 
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({

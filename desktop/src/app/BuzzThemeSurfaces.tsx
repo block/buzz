@@ -27,7 +27,7 @@ export function ContentSurface({
 }: {
   children: ReactNode;
   terminal?: ReactNode;
-  /** Used by dedicated huddle windows, which should not resemble app cards. */
+  /** Used by dedicated companion windows, which should not resemble app cards. */
   unframed?: boolean;
 }) {
   return (

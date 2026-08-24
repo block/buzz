@@ -13,6 +13,7 @@ type HuddleReadMarkerOptions = {
   activeChannelId: string | null;
   activeChannelIsMember: boolean | undefined;
   isHuddleTranscript: boolean;
+  enabled?: boolean;
   markChannelRead: MarkChannelRead;
   messages: RelayEvent[] | undefined;
   resolvedMessages: RelayEvent[];
@@ -22,6 +23,7 @@ export function useHuddleReadMarker({
   activeChannelId,
   activeChannelIsMember,
   isHuddleTranscript,
+  enabled = true,
   markChannelRead,
   messages,
   resolvedMessages,
@@ -65,7 +67,7 @@ export function useHuddleReadMarker({
   const lastHuddleReadKeyRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
-    if (!activeChannelId || activeChannelIsMember === false) return;
+    if (!enabled || !activeChannelId || activeChannelIsMember === false) return;
     const huddleReadKey = hasFlattenedHuddleReplies
       ? `${activeChannelId}:${huddleReadAt}`
       : null;
@@ -82,6 +84,7 @@ export function useHuddleReadMarker({
   }, [
     activeChannelId,
     activeChannelIsMember,
+    enabled,
     hasFlattenedHuddleReplies,
     huddleReadAt,
     markChannelRead,

@@ -1,5 +1,6 @@
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Markdown } from "@/shared/ui/markdown";
+import { activityWindowMarkdownInteractive } from "./activityWindowPresentation";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import type { TranscriptItem } from "../agentSessionTypes";
@@ -63,8 +64,10 @@ function MessageItem({
           title={formatTranscriptTimestampTitle(item.timestamp)}
         >
           <Markdown
+            blockCode
             className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
             content={text || " "}
+            interactive={activityWindowMarkdownInteractive()}
           />
         </div>
       </div>

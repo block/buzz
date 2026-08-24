@@ -52,8 +52,10 @@ export type ChannelPaneProps = {
   isFetchingOlder?: boolean;
   /** A companion huddle window presents the channel only as a transcript. */
   isHuddleTranscript?: boolean;
+  isDedicatedActivityWindow?: boolean;
   isJoining?: boolean;
   isSinglePanelView?: boolean;
+  isAgentSessionLoading?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
   /** Newly-created message that should receive the one-shot conversation arrival motion. */
@@ -96,6 +98,10 @@ export type ChannelPaneProps = {
   onExpandThreadReplies: (message: TimelineMessage) => void;
   onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
+  onOpenAgentSessionExternal: (
+    pubkey: string,
+    channelId?: string | null,
+  ) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenMembers?: () => void;
   onOpenProfilePanel: (

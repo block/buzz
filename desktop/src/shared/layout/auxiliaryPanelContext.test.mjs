@@ -8,6 +8,7 @@ import { AuxiliaryPanel } from "./AuxiliaryPanel/index.ts";
 import { AuxiliaryPanelBody } from "./AuxiliaryPanel/index.ts";
 import {
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
 } from "./AuxiliaryPanel/index.ts";
 import {
@@ -175,6 +176,33 @@ test("AuxiliaryPanelHeader renders a generic close action from context", () => {
 
   assert.match(html, /aria-label="Close panel"/);
   assert.match(html, /data-testid="auxiliary-panel-close"/);
+});
+
+test("AuxiliaryPanelHeader can suppress its close action", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          { showCloseAction: false },
+          React.createElement(AuxiliaryPanelHeaderGroup, null, "Title"),
+          React.createElement(
+            AuxiliaryPanelHeaderActions,
+            null,
+            React.createElement("button", { type: "button" }, "Settings"),
+          ),
+        ),
+        onClose: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, />Settings</);
+  assert.doesNotMatch(html, /aria-label="Close panel"/);
+  assert.doesNotMatch(html, /data-testid="auxiliary-panel-close"/);
 });
 
 test("AuxiliaryPanelHeader keeps resize border in single-panel mode when requested", () => {

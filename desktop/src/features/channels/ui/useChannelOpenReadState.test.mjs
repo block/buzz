@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getTopLevelInboxUnreadOverrideIds } from "./useChannelOpenReadState.ts";
+import {
+  getTopLevelInboxUnreadOverrideIds,
+  shouldAdvanceChannelReadState,
+} from "./useChannelOpenReadState.ts";
 
 test("opening a channel clears only its top-level Inbox overrides", () => {
   assert.deepEqual(
@@ -21,5 +24,24 @@ test("opening a channel clears only its top-level Inbox overrides", () => {
       "general",
     ),
     ["top-level"],
+  );
+});
+
+test("passive activity companions never advance synced read state", () => {
+  assert.equal(
+    shouldAdvanceChannelReadState({
+      activeChannelId: "general",
+      enabled: false,
+      isChannelMember: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAdvanceChannelReadState({
+      activeChannelId: "general",
+      enabled: true,
+      isChannelMember: true,
+    }),
+    true,
   );
 });

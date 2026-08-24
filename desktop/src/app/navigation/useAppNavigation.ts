@@ -7,6 +7,10 @@ import {
 } from "@tanstack/react-router";
 
 import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
+import {
+  currentAgentActivityCompanionCoordinates,
+  pinCurrentAgentActivityCompanionSearch,
+} from "@/app/companionWindow";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -20,6 +24,9 @@ export function useAppNavigation() {
   const navigate = useNavigate();
   const location = useLocation();
   const canGoBack = useCanGoBack();
+  const companionCoordinates = currentAgentActivityCompanionCoordinates(
+    location.search as Record<string, unknown>,
+  );
 
   const commitNavigation = React.useCallback(
     async (
@@ -31,20 +38,39 @@ export function useAppNavigation() {
       },
       behavior: NavigationBehavior = {},
     ) => {
-      const nextLocation = router.buildLocation(next as never);
+      const destination = companionCoordinates
+        ? {
+            ...next,
+            search: pinCurrentAgentActivityCompanionSearch(
+              location.search as Record<string, unknown>,
+              next.search ?? {},
+            ),
+          }
+        : next;
+
+      if (
+        companionCoordinates &&
+        (destination.to !== "/channels/$channelId" ||
+          destination.params?.channelId !==
+            companionCoordinates.agentSessionChannel)
+      ) {
+        return false;
+      }
+
+      const nextLocation = router.buildLocation(destination as never);
 
       if (location.href === nextLocation.href && !behavior.force) {
         return false;
       }
 
       await navigate({
-        ...next,
+        ...destination,
         replace: behavior.replace,
         resetScroll: behavior.resetScroll,
       } as never);
       return true;
     },
-    [location.href, navigate, router],
+    [companionCoordinates, location.href, location.search, navigate, router],
   );
 
   const goHome = React.useCallback(

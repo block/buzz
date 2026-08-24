@@ -57,6 +57,22 @@ export function isChannelCreatedSystemMessage(message: TimelineMessage) {
   }
 }
 
+export function shouldShowAgentSessionUnavailable({
+  isDedicatedActivityWindow,
+  openAgentSessionPubkey,
+  selectedAgent,
+}: {
+  isDedicatedActivityWindow: boolean;
+  openAgentSessionPubkey: string | null;
+  selectedAgent: unknown;
+}): boolean {
+  return (
+    isDedicatedActivityWindow &&
+    openAgentSessionPubkey !== null &&
+    selectedAgent == null
+  );
+}
+
 export function mentionsKnownAgent(
   mentionPubkeys: string[],
   knownAgentPubkeys: ReadonlySet<string>,

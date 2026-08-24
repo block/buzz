@@ -19,6 +19,7 @@ type AuxiliaryPanelHeaderProps = Omit<
   inset?: "default" | "wide";
   mode?: AuxiliaryPanelMode;
   resizeBorder?: boolean;
+  showCloseAction?: boolean;
   surface?: AuxiliaryPanelSurface;
   /** Render header content without its own backdrop for a shared parent chrome. */
   transparent?: boolean;
@@ -113,6 +114,7 @@ export function AuxiliaryPanelHeader({
   inset = "default",
   mode,
   resizeBorder = false,
+  showCloseAction = true,
   surface = "default",
   transparent,
   ...props
@@ -159,7 +161,7 @@ export function AuxiliaryPanelHeader({
           data-tauri-drag-region
           {...props}
         >
-          {renderAuxiliaryPanelHeaderContent(children)}
+          {renderAuxiliaryPanelHeaderContent(children, showCloseAction)}
         </div>
       </>
     );
@@ -181,15 +183,21 @@ export function AuxiliaryPanelHeader({
         data-tauri-drag-region
       >
         <div className="flex h-9 min-w-0 items-center gap-2.5">
-          {renderAuxiliaryPanelHeaderContent(children)}
+          {renderAuxiliaryPanelHeaderContent(children, showCloseAction)}
         </div>
       </div>
     </div>
   );
 }
 
-function renderAuxiliaryPanelHeaderContent(children: React.ReactNode) {
-  const { foundActions, content } = attachCloseActionToHeaderActions(children);
+function renderAuxiliaryPanelHeaderContent(
+  children: React.ReactNode,
+  showCloseAction: boolean,
+) {
+  const { foundActions, content } = attachCloseActionToHeaderActions(
+    children,
+    showCloseAction,
+  );
 
   if (foundActions) {
     return content;
@@ -198,12 +206,15 @@ function renderAuxiliaryPanelHeaderContent(children: React.ReactNode) {
   return (
     <>
       {children}
-      <AuxiliaryPanelHeaderActions includeCloseAction />
+      <AuxiliaryPanelHeaderActions includeCloseAction={showCloseAction} />
     </>
   );
 }
 
-function attachCloseActionToHeaderActions(children: React.ReactNode): {
+function attachCloseActionToHeaderActions(
+  children: React.ReactNode,
+  includeCloseAction: boolean,
+): {
   content: React.ReactNode;
   foundActions: boolean;
 } {
@@ -216,11 +227,14 @@ function attachCloseActionToHeaderActions(children: React.ReactNode): {
 
     if (child.type === AuxiliaryPanelHeaderActions) {
       foundActions = true;
-      return React.cloneElement(child, { includeCloseAction: true });
+      return React.cloneElement(child, { includeCloseAction });
     }
 
     if (child.type === React.Fragment) {
-      const nested = attachCloseActionToHeaderActions(child.props.children);
+      const nested = attachCloseActionToHeaderActions(
+        child.props.children,
+        includeCloseAction,
+      );
 
       if (!nested.foundActions) {
         return child;

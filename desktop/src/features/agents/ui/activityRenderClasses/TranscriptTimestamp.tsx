@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
+import { isAgentActivityWindow } from "@/features/agents/lib/agentActivityWindow";
 import { cn } from "@/shared/lib/cn";
 import {
   formatTranscriptTime,
@@ -24,17 +25,20 @@ export function TranscriptTimestamp({
 }) {
   const formatted = formatTranscriptTime(timestamp);
   const { goChannel } = useAppNavigation();
-  const href = messageLink ? buildMessageLink(messageLink) : null;
+  const effectiveMessageLink = isAgentActivityWindow() ? null : messageLink;
+  const href = effectiveMessageLink
+    ? buildMessageLink(effectiveMessageLink)
+    : null;
   const openMessage = React.useCallback(
     (event: React.MouseEvent<HTMLAnchorElement>) => {
-      if (!messageLink) return;
+      if (!effectiveMessageLink) return;
       event.preventDefault();
       event.stopPropagation();
-      void goChannel(messageLink.channelId, {
-        messageId: messageLink.messageId,
+      void goChannel(effectiveMessageLink.channelId, {
+        messageId: effectiveMessageLink.messageId,
       });
     },
-    [goChannel, messageLink],
+    [effectiveMessageLink, goChannel],
   );
 
   if (!formatted) return null;

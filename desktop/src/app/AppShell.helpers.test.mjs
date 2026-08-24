@@ -3,10 +3,33 @@ import test from "node:test";
 
 import {
   markAllReadSources,
+  mainOwnedEffects,
   activateDesktopNotificationTarget,
   createDesktopNotificationActivationQueue,
   shouldBounceForChannelNotification,
 } from "./AppShell.helpers.ts";
+
+const MAIN_OWNED_EFFECTS_ENABLED = {
+  agentRuntimeReconciliation: true,
+  autoRestart: true,
+  membershipNotifications: true,
+  presenceSession: true,
+  reminderNotifications: true,
+  markAsReadShortcuts: true,
+};
+
+test("primary window owns singleton and mutating app effects", () => {
+  assert.deepEqual(mainOwnedEffects(false), MAIN_OWNED_EFFECTS_ENABLED);
+});
+
+test("companion windows disable singleton and mutating app effects", () => {
+  assert.deepEqual(
+    mainOwnedEffects(true),
+    Object.fromEntries(
+      Object.keys(MAIN_OWNED_EFFECTS_ENABLED).map((effect) => [effect, false]),
+    ),
+  );
+});
 
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);

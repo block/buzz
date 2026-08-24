@@ -75,7 +75,7 @@ function mountGate({
     },
     // `getCurrentWindow()` reads exactly this path (api/window.js:85), and
     // `isTauri()` reads `globalThis.isTauri` (api/core.js:280). Both are what
-    // `huddleWindowChannelId` uses to tell a companion realm from the main one.
+    // `isCompanionWindow` uses to tell a companion realm from the main one.
     metadata: { currentWindow: { label: windowLabel } },
     transformCallback: () => Math.random(),
   };
@@ -265,25 +265,28 @@ describe("archive sync lifecycle leases", () => {
 // commands at all.
 
 describe("archive sync realm ownership", () => {
-  it("issues no archive lifecycle commands from a companion window", async () => {
-    const gate = mountGate({
-      windowLabel: "huddle-11111111-2222-3333-4444-555555555555",
-    });
-    await gate.mount();
-    await gate.settleGate();
-    await gate.unmount();
+  for (const windowLabel of [
+    "huddle-test-channel-do-not-use",
+    "agent-activity-test-agent-do-not-use-test-channel-do-not-use",
+  ]) {
+    it(`issues no archive lifecycle commands from ${windowLabel}`, async () => {
+      const gate = mountGate({ windowLabel });
+      await gate.mount();
+      await gate.settleGate();
+      await gate.unmount();
 
-    assert.deepEqual(
-      gate.invoked.filter(
-        (cmd) =>
-          cmd.endsWith("_archive_sync") ||
-          cmd === "announce_archive_sync_epoch",
-      ),
-      [],
-      "a companion realm must not announce or run lifecycle commands — its " +
-        "cleanup would cancel the main window's live sync task",
-    );
-  });
+      assert.deepEqual(
+        gate.invoked.filter(
+          (cmd) =>
+            cmd.endsWith("_archive_sync") ||
+            cmd === "announce_archive_sync_epoch",
+        ),
+        [],
+        "a companion realm must not announce or run lifecycle commands — its " +
+          "cleanup would cancel the main window's live sync task",
+      );
+    });
+  }
 
   it("still runs the lifecycle in the main window", async () => {
     const gate = mountGate({ windowLabel: "main" });

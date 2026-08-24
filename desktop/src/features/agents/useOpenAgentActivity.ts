@@ -69,8 +69,8 @@ export function resolveOpenableActivityChannelId({
  * there would land on a screen they can't read. In that case we surface a
  * safe warning instead of navigating — no channel content, no trap-door.
  *
- * This replaces the old behavior where "View activity log" silently
- * disappeared on routes without an AgentSessionProvider.
+ * The separate pop-out actions invoke the native companion window explicitly;
+ * ordinary activity entry points preserve the existing in-app behavior.
  */
 export function useOpenAgentActivity() {
   const { onOpenAgentSession } = useAgentSession();

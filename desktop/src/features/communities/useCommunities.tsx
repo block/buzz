@@ -154,8 +154,14 @@ export type UseCommunitiesReturn = {
 
 const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
 
-export function CommunitiesProvider({ children }: { children: ReactNode }) {
-  const value = useCommunitiesInternal();
+export function CommunitiesProvider({
+  children,
+  initialActiveCommunityId,
+}: {
+  children: ReactNode;
+  initialActiveCommunityId?: string | null;
+}) {
+  const value = useCommunitiesInternal(initialActiveCommunityId);
   return (
     <CommunitiesContext.Provider value={value}>
       {children}
@@ -171,19 +177,26 @@ export function useCommunities(): UseCommunitiesReturn {
   return ctx;
 }
 
-function useCommunitiesInternal(): UseCommunitiesReturn {
+function useCommunitiesInternal(
+  initialActiveCommunityId?: string | null,
+): UseCommunitiesReturn {
   const [communities, setCommunitiesState] =
     useState<Community[]>(loadCommunities);
-  const [activeId, setActiveId] = useState<string | null>(
-    loadActiveCommunityId,
+  const [activeId, setActiveId] = useState<string | null>(() =>
+    initialActiveCommunityId === undefined
+      ? loadActiveCommunityId()
+      : initialActiveCommunityId,
   );
   const [reinitKey, setReinitKey] = useState(0);
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
 
   const activeCommunity = useMemo(
-    () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
-    [communities, activeId],
+    () =>
+      communities.find((community) => community.id === activeId) ??
+      (initialActiveCommunityId === undefined ? communities[0] : null) ??
+      null,
+    [activeId, communities, initialActiveCommunityId],
   );
 
   const addCommunity = useCallback((community: Community): string => {

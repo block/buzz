@@ -106,6 +106,7 @@ export function useCommunityInit(
   communityKey: string,
   isSharedIdentity: boolean,
   suppressAutoConnect = false,
+  applyBackend = true,
 ): CommunityInitResult {
   const [result, setResult] = useState<CommunityInitResult>({
     isReady: false,
@@ -289,13 +290,15 @@ export function useCommunityInit(
       // imported key. `loadCommunities()` strips lingering `nsec` fields from
       // legacy entries; this site refuses to apply one even if present.
       try {
-        await applyCommunity(
-          activeCommunity.relayUrl,
-          undefined,
-          activeCommunity.token,
-          activeCommunity.reposDir,
-          getOverrides().agentManagedProfiles === true,
-        );
+        if (applyBackend) {
+          await applyCommunity(
+            activeCommunity.relayUrl,
+            undefined,
+            activeCommunity.token,
+            activeCommunity.reposDir,
+            getOverrides().agentManagedProfiles === true,
+          );
+        }
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
         // it as non-fatal (relay/keys apply, bad value not persisted, REPOS
@@ -356,6 +359,7 @@ export function useCommunityInit(
     activeCommunity?.relayUrl,
     activeCommunity?.token,
     activeCommunity?.reposDir,
+    applyBackend,
     isSharedIdentity,
     suppressAutoConnect,
     communityKey,
