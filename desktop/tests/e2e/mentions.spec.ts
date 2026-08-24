@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
+
 import {
   installMockBridge,
   openChannelBrowser,
@@ -837,6 +839,9 @@ test("mention autocomplete caps global people search at 50 results", async ({
 test("selecting a person mention inserts @Name into input", async ({
   page,
 }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -865,6 +870,30 @@ test("selecting a person mention inserts @Name into input", async ({
     ),
   );
   expect(iconMask).toContain("data:image/svg+xml");
+  await expect(mentionChip).toHaveCSS("line-height", "18px");
+  expect(await mentionChip.evaluate((element) => element.clientHeight)).toBe(
+    await mentionChip.evaluate((element) => element.scrollHeight),
+  );
+  const humanIconTranslateY = await mentionChip.evaluate(
+    (element) =>
+      new DOMMatrix(getComputedStyle(element, "::before").transform).m42,
+  );
+  const channelIconTranslateY = await input.evaluate((composer) => {
+    const probe = document.createElement("span");
+    probe.className =
+      "mention-chip inline-chip-with-icon inline-chip-icon-channel";
+    composer.append(probe);
+    const translateY = new DOMMatrix(
+      getComputedStyle(probe, "::before").transform,
+    ).m42;
+    probe.remove();
+    return translateY;
+  });
+  expect(humanIconTranslateY - channelIconTranslateY).toBeCloseTo(1);
+  await waitForAnimations(page);
+  await page.getByTestId("message-composer").screenshot({
+    path: "test-results/inline-chip-polish/composer-after.png",
+  });
 });
 
 test("immediate ArrowLeft after a person mention is not bounced past the trailing space", async ({
