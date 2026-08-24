@@ -786,7 +786,10 @@ test("commit detail opens from the commits feed with a diff", async ({
   expect(Math.round((sheetRowBox?.x ?? 0) - (sheetGroupBox?.x ?? 0))).toBe(8);
   await page.getByTestId("project-home-workspace-sheet-create").click();
   await expect(page.getByTestId("create-issue-dialog")).toBeVisible();
-  await page.keyboard.press("Escape");
+  await page
+    .getByTestId("create-issue-dialog")
+    .getByRole("button", { name: "Close" })
+    .click();
   await expect(page.getByTestId("create-issue-dialog")).toHaveCount(0);
   await sheetRow.locator('[data-projects-text-priority="primary"]').click();
   await expect(
