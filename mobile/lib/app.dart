@@ -197,15 +197,22 @@ String desktopStarterChannelId({
   );
 }
 
-/// Builds invite recovery against the active app-level provider container.
-InviteJoinRecovery buildMobileInviteJoinRecovery(Ref ref) {
+/// Builds one fresh, identity-scoped invite recovery against the app container.
+InviteJoinRecovery buildMobileInviteJoinRecovery(
+  Ref ref,
+  InviteJoinRecoveryScope scope,
+) {
   final expectedConfig = ref.read(relayConfigProvider);
+  if (expectedConfig.baseUrl != scope.relayHttpOrigin ||
+      expectedConfig.nsec != scope.nsec) {
+    throw StateError('Active community changed before invite recovery');
+  }
   final channelActions = ref.read(channelActionsProvider);
 
   bool isScopeCurrent() {
     final currentConfig = ref.read(relayConfigProvider);
-    return currentConfig.baseUrl == expectedConfig.baseUrl &&
-        currentConfig.nsec == expectedConfig.nsec;
+    return currentConfig.baseUrl == scope.relayHttpOrigin &&
+        currentConfig.nsec == scope.nsec;
   }
 
   void ensureScopeCurrent() {
@@ -220,7 +227,7 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(Ref ref) {
       await ref.read(activeCommunityProvider.future);
       ensureScopeCurrent();
       await ref
-          .read(_inviteRelayConnectedProvider(expectedConfig.baseUrl).future)
+          .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
           .timeout(const Duration(seconds: 15));
       ensureScopeCurrent();
       await ref.read(channelsProvider.notifier).refresh();
@@ -246,7 +253,7 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(Ref ref) {
           ttlSeconds: ttlSeconds,
         ),
     joinChannel: channelActions.joinChannel,
-    relayHttpOrigin: expectedConfig.baseUrl,
+    relayHttpOrigin: scope.relayHttpOrigin,
     isScopeCurrent: isScopeCurrent,
   );
 }

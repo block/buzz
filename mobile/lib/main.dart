@@ -16,7 +16,10 @@ void main() async {
     ProviderScope(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
-        inviteJoinRecoveryProvider.overrideWith(buildMobileInviteJoinRecovery),
+        inviteJoinRecoveryProvider.overrideWith(
+          (ref) =>
+              (scope) => buildMobileInviteJoinRecovery(ref, scope),
+        ),
       ],
       child: const App(),
     ),

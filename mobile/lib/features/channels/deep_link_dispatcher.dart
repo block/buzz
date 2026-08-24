@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -135,10 +137,14 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         final status = inviteState.status;
         if (status == InviteJoinStatus.confirming ||
             inviteState.isStarterSetupRecovery) {
-          final shouldFocusStarter = await showInviteJoinSheet(
-            navigatorContext,
-            ref,
-          );
+          final sheet = showInviteJoinSheet(navigatorContext);
+          if (status == InviteJoinStatus.claiming &&
+              inviteState.isStarterSetupRecovery) {
+            unawaited(
+              ref.read(inviteJoinProvider.notifier).startStarterSetupRecovery(),
+            );
+          }
+          final shouldFocusStarter = await sheet;
           final focusChannelId = ref.read(inviteJoinProvider).focusChannelId;
           if (shouldFocusStarter == true &&
               focusChannelId != null &&

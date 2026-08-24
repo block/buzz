@@ -8,13 +8,29 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
 
-Future<bool?> showInviteJoinSheet(BuildContext context, WidgetRef ref) {
+Future<bool?> showInviteJoinSheet(BuildContext context) {
   return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
-    showDragHandle: true,
-    builder: (_) => const InviteJoinSheet(),
+    // The route remains a normal modal while idle, but its contents install a
+    // PopScope once a membership claim or starter setup begins. Keep drag and
+    // the shared close affordance out of this sheet so they cannot bypass that
+    // in-flight guard.
+    enableDrag: false,
+    showCloseButton: false,
+    builder: (_) => const _InviteJoinSheetRoute(),
   );
+}
+
+class _InviteJoinSheetRoute extends ConsumerWidget {
+  const _InviteJoinSheetRoute();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isClaiming =
+        ref.watch(inviteJoinProvider).status == InviteJoinStatus.claiming;
+    return PopScope(canPop: !isClaiming, child: const InviteJoinSheet());
+  }
 }
 
 class InviteJoinSheet extends ConsumerWidget {
@@ -138,7 +154,7 @@ class InviteJoinSheet extends ConsumerWidget {
                   child: FilledButton.icon(
                     onPressed: isClaiming || state.requiresFreshInvite
                         ? null
-                        : () => ref
+                        : () async => ref
                               .read(inviteJoinProvider.notifier)
                               .confirmJoin(),
                     icon: isClaiming

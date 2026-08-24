@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
+import '../../shared/relay/relay_provider.dart';
 import '../../shared/relay/relay_session.dart';
 import '../../shared/relay/relay_validation.dart';
 
@@ -29,7 +30,26 @@ abstract interface class InviteJoinRecovery {
   Future<String?> ensureStarterChannels();
 }
 
-final inviteJoinRecoveryProvider = Provider<InviteJoinRecovery>((ref) {
+/// The active relay and signing identity a recovery instance must be bound to.
+class InviteJoinRecoveryScope {
+  const InviteJoinRecoveryScope({
+    required this.relayHttpOrigin,
+    required this.nsec,
+  });
+
+  /// Canonical HTTP(S) origin used by the active relay session.
+  final String relayHttpOrigin;
+
+  /// Signing identity that must remain active for the recovery lifetime.
+  final String? nsec;
+}
+
+/// Constructs a fresh recovery operation for one scoped setup attempt.
+typedef InviteJoinRecoveryFactory =
+    InviteJoinRecovery Function(InviteJoinRecoveryScope scope);
+
+/// Provides recovery construction after the active community is authenticated.
+final inviteJoinRecoveryProvider = Provider<InviteJoinRecoveryFactory>((ref) {
   throw StateError(
     'inviteJoinRecoveryProvider must be configured by the app root',
   );
@@ -92,6 +112,9 @@ class InviteJoinState {
 }
 
 class InviteJoinNotifier extends Notifier<InviteJoinState> {
+  Community? _pendingStarterSetupCommunity;
+  Future<void>? _starterSetupInFlight;
+
   @override
   InviteJoinState build() => const InviteJoinState();
 
@@ -104,6 +127,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
           .read(communityListProvider.notifier)
           .switchCommunity(existing.id);
       if (existing.starterSetupIncomplete) {
+        _pendingStarterSetupCommunity = existing;
         state = InviteJoinState(
           status: InviteJoinStatus.claiming,
           invite: invite,
@@ -111,9 +135,9 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
           communityName: existing.name,
           isStarterSetupRecovery: true,
         );
-        await _finishStarterSetup(existing);
         return;
       }
+      _pendingStarterSetupCommunity = null;
       state = InviteJoinState(
         status: InviteJoinStatus.switchedExisting,
         invite: invite,
@@ -123,6 +147,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       return;
     }
 
+    _pendingStarterSetupCommunity = null;
     state = InviteJoinState(
       status: InviteJoinStatus.confirming,
       invite: invite,
@@ -153,7 +178,8 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
             .read(communityListProvider.notifier)
             .switchCommunity(existing.id);
         if (existing.starterSetupIncomplete || state.isStarterSetupRecovery) {
-          await _finishStarterSetup(existing);
+          _pendingStarterSetupCommunity = existing;
+          await startStarterSetupRecovery();
         } else {
           state = state.copyWith(
             status: InviteJoinStatus.switchedExisting,
@@ -221,7 +247,9 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
-      await _finishStarterSetup(community);
+      _pendingStarterSetupCommunity = community;
+      state = state.copyWith(isStarterSetupRecovery: true);
+      await startStarterSetupRecovery();
     } catch (error) {
       final requiresFreshInvite = _requiresFreshInvite(error);
       state = state.copyWith(
@@ -232,10 +260,50 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
     }
   }
 
+  /// Runs the pending recovery after its progress UI has been presented.
+  Future<void> startStarterSetupRecovery() async {
+    final community = _pendingStarterSetupCommunity;
+    if (community == null ||
+        state.status != InviteJoinStatus.claiming ||
+        !state.isStarterSetupRecovery) {
+      return;
+    }
+    final inFlight = _starterSetupInFlight;
+    if (inFlight != null) return inFlight;
+
+    final setup = _finishStarterSetup(community);
+    _starterSetupInFlight = setup;
+    try {
+      await setup;
+    } finally {
+      if (identical(_starterSetupInFlight, setup)) {
+        _starterSetupInFlight = null;
+      }
+    }
+  }
+
   Future<void> _finishStarterSetup(Community community) async {
     try {
+      // Authentication and community switches invalidate the scoped providers.
+      // Wait for the active community projection to settle before constructing
+      // the recovery, otherwise it could capture the previous relay's actions.
+      final activeCommunity = await ref.read(activeCommunityProvider.future);
+      if (activeCommunity?.id != community.id ||
+          activeCommunity?.relayUrl != community.relayUrl ||
+          activeCommunity?.nsec != community.nsec) {
+        throw StateError('Active community changed before invite recovery');
+      }
+      final config = RelayConfig(
+        baseUrl: community.relayUrl,
+        nsec: community.nsec,
+      );
       final focusChannelId = await ref
-          .read(inviteJoinRecoveryProvider)
+          .read(inviteJoinRecoveryProvider)(
+            InviteJoinRecoveryScope(
+              relayHttpOrigin: config.baseUrl,
+              nsec: config.nsec,
+            ),
+          )
           .ensureStarterChannels();
       await _saveStarterSetupState(community, incomplete: false);
       state = state.copyWith(
@@ -253,7 +321,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       }
       state = state.copyWith(
         status: InviteJoinStatus.error,
-        errorMessage: _friendlyInviteError(visibleError),
+        errorMessage: _friendlyStarterSetupError(visibleError),
         requiresFreshInvite: false,
         isStarterSetupRecovery: true,
         focusChannelId: null,
@@ -275,6 +343,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
   }
 
   void reset() {
+    _pendingStarterSetupCommunity = null;
     state = const InviteJoinState();
   }
 }
@@ -380,4 +449,15 @@ String _friendlyInviteError(Object error) {
     return 'Could not reach the relay. Check your connection and try again.';
   }
   return 'Could not join this community: $message';
+}
+
+String _friendlyStarterSetupError(Object error) {
+  final message = error.toString();
+  if (message.contains('SocketException') ||
+      message.contains('Connection refused') ||
+      message.contains('Network is unreachable') ||
+      message.contains('No route to host')) {
+    return 'Starter channels could not reach the relay. Check your connection and retry setup.';
+  }
+  return 'Starter channels could not be set up. Retry setup to try again.';
 }

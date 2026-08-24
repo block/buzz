@@ -91,7 +91,9 @@ void main() {
           communityStorageProvider.overrideWithValue(storage),
           authProvider.overrideWith(() => auth),
           inviteKeyGeneratorProvider.overrideWithValue(() => keys),
-          inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
+          ),
           inviteJoinHttpClientProvider.overrideWithValue(
             http_testing.MockClient((request) async {
               capturedRequest = request;
@@ -363,7 +365,8 @@ void main() {
             return keys;
           }),
           inviteJoinRecoveryProvider.overrideWithValue(
-            _FakeInviteJoinRecovery(error: Exception('relay disconnected')),
+            (_) =>
+                _FakeInviteJoinRecovery(error: Exception('relay disconnected')),
           ),
           inviteJoinHttpClientProvider.overrideWithValue(
             http_testing.MockClient((request) async {
@@ -406,7 +409,9 @@ void main() {
             generatedKeys++;
             return nostr.Keys.generate();
           }),
-          inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
+          ),
           inviteJoinHttpClientProvider.overrideWithValue(
             http_testing.MockClient((request) async {
               claimRequests++;
@@ -425,6 +430,9 @@ void main() {
               code: 'code',
             ),
           );
+      await secondContainer
+          .read(inviteJoinProvider.notifier)
+          .startStarterSetupRecovery();
 
       final recovered = secondContainer.read(inviteJoinProvider);
       expect(recovered.status, InviteJoinStatus.success);
@@ -575,7 +583,9 @@ void main() {
         communityStorageProvider.overrideWithValue(storage),
         authProvider.overrideWith(() => auth),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
-        inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
+        inviteJoinRecoveryProvider.overrideWithValue(
+          (_) => _successfulRecovery(),
+        ),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
             attempts++;
@@ -621,6 +631,72 @@ void main() {
     );
     expect(auth.authenticatedCommunities, hasLength(1));
   });
+
+  test('builds a fresh recovery with the second community identity', () async {
+    final firstKeys = nostr.Keys.generate();
+    final secondKeys = nostr.Keys.generate();
+    final scopes = <InviteJoinRecoveryScope>[];
+    final recoveries = <InviteJoinRecoveryScope>[];
+    var nextKeys = 0;
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(
+          CommunityStorage(secure: FakeSecureStorage()),
+        ),
+        authProvider.overrideWith(_RecordingAuthNotifier.new),
+        inviteKeyGeneratorProvider.overrideWithValue(() {
+          final keys = nextKeys == 0 ? firstKeys : secondKeys;
+          nextKeys++;
+          return keys;
+        }),
+        inviteJoinRecoveryProvider.overrideWithValue((scope) {
+          scopes.add(scope);
+          return _RecordingInviteJoinRecovery(() async {
+            recoveries.add(scope);
+            return 'welcome-everyone-id';
+          });
+        }),
+        inviteJoinHttpClientProvider.overrideWithValue(
+          http_testing.MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'status': 'joined',
+                'host': request.url.host,
+                'role': 'member',
+              }),
+              200,
+            ),
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    for (final invite in const [
+      InviteDeepLink(relayUrl: 'wss://first.example.com', code: 'first'),
+      InviteDeepLink(relayUrl: 'wss://second.example.com', code: 'second'),
+    ]) {
+      await container.read(inviteJoinProvider.notifier).prepare(invite);
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+    }
+
+    expect(scopes.map((scope) => scope.relayHttpOrigin), [
+      'https://first.example.com',
+      'https://second.example.com',
+    ]);
+    expect(scopes.map((scope) => scope.nsec), [
+      firstKeys.nsec,
+      secondKeys.nsec,
+    ]);
+    expect(recoveries, hasLength(2));
+    expect(identical(recoveries[0], scopes[0]), isTrue);
+    expect(identical(recoveries[1], scopes[1]), isTrue);
+    expect(identical(recoveries[1], scopes[0]), isFalse);
+  });
 }
 
 InviteJoinRecovery _successfulRecovery() =>
@@ -637,6 +713,15 @@ class _FakeInviteJoinRecovery implements InviteJoinRecovery {
     if (error case final failure?) throw failure;
     return focusChannelId;
   }
+}
+
+class _RecordingInviteJoinRecovery implements InviteJoinRecovery {
+  const _RecordingInviteJoinRecovery(this._ensure);
+
+  final Future<String?> Function() _ensure;
+
+  @override
+  Future<String?> ensureStarterChannels() => _ensure();
 }
 
 Channel _channel({
@@ -665,6 +750,11 @@ class _RecordingAuthNotifier extends AuthNotifier {
 
   @override
   Future<void> authenticateWithCommunity(Community community) async {
+    final storage = ref.read(communityStorageProvider);
+    await storage.save(community);
+    await storage.saveActiveId(community.id);
+    ref.invalidate(communityListProvider);
+    ref.invalidate(activeCommunityProvider);
     authenticatedCommunities.add(community);
     state = AsyncData(
       AuthState(status: AuthStatus.authenticated, community: community),
