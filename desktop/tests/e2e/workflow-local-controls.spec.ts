@@ -4,6 +4,15 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
+declare global {
+  interface Window {
+    __BUZZ_WORKFLOW_BATCH_CALLS__?: {
+      eventBatches: number[];
+      userBatches: number[];
+    };
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -419,7 +428,9 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   ).toBeLessThan(0.5);
 });
 
-test("Escape closes a filter picker before its inspector", async ({ page }) => {
+test("Escape closes a filter picker, restores disclosure focus, then closes its inspector", async ({
+  page,
+}) => {
   for (const width of [760, 1280]) {
     await page.setViewportSize({ width, height: 820 });
     await page.goto(
@@ -428,22 +439,99 @@ test("Escape closes a filter picker before its inspector", async ({ page }) => {
 
     const dialog = page.getByRole("dialog", { name: "Create workflow" });
     const inspector = dialog.getByTestId("workflow-node-inspector");
-    await dialog.getByText("Author", { exact: true }).locator("..").click();
+    await selectTrigger(page, dialog, "Reaction Added");
+    for (const field of [
+      {
+        label: "Author",
+        picker: "workflow-author-picker",
+        search: "Search authors or paste a public key",
+      },
+      {
+        label: "Message",
+        picker: "workflow-message-picker",
+        search: "Search messages or paste a message ID",
+      },
+    ]) {
+      const disclosure = dialog
+        .getByText(field.label, { exact: true })
+        .locator("..");
+      await disclosure.click();
+      const picker = dialog.getByTestId(field.picker);
+      const search = dialog.getByRole("combobox", { name: field.search });
+      await expect(picker).toBeVisible();
 
-    const picker = dialog.getByTestId("workflow-author-picker");
-    const search = dialog.getByRole("combobox", {
-      name: "Search authors or paste a public key",
-    });
-    await expect(picker).toBeVisible();
-
-    await search.press("Escape");
-    await expect(picker).toBeHidden();
-    await expect(inspector).toBeVisible();
+      await search.press("Escape");
+      await expect(picker).toBeHidden();
+      await expect(disclosure).toBeFocused();
+      await expect(inspector).toBeVisible();
+    }
 
     await page.keyboard.press("Escape");
     await expect(inspector).toBeHidden();
     await expect(dialog).toBeVisible();
   }
+});
+
+test("workflow grid batches card author and message presentation reads", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__TAURI_INTERNALS__?.invoke === "function",
+  );
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    if (!invoke) throw new Error("mock invoke bridge unavailable");
+    for (let index = 0; index < 40; index += 1) {
+      const messageId = (index + 1).toString(16).padStart(64, "0");
+      const author = (index + 101).toString(16).padStart(64, "0");
+      await invoke("create_workflow", {
+        channelId: "94a444a4-c0a3-5966-ab05-530c6ddc2301",
+        yamlDefinition: JSON.stringify({
+          name: `batched_card_${index}`,
+          trigger: {
+            on: "reaction_added",
+            filter: `trigger_author == "${author}" && trigger_message_id == "${messageId}"`,
+          },
+          steps: [],
+        }),
+      });
+    }
+
+    const calls = { eventBatches: [], userBatches: [] };
+    window.__BUZZ_WORKFLOW_BATCH_CALLS__ = calls;
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "get_events") {
+        calls.eventBatches.push(
+          (args?.eventIds as unknown[] | undefined)?.length ?? 0,
+        );
+      }
+      if (command === "get_users_batch") {
+        calls.userBatches.push(
+          (args?.pubkeys as unknown[] | undefined)?.length ?? 0,
+        );
+      }
+      return invoke(command, args);
+    };
+  });
+
+  await page.getByTestId("open-workflows-view").click();
+  await expect(
+    page.locator('[data-testid^="workflow-card-mock-wf-"]'),
+  ).toHaveCount(40);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const calls = window.__BUZZ_WORKFLOW_BATCH_CALLS__;
+        return {
+          eventBatchCount: calls?.eventBatches.filter((size) => size === 40)
+            .length,
+          userBatchCount: calls?.userBatches.filter((size) => size === 40)
+            .length,
+        };
+      }),
+    )
+    .toEqual({ eventBatchCount: 1, userBatchCount: 1 });
 });
 
 test("does not select stale picker results when Enter outruns deferred filtering", async ({
