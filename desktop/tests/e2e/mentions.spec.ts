@@ -1933,6 +1933,69 @@ test("shared agents wait for initial directory authorization", async ({
   });
 });
 
+test("bot agents owned by another identity are mentionable when added to a shared channel", async ({
+  page,
+}) => {
+  const OTHER_OWNER_BOT_PUBKEY =
+    "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b";
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OTHER_OWNER_BOT_PUBKEY,
+        name: "scout",
+        respondTo: "anyone",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@scout");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("scout")).toBeVisible();
+  await expect(dropdown.getByText("agent")).toBeVisible();
+
+  await input.press("Enter");
+  await page.keyboard.type(" can you help?");
+  await page.getByTestId("send-message").click();
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "scout" });
+  await expect(mentionChip).toBeVisible();
+});
+
+test("bot agents owned by another identity stay hidden when not added to a shared channel", async ({
+  page,
+}) => {
+  const OTHER_OWNER_BOT_PUBKEY =
+    "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c";
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OTHER_OWNER_BOT_PUBKEY,
+        name: "ghost",
+        respondTo: "anyone",
+        // Deliberately not added to "general" — respondTo=anyone alone must
+        // not be enough; the fix requires real channel membership too.
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@ghost");
+
+  await expect(autocomplete(page)).toHaveCount(0);
+});
+
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({
   page,
 }) => {
