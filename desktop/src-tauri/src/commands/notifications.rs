@@ -71,10 +71,87 @@ pub(crate) fn ensure_startup_registration(_app: &tauri::AppHandle) {}
 
 #[cfg(target_os = "windows")]
 pub(crate) mod windows {
+    use std::sync::mpsc;
     use std::sync::Once;
 
     static AUMID_REGISTERED: Once = Once::new();
     static STARTUP_REGISTRATION_DONE: Once = Once::new();
+    static PROCESS_MTA_READY: Once = Once::new();
+
+    /// Establishes a process-wide multi-threaded COM apartment (MTA) that lives
+    /// for the entire lifetime of the app, and blocks until it is ready.
+    ///
+    /// This is the load-bearing piece for Windows toast delivery.
+    /// `tauri-winrt-notification`'s `Toast::show()` calls into WinRT
+    /// (`XmlDocument::new`, `ToastNotificationManager::CreateToastNotifierWithId`,
+    /// `ToastNotifier::Show`) and does no COM apartment init of its own —
+    /// confirmed by reading the crate source. The upstream Tauri notification
+    /// plugin gets away with that only because it posts from the tokio runtime,
+    /// where some other thread has already created an MTA and the worker joins
+    /// it via COM's "implicit MTA" rule (Raymond Chen,
+    /// <https://devblogs.microsoft.com/oldnewthing/20130419-00/?p=4613>). Buzz
+    /// posts toasts from a bare `std::thread`, so unless the process already
+    /// has a live MTA, every one of those WinRT calls fails with
+    /// `CO_E_NOTINITIALIZED`. `Toast::show()` maps that to `Err`, which the
+    /// caller only `eprintln!`s — and release builds set
+    /// `windows_subsystem = "windows"`, so there is no console and the error
+    /// vanishes. Net effect: no toast ever appears, silently, on every launch,
+    /// on every machine. That is exactly the bug this fixes.
+    ///
+    /// We make the dependency explicit and permanent: one dedicated thread
+    /// initializes an MTA and then parks forever. It must never
+    /// `CoUninitialize` or exit — holding the apartment open is the entire
+    /// point. This does two things a per-notification `CoInitializeEx`/
+    /// `CoUninitialize` pair (the tempting shorter fix) cannot:
+    ///   1. Every notification thread joins the implicit MTA with zero per-call
+    ///      init, so there is no `CoUninitialize`-then-exit race against the
+    ///      Windows Notification Platform's async delivery
+    ///      (microsoft/WindowsAppSDK#3437).
+    ///   2. The `on_activated` click handler stays deliverable. In an MTA,
+    ///      WinRT delivers `Activated`/`Dismissed` callbacks on COM worker
+    ///      threads rather than a per-thread message pump, so the short-lived
+    ///      thread that showed the toast can exit while the click handler still
+    ///      fires later — as long as the apartment itself is still alive, which
+    ///      this permanent thread guarantees. A per-call `CoUninitialize` +
+    ///      thread exit would tear the sink down and silently drop every click.
+    ///
+    /// MTA (not STA/`COINIT_APARTMENTTHREADED`) is correct here: STA would
+    /// require this thread to run a window message pump to deliver callbacks,
+    /// which a parked thread does not. Microsoft's own WinRT guidance is to use
+    /// MTA for non-UI threads and reserve STA for UI threads
+    /// (<https://microsoft.github.io/MIDI/kb/threading-and-initialization/>).
+    fn ensure_process_mta() {
+        PROCESS_MTA_READY.call_once(|| {
+            let (ready_tx, ready_rx) = mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+                // SAFETY: this thread performs no other COM work and never
+                // uninitializes; the apartment is intentionally leaked for the
+                // process lifetime. On a fresh thread this returns S_OK (or
+                // S_FALSE if the process MTA already exists) — both are
+                // non-negative, so `is_err()` is false. It cannot return
+                // RPC_E_CHANGED_MODE because this thread has never been
+                // initialized with a different model.
+                let hresult = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                if hresult.is_err() {
+                    eprintln!(
+                        "buzz-desktop: failed to establish process MTA for notifications: {hresult:?}"
+                    );
+                }
+                // Signal readiness regardless: even on the (unexpected) error
+                // path, blocking callers must not hang.
+                let _ = ready_tx.send(());
+                // Park forever. Returning from this closure would end the
+                // thread and tear the apartment down — never do that.
+                loop {
+                    std::thread::park();
+                }
+            });
+            // Block until the apartment is confirmed up, so the very first
+            // toast can never race ahead of it.
+            let _ = ready_rx.recv();
+        });
+    }
 
     /// Runs Buzz's full Windows toast-notification eligibility setup once,
     /// early in app startup — call this from `lib.rs`'s `setup()`, not
@@ -91,6 +168,9 @@ pub(crate) mod windows {
             // Start Menu folder) — do this off the main setup thread so
             // it never delays window creation.
             std::thread::spawn(move || {
+                // Bring the process MTA up at launch so the first toast never
+                // has to wait on it. Idempotent and cheap after the first call.
+                ensure_process_mta();
                 let app_id = app.config().identifier.clone();
                 set_process_aumid(&app_id);
                 if let Err(error) = write_aumid_registry_entry(&app, &app_id) {
@@ -115,6 +195,11 @@ pub(crate) mod windows {
 
         let app_id = app.config().identifier.clone();
         ensure_aumid_registered(&app, &app_id);
+        // `Toast::show()` below calls into WinRT, which requires the calling
+        // thread to be in a COM apartment. See `ensure_process_mta` — this
+        // guarantees a process-wide MTA is live before we spawn, so the bare
+        // thread below joins it implicitly and the WinRT calls succeed.
+        ensure_process_mta();
 
         std::thread::spawn(move || {
             let mut toast = tauri_winrt_notification::Toast::new(&app_id).text1(&title);

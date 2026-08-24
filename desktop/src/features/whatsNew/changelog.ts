@@ -183,6 +183,13 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Programs (.exe, .dll and similar) can now be shared — they go to your Google Drive instead of failing to upload",
     ],
   },
+  {
+    version: "0.5.18-2",
+    date: "2026-08-24",
+    bullets: [
+      "Fixed Windows desktop notifications never appearing — new messages now show a toast, and clicking it opens the conversation",
+    ],
+  },
 ];
 
 /**
