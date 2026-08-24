@@ -340,6 +340,21 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # buzz-acp harness: ACP prompt formatting, the event queue, and the pool
+        # lifecycle state machine. Pure in-process tests, no infra. Enumerated
+        # explicitly because nothing in CI runs `cargo test --workspace`; without
+        # this step the mid-turn steer prompt's reply-anchor invariants compile
+        # but never execute.
+        #
+        # The `BUZZ_*` scrub is load-bearing, not hygiene — see
+        # `run_buzz_acp_unit_tests` in scripts/run-tests.sh for why. Subshell so
+        # the steps above keep their environment.
+        (
+            while IFS= read -r var; do
+                unset "$var"
+            done < <(env | sed -n 's/^\(BUZZ_[A-Za-z0-9_]*\)=.*/\1/p')
+            cargo nextest run -p buzz-acp
+        )
     else
         ./scripts/run-tests.sh unit
     fi
