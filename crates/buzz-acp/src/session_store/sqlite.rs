@@ -59,7 +59,40 @@ impl SqliteSessionStore {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     SessionStoreError::Io(format!("failed to create session store dir: {e}"))
                 })?;
+                // Ported from #6088: owner-only store directory. Bindings are not
+                // secrets, but they name channels, agent pubkeys and workspace
+                // paths, and the default umask commonly leaves them world-readable.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|e| {
+                            SessionStoreError::Io(format!(
+                                "failed to secure session store dir: {e}"
+                            ))
+                        })?;
+                }
             }
+        }
+
+        // Create the database at 0600 *before* SQLite opens it, so its bytes are
+        // never briefly world-readable. SQLite derives -wal/-shm permissions from
+        // the main database file, so this covers the sidecars too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| {
+                    SessionStoreError::Io(format!("failed to create session store: {e}"))
+                })?;
+            // Repair a store created before this hardening landed.
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| SessionStoreError::Io(format!("failed to secure session store: {e}")),
+            )?;
         }
 
         let conn = Connection::open(path)

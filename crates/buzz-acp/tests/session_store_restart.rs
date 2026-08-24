@@ -305,3 +305,66 @@ fn table_columns(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
         .expect("rows");
     rows.map(|r| r.expect("col")).collect()
 }
+
+/// Ported from #6088's owner-only permission discipline.
+///
+/// #6682 opened the database with a bare `Connection::open`, leaving it at the
+/// process umask — commonly `0644`, i.e. world-readable. Bindings are not
+/// secrets, but they name channels, agent pubkeys and workspace paths.
+///
+/// This asserts the MODE, not the content. #6682's shipped
+/// `session_store_file_contains_ids_only` test passes even when the file is
+/// world-readable, so it cannot catch this class of regression.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_store_is_owner_only_on_disk() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir.path().join("state");
+    let path = db_path(&nested);
+    let key = ContextKey::Channel(Uuid::new_v4());
+
+    let store = SqliteSessionStore::open(&path, scope_a()).expect("open");
+    store.save_binding(&key, "ses_perm").await.expect("save");
+    drop(store);
+
+    let file_mode = std::fs::metadata(&path)
+        .expect("db metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    let dir_mode = std::fs::metadata(&nested)
+        .expect("dir metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(file_mode, 0o600, "session store db must be owner-only");
+    assert_eq!(dir_mode, 0o700, "session store dir must be owner-only");
+}
+
+/// A store created before this hardening landed must be repaired on open, not
+/// merely left alone — a fix that only applies to fresh installs leaves every
+/// existing deployment exposed.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_store_repairs_loose_permissions_on_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = db_path(dir.path());
+
+    let store = SqliteSessionStore::open(&path, scope_a()).expect("open");
+    drop(store);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("loosen");
+
+    let store = SqliteSessionStore::open(&path, scope_a()).expect("reopen");
+    drop(store);
+
+    let mode = std::fs::metadata(&path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "reopen must repair a world-readable store");
+}
