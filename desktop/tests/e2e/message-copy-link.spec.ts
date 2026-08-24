@@ -83,6 +83,20 @@ test("message action rail copies the same canonical thread link as More", async 
     name: /^React with /,
   });
   await expect(quickReactions).toHaveCount(3);
+  const orderedActionNames = await actionBar
+    .getByRole("button")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("aria-label")),
+    );
+  expect(orderedActionNames).toEqual([
+    expect.stringMatching(/^React with /),
+    expect.stringMatching(/^React with /),
+    expect.stringMatching(/^React with /),
+    "Open reactions",
+    "Reply",
+    "Copy link",
+    "More actions",
+  ]);
 
   const copyLink = actionBar.getByTestId(`copy-link-message-${replyId}`);
   await expect(copyLink).toHaveAccessibleName("Copy link");
