@@ -97,9 +97,16 @@ impl From<image::ImageError> for MediaError {
     }
 }
 
-impl From<s3::error::S3Error> for MediaError {
-    fn from(e: s3::error::S3Error) -> Self {
-        Self::StorageError(e.to_string())
+impl From<buzz_object_store::ObjectStoreError> for MediaError {
+    /// A missing object is a media-level `NotFound`; everything else — a
+    /// throttle, an ambiguous transport outcome, a permanent provider failure,
+    /// a misconfiguration — is opaque to media callers and collapses to
+    /// `StorageError`.
+    fn from(e: buzz_object_store::ObjectStoreError) -> Self {
+        match e {
+            buzz_object_store::ObjectStoreError::NotFound { .. } => Self::NotFound,
+            other => Self::StorageError(other.to_string()),
+        }
     }
 }
 

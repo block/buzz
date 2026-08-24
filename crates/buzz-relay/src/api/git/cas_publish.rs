@@ -75,7 +75,9 @@ use crate::api::git::manifest::{
     pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS, MAX_MANIFEST_REFS,
     PACK_COMPACTION_THRESHOLD,
 };
-use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
+use buzz_object_store::{ConditionalWrite, Revision, WriteCondition};
+
+use crate::api::git::store::{GitStore, StoreError};
 use buzz_core::TenantContext;
 
 const PACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -202,7 +204,7 @@ pub struct CasSuccess {
 /// this *before* running receive-pack against the hydrated workspace, and
 /// pass the same value into [`cas_publish`]. If the pointer advances
 /// between load and CAS (a concurrent push wins), the CAS fails with
-/// `LostRace`/`Conflict` and the loser re-pushes — that is the only safe
+/// `Conflict` and the loser re-pushes — that is the only safe
 /// retry path (the loser's receive-pack output is derived against the
 /// superseded parent, so reusing it would violate
 /// `Inv_RefDerivedFromParent`).
@@ -213,10 +215,10 @@ pub struct CasSuccess {
 /// pointer happens to be live at CAS time.
 #[derive(Debug, Clone)]
 pub struct ParentState {
-    /// ETag predicating the next CAS write. `None` only when the pointer
-    /// does not yet exist (first push to an empty repo) — then the CAS
-    /// uses `If-None-Match: *`.
-    pub if_match: Option<ETag>,
+    /// Revision predicating the next CAS write. `None` only when the
+    /// pointer does not yet exist (first push to an empty repo) — then the
+    /// CAS is create-only.
+    pub if_match: Option<Revision>,
     /// The parent manifest's content-addressed *digest* (64-hex), not the
     /// full `manifests/<digest>` key. This lands in `Manifest.parent` and
     /// is what `Inv_RefDerivedFromParent` reasons over (parent =
@@ -246,14 +248,14 @@ impl ParentState {
     /// Build a `ParentState` from already-loaded pointer state.
     ///
     /// The hydrate layer reads the pointer + verified manifest as part of
-    /// materializing the workspace, then hands the same `(etag, digest,
+    /// materializing the workspace, then hands the same `(revision, digest,
     /// manifest)` tuple back here. Centralizing the constructor in
     /// `cas_publish` means there's one place where `ParentState`
     /// invariants live; centralizing the I/O in `hydrate` means we read
     /// the pointer once per push, not twice.
-    pub fn from_loaded(etag: ETag, digest: String, parent: Manifest) -> Self {
+    pub fn from_loaded(revision: Revision, digest: String, parent: Manifest) -> Self {
         Self {
-            if_match: Some(etag),
+            if_match: Some(revision),
             parent_digest: Some(digest),
             parent,
         }
@@ -385,10 +387,12 @@ fn digest_from_pack_key(key: &str) -> Result<String, CasError> {
         .filter(|digest| digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
         .map(str::to_string)
         .ok_or_else(|| {
-            CasError::Backend(StoreError::Backend(s3::error::S3Error::HttpFailWithBody(
-                500,
-                format!("put_pack returned non-standard key: {key}"),
-            )))
+            CasError::Backend(StoreError::Backend(
+                buzz_object_store::ObjectStoreError::Provider {
+                    operation: "put_pack",
+                    message: format!("put_pack returned non-standard key: {key}"),
+                },
+            ))
         })
 }
 
@@ -951,10 +955,12 @@ fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
     key.strip_prefix("manifests/")
         .map(str::to_string)
         .ok_or_else(|| {
-            CasError::Backend(StoreError::Backend(s3::error::S3Error::HttpFailWithBody(
-                500,
-                format!("put_manifest returned non-standard key: {key}"),
-            )))
+            CasError::Backend(StoreError::Backend(
+                buzz_object_store::ObjectStoreError::Provider {
+                    operation: "put_manifest",
+                    message: format!("put_manifest returned non-standard key: {key}"),
+                },
+            ))
         })
 }
 
@@ -1210,8 +1216,8 @@ async fn cas_publish_inner(
 
     // Step 7: CAS the pointer.
     let precond = match &parent_state.if_match {
-        Some(e) => Precond::IfMatch(e.clone()),
-        None => Precond::IfNoneMatchStar,
+        Some(revision) => WriteCondition::Matches(revision.clone()),
+        None => WriteCondition::Absent,
     };
     let cas_outcome = match store
         .put_pointer(&pkey, manifest_digest.as_bytes(), precond)
@@ -1232,7 +1238,7 @@ async fn cas_publish_inner(
         }
     };
     match cas_outcome {
-        CasOutcome::Won(_new_etag) => {
+        ConditionalWrite::Committed(_new_revision) => {
             if let Some(observation) = &compaction_observation {
                 record_compaction(
                     "success",
@@ -1247,7 +1253,7 @@ async fn cas_publish_inner(
                 manifest_key,
             })
         }
-        CasOutcome::LostRace => {
+        ConditionalWrite::Conflict => {
             if let Some(observation) = &compaction_observation {
                 record_compaction(
                     "cas_conflict",
@@ -1266,11 +1272,11 @@ async fn cas_publish_inner(
             let expected = parent_state
                 .if_match
                 .as_ref()
-                .map(|e| e.0.as_str())
-                .unwrap_or("<first-push>");
+                .map(|revision| format!("{revision:?}"))
+                .unwrap_or_else(|| "<first-push>".to_string());
             warn!(
                 pointer = %pkey,
-                expected_etag = %expected,
+                expected_revision = %expected,
                 attempted_manifest = %manifest_key,
                 "CAS lost race; resolving winner for reconcile"
             );
@@ -1284,7 +1290,7 @@ async fn cas_publish_inner(
     }
 }
 
-/// Re-read the pointer after a `LostRace` and fetch the winner's manifest.
+/// Re-read the pointer after a CAS conflict and fetch the winner's manifest.
 ///
 /// Fail-closed at every step: if the pointer is now absent (a deletion
 /// raced in — currently impossible under the protocol's no-delete rule,
@@ -1592,7 +1598,7 @@ mod tests {
     }
 
     fn live_store() -> GitStore {
-        GitStore::new(
+        GitStore::from_s3_config(
             "http://localhost:9000",
             "buzz_dev",
             "buzz_dev_secret",
@@ -1712,12 +1718,12 @@ mod tests {
         let repo = "history";
         let pkey = pointer_key(ctx.community(), &owner, repo);
         match store
-            .put_pointer(&pkey, parent_digest.as_bytes(), Precond::IfNoneMatchStar)
+            .put_pointer(&pkey, parent_digest.as_bytes(), WriteCondition::Absent)
             .await
             .expect("put pointer")
         {
-            CasOutcome::Won(_) => {}
-            CasOutcome::LostRace => panic!("unique pointer must win"),
+            ConditionalWrite::Committed(_) => {}
+            ConditionalWrite::Conflict => panic!("unique pointer must win"),
         }
         let cache_parent = scratch.path().join("cache");
         let cache =

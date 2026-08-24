@@ -9,6 +9,7 @@ description = "Media storage, validation, and thumbnail generation for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }
+buzz-object-store = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,7 +22,6 @@ chrono = { workspace = true }
 ulid = "1"
 uuid = { workspace = true }
 axum = { workspace = true }
-s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 infer = "0.19"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 blurhash = "0.2"
@@ -32,7 +32,6 @@ tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 futures-core = "0.3"
-quick-xml = { version = "0.38", features = ["serialize"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

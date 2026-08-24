@@ -97,6 +97,58 @@ pub struct BulkDeleteOutcome {
     pub failed: Vec<(String, String, String)>,
 }
 
+/// Provider-neutral kind of retained object version.
+///
+/// S3 reports concrete versions and delete markers. GCS reports generations;
+/// because Buzz admits only GCS buckets with versioning and soft delete off,
+/// those entries are always concrete objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectVersionKind {
+    /// A byte-bearing object version.
+    Object,
+    /// A marker that hides older bytes without removing them.
+    DeleteMarker,
+}
+
+/// One provider version under an object prefix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObjectVersionEntry {
+    /// Object key.
+    pub key: String,
+    /// Opaque provider version token (S3 version ID or GCS generation).
+    pub version_id: String,
+    /// Whether this is a byte-bearing version or a delete marker.
+    pub kind: ObjectVersionKind,
+    /// Byte size for object versions; zero for delete markers.
+    pub size: u64,
+}
+
+/// Exact provider version identifier used for permanent deletion.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObjectVersionRef {
+    /// Object key.
+    pub key: String,
+    /// Opaque provider version token (S3 version ID or GCS generation).
+    pub version_id: String,
+}
+
+/// One page of prefix-scoped provider versions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectVersionsPage {
+    /// Object versions and delete markers returned by this page.
+    pub entries: Vec<ObjectVersionEntry>,
+    /// First half of the next-page cursor.
+    ///
+    /// S3 uses a key marker; GCS stores its opaque page token here.
+    pub next_key_marker: Option<String>,
+    /// Second half of the next-page cursor, used by S3 when several versions
+    /// of one key straddle a page boundary. GCS leaves it empty.
+    pub next_version_id_marker: Option<String>,
+    /// Whether more pages remain.
+    pub is_truncated: bool,
+}
+
 /// The object-store operations Buzz actually performs.
 ///
 /// Implementations are shared across the process behind an `Arc`: the relay
@@ -202,6 +254,23 @@ pub trait ObjectStore: Send + Sync {
     /// one issue bounded-concurrency individual deletes. Either way the caller
     /// sees the same per-key fold and decides retry policy.
     async fn delete_objects(&self, keys: &[String]) -> Result<BulkDeleteOutcome, ObjectStoreError>;
+
+    /// Fetch one page of exact object versions under a prefix.
+    ///
+    /// Cursor fields are opaque to callers and must be replayed together.
+    async fn list_versions_page(
+        &self,
+        prefix: &str,
+        key_marker: Option<String>,
+        version_id_marker: Option<String>,
+        max_keys: usize,
+    ) -> Result<ObjectVersionsPage, ObjectStoreError>;
+
+    /// Permanently delete exact provider versions.
+    async fn delete_versions(
+        &self,
+        versions: &[ObjectVersionRef],
+    ) -> Result<BulkDeleteOutcome, ObjectStoreError>;
 
     /// Probe connectivity and bucket access.
     async fn ping(&self) -> Result<(), ObjectStoreError>;

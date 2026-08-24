@@ -24,18 +24,25 @@
 //! observation. Do not widen the ambiguous set: it would let a genuine
 //! conformance failure be silently dropped from the probe's observer set.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 use s3::creds::Credentials;
 use s3::error::S3Error;
+use s3::request::Request as _;
 use s3::{Bucket, Region};
 
 use crate::error::ObjectStoreError;
 use crate::revision::{ConditionalWrite, ProviderKind, Revision, WriteCondition};
-use crate::{BulkDeleteOutcome, ByteStream, ImmutableWrite, ListPage, ObjectMeta, ObjectStore};
+use crate::{
+    BulkDeleteOutcome, ByteStream, ImmutableWrite, ListPage, ObjectMeta, ObjectStore,
+    ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,
+};
 
 /// S3 URL addressing style shared by media and Git/CAS storage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
@@ -207,15 +214,32 @@ fn classify(operation: &'static str, key: &str, error: S3Error) -> ObjectStoreEr
 /// `NoSuchKey`/`NoSuchVersion` errors instead of deleted; both map to
 /// `already_missing` to keep checkpointed retry idempotent.
 fn fold_bulk_delete_result(result: s3::serde_types::DeleteObjectsResult) -> BulkDeleteOutcome {
+    fold_delete_result(result, DeleteMode::Unversioned)
+}
+
+fn fold_version_delete_result(result: s3::serde_types::DeleteObjectsResult) -> BulkDeleteOutcome {
+    fold_delete_result(result, DeleteMode::ExplicitVersion)
+}
+
+enum DeleteMode {
+    Unversioned,
+    ExplicitVersion,
+}
+
+fn fold_delete_result(
+    result: s3::serde_types::DeleteObjectsResult,
+    mode: DeleteMode,
+) -> BulkDeleteOutcome {
     let mut outcome = BulkDeleteOutcome::default();
     for deleted in result.deleted {
-        if deleted.delete_marker == Some(true)
+        let has_version_artifact = deleted.delete_marker == Some(true)
             || deleted.delete_marker_version_id.is_some()
-            || deleted.version_id.is_some()
-        {
-            outcome.versioned_keys.push(deleted.key);
-        } else {
-            outcome.deleted += 1;
+            || deleted.version_id.is_some();
+        match mode {
+            DeleteMode::Unversioned if has_version_artifact => {
+                outcome.versioned_keys.push(deleted.key);
+            }
+            DeleteMode::Unversioned | DeleteMode::ExplicitVersion => outcome.deleted += 1,
         }
     }
     for error in result.errors {
@@ -226,6 +250,150 @@ fn fold_bulk_delete_result(result: s3::serde_types::DeleteObjectsResult) -> Bulk
         }
     }
     outcome
+}
+
+#[derive(Debug, Default)]
+struct ListVersionFields {
+    key: Option<String>,
+    version_id: Option<String>,
+    size: Option<u64>,
+}
+
+fn local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+fn version_xml_error(error: impl std::fmt::Display) -> ObjectStoreError {
+    ObjectStoreError::Provider {
+        operation: "list_versions_page",
+        message: error.to_string(),
+    }
+}
+
+fn read_element_text(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart<'_>,
+) -> Result<String, ObjectStoreError> {
+    reader
+        .read_text(start.to_end().name())
+        .map(|text| text.into_owned())
+        .map_err(version_xml_error)
+}
+
+fn skip_element(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart<'_>,
+) -> Result<(), ObjectStoreError> {
+    reader
+        .read_to_end(start.to_end().name())
+        .map_err(version_xml_error)?;
+    Ok(())
+}
+
+fn parse_list_version_entry(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart<'_>,
+    kind: ObjectVersionKind,
+) -> Result<ObjectVersionEntry, ObjectStoreError> {
+    let mut fields = ListVersionFields::default();
+    loop {
+        match reader.read_event().map_err(version_xml_error)? {
+            Event::Start(child) => match local_name(child.local_name().as_ref()) {
+                b"Key" => fields.key = Some(read_element_text(reader, &child)?),
+                b"VersionId" => fields.version_id = Some(read_element_text(reader, &child)?),
+                b"Size" => {
+                    fields.size = Some(
+                        read_element_text(reader, &child)?
+                            .parse::<u64>()
+                            .map_err(version_xml_error)?,
+                    );
+                }
+                _ => skip_element(reader, &child)?,
+            },
+            Event::Empty(child) => match local_name(child.local_name().as_ref()) {
+                b"Key" => fields.key = Some(String::new()),
+                b"VersionId" => fields.version_id = Some(String::new()),
+                b"Size" => fields.size = Some(0),
+                _ => {}
+            },
+            Event::End(end) if end.name().as_ref() == start.to_end().name().as_ref() => {
+                let key = fields.key.ok_or_else(|| {
+                    version_xml_error("ListObjectVersions entry missing Key")
+                })?;
+                let version_id = fields.version_id.ok_or_else(|| {
+                    version_xml_error("ListObjectVersions entry missing VersionId")
+                })?;
+                return Ok(ObjectVersionEntry {
+                    key,
+                    version_id,
+                    kind,
+                    size: if kind == ObjectVersionKind::Object {
+                        fields.size.unwrap_or(0)
+                    } else {
+                        0
+                    },
+                });
+            }
+            Event::Eof => {
+                return Err(version_xml_error(
+                    "unexpected EOF inside ListObjectVersions entry",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_object_versions_page(xml: &[u8]) -> Result<ObjectVersionsPage, ObjectStoreError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut entries = Vec::new();
+    let mut next_key_marker = None;
+    let mut next_version_id_marker = None;
+    let mut is_truncated = false;
+
+    loop {
+        match reader.read_event().map_err(version_xml_error)? {
+            Event::Start(start) => match local_name(start.local_name().as_ref()) {
+                b"Version" => entries.push(parse_list_version_entry(
+                    &mut reader,
+                    &start,
+                    ObjectVersionKind::Object,
+                )?),
+                b"DeleteMarker" => entries.push(parse_list_version_entry(
+                    &mut reader,
+                    &start,
+                    ObjectVersionKind::DeleteMarker,
+                )?),
+                b"IsTruncated" => {
+                    is_truncated =
+                        read_element_text(&mut reader, &start)?.eq_ignore_ascii_case("true");
+                }
+                b"NextKeyMarker" => {
+                    next_key_marker = Some(read_element_text(&mut reader, &start)?);
+                }
+                b"NextVersionIdMarker" => {
+                    next_version_id_marker = Some(read_element_text(&mut reader, &start)?);
+                }
+                b"ListVersionsResult" => {}
+                _ => skip_element(&mut reader, &start)?,
+            },
+            Event::Empty(start) => match local_name(start.local_name().as_ref()) {
+                b"NextKeyMarker" => next_key_marker = Some(String::new()),
+                b"NextVersionIdMarker" => next_version_id_marker = Some(String::new()),
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(ObjectVersionsPage {
+        entries,
+        next_key_marker,
+        next_version_id_marker,
+        is_truncated,
+    })
 }
 
 #[async_trait]
@@ -453,6 +621,76 @@ impl ObjectStore for S3ObjectStore {
         Ok(fold_bulk_delete_result(result))
     }
 
+    async fn list_versions_page(
+        &self,
+        prefix: &str,
+        key_marker: Option<String>,
+        version_id_marker: Option<String>,
+        max_keys: usize,
+    ) -> Result<ObjectVersionsPage, ObjectStoreError> {
+        let mut query = HashMap::from([
+            ("versions".to_string(), String::new()),
+            ("prefix".to_string(), prefix.to_string()),
+            ("max-keys".to_string(), max_keys.to_string()),
+        ]);
+        if let Some(marker) = key_marker {
+            query.insert("key-marker".to_string(), marker);
+        }
+        if let Some(marker) = version_id_marker {
+            query.insert("version-id-marker".to_string(), marker);
+        }
+        let bucket = self
+            .bucket
+            .with_extra_query(query)
+            .map_err(|e| classify("list_versions_page", prefix, e))?;
+        let request = s3::request::tokio_backend::ReqwestRequest::new(
+            &bucket,
+            "/",
+            s3::command::Command::GetObject,
+        )
+        .await
+        .map_err(|e| classify("list_versions_page", prefix, e))?;
+        let response = request
+            .response_data(false)
+            .await
+            .map_err(|e| classify("list_versions_page", prefix, e))?;
+        if response.status_code() >= 300 {
+            return Err(ObjectStoreError::Provider {
+                operation: "list_versions_page",
+                message: format!(
+                    "unexpected status {}: {}",
+                    response.status_code(),
+                    response.as_str().unwrap_or("")
+                ),
+            });
+        }
+        parse_object_versions_page(response.as_slice())
+    }
+
+    async fn delete_versions(
+        &self,
+        versions: &[ObjectVersionRef],
+    ) -> Result<BulkDeleteOutcome, ObjectStoreError> {
+        if versions.is_empty() {
+            return Ok(BulkDeleteOutcome::default());
+        }
+        let identifiers = versions
+            .iter()
+            .map(|version| {
+                s3::serde_types::ObjectIdentifier::with_version(
+                    version.key.clone(),
+                    version.version_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let result = self
+            .bucket
+            .delete_objects(identifiers)
+            .await
+            .map_err(|e| classify("delete_versions", "", e))?;
+        Ok(fold_version_delete_result(result))
+    }
+
     async fn ping(&self) -> Result<(), ObjectStoreError> {
         self.list_page("", None, 1).await.map(|_| ())
     }
@@ -531,31 +769,6 @@ mod tests {
             assert!(
                 matches!(err, ObjectStoreError::Config(ref msg) if msg.contains("must be configured together")),
                 "unexpected error: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn addressing_style_parses_supported_values() {
-        assert_eq!(
-            S3AddressingStyle::from_str("path"),
-            Ok(S3AddressingStyle::Path)
-        );
-        assert_eq!(
-            S3AddressingStyle::from_str("virtual"),
-            Ok(S3AddressingStyle::Virtual)
-        );
-        assert_eq!(S3AddressingStyle::default(), S3AddressingStyle::Path);
-    }
-
-    #[test]
-    fn addressing_style_rejects_unknown_or_ambiguous_values() {
-        for invalid in ["", "auto", "PATH", "virtual-hosted"] {
-            let error =
-                S3AddressingStyle::from_str(invalid).expect_err("must reject invalid style");
-            assert!(
-                error.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'"),
-                "unexpected error for {invalid:?}: {error}"
             );
         }
     }

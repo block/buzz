@@ -2884,7 +2884,7 @@ const DEFAULT_HEAD: &str = "refs/heads/main";
 
 /// Seed the manifest-pointer for a newly-announced repo with an empty manifest.
 ///
-/// Idempotent: a `CasOutcome::LostRace` is treated as success **only if** the
+/// Idempotent: a `ConditionalWrite::Conflict` is treated as success **only if** the
 /// existing pointer names the same empty manifest digest. Any other pre-existing
 /// pointer body (e.g. a non-empty manifest from a previous announce/push pair
 /// for the same `(owner, repo)`) surfaces as an error rather than silently
@@ -2896,7 +2896,7 @@ async fn seed_manifest_pointer(
     repo_id: &str,
 ) -> anyhow::Result<()> {
     use crate::api::git::manifest::{pointer_key, Manifest, MANIFEST_VERSION};
-    use crate::api::git::store::{CasOutcome, Precond};
+    use buzz_object_store::{ConditionalWrite, WriteCondition};
     use std::collections::BTreeMap;
 
     // The empty manifest. All empty manifests across all repos share canonical
@@ -2927,22 +2927,22 @@ async fn seed_manifest_pointer(
     let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
     let outcome = state
         .git_store
-        .put_pointer(&pkey, digest.as_bytes(), Precond::IfNoneMatchStar)
+        .put_pointer(&pkey, digest.as_bytes(), WriteCondition::Absent)
         .await
         .map_err(|e| anyhow::anyhow!("put_pointer: {e}"))?;
     match outcome {
-        CasOutcome::Won(_) => Ok(()),
-        CasOutcome::LostRace => {
+        ConditionalWrite::Committed(_) => Ok(()),
+        ConditionalWrite::Conflict => {
             // Pointer already exists. Idempotency check: only treat as success
             // if it names the same empty manifest digest. Any other value is
             // either a stale pointer from a prior repo lifecycle for the same
             // (owner, repo) or a real misconfiguration — surface, don't swallow.
-            let (_etag, body) = state
+            let (_revision, body) = state
                 .git_store
                 .get_pointer(&pkey)
                 .await
-                .map_err(|e| anyhow::anyhow!("re-read pointer after LostRace: {e}"))?
-                .ok_or_else(|| anyhow::anyhow!("pointer vanished after LostRace race"))?;
+                .map_err(|e| anyhow::anyhow!("re-read pointer after CAS conflict: {e}"))?
+                .ok_or_else(|| anyhow::anyhow!("pointer vanished after CAS conflict"))?;
             let existing = std::str::from_utf8(&body)
                 .map_err(|e| anyhow::anyhow!("pointer body not utf-8: {e}"))?
                 .trim();

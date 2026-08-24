@@ -1,37 +1,6 @@
 //! Media storage configuration.
 
-use std::str::FromStr;
-
-/// S3 URL addressing style shared by media and Git/CAS storage.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum S3AddressingStyle {
-    /// Put the bucket in the request path (`https://endpoint/bucket/key`).
-    ///
-    /// This preserves compatibility with the bundled MinIO deployments, whose
-    /// internal DNS only resolves the endpoint hostname.
-    #[default]
-    Path,
-    /// Put the bucket in the hostname (`https://bucket.endpoint/key`).
-    ///
-    /// This is the standard S3 form and is required by providers such as new
-    /// Railway Storage Buckets.
-    Virtual,
-}
-
-impl FromStr for S3AddressingStyle {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "path" => Ok(Self::Path),
-            "virtual" => Ok(Self::Virtual),
-            _ => Err(format!(
-                "BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual', got {value:?}"
-            )),
-        }
-    }
-}
+pub use buzz_object_store::S3AddressingStyle;
 
 fn default_max_video_bytes() -> u64 {
     524_288_000 // 500 MB

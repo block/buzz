@@ -36,7 +36,9 @@ use tokio::process::Command;
 use super::cas_publish::ParentState;
 use super::manifest::{is_hex_oid, is_safe_refname, pointer_key, Manifest, ManifestError};
 use super::pack_cache::GitPackCache;
-use super::store::{ETag, GitStore, StoreError};
+use buzz_object_store::Revision;
+
+use super::store::{GitStore, StoreError};
 use buzz_core::TenantContext;
 
 /// Manifests should stay small after ref/pack cardinality validation. Bound
@@ -239,7 +241,7 @@ pub async fn hydrate_for_write(
     }
 }
 
-/// Resolve the pointer to its `(ETag, digest, verified Manifest)` triple.
+/// Resolve the pointer to its `(Revision, digest, verified Manifest)` triple.
 ///
 /// `Ok(None)` if the pointer is absent (caller decides 404 vs first-push
 /// per call site). `Err(_)` on any below-pointer failure.
@@ -248,7 +250,7 @@ async fn load_pointer(
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
-) -> Result<Option<(ETag, String, Manifest)>, HydrateError> {
+) -> Result<Option<(Revision, String, Manifest)>, HydrateError> {
     let pkey = pointer_key(ctx.community(), owner, repo);
     let (etag, pointer_bytes) = match store.get_pointer(&pkey).await? {
         Some(p) => p,
@@ -543,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn materialized_repo_is_created_under_configured_scratch_dir() {
         let scratch = TempDir::new().unwrap();
-        let store = GitStore::new(
+        let store = GitStore::from_s3_config(
             "http://localhost:9000",
             "x",
             "x",
@@ -588,7 +590,7 @@ mod tests {
     }
 
     fn store() -> GitStore {
-        GitStore::new(
+        GitStore::from_s3_config(
             "http://localhost:9000",
             "buzz_dev",
             "buzz_dev_secret",
@@ -682,13 +684,15 @@ mod tests {
             .put_pointer(
                 &pkey,
                 manifest_digest.as_bytes(),
-                super::super::store::Precond::IfNoneMatchStar,
+                buzz_object_store::WriteCondition::Absent,
             )
             .await
             .expect("put_pointer")
         {
-            super::super::store::CasOutcome::Won(_) => {}
-            super::super::store::CasOutcome::LostRace => panic!("first INM* must win"),
+            buzz_object_store::ConditionalWrite::Committed(_) => {}
+            buzz_object_store::ConditionalWrite::Conflict => {
+                panic!("first create-only write must commit")
+            }
         }
 
         // Hydrate.
@@ -829,13 +833,15 @@ mod tests {
             .put_pointer(
                 &pkey,
                 manifest_digest.as_bytes(),
-                super::super::store::Precond::IfNoneMatchStar,
+                buzz_object_store::WriteCondition::Absent,
             )
             .await
             .expect("put_pointer")
         {
-            super::super::store::CasOutcome::Won(_) => {}
-            super::super::store::CasOutcome::LostRace => panic!("first INM* must win"),
+            buzz_object_store::ConditionalWrite::Committed(_) => {}
+            buzz_object_store::ConditionalWrite::Conflict => {
+                panic!("first create-only write must commit")
+            }
         }
 
         let scratch = TempDir::new().unwrap();
