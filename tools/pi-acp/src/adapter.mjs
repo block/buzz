@@ -1,7 +1,12 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { attachJsonlReader, writeJsonl } from "./jsonl.mjs";
+
+const SDK_BRIDGE_PATH = fileURLToPath(
+  new URL("./sdk-bridge.mjs", import.meta.url),
+);
 
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
@@ -261,12 +266,12 @@ export class PiAcpRpcSpike {
   }
 
   async #spawnPi(cwd, systemPrompt) {
-    const command = this.env.PI_ACP_PI_COMMAND || "pi";
+    const command = this.env.PI_ACP_PI_COMMAND || process.execPath;
     let configuredArgs;
     try {
       configuredArgs = this.env.PI_ACP_PI_ARGS_JSON
         ? JSON.parse(this.env.PI_ACP_PI_ARGS_JSON)
-        : ["--mode", "rpc", "--no-session"];
+        : [SDK_BRIDGE_PATH];
     } catch (error) {
       throw new Error(`PI_ACP_PI_ARGS_JSON is invalid: ${error.message}`);
     }

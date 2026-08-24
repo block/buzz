@@ -1,0 +1,19 @@
+{
+  "name": "@buzz/pi-acp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pi-acp": "src/pi-acp-rpc.mjs"
+  },
+  "scripts": {
+    "check": "biome check .",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

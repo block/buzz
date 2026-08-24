@@ -2,8 +2,11 @@ packages:
   - "desktop"
   - "web"
   - "admin-web"
+  - "tools/pi-acp"
 allowBuilds:
+  "@google/genai": false # Published preinstall is a no-op; no install-time execution needed.
   esbuild: true
+  protobufjs: false # Postinstall only warns about version-range style; runtime files are prebuilt.
 overrides:
   # Force a single copy of the dismissable-layer. Radix packages otherwise
   # resolve different versions (react-menu pulled 1.1.11, react-dialog 1.1.15),

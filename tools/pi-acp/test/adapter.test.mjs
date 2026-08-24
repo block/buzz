@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { attachJsonlReader, writeJsonl } from "../src/jsonl.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const adapterPath = path.join(here, "../src/pi-acp.mjs");
+const adapterPath = path.join(here, "../src/pi-acp-rpc.mjs");
 const fakePiPath = path.join(here, "fake-pi.mjs");
 
 function startHarness(mode = "complete") {
