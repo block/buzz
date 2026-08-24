@@ -287,12 +287,14 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
         if (captureEpoch.value != currentCapture || !context.mounted) return;
-        await releaseCamera();
         if (captured.length < 2) {
           throw StateError('Not enough frames were captured.');
         }
         isRecording.value = false;
+        // Enter the processing state before releasing the controller. Clearing
+        // the camera first briefly exposed the unavailable-camera placeholder.
         isPreparingFrames.value = true;
+        await releaseCamera();
         // Cut out only the frames each device captured, then resample the
         // three-second window so Android and iOS use the same playback cadence.
         final cutouts = await _removeBackgrounds(captured);
