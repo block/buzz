@@ -1,6 +1,6 @@
 import { mergeAttributes, Node } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { TextSelection } from "@tiptap/pm/state";
+import { Selection, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 
 import {
@@ -163,8 +163,10 @@ function applyLinkToSelection(view: EditorView, href: string): boolean {
   if (!linkMark) return false;
 
   let transaction = view.state.tr.addMark(from, to, linkMark.create({ href }));
+  if (!transaction.docChanged) return false;
+
   transaction = transaction.setSelection(
-    TextSelection.create(transaction.doc, to),
+    Selection.near(transaction.doc.resolve(transaction.mapping.map(to)), -1),
   );
   view.dispatch(transaction.setStoredMarks([]).scrollIntoView());
   view.focus();

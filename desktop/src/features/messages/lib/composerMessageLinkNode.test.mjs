@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 import { Schema } from "@tiptap/pm/model";
-import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { AllSelection, EditorState, TextSelection } from "@tiptap/pm/state";
 
 import {
   ComposerMessageLinkNode,
@@ -148,6 +148,7 @@ const editorSchema = new Schema({
       inline: true,
       selectable: true,
     },
+    codeBlock: { content: "text*", group: "block", marks: "" },
   },
   marks: {
     link: { attrs: { href: {} }, inclusive: false },
@@ -156,6 +157,8 @@ const editorSchema = new Schema({
 
 const paragraph = (...content) =>
   editorSchema.nodes.paragraph.create(null, content);
+const codeBlock = (...content) =>
+  editorSchema.nodes.codeBlock.create(null, content);
 const document = (...content) => editorSchema.nodes.doc.create(null, content);
 const text = (value, marks = []) => editorSchema.text(value, marks);
 const composerChip = (href = HREF) =>
@@ -195,6 +198,13 @@ function stateFromDocument(doc, from, to = from) {
   return EditorState.create({
     doc,
     selection: TextSelection.create(doc, from, to),
+  });
+}
+
+function allSelectionStateFromDocument(doc) {
+  return EditorState.create({
+    doc,
+    selection: new AllSelection(doc),
   });
 }
 
@@ -242,6 +252,44 @@ test("paste handler canonicalizes Buzz links over selected text", () => {
       type: "link",
     },
   ]);
+});
+
+test("paste handler falls through when selected text cannot carry link marks", () => {
+  const doc = document(codeBlock(text("const value = 1;")));
+  const view = createMockView(stateFromDocument(doc, 1, 17));
+  const event = createPasteEvent("https://example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, false);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(view.focusCalled, false);
+  assert.equal(view.state.doc.textContent, "const value = 1;");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content[0], {
+    text: "const value = 1;",
+    type: "text",
+  });
+});
+
+test("paste handler collapses an all-selection to inline content", () => {
+  const doc = document(paragraph(text("select all")));
+  const view = createMockView(allSelectionStateFromDocument(doc));
+  const event = createPasteEvent("https://example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, true);
+  assert.equal(view.state.doc.textContent, "select all");
+  assert.deepEqual(toPlainJson(view.state.doc).content[0].content[0].marks, [
+    { attrs: { href: "https://example.com" }, type: "link" },
+  ]);
+  assert.equal(view.state.selection.empty, true);
+  assert.equal(view.state.selection.from, 11);
+  assert.equal(view.state.selection.$from.parent.type.name, "paragraph");
 });
 
 test("paste handler replaces selected text when it contains a composer chip", () => {
