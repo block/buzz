@@ -18,6 +18,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/ios_native_segmented_control.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_native_skin_tone_control.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'animated_avatar_capture.dart';
@@ -701,22 +702,22 @@ class _ImageMode extends StatelessWidget {
           children: [
             const Spacer(),
             Expanded(
-              child: AvatarEditorOptionButton(
+              child: _ImageSourceOption(
                 key: const ValueKey('image-source-camera'),
                 icon: LucideIcons.camera,
+                iosIcon: IosGlassNavigationIcon.camera,
                 label: 'Camera',
-                selected: false,
                 onTap: isPicking ? null : onCamera,
                 labelMaxWidth: 96,
               ),
             ),
             const SizedBox(width: Grid.half),
             Expanded(
-              child: AvatarEditorOptionButton(
+              child: _ImageSourceOption(
                 key: const ValueKey('image-source-library'),
                 icon: LucideIcons.images,
+                iosIcon: IosGlassNavigationIcon.photoLibrary,
                 label: 'Photo Library',
-                selected: false,
                 onTap: isPicking ? null : onLibrary,
                 labelMaxWidth: 104,
               ),
@@ -727,4 +728,69 @@ class _ImageMode extends StatelessWidget {
       ],
     ),
   );
+}
+
+class _ImageSourceOption extends StatelessWidget {
+  const _ImageSourceOption({
+    super.key,
+    required this.icon,
+    required this.iosIcon,
+    required this.label,
+    required this.onTap,
+    required this.labelMaxWidth,
+  });
+
+  final IconData icon;
+  final IosGlassNavigationIcon iosIcon;
+  final String label;
+  final VoidCallback? onTap;
+  final double labelMaxWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    if (defaultTargetPlatform != TargetPlatform.iOS) {
+      return AvatarEditorOptionButton(
+        icon: icon,
+        label: label,
+        selected: false,
+        onTap: onTap,
+        labelMaxWidth: labelMaxWidth,
+      );
+    }
+    final handleTap = onTap == null
+        ? null
+        : () {
+            unawaited(HapticFeedback.selectionClick());
+            onTap!();
+          };
+    return Column(
+      children: [
+        IosGlassNavigationButton(
+          icon: iosIcon,
+          semanticLabel: label,
+          onPressed: handleTap,
+          width: 64,
+          height: 64,
+          controlSize: 64,
+          foregroundColor: context.colors.onSurface,
+        ),
+        const SizedBox(height: Grid.quarter),
+        SizedBox(
+          height: 20,
+          child: OverflowBox(
+            maxWidth: labelMaxWidth,
+            maxHeight: 20,
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }

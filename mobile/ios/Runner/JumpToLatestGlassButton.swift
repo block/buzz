@@ -350,6 +350,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     switch icon {
     case "close": buttonIconName = "xmark"
+    case "camera": buttonIconName = "camera"
+    case "photoLibrary": buttonIconName = "photo.on.rectangle.angled"
     case "rotateCamera": buttonIconName = "arrow.triangle.2.circlepath.camera"
     case "shutter": buttonIconName = "circle.fill"
     default: buttonIconName = "chevron.backward"
@@ -371,7 +373,15 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     } else {
       button.configuration?.title = nil
       button.configuration?.titleTextAttributesTransformer = nil
-      let pointSize: CGFloat = icon == "shutter" ? 50 : 17
+      if icon == "shutter" {
+        button.configuration?.contentInsets = NSDirectionalEdgeInsets(
+          top: 8,
+          leading: 8,
+          bottom: 8,
+          trailing: 8
+        )
+      }
+      let pointSize: CGFloat = icon == "shutter" ? 99 : 17
       button.configuration?.image = UIImage(
         systemName: buttonIconName,
         withConfiguration: UIImage.SymbolConfiguration(

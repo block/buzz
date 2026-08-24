@@ -22,10 +22,11 @@ const _avatarPreviewSize = 220.0;
 const imageAvatarCameraPreviewSize = _avatarPreviewSize * 1.25;
 const _cameraControlSize = 64.0;
 const _shutterSize = 115.0;
-const _shutterCoreSize = 94.0;
+const _shutterCoreSize = _shutterSize - Grid.xxs * 2;
 const _reviewControlWidth = 112.0;
 const _collapsedControlOffset = 52.0;
 const _expandedControlOffset = 119.5;
+const _reviewControlGap = Grid.twelve;
 const _captureMotionDuration = Duration(milliseconds: 180);
 
 /// Builds the inline still-photo camera used by the profile avatar editor.
@@ -83,7 +84,6 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final isProcessingCapture = useState(false);
     final capturedBytes = useState<Uint8List?>(initialCapturedBytes);
     final controlsExpanded = useState(false);
-    final previewTransitionComplete = useState(reduceMotion);
     final isClosing = useState(false);
     final error = useState<String?>(null);
 
@@ -91,18 +91,18 @@ class ImageAvatarCapture extends HookConsumerWidget {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
         controlsExpanded.value = true;
-        if (reduceMotion) {
-          previewTransitionComplete.value = true;
-        } else {
-          Future<void>.delayed(_captureMotionDuration, () {
-            if (context.mounted && !isClosing.value) {
-              previewTransitionComplete.value = true;
-            }
-          });
-        }
       });
       return null;
-    }, [reduceMotion]);
+    }, const []);
+
+    useEffect(
+      () => () {
+        final active = controllerRef.value;
+        controllerRef.value = null;
+        unawaited(active?.dispose() ?? Future<void>.value());
+      },
+      const [],
+    );
 
     useEffect(() {
       var disposed = false;
@@ -111,16 +111,19 @@ class ImageAvatarCapture extends HookConsumerWidget {
       if (lifecycle != AppLifecycleState.resumed ||
           capturedBytes.value != null) {
         isInitializing.value = false;
+        final active = controllerRef.value;
+        controllerRef.value = null;
         controller.value = null;
+        unawaited(active?.dispose() ?? Future<void>.value());
         return null;
       }
 
       isInitializing.value = true;
-      controller.value = null;
       error.value = null;
 
       Future<void> initialize() async {
         CameraController? next;
+        var installed = false;
         try {
           final available = await loadCameras();
           if (disposed || generation != cameraGeneration.value) return;
@@ -146,11 +149,20 @@ class ImageAvatarCapture extends HookConsumerWidget {
             await next.dispose();
             return;
           }
+          final previous = controllerRef.value;
           controllerRef.value = next;
           controller.value = next;
+          installed = true;
+          if (previous != null && previous != next) {
+            unawaited(previous.dispose());
+          }
         } catch (_) {
-          await next?.dispose();
+          if (!installed) await next?.dispose();
           if (!disposed && generation == cameraGeneration.value) {
+            final active = controllerRef.value;
+            if (active != null) {
+              selectedLens.value = active.description.lensDirection;
+            }
             error.value = 'Could not access the camera.';
           }
         } finally {
@@ -163,9 +175,6 @@ class ImageAvatarCapture extends HookConsumerWidget {
       unawaited(initialize());
       return () {
         disposed = true;
-        final active = controllerRef.value;
-        controllerRef.value = null;
-        unawaited(active?.dispose() ?? Future<void>.value());
       };
     }, [lifecycle, capturedBytes.value == null, cameraGeneration.value]);
 
@@ -255,12 +264,20 @@ class ImageAvatarCapture extends HookConsumerWidget {
 
     final captured = capturedBytes.value;
     final previewSize = controlsExpanded.value
-        ? imageAvatarCameraPreviewSize
+        ? controller.value != null || captured != null
+              ? imageAvatarCameraPreviewSize
+              : _avatarPreviewSize
         : _avatarPreviewSize;
     final captureEnabled =
-        controller.value != null && !isCapturing.value && !isClosing.value;
+        controller.value != null &&
+        !isInitializing.value &&
+        !isCapturing.value &&
+        !isClosing.value;
     final flipEnabled =
-        cameras.value.length > 1 && !isCapturing.value && !isClosing.value;
+        cameras.value.length > 1 &&
+        !isInitializing.value &&
+        !isCapturing.value &&
+        !isClosing.value;
 
     return SizedBox(
       key: const ValueKey('image-avatar-camera'),
@@ -281,8 +298,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
                   color: Colors.black,
                   child: captured != null
                       ? Image.memory(captured, fit: BoxFit.cover)
-                      : previewTransitionComplete.value &&
-                            controller.value != null
+                      : controller.value != null
                       ? _CameraPreview(controller: controller.value!)
                       : initialPreview ??
                             Center(
@@ -322,13 +338,18 @@ class ImageAvatarCapture extends HookConsumerWidget {
                           _cameraControlSize +
                           (_reviewControlWidth - _cameraControlSize) *
                               reviewProgress;
+                      final reviewSideOffset =
+                          _reviewControlWidth / 2 + _reviewControlGap / 2;
+                      final effectiveSideOffset =
+                          sideOffset +
+                          (reviewSideOffset - sideOffset) * reviewProgress;
                       return Stack(
                         alignment: Alignment.center,
                         children: [
                           Positioned(
                             left:
                                 constraints.maxWidth / 2 -
-                                sideOffset -
+                                effectiveSideOffset -
                                 sideWidth / 2,
                             width: sideWidth,
                             height: _cameraControlSize,
@@ -368,7 +389,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
                           Positioned(
                             left:
                                 constraints.maxWidth / 2 +
-                                sideOffset -
+                                effectiveSideOffset -
                                 sideWidth / 2,
                             width: sideWidth,
                             height: _cameraControlSize,

@@ -9,7 +9,14 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../theme/theme.dart';
 
 /// The navigation glyph displayed by [IosGlassNavigationButton].
-enum IosGlassNavigationIcon { back, close, rotateCamera, shutter }
+enum IosGlassNavigationIcon {
+  back,
+  close,
+  camera,
+  photoLibrary,
+  rotateCamera,
+  shutter,
+}
 
 /// Leading width used by iOS channel-style headers.
 const iosGlassChannelHeaderLeadingWidth = 58.0;
@@ -158,6 +165,10 @@ class IosGlassNavigationButton extends HookWidget {
                                 Icons.arrow_back_ios_new_rounded,
                               IosGlassNavigationIcon.close =>
                                 Icons.close_rounded,
+                              IosGlassNavigationIcon.camera =>
+                                Icons.camera_alt_rounded,
+                              IosGlassNavigationIcon.photoLibrary =>
+                                Icons.photo_library_rounded,
                               IosGlassNavigationIcon.rotateCamera =>
                                 Icons.cameraswitch_rounded,
                               IosGlassNavigationIcon.shutter => Icons.circle,

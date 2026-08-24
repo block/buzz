@@ -1,7 +1,33 @@
 part of '../profile_edit_page_test.dart';
 
 void runProfileEditImageSelectionTests() {
-  testWidgets('grows the existing avatar cutout by 25 percent', (tester) async {
+  testWidgets('uses glass image source controls on iOS', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final nativeControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .where((view) => view.viewType == IosGlassNavigationButton.viewType)
+        .map((view) => view.creationParams as Map<String, Object>)
+        .toList();
+    expect(nativeControls.any((params) => params['icon'] == 'camera'), isTrue);
+    expect(
+      nativeControls.any((params) => params['icon'] == 'photoLibrary'),
+      isTrue,
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('keeps the avatar compact until the camera is ready', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       WidgetHelpers.testable(
         child: Scaffold(
@@ -26,7 +52,7 @@ void runProfileEditImageSelectionTests() {
     expect(tester.getSize(preview), const Size.square(220));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 180));
-    expect(tester.getSize(preview), const Size.square(275));
+    expect(tester.getSize(preview), const Size.square(220));
     expect(
       find.byKey(const ValueKey('existing-avatar-preview')),
       findsOneWidget,
@@ -48,7 +74,7 @@ void runProfileEditImageSelectionTests() {
     expect(find.bySemanticsLabel('Take photo'), findsOneWidget);
   });
 
-  testWidgets('reverses the camera expansion before closing', (tester) async {
+  testWidgets('reverses the camera controls before closing', (tester) async {
     var closed = false;
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -67,22 +93,21 @@ void runProfileEditImageSelectionTests() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 180));
+    final leftAction = find.byKey(const ValueKey('image-camera-left-action'));
+    final rightAction = find.byKey(const ValueKey('image-camera-right-action'));
+    final expandedDistance =
+        tester.getCenter(rightAction).dx - tester.getCenter(leftAction).dx;
 
     tester
         .widget<InkWell>(
-          find.descendant(
-            of: find.byKey(const ValueKey('image-camera-left-action')),
-            matching: find.byType(InkWell),
-          ),
+          find.descendant(of: leftAction, matching: find.byType(InkWell)),
         )
         .onTap!();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 90));
-    final midSize = tester
-        .getSize(find.byKey(const ValueKey('image-camera-preview-size')))
-        .width;
-    expect(midSize, greaterThan(220));
-    expect(midSize, lessThan(275));
+    final midDistance =
+        tester.getCenter(rightAction).dx - tester.getCenter(leftAction).dx;
+    expect(midDistance, lessThan(expandedDistance));
     expect(closed, isFalse);
 
     await tester.pump(const Duration(milliseconds: 90));
@@ -131,6 +156,13 @@ void runProfileEditImageSelectionTests() {
       tester.getSize(find.byKey(const ValueKey('image-camera-right-action'))),
       const Size(112, 64),
     );
+    final leftRect = tester.getRect(
+      find.byKey(const ValueKey('image-camera-left-action')),
+    );
+    final rightRect = tester.getRect(
+      find.byKey(const ValueKey('image-camera-right-action')),
+    );
+    expect(rightRect.left - leftRect.right, 12);
 
     await tester.tap(find.text('Use Photo'));
     await tester.pump();
@@ -147,6 +179,44 @@ void runProfileEditImageSelectionTests() {
       tester.getSize(find.byKey(const ValueKey('image-camera-preview-size'))),
       const Size.square(220),
     );
+  });
+
+  testWidgets('retry moves the review actions apart again', (tester) async {
+    final bytes = Uint8List.fromList(
+      image.encodeJpg(image.Image(width: 8, height: 8)),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Scaffold(
+          body: SizedBox(
+            height: 400,
+            child: ImageAvatarCapture(
+              height: 400,
+              initialCapturedBytes: bytes,
+              onAccepted: (_) {},
+              onClosed: () {},
+              loadCameras: () async => const [],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final leftAction = find.byKey(const ValueKey('image-camera-left-action'));
+    final rightAction = find.byKey(const ValueKey('image-camera-right-action'));
+    final reviewGap =
+        tester.getRect(rightAction).left - tester.getRect(leftAction).right;
+
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 180));
+
+    final cameraGap =
+        tester.getRect(rightAction).left - tester.getRect(leftAction).right;
+    expect(reviewGap, 12);
+    expect(cameraGap, greaterThan(reviewGap));
+    expect(find.bySemanticsLabel('Close camera'), findsOneWidget);
+    expect(find.bySemanticsLabel('Flip camera'), findsOneWidget);
   });
 
   testWidgets('accepts an inline camera photo before enabling profile Save', (
