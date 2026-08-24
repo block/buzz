@@ -32,6 +32,7 @@ import { reactionConditionValue } from "./workflowReactionCondition";
 import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
 import { WorkflowRichTriggerDescription } from "./WorkflowRichTriggerDescription";
 import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation";
+import { compactWorkflowTriggerDescription } from "./workflowTriggerDescription";
 import { workflowStepDescription } from "./workflowStepDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
@@ -623,12 +624,14 @@ export const WorkflowFormBuilder = React.forwardRef<
     workflowChannelId,
   );
   const triggerDescription = triggerPresentation.description;
-  const visibleTriggerDescription = triggerEmoji ? (
-    "Reaction added"
-  ) : (
+  const compactTriggerDescription = compactWorkflowTriggerDescription(
+    triggerDescription,
+    triggerEmoji,
+  );
+  const visibleTriggerDescription = (
     <WorkflowRichTriggerDescription
       avatarUrl={triggerPresentation.avatarUrl}
-      description={triggerDescription}
+      description={compactTriggerDescription}
       label={triggerPresentation.label}
       loading={triggerPresentation.loading}
     />

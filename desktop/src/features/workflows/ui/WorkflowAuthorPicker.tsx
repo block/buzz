@@ -40,7 +40,7 @@ export function WorkflowAuthorPicker({
   const pickerRef = React.useRef<HTMLDivElement>(null);
   const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const [query, setQuery] = React.useState("");
-  const [activeIndex, setActiveIndex] = React.useState(0);
+  const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
   const [columnCount, setColumnCount] = React.useState(2);
   const deferredQuery = React.useDeferredValue(query.trim());
   const normalizedValue = parseDirectAuthorInput(value);
@@ -93,8 +93,10 @@ export function WorkflowAuthorPicker({
   const listId = `${id}-list`;
 
   React.useEffect(() => {
-    if (activeIndex >= visibleCandidates.length) {
-      setActiveIndex(Math.max(visibleCandidates.length - 1, 0));
+    if (activeIndex !== null && activeIndex >= visibleCandidates.length) {
+      setActiveIndex(
+        visibleCandidates.length > 0 ? visibleCandidates.length - 1 : null,
+      );
     }
   }, [activeIndex, visibleCandidates.length]);
 
@@ -110,6 +112,7 @@ export function WorkflowAuthorPicker({
   }, []);
 
   React.useEffect(() => {
+    if (activeIndex === null) return;
     const candidate = visibleCandidates[activeIndex];
     if (!candidate) return;
     optionRefs.current
@@ -129,10 +132,13 @@ export function WorkflowAuthorPicker({
 
   function moveActive(delta: number) {
     if (visibleCandidates.length === 0) return;
-    setActiveIndex(
-      (current) =>
-        (current + delta + visibleCandidates.length) % visibleCandidates.length,
-    );
+    setActiveIndex((current) => {
+      const startingIndex = current ?? -1;
+      return (
+        (startingIndex + delta + visibleCandidates.length) %
+        visibleCandidates.length
+      );
+    });
   }
 
   return (
@@ -145,7 +151,7 @@ export function WorkflowAuthorPicker({
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           aria-activedescendant={
-            visibleCandidates[activeIndex]
+            activeIndex !== null && visibleCandidates[activeIndex]
               ? `${listId}-${visibleCandidates[activeIndex].pubkey}`
               : undefined
           }
@@ -156,11 +162,12 @@ export function WorkflowAuthorPicker({
           autoComplete="off"
           autoCorrect="off"
           className="h-11 rounded-none border-0 bg-transparent pl-9 focus-visible:ring-0"
+          data-workflow-filter-picker-search="true"
           disabled={disabled}
           id={id}
           onChange={(event) => {
             setQuery(event.target.value);
-            setActiveIndex(0);
+            setActiveIndex(null);
           }}
           onKeyDown={(event) => {
             const delta =
@@ -178,16 +185,16 @@ export function WorkflowAuthorPicker({
               moveActive(delta);
             } else if (
               event.key === "Enter" &&
-              visibleCandidates[activeIndex]
+              visibleCandidates[activeIndex ?? 0]
             ) {
               event.preventDefault();
-              onChange(visibleCandidates[activeIndex].pubkey);
+              onChange(visibleCandidates[activeIndex ?? 0].pubkey);
             } else if (event.key === "Escape") {
               event.preventDefault();
               event.stopPropagation();
               if (query) {
                 setQuery("");
-                setActiveIndex(0);
+                setActiveIndex(null);
               } else {
                 onEscape?.();
               }
@@ -222,12 +229,15 @@ export function WorkflowAuthorPicker({
       >
         {visibleCandidates.map((candidate, index) => (
           <AuthorOption
-            active={index === activeIndex}
+            active={activeIndex !== null && index === activeIndex}
             candidate={candidate}
             disabled={disabled}
             id={`${listId}-${candidate.pubkey}`}
             key={candidate.pubkey}
-            onSelect={() => onChange(candidate.pubkey)}
+            onSelect={() => {
+              setActiveIndex(null);
+              onChange(candidate.pubkey);
+            }}
             optionRef={(node) => {
               if (node) optionRefs.current.set(candidate.pubkey, node);
               else optionRefs.current.delete(candidate.pubkey);
@@ -315,7 +325,7 @@ function AuthorOption({
         selected
           ? "border-primary bg-primary/10"
           : "border-border hover:bg-accent",
-        active && "ring-2 ring-ring ring-offset-1",
+        active && "ring-1 ring-ring",
       )}
       disabled={disabled}
       id={id}

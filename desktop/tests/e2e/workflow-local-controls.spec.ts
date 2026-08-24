@@ -419,6 +419,33 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   ).toBeLessThan(0.5);
 });
 
+test("Escape closes a filter picker before its inspector", async ({ page }) => {
+  for (const width of [760, 1280]) {
+    await page.setViewportSize({ width, height: 820 });
+    await page.goto(
+      "/#/workflows?view=create&channel=94a444a4-c0a3-5966-ab05-530c6ddc2301&pane=trigger",
+    );
+
+    const dialog = page.getByRole("dialog", { name: "Create workflow" });
+    const inspector = dialog.getByTestId("workflow-node-inspector");
+    await dialog.getByRole("button", { name: "Author pubkey" }).click();
+
+    const picker = dialog.getByTestId("workflow-author-picker");
+    const search = dialog.getByRole("combobox", {
+      name: "Search authors or paste a public key",
+    });
+    await expect(picker).toBeVisible();
+
+    await search.press("Escape");
+    await expect(picker).toBeHidden();
+    await expect(inspector).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(inspector).toBeHidden();
+    await expect(dialog).toBeVisible();
+  }
+});
+
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
   page,
 }) => {

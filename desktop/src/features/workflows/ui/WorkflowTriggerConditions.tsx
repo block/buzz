@@ -59,6 +59,71 @@ function fieldPlaceholder(field: string): string {
   return "e.g. deploy";
 }
 
+function ExclusionStrike() {
+  return (
+    <span aria-hidden="true" className="pointer-events-none absolute inset-0">
+      <span className="absolute inset-0 [clip-path:circle(50%_at_50%_50%)]">
+        <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          <span className="block h-1 w-9 translate-y-0.5 -rotate-45 rounded-full bg-background/90" />
+        </span>
+      </span>
+      <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        <span className="block h-0.5 w-8 -rotate-45 rounded-full bg-muted-foreground" />
+      </span>
+    </span>
+  );
+}
+
+function AuthorConditionSummary({
+  avatarUrl,
+  excluded,
+  label,
+}: {
+  avatarUrl: string | null;
+  excluded: boolean;
+  label: string;
+}) {
+  return (
+    <span className="flex shrink-0 items-center">
+      <span className="relative shrink-0">
+        <UserAvatar
+          avatarUrl={avatarUrl}
+          className="h-6 w-6"
+          displayName={label}
+          fallbackDelayMs={0}
+          size="xs"
+        />
+        {excluded ? <ExclusionStrike /> : null}
+      </span>
+      <span className="sr-only">
+        {excluded ? "Excluded author: " : "Selected author: "}
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function EmojiConditionSummary({
+  emoji,
+  excluded,
+}: {
+  emoji: string;
+  excluded: boolean;
+}) {
+  return (
+    <span className="relative flex h-6 w-6 shrink-0 items-center justify-center">
+      <span aria-hidden="true" className="text-2xl leading-none">
+        {emoji}
+      </span>
+      {excluded ? <ExclusionStrike /> : null}
+      <span className="sr-only">
+        {excluded ? "Excluded reaction emoji: " : "Selected reaction emoji: "}
+        {emoji}
+      </span>
+    </span>
+  );
+}
+
 export function WorkflowTriggerConditions({
   conditionDrafts,
   disabled,
@@ -228,7 +293,7 @@ export function WorkflowTriggerConditions({
             return (
               <div
                 className={cn(
-                  expanded && "pb-4",
+                  expanded && "pb-4 last:pb-0",
                   expanded &&
                     fieldUsesFullHeightPicker(field.value) &&
                     "flex min-h-0 flex-1 flex-col",
@@ -248,20 +313,27 @@ export function WorkflowTriggerConditions({
                     {field.label}
                   </span>
                   {authorSummary ? (
-                    <span className="flex min-w-0 max-w-44 items-center gap-1.5 text-xs text-muted-foreground">
-                      <UserAvatar
-                        avatarUrl={triggerPresentation.avatarUrl}
-                        className="h-4 w-4 shrink-0"
-                        displayName={authorSummary}
-                        fallbackDelayMs={0}
-                        size="xs"
-                      />
-                      <span className="truncate">{authorSummary}</span>
-                    </span>
+                    <AuthorConditionSummary
+                      avatarUrl={triggerPresentation.avatarUrl}
+                      excluded={condition.operator === "not_equals"}
+                      label={authorSummary}
+                    />
                   ) : messageSummary ? (
-                    <span className="max-w-44 truncate text-xs text-muted-foreground">
+                    <span
+                      className={cn(
+                        "max-w-44 truncate text-xs text-muted-foreground",
+                        condition.operator === "not_equals" && "line-through",
+                      )}
+                    >
                       “{messageSummary}”
                     </span>
+                  ) : existing &&
+                    field.value === "trigger_emoji" &&
+                    condition.value.trim() ? (
+                    <EmojiConditionSummary
+                      emoji={condition.value.trim()}
+                      excluded={condition.operator === "not_equals"}
+                    />
                   ) : (
                     <span className="max-w-44 truncate font-mono text-xs text-muted-foreground">
                       {summary}
@@ -336,48 +408,38 @@ export function WorkflowTriggerConditions({
                           value={condition.value}
                         />
                       ) : field.value === "trigger_author" ? (
-                        <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-                          <FieldLabel htmlFor="wf-trigger-author-value">
-                            {field.label}
-                          </FieldLabel>
-                          <WorkflowAuthorPicker
-                            channelId={workflowChannelId}
-                            disabled={disabled}
-                            id="wf-trigger-author-value"
-                            onEscape={() => setExpandedField(null)}
-                            onChange={(pubkey) =>
-                              updateConditions([
-                                ...conditions.filter(
-                                  (item) => item.field !== field.value,
-                                ),
-                                { ...condition, value: pubkey },
-                              ])
-                            }
-                            value={condition.value}
-                          />
-                        </div>
+                        <WorkflowAuthorPicker
+                          channelId={workflowChannelId}
+                          disabled={disabled}
+                          id="wf-trigger-author-value"
+                          onEscape={() => setExpandedField(null)}
+                          onChange={(pubkey) =>
+                            updateConditions([
+                              ...conditions.filter(
+                                (item) => item.field !== field.value,
+                              ),
+                              { ...condition, value: pubkey },
+                            ])
+                          }
+                          value={condition.value}
+                        />
                       ) : field.value === "trigger_message_id" ? (
-                        <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-                          <FieldLabel htmlFor="wf-trigger-message-id-value">
-                            {field.label}
-                          </FieldLabel>
-                          <WorkflowMessagePicker
-                            channelId={workflowChannelId}
-                            disabled={disabled}
-                            id="wf-trigger-message-id-value"
-                            key={workflowChannelId ?? "unscoped"}
-                            onEscape={() => setExpandedField(null)}
-                            onChange={(messageId) =>
-                              updateConditions([
-                                ...conditions.filter(
-                                  (item) => item.field !== field.value,
-                                ),
-                                { ...condition, value: messageId },
-                              ])
-                            }
-                            value={condition.value}
-                          />
-                        </div>
+                        <WorkflowMessagePicker
+                          channelId={workflowChannelId}
+                          disabled={disabled}
+                          id="wf-trigger-message-id-value"
+                          key={workflowChannelId ?? "unscoped"}
+                          onEscape={() => setExpandedField(null)}
+                          onChange={(messageId) =>
+                            updateConditions([
+                              ...conditions.filter(
+                                (item) => item.field !== field.value,
+                              ),
+                              { ...condition, value: messageId },
+                            ])
+                          }
+                          value={condition.value}
+                        />
                       ) : (
                         <div className="space-y-1.5">
                           <FieldLabel

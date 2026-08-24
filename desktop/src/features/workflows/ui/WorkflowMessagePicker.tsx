@@ -60,7 +60,7 @@ export function WorkflowMessagePicker({
 }) {
   const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const [query, setQuery] = React.useState("");
-  const [activeIndex, setActiveIndex] = React.useState(0);
+  const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
   const deferredQuery = React.useDeferredValue(query.trim());
   const normalizedQuery = deferredQuery.toLowerCase();
   const selectedId = normalizeMessageEventId(value);
@@ -149,30 +149,21 @@ export function WorkflowMessagePicker({
     });
   }, [channelId, exactQuery.data, lookupId]);
   const allCandidates = React.useMemo(() => {
-    const fetchedCandidates = [
-      ...(exactCandidate ? [exactCandidate] : []),
-      ...historyCandidates,
-      ...searchCandidates,
-    ];
-    const selectedCandidate = selectedId
-      ? fetchedCandidates.find(({ id }) => id === selectedId)
-      : null;
-    const directCandidate = directId
-      ? fetchedCandidates.find(({ id }) => id === directId)
-      : null;
+    // Preserve the relay-provided history/search order. Exact lookups and raw-ID
+    // fallbacks only fill gaps; selecting an existing row must not move it.
     return mergeMessageCandidateSources([
-      selectedCandidate ? [selectedCandidate] : selectedFallback,
-      directCandidate ? [directCandidate] : directFallback,
-      fetchedCandidates,
+      historyCandidates,
+      searchCandidates,
+      exactCandidate ? [exactCandidate] : [],
+      selectedFallback,
+      directFallback,
     ]);
   }, [
     directFallback,
-    directId,
     exactCandidate,
     historyCandidates,
     searchCandidates,
     selectedFallback,
-    selectedId,
   ]);
   const visibleCandidates = React.useMemo(() => {
     if (directId) return allCandidates.filter(({ id }) => id === directId);
@@ -195,11 +186,14 @@ export function WorkflowMessagePicker({
   const listId = `${id}-list`;
 
   React.useEffect(() => {
-    if (activeIndex >= visibleCandidates.length) {
-      setActiveIndex(Math.max(visibleCandidates.length - 1, 0));
+    if (activeIndex !== null && activeIndex >= visibleCandidates.length) {
+      setActiveIndex(
+        visibleCandidates.length > 0 ? visibleCandidates.length - 1 : null,
+      );
     }
   }, [activeIndex, visibleCandidates.length]);
   React.useEffect(() => {
+    if (activeIndex === null) return;
     const candidate = visibleCandidates[activeIndex];
     if (!candidate) return;
     optionRefs.current
@@ -235,7 +229,7 @@ export function WorkflowMessagePicker({
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           aria-activedescendant={
-            visibleCandidates[activeIndex]
+            activeIndex !== null && visibleCandidates[activeIndex]
               ? `${listId}-${visibleCandidates[activeIndex].id}`
               : undefined
           }
@@ -246,37 +240,40 @@ export function WorkflowMessagePicker({
           autoComplete="off"
           autoCorrect="off"
           className="h-11 rounded-none border-0 bg-transparent pl-9 focus-visible:ring-0"
+          data-workflow-filter-picker-search="true"
           disabled={disabled || !channelId}
           id={id}
           onChange={(event) => {
             setQuery(event.target.value);
-            setActiveIndex(0);
+            setActiveIndex(null);
           }}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
               event.preventDefault();
               if (visibleCandidates.length > 0) {
-                setActiveIndex(
-                  (current) =>
-                    (current +
+                setActiveIndex((current) => {
+                  const startingIndex = current ?? -1;
+                  return (
+                    (startingIndex +
                       (event.key === "ArrowDown" ? 1 : -1) +
                       visibleCandidates.length) %
-                    visibleCandidates.length,
-                );
+                    visibleCandidates.length
+                  );
+                });
               }
             } else if (
               event.key === "Enter" &&
-              visibleCandidates[activeIndex]
+              visibleCandidates[activeIndex ?? 0]
             ) {
               event.preventDefault();
               if (invalidDirectResult) return;
-              onChange(visibleCandidates[activeIndex].id);
+              onChange(visibleCandidates[activeIndex ?? 0].id);
             } else if (event.key === "Escape") {
               event.preventDefault();
               event.stopPropagation();
               if (query) {
                 setQuery("");
-                setActiveIndex(0);
+                setActiveIndex(null);
               } else {
                 onEscape?.();
               }
@@ -326,12 +323,13 @@ export function WorkflowMessagePicker({
       >
         {visibleCandidates.map((candidate, index) => (
           <MessageOption
-            active={index === activeIndex}
+            active={activeIndex !== null && index === activeIndex}
             candidate={candidate}
             disabled={disabled}
             id={`${listId}-${candidate.id}`}
             key={candidate.id}
             onSelect={() => {
+              setActiveIndex(null);
               if (!invalidDirectResult) onChange(candidate.id);
             }}
             optionRef={(node) => {
@@ -421,11 +419,11 @@ function MessageOption({
     <button
       aria-selected={selected}
       className={cn(
-        "relative flex w-full items-start gap-2.5 rounded-md border px-3 py-2.5 text-left transition-colors",
+        "relative flex min-w-0 w-full items-start gap-2.5 overflow-hidden rounded-md border px-3 py-2.5 text-left transition-colors",
         selected
-          ? "border-primary bg-primary/10"
+          ? "border-foreground/40 bg-muted/70"
           : "border-transparent hover:border-border hover:bg-muted/45",
-        active && "ring-2 ring-ring ring-offset-1",
+        active && "ring-1 ring-ring",
       )}
       disabled={disabled}
       id={id}
@@ -449,7 +447,7 @@ function MessageOption({
             <span className="ml-auto shrink-0">{timestamp}</span>
           ) : null}
         </span>
-        <span className="mt-1 block text-sm leading-5 text-foreground">
+        <span className="mt-1 block min-w-0 break-words text-sm leading-5 text-foreground [overflow-wrap:anywhere]">
           {truncateContent(candidate.content)}
         </span>
         <span className="mt-1 block font-mono text-2xs text-muted-foreground">

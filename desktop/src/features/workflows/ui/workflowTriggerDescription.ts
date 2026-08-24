@@ -66,6 +66,18 @@ function textConditionDescription(
   }
 }
 
+/** Remove a reaction value from compact copy when the node icon already shows it. */
+export function compactWorkflowTriggerDescription(
+  description: string,
+  triggerEmoji?: string,
+): string {
+  if (!triggerEmoji) return description;
+  const emojiPrefix = `${triggerEmoji} reaction added`;
+  return description.startsWith(emojiPrefix)
+    ? `Reaction added${description.slice(emojiPrefix.length)}`
+    : description;
+}
+
 /** Build the concise trigger summary rendered on the workflow canvas. */
 export function workflowTriggerDescription(
   trigger: TriggerConfig,
