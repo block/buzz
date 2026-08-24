@@ -76,6 +76,58 @@ void main() {
     );
   });
 
+  test('surfaces bot-role subscription setup failure', () async {
+    final relaySession = _MembershipRelaySessionNotifier([
+      _membershipEvent(role: 'member'),
+    ], subscribeError: StateError('subscription unavailable'));
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      channelMembershipUpdateProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(keepAlive.close);
+
+    await _pumpEventQueue();
+
+    final state = container.read(channelMembershipUpdateProvider(_channelId));
+    expect(state.isReady, isFalse);
+    expect(state.error, isA<StateError>());
+  });
+
+  test('surfaces terminal bot-role subscription closure', () async {
+    final relaySession = _MembershipRelaySessionNotifier([
+      _membershipEvent(role: 'member'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      channelMembershipUpdateProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(keepAlive.close);
+
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+    expect(
+      container.read(channelMembershipUpdateProvider(_channelId)).isReady,
+      isTrue,
+    );
+
+    relaySession.closeSubscription('unsupported filter');
+    await _pumpEventQueue();
+
+    final state = container.read(channelMembershipUpdateProvider(_channelId));
+    expect(state.isReady, isFalse);
+    expect(state.error, isA<Exception>());
+  });
+
   test('disposes the live role subscription without consumers', () async {
     final relaySession = _MembershipRelaySessionNotifier([
       _membershipEvent(role: 'bot'),
@@ -162,13 +214,14 @@ Future<void> _pumpEventQueue() async {
 
 class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrEvent> _memberships;
+  final Object? subscribeError;
   final List<NostrFilter> liveFilters = [];
   final List<_LiveSubscription> _subscriptions = [];
   final Completer<void> _subscribed = Completer<void>();
   var unsubscribeCount = 0;
   var _membershipIndex = 0;
 
-  _MembershipRelaySessionNotifier(this._memberships);
+  _MembershipRelaySessionNotifier(this._memberships, {this.subscribeError});
 
   Future<void> get subscribed => _subscribed.future;
 
@@ -189,8 +242,9 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    if (subscribeError case final error?) throw error;
     liveFilters.add(filter);
-    final subscription = _LiveSubscription(filter, onEvent);
+    final subscription = _LiveSubscription(filter, onEvent, onClosed);
     _subscriptions.add(subscription);
     if (!_subscribed.isCompleted) _subscribed.complete();
     return () {
@@ -206,13 +260,20 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
       }
     }
   }
+
+  void closeSubscription(String message) {
+    for (final subscription in List.of(_subscriptions)) {
+      subscription.onClosed?.call(message);
+    }
+  }
 }
 
 class _LiveSubscription {
   final NostrFilter filter;
   final void Function(NostrEvent) onEvent;
+  final void Function(String message)? onClosed;
 
-  const _LiveSubscription(this.filter, this.onEvent);
+  const _LiveSubscription(this.filter, this.onEvent, this.onClosed);
 }
 
 bool _matches(NostrFilter filter, NostrEvent event) {

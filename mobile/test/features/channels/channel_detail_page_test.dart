@@ -338,8 +338,12 @@ Widget _buildTestable({
         ),
         mediaHttpClientProvider.overrideWithValue(mediaClient),
       ],
-      if (relaySessionNotifier != null)
-        relaySessionProvider.overrideWith(() => relaySessionNotifier),
+      if (relaySessionNotifier != null ||
+          (resolvedChannel.isDm &&
+              resolvedChannel.participantPubkeys.toSet().length == 2))
+        relaySessionProvider.overrideWith(
+          () => relaySessionNotifier ?? _IdentityUpdateRelaySession(),
+        ),
       if (relayConfigNotifier != null)
         relayConfigProvider.overrideWith(() => relayConfigNotifier),
       if (huddleMediaFactory != null)
@@ -718,7 +722,7 @@ void main() {
     testWidgets('rechecks verified owner profiles after reconnect', (
       tester,
     ) async {
-      final relaySession = _ReconnectingRelaySession();
+      final relaySession = _IdentityUpdateRelaySession();
       final reconnectPreloadCompleter = Completer<bool>();
       var memberPreloadCount = 0;
       var blockMemberPreload = false;
@@ -772,9 +776,12 @@ void main() {
       final memberPreloadsBeforeReconnect = memberPreloadCount;
       blockMemberPreload = true;
 
+      relaySession.disconnect();
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
       relaySession.connect();
       await tester.pump();
-
       expect(memberPreloadCount, greaterThan(memberPreloadsBeforeReconnect));
       expect(find.byTooltip('Start Huddle'), findsNothing);
 
@@ -790,6 +797,104 @@ void main() {
 
       expect(find.byTooltip('Start Huddle'), findsNothing);
       await tester.pump(const Duration(milliseconds: 500));
+    });
+
+    testWidgets('keeps directory-only agent Huddle hidden after disconnect', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          loadAgentDirectory: () async => const [
+            AgentDirectoryEntry(pubkey: 'agent'),
+          ],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.disconnect();
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps bot-role-only Huddle hidden after disconnect', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Bot DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Bot'],
+        participantPubkeys: const ['self', 'bot'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          loadChannelBotPubkeys: () async => const {'bot'},
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'bot',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.disconnect();
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Start Huddle'), findsNothing);
     });
 
     testWidgets('keeps the Huddle action hidden when identity loading fails', (
@@ -12799,6 +12904,14 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
 
   void closeIdentitySubscription() {
     _identityClosedListener?.call('unsupported filter');
+  }
+
+  void disconnect() {
+    state = const SessionState(status: SessionStatus.disconnected);
+  }
+
+  void connect() {
+    state = const SessionState(status: SessionStatus.connected);
   }
 }
 

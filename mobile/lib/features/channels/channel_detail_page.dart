@@ -334,6 +334,15 @@ class ChannelDetailPage extends HookConsumerWidget {
     }
     final agentDirectoryState = ref.watch(agentDirectoryProvider);
     final agentOwnersState = ref.watch(agentOwnersProvider);
+    final participantCount = resolvedChannel.participantPubkeys
+        .map((pubkey) => pubkey.trim().toLowerCase())
+        .where((pubkey) => pubkey.isNotEmpty)
+        .toSet()
+        .length;
+    final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
+    final channelMembershipUpdateState = isOneToOneDm
+        ? ref.watch(channelMembershipUpdateProvider(resolvedChannel.id))
+        : const ChannelMembershipUpdateState(isReady: true);
     final channelBotPubkeysState = ref.watch(
       channelBotPubkeysProvider(resolvedChannel.id),
     );
@@ -345,12 +354,6 @@ class ChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
-    final participantCount = resolvedChannel.participantPubkeys
-        .map((pubkey) => pubkey.trim().toLowerCase())
-        .where((pubkey) => pubkey.isNotEmpty)
-        .toSet()
-        .length;
-    final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
     final identitySubscriptionPubkeys = isOneToOneDm
         ? (resolvedChannel.participantPubkeys
               .map((pubkey) => pubkey.trim().toLowerCase())
@@ -408,12 +411,14 @@ class ChannelDetailPage extends HookConsumerWidget {
     }, [sessionStatus, resolvedChannel.id, identitySubscriptionKey]);
     final isAgentIdentityUnresolved =
         isOneToOneDm &&
-        ((sessionStatus == SessionStatus.connected &&
-                !isIdentitySubscriptionReady) ||
+        (sessionStatus != SessionStatus.connected ||
+            !isIdentitySubscriptionReady ||
             agentDirectoryState.isLoading ||
             agentDirectoryState.hasError ||
             agentOwnersState.isLoading ||
             agentOwnersState.hasError ||
+            !channelMembershipUpdateState.isReady ||
+            channelMembershipUpdateState.error != null ||
             channelBotPubkeysState.isLoading ||
             channelBotPubkeysState.hasError ||
             memberProfilesPreloadState.connectionState !=
