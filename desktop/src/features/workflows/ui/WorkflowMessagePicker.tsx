@@ -267,7 +267,8 @@ export function WorkflowMessagePicker({
             ) {
               event.preventDefault();
               if (invalidDirectResult) return;
-              onChange(visibleCandidates[activeIndex ?? 0].id);
+              const candidate = visibleCandidates[activeIndex ?? 0];
+              onChange(candidate.id === selectedId ? "" : candidate.id);
             } else if (event.key === "Escape") {
               event.preventDefault();
               event.stopPropagation();
@@ -330,7 +331,9 @@ export function WorkflowMessagePicker({
             key={candidate.id}
             onSelect={() => {
               setActiveIndex(null);
-              if (!invalidDirectResult) onChange(candidate.id);
+              if (!invalidDirectResult) {
+                onChange(candidate.id === selectedId ? "" : candidate.id);
+              }
             }}
             optionRef={(node) => {
               if (node) optionRefs.current.set(candidate.id, node);

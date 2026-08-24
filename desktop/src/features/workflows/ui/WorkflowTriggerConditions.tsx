@@ -414,12 +414,18 @@ export function WorkflowTriggerConditions({
                           id="wf-trigger-author-value"
                           onEscape={() => setExpandedField(null)}
                           onChange={(pubkey) =>
-                            updateConditions([
-                              ...conditions.filter(
-                                (item) => item.field !== field.value,
-                              ),
-                              { ...condition, value: pubkey },
-                            ])
+                            updateConditions(
+                              pubkey
+                                ? [
+                                    ...conditions.filter(
+                                      (item) => item.field !== field.value,
+                                    ),
+                                    { ...condition, value: pubkey },
+                                  ]
+                                : conditions.filter(
+                                    (item) => item.field !== field.value,
+                                  ),
+                            )
                           }
                           value={condition.value}
                         />
@@ -431,12 +437,18 @@ export function WorkflowTriggerConditions({
                           key={workflowChannelId ?? "unscoped"}
                           onEscape={() => setExpandedField(null)}
                           onChange={(messageId) =>
-                            updateConditions([
-                              ...conditions.filter(
-                                (item) => item.field !== field.value,
-                              ),
-                              { ...condition, value: messageId },
-                            ])
+                            updateConditions(
+                              messageId
+                                ? [
+                                    ...conditions.filter(
+                                      (item) => item.field !== field.value,
+                                    ),
+                                    { ...condition, value: messageId },
+                                  ]
+                                : conditions.filter(
+                                    (item) => item.field !== field.value,
+                                  ),
+                            )
                           }
                           value={condition.value}
                         />
@@ -481,7 +493,7 @@ export function WorkflowTriggerConditions({
                         </div>
                       )
                     ) : null}
-                    {existing ? (
+                    {existing && !fieldUsesFullHeightPicker(field.value) ? (
                       <button
                         className="text-xs font-medium text-muted-foreground hover:text-foreground"
                         disabled={disabled}

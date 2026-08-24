@@ -188,7 +188,10 @@ export function WorkflowAuthorPicker({
               visibleCandidates[activeIndex ?? 0]
             ) {
               event.preventDefault();
-              onChange(visibleCandidates[activeIndex ?? 0].pubkey);
+              const candidate = visibleCandidates[activeIndex ?? 0];
+              onChange(
+                candidate.pubkey === normalizedValue ? "" : candidate.pubkey,
+              );
             } else if (event.key === "Escape") {
               event.preventDefault();
               event.stopPropagation();
@@ -236,7 +239,9 @@ export function WorkflowAuthorPicker({
             key={candidate.pubkey}
             onSelect={() => {
               setActiveIndex(null);
-              onChange(candidate.pubkey);
+              onChange(
+                candidate.pubkey === normalizedValue ? "" : candidate.pubkey,
+              );
             }}
             optionRef={(node) => {
               if (node) optionRefs.current.set(candidate.pubkey, node);

@@ -563,6 +563,91 @@ test("round-trips manual author and reaction message IDs through save and reopen
   expect(definition.trigger.filter).toContain(messageId);
 });
 
+test("toggles selected author and message filters while preserving sibling conditions", async ({
+  page,
+}) => {
+  const author = "a".repeat(64);
+  const replacementAuthor = "c".repeat(64);
+  const messageId = "b".repeat(64);
+  const dialog = await openCreateWorkflow(
+    page,
+    `toggle_trigger_ids_${Date.now()}`,
+  );
+  await selectTrigger(page, dialog, "Reaction Added");
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+  const definition = parseYaml(await yamlEditor.inputValue());
+  definition.trigger.filter =
+    `trigger_emoji == "👍" && trigger_author == "${author.toUpperCase()}" && ` +
+    `trigger_message_id == "${messageId.toUpperCase()}"`;
+  await yamlEditor.fill(stringifyYaml(definition));
+  await dialog.getByRole("tab", { name: "Form" }).click();
+  await openTriggerInspector(dialog);
+  const authorField = dialog
+    .getByRole("button", { name: "Author pubkey" })
+    .locator("..");
+  await authorField.getByRole("button", { name: "Author pubkey" }).click();
+  const authorOption = dialog.getByRole("option", {
+    name: new RegExp(author.slice(0, 8)),
+  });
+  await expect(authorOption).toHaveAttribute("aria-selected", "true");
+  await expect(
+    authorField.getByRole("button", { name: "Clear filter" }),
+  ).toHaveCount(0);
+  await authorOption.click();
+
+  const authorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await authorSearch.fill(replacementAuthor);
+  const replacementAuthorOption = dialog.getByRole("option", {
+    name: new RegExp(replacementAuthor.slice(0, 8)),
+  });
+  await expect(replacementAuthorOption).toBeVisible();
+  await authorSearch.press("Enter");
+  await expect(replacementAuthorOption).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(authorSearch).toHaveValue(replacementAuthor);
+  await authorSearch.press("Enter");
+  await expect(authorSearch).toHaveValue(replacementAuthor);
+
+  const messageField = dialog
+    .getByRole("button", { name: "Message event ID" })
+    .locator("..");
+  await messageField.getByRole("button", { name: "Message event ID" }).click();
+  const messageSearch = dialog.getByRole("combobox", {
+    name: "Search messages or paste a message ID",
+  });
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(messageId.slice(0, 12)) }),
+  ).toHaveAttribute("aria-selected", "true");
+  await expect(
+    messageField.getByRole("button", { name: "Clear filter" }),
+  ).toHaveCount(0);
+  await messageSearch.fill(messageId);
+  await messageSearch.press("Enter");
+  await expect(messageSearch).toHaveValue(messageId);
+  await messageSearch.press("Enter");
+  const selectedMessage = dialog.getByRole("option", {
+    name: new RegExp(messageId.slice(0, 12)),
+  });
+  await expect(selectedMessage).toHaveAttribute("aria-selected", "true");
+  await selectedMessage.click();
+  await expect(messageSearch).toHaveValue(messageId);
+
+  await dialog.getByRole("button", { name: "Reaction emoji" }).click();
+  await expect(
+    dialog.getByRole("button", { name: "Clear filter" }),
+  ).toBeVisible();
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  expect(parseYaml(await yamlEditor.inputValue()).trigger.filter).toBe(
+    'trigger_emoji == "👍"',
+  );
+});
+
 test("hides and clears message-text step conditions for schedule triggers", async ({
   page,
 }) => {
