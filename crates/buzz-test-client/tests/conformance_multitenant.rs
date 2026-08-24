@@ -1647,15 +1647,21 @@ mod channels_membership {
 mod workflows {
     use super::*;
 
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use sha2::{Digest, Sha256};
 
     /// Workflow definition command (NIP-custom kind 30620). `content` is the
-    /// YAML body; `h` tags the channel. The server *generates* the workflow id
-    /// and returns it in the OK message — it is **not** the `d` tag.
+    /// YAML body; `h` tags the channel and the NIP-33 `d` tag carries the
+    /// client-chosen workflow UUID (addressable-event replace semantics — the
+    /// relay upserts by it and echoes it back as `workflow_id`).
     const KIND_WORKFLOW_DEF: u16 = 30620;
     /// Workflow trigger command (kind 46020). `d` tag = the server-generated
     /// workflow id to fire.
     const KIND_WORKFLOW_TRIGGER: u16 = 46020;
+    /// Approval grant command (kind 46030). `d` tag = the hex token hash
+    /// (`approval_ref`) of the pending approval to grant.
+    const KIND_APPROVAL_GRANT: u16 = 46030;
 
     /// Convert any base form to `http(s)://` for the REST `POST /events` door.
     fn to_http(base: &str) -> String {
@@ -1741,19 +1747,20 @@ mod workflows {
     }
 
     /// Define a workflow in `channel_id` on `http_base`'s community (kind:30620,
-    /// `h`=channel, content=YAML). Returns the **server-generated** workflow id,
-    /// parsed out of the OK message (`response:{"workflow_id":"…"}`). This id is
-    /// the tenant-scoped handle the trigger door confines: defined under A, it
-    /// only resolves under A.
+    /// `h`=channel, NIP-33 `d`=client-chosen workflow UUID, content=YAML).
+    /// Returns the workflow id, parsed out of the OK message
+    /// (`response:{"workflow_id":"…"}`) — it equals the `d` tag value. This id
+    /// is the tenant-scoped handle the trigger door confines: defined under A,
+    /// it only resolves under A.
     async fn define_workflow(http_base: &str, keys: &Keys, channel_id: &str, name: &str) -> String {
-        // `h` binds the channel; `name` is required by `handle_workflow_def`
-        // (it rejects "missing workflow name" before parsing YAML). We use the
-        // `name` tag, not `d`: the server *generates* the workflow id, and that
-        // generated id — not any client-supplied `d` — is the handle this row
-        // confines. A `d` tag here would falsely imply the trigger resolves by
-        // client key.
+        // `h` binds the channel; the NIP-33 `d` tag carries the client-chosen
+        // workflow UUID (the relay upserts by it, NIP-33 replace semantics, and
+        // echoes it back as `workflow_id`). That id — not anything the server
+        // derives — is the handle this row confines.
+        let workflow_id = uuid::Uuid::new_v4().to_string();
         let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), workflow_yaml(name))
             .tags(vec![
+                Tag::parse(["d", &workflow_id]).unwrap(),
                 Tag::parse(["h", channel_id]).unwrap(),
                 Tag::parse(["name", name]).unwrap(),
             ])
@@ -1820,6 +1827,245 @@ mod workflows {
         panic!("POST workflow trigger to {http_base} returned HTTP {status}: {body}");
     }
 
+    /// Define a workflow whose YAML body is supplied by the caller (the fixed
+    /// `workflow_yaml` helper only covers the trigger-confinement row). Returns
+    /// the workflow id from the OK message (equals the `d` tag value).
+    async fn define_workflow_with_yaml(
+        http_base: &str,
+        keys: &Keys,
+        channel_id: &str,
+        name: &str,
+        yaml: &str,
+    ) -> String {
+        // NIP-33 `d` tag: the client-chosen workflow UUID (upsert handle).
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), yaml.to_string())
+            .tags(vec![
+                Tag::parse(["d", &workflow_id]).unwrap(),
+                Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["name", name]).unwrap(),
+            ])
+            .sign_with_keys(keys)
+            .unwrap();
+        let body = submit_event(http_base, keys, event).await;
+        assert!(
+            body["accepted"].as_bool().unwrap_or(false),
+            "workflow def not accepted against {http_base}: {body}"
+        );
+        let msg = body["message"].as_str().unwrap_or_default();
+        let json_part = msg.strip_prefix("response:").unwrap_or_else(|| {
+            panic!("workflow def OK message missing `response:` prefix: {msg:?}")
+        });
+        let resp: serde_json::Value = serde_json::from_str(json_part)
+            .unwrap_or_else(|e| panic!("parse workflow def response json: {e} ({json_part:?})"));
+        resp["workflow_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("workflow def response missing workflow_id: {resp}"))
+            .to_string()
+    }
+
+    /// A webhook-triggered workflow with a `request_approval` gate followed by
+    /// a `send_message` step, so a granted run resumes and completes. `from`
+    /// must be an approver spec the grant handler accepts ("" / "any" / the
+    /// exact 64-char hex pubkey).
+    fn approval_workflow_yaml(name: &str, from: &str) -> String {
+        format!(
+            "name: {name}\n\
+             description: conformance approval-isolation probe\n\
+             trigger:\n\
+             \x20 on: webhook\n\
+             steps:\n\
+             \x20 - id: gate\n\
+             \x20   name: Gate\n\
+             \x20   action: request_approval\n\
+             \x20   from: \"{from}\"\n\
+             \x20   message: \"Approve the conformance run?\"\n\
+             \x20   timeout: 10m\n\
+             \x20 - id: after\n\
+             \x20   name: After\n\
+             \x20   action: send_message\n\
+             \x20   text: \"approval granted\"\n"
+        )
+    }
+
+    /// Build an `Authorization: Nostr <base64>` header for NIP-98 HTTP auth
+    /// (kind 27235 `HttpAuth` with `u`/`method`/`payload` tags). Kept local to
+    /// this row so the conformance file's rows stay self-contained.
+    fn build_nip98_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> String {
+        let payload_hash = hex::encode(Sha256::digest(body));
+        let tags = vec![
+            Tag::parse(["u", url]).expect("u tag"),
+            Tag::parse(["method", method]).expect("method tag"),
+            Tag::parse(["payload", &payload_hash]).expect("payload tag"),
+        ];
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign NIP-98 event");
+        let json = nostr::JsonUtil::as_json(&event);
+        let encoded = BASE64.encode(json.as_bytes());
+        format!("Nostr {encoded}")
+    }
+
+    /// NIP-98-authenticated `GET {path}` on `http_base`'s community, asserted
+    /// to succeed. Returns the parsed JSON body.
+    ///
+    /// When `unique` is true a `_=` nonce query parameter is appended to the
+    /// request **and** the signed URL: the relay rejects NIP-98 auth events it
+    /// has already seen, and a poll loop signing the *same* URL twice within
+    /// one second would produce identical HttpAuth events (same timestamp →
+    /// same id) and trip the replay set. Endpoints whose expected URL excludes
+    /// the query (e.g. `run_approvals` passes `raw_query=None` to its auth
+    /// check) must pass `unique = false` and be called at most once per
+    /// test, signing the bare path.
+    async fn nip98_get_json(
+        http_base: &str,
+        keys: &Keys,
+        path: &str,
+        unique: bool,
+    ) -> serde_json::Value {
+        let url = if unique {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_micros();
+            let separator = if path.contains('?') { '&' } else { '?' };
+            format!("{http_base}{path}{separator}_={nonce}")
+        } else {
+            format!("{http_base}{path}")
+        };
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .header("Authorization", build_nip98_header(keys, &url, "GET", b""))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET {url} failed: {e}"));
+        let status = resp.status();
+        let body = resp.text().await.expect("read GET body");
+        assert!(
+            status.is_success(),
+            "GET {url} returned HTTP {status}: {body}"
+        );
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("parse GET JSON from {url}: {e}"))
+    }
+
+    /// Extract the server-generated `run_id` from a workflow trigger OK body
+    /// (`message: "response:{json}"`, json carries `run_id`).
+    fn extract_run_id(trigger_body: &serde_json::Value) -> String {
+        let msg = trigger_body["message"].as_str().unwrap_or_default();
+        let json_part = msg.strip_prefix("response:").unwrap_or_else(|| {
+            panic!("workflow trigger OK message missing `response:` prefix: {msg:?}")
+        });
+        let resp: serde_json::Value = serde_json::from_str(json_part).unwrap_or_else(|e| {
+            panic!("parse workflow trigger response json: {e} ({json_part:?})")
+        });
+        resp["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("workflow trigger response missing run_id: {resp}"))
+            .to_string()
+    }
+
+    /// Grant an approval over the wire (kind:46030, `d` tag = the hex token
+    /// hash / `approval_ref`), signed by the caller. Returns a normalized
+    /// `{accepted, message}` body so the caller can assert on the wire-visible
+    /// accept/reject (HTTP 400 rejection → `{accepted:false}`).
+    async fn grant_approval(http_base: &str, keys: &Keys, approval_ref: &str) -> serde_json::Value {
+        let event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT), "")
+            .tags(vec![Tag::parse(["d", approval_ref]).unwrap()])
+            .sign_with_keys(keys)
+            .unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{http_base}/events"))
+            .header("X-Pubkey", keys.public_key().to_hex())
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&event).expect("serialize event"))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("POST approval grant to {http_base} failed: {e}"));
+        let status = resp.status();
+        let body = resp.text().await.expect("read approval grant body");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|e| {
+            panic!("parse approval grant JSON from {http_base}: {e} (body: {body})")
+        });
+        if status.is_success() {
+            return parsed;
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            return serde_json::json!({
+                "accepted": false,
+                "message": parsed["error"].as_str().unwrap_or_default(),
+            });
+        }
+        panic!("POST approval grant to {http_base} returned HTTP {status}: {body}");
+    }
+
+    /// `GET /workflows/{workflow_id}/runs/{run_id}/approvals` — the pending
+    /// approvals minted for a run. Returns the `approvals` array.
+    async fn fetch_run_approvals(
+        http_base: &str,
+        keys: &Keys,
+        workflow_id: &str,
+        run_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let body = nip98_get_json(
+            http_base,
+            keys,
+            &format!("/workflows/{workflow_id}/runs/{run_id}/approvals"),
+            false, // run_approvals' expected URL is path-only (raw_query=None)
+        )
+        .await;
+        body["approvals"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| panic!("run approvals response missing `approvals` array: {body}"))
+    }
+
+    /// Poll `GET /workflows/{workflow_id}/runs` until the run with `run_id`
+    /// reaches `expected` status (e.g. `waiting_approval`, `completed`).
+    async fn wait_for_run_status(
+        http_base: &str,
+        keys: &Keys,
+        workflow_id: &str,
+        run_id: &str,
+        expected: &str,
+        timeout: Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            // Polled: per-request nonce keeps NIP-98 auth events unique.
+            let body = nip98_get_json(
+                http_base,
+                keys,
+                &format!("/workflows/{workflow_id}/runs"),
+                true,
+            )
+            .await;
+            let runs = body["runs"]
+                .as_array()
+                .unwrap_or_else(|| panic!("workflow runs response missing `runs` array: {body}"));
+            if let Some(run) = runs.iter().find(|r| r["id"].as_str() == Some(run_id)) {
+                let status = run["status"].as_str().unwrap_or_default();
+                if status == expected {
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!(
+                        "run {run_id} did not reach {expected} within {timeout:?}; \
+                         last status: {status:?}; runs: {body}"
+                    );
+                }
+            } else if std::time::Instant::now() > deadline {
+                panic!(
+                    "run {run_id} never appeared in {workflow_id} run list within {timeout:?}: {body}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
     /// Obligation (trigger-confinement half): a workflow id defined under
     /// community A is triggerable only under A. Firing A's id under host B —
     /// even by a caller who is a legitimate member of the *same channel UUID* in
@@ -1836,8 +2082,9 @@ mod workflows {
     ///      as owner-member of `U` on *each* side (`create_channel_with_id`).
     ///      This deliberately removes "not a member of U in B" as an alternate
     ///      cause of the B rejection — K *is* a member of U in B.
-    ///   2. Define a workflow in `U` under **A** (kind:30620). The server
-    ///      generates `W` and returns it. `W` is an A-community row.
+    ///   2. Define a workflow in `U` under **A** (kind:30620, NIP-33 `d` tag =
+    ///      client-chosen UUID `W`, so `W` is the workflow's id). `W` is an
+    ///      A-community row.
     ///   3. Fire `W` under host **B** (kind:46020, `d`=W) as K. Must be
     ///      rejected — `accepted == false` and the generic `workflow not found`
     ///      message — because `get_workflow(B_community, W)` finds nothing: `W`
@@ -1858,16 +2105,12 @@ mod workflows {
     /// assertion goes RED. Restore the `community_id` argument → GREEN. This is
     /// the exact invariant commit `c81b89355` documents at that call site.
     ///
-    /// NOTE — approval-token isolation is a **separate, not-yet-wire-live**
-    /// obligation, deliberately left as a `pending_lane` below. The grant
-    /// handler (`get_approval_by_stored_hash(community, hash)`) is already
-    /// community-scoped, but nothing *mints* a pending approval over the wire:
-    /// the executor's approval gate is an explicit TODO
-    /// (`crates/buzz-workflow/src/lib.rs` — "approval gates not yet implemented,
-    /// see WF-08") and `create_approval` is only reached from unit tests. A
-    /// green end-to-end approval-isolation test therefore cannot be exercised
-    /// today; writing one would violate this file's contract (a green run can
-    /// never be faked by an empty/DB-only body). It lands with WF-08.
+    /// NOTE — approval-token isolation is the **sibling obligation** below
+    /// (`approval_token_is_community_confined`), now wire-live since WF-08:
+    /// the executor mints pending approvals (DB record + kind:46010 event)
+    /// when a `request_approval` step suspends a run, and the grant handler
+    /// resolves them community-scoped via
+    /// `get_approval_by_stored_hash(community, hash)`.
     #[tokio::test]
     #[ignore]
     async fn workflow_trigger_is_community_confined() {
@@ -1891,7 +2134,7 @@ mod workflows {
         let workflow_id = define_workflow(&http_a, &keys, &chan_a, &name).await;
         assert!(
             uuid::Uuid::parse_str(&workflow_id).is_ok(),
-            "server-generated workflow_id must be a UUID, got {workflow_id:?}"
+            "workflow_id must be a UUID, got {workflow_id:?}"
         );
 
         // (3) Fire W under host B as K. Must fail closed: W is an A-community
@@ -1927,24 +2170,139 @@ mod workflows {
 
     /// Obligation (approval-token half): an approval token (its stored hash)
     /// minted under community A cannot be satisfied by a grant on host B, and
-    /// vice versa. The grant resolution is already community-scoped
-    /// (`get_approval_by_stored_hash(community, hash)`), but this half is
-    /// **not wire-live**: nothing mints a pending approval over the wire yet —
-    /// the executor approval gate is an explicit TODO (WF-08), and
-    /// `create_approval` is reached only from unit tests. Left as a precise
-    /// `pending_lane` so the WF-08 owner fills in *their* row; a green run can
-    /// never be faked by a DB-only/empty body. Depends on WF-08 (approval
-    /// minting), **not** buzz-db — the scoping fence it will exercise is
-    /// already landed.
+    /// vice versa. The grant resolution is community-scoped
+    /// (`get_approval_by_stored_hash(community, hash)`), and since WF-08 the
+    /// executor mints pending approvals over the wire: a `request_approval`
+    /// step persists the approval row and emits the kind:46010 event under the
+    /// run's community.
+    ///
+    /// Wire-observable shape (single keypair K; the fence under test must be
+    /// `community_id`, never `pubkey` or channel membership):
+    ///   1. Create the **same** channel UUID `U` in A and in B, so K is
+    ///      owner-member of `U` on each side — "not a member in B" cannot
+    ///      explain the B rejection.
+    ///   2. Define a workflow under A with a `request_approval` gate whose
+    ///      approver spec is K's exact hex pubkey (so K can grant on A), then
+    ///      trigger it under A. The run must reach `waiting_approval` and mint
+    ///      exactly one pending approval whose `approval_ref` is the 32-byte
+    ///      hex token hash.
+    ///   3. Grant the SAME token hash under host B as K (kind:46030, `d` tag =
+    ///      `approval_ref`). Must be rejected — `accepted == false` with the
+    ///      generic `approval not found` message — because the record lives in
+    ///      A's community only.
+    ///   4. Grant under host A as K. Must be accepted, and the run must resume
+    ///      past the gate and reach `completed` — the positive half proves the
+    ///      (3) rejection is community confinement, not a broken grant path.
+    ///
+    /// Mutate-bite (would-it-fail-without-the-fix): drop the community fence on
+    /// the grant lookup (`get_approval_by_stored_hash(community, hash)` →
+    /// bare-hash lookup). Then step 3's grant on B finds A's row and is
+    /// **accepted** — step 3's `accepted == false` assertion goes RED. Restore
+    /// the `community_id` argument → GREEN. Before WF-08 nothing minted
+    /// approvals at all, so this whole wire shape was unreachable.
     #[tokio::test]
     #[ignore]
     async fn approval_token_is_community_confined() {
-        pending_lane(
-            "WF-08 (approval minting)",
-            "an approval token minted under A cannot be satisfied by a grant on host B — \
-             blocked until the executor approval gate (WF-08) mints pending approvals over \
-             the wire; the get_approval_by_stored_hash(community, hash) fence is already landed",
+        let http_a = to_http(&url_a());
+        let http_b = to_http(&url_b());
+        let keys = Keys::generate();
+
+        // (1) Same channel UUID in both communities. (community_id, id) PK
+        //     permits this; K becomes owner-member of U on *each* side.
+        let shared_uuid = uuid::Uuid::new_v4();
+        let chan_a = create_open_channel(&http_a, &keys, shared_uuid).await;
+        let chan_b = create_open_channel(&http_b, &keys, shared_uuid).await;
+        assert_eq!(chan_a, chan_b, "channels must share UUID — test design");
+
+        // (2) Define an approval-gated workflow under A, with K as the
+        //     designated approver, and trigger it under A.
+        let name = format!("wfappr_{}", uuid::Uuid::new_v4().simple());
+        let workflow_id = define_workflow_with_yaml(
+            &http_a,
+            &keys,
+            &chan_a,
+            &name,
+            &approval_workflow_yaml(&name, &keys.public_key().to_hex()),
+        )
+        .await;
+
+        let trigger = trigger_workflow(&http_a, &keys, &workflow_id).await;
+        assert_eq!(
+            trigger["accepted"].as_bool(),
+            Some(true),
+            "host A rejected a trigger for its own workflow — positive control failed: {trigger}"
         );
+        let run_id = extract_run_id(&trigger);
+
+        // The run must suspend at the gate and mint exactly one pending
+        // approval whose approval_ref is the 32-byte hex token hash.
+        wait_for_run_status(
+            &http_a,
+            &keys,
+            &workflow_id,
+            &run_id,
+            "waiting_approval",
+            Duration::from_secs(20),
+        )
+        .await;
+        let approvals = fetch_run_approvals(&http_a, &keys, &workflow_id, &run_id).await;
+        assert_eq!(
+            approvals.len(),
+            1,
+            "run {run_id} must have exactly one pending approval: {approvals:?}"
+        );
+        assert_eq!(
+            approvals[0]["status"].as_str(),
+            Some("pending"),
+            "minted approval must be pending: {:?}",
+            approvals[0]
+        );
+        let approval_ref = approvals[0]["approval_ref"]
+            .as_str()
+            .expect("approval_ref missing")
+            .to_string();
+        assert_eq!(
+            approval_ref.len(),
+            64,
+            "approval_ref must be the 32-byte token hash in hex, got {approval_ref:?}"
+        );
+
+        // (3) Grant the SAME token hash under host B as K. Must fail closed:
+        //     the record is an A-community row, and
+        //     get_approval_by_stored_hash(B_community, hash) finds nothing.
+        let b_grant = grant_approval(&http_b, &keys, &approval_ref).await;
+        assert_eq!(
+            b_grant["accepted"].as_bool(),
+            Some(false),
+            "host B accepted a grant for an A-community approval — cross-community \
+             approval leak. response: {b_grant}"
+        );
+        let b_msg = b_grant["message"].as_str().unwrap_or_default();
+        assert!(
+            b_msg.contains("approval not found"),
+            "host B rejection must be the generic `approval not found` (no enumeration \
+             oracle); got: {b_msg:?}"
+        );
+
+        // (4) Mirror positive: grant under host A as K (the designated
+        //     approver). Must be accepted, and the run must resume past the
+        //     gate and complete — proving the (3) rejection is community
+        //     confinement, not a broken grant path.
+        let a_grant = grant_approval(&http_a, &keys, &approval_ref).await;
+        assert_eq!(
+            a_grant["accepted"].as_bool(),
+            Some(true),
+            "host A rejected a grant for its own approval — positive control failed: {a_grant}"
+        );
+        wait_for_run_status(
+            &http_a,
+            &keys,
+            &workflow_id,
+            &run_id,
+            "completed",
+            Duration::from_secs(20),
+        )
+        .await;
     }
 }
 

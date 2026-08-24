@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use buzz_core::tenant::CommunityId;
+use chrono::Utc;
 use evalexpr::HashMapContext;
 use nostr::ToBech32;
 use serde_json::Value as JsonValue;
@@ -532,10 +533,15 @@ fn resolve_send_message_channel(
 /// For MVP, most actions log their intent and return a success output.
 /// Real event emission is wired in WF-07/08 (relay integration).
 ///
-/// `RequestApproval` returns `StepResult::Suspended` — the caller must
-/// persist state and stop the execution loop.
+/// `RequestApproval` mints a pending approval through the action sink (DB
+/// record + kind:46010 event) and returns `StepResult::Suspended` — the
+/// caller must persist the run's waiting state and stop the execution loop.
+///
+/// `step_index` is the zero-based position of the step in the workflow; it is
+/// persisted with the approval record so a grant can resume after this step.
 pub async fn dispatch_action(
     step_id: &str,
+    step_index: i32,
     action: &ActionDef,
     engine: &WorkflowEngine,
     community_id: CommunityId,
@@ -723,8 +729,35 @@ pub async fn dispatch_action(
 
                     let token = generate_approval_token(run_id, step_id);
 
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
+                    // Mint the approval gate (WF-08): persist the pending
+                    // approval record and emit the kind:46010 approval-requested
+                    // event through the action sink. Fail-closed: if the mint
+                    // fails, the step errors and the run is marked Failed rather
+                    // than suspending into an unreachable waiting state.
+                    let timeout_secs = parse_duration_secs(timeout_str)?;
+                    let expires_at = Utc::now() + std::time::Duration::from_secs(timeout_secs);
+                    let event_id = engine
+                        .action_sink()?
+                        .request_approval(
+                            community_id,
+                            run_id,
+                            step_id,
+                            step_index,
+                            from,
+                            message,
+                            &token,
+                            expires_at,
+                        )
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    info!(
+                        run_id = %run_id,
+                        step = step_id,
+                        event_id = %event_id,
+                        expires_at = %expires_at,
+                        "RequestApproval minted — run suspended awaiting approval"
+                    );
 
                     Ok(StepResult::Suspended {
                         approval_token: token,
@@ -1016,7 +1049,9 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 /// Rich return type from `execute_run` / `execute_from_step`.
 ///
 /// Carries enough information for the caller to:
-/// - Persist the approval record when suspended at a `RequestApproval` step.
+/// - Mark the run `WaitingApproval` when suspended at a `RequestApproval` step
+///   (the approval record and kind:46010 event are already minted by the
+///   executor through the action sink).
 /// - Update the run's execution trace and current step in the DB.
 /// - Resume execution from the correct step after approval.
 #[derive(Debug)]
@@ -1040,8 +1075,10 @@ pub struct ExecutionResult {
 /// 3. Dispatches the action.
 /// 4. Stores the step output for use by later steps.
 ///
-/// On `RequestApproval`: returns `ExecutionResult` with `approval_token = Some(token)`.
-/// Caller must persist the approval record and update the run status.
+/// On `RequestApproval`: the step mints the approval gate through the action
+/// sink (pending DB record + kind:46010 event) and execution returns an
+/// `ExecutionResult` with `approval_token = Some(token)`; the caller's
+/// `finalize_run` transitions the run to `WaitingApproval`.
 ///
 /// Returns `ExecutionResult` with `approval_token = None` on normal completion.
 ///
@@ -1221,6 +1258,7 @@ async fn execute_steps(
             std::time::Duration::from_secs(timeout_secs),
             dispatch_action(
                 &step.id,
+                i as i32,
                 &resolved_action,
                 engine,
                 community_id,
@@ -1269,8 +1307,10 @@ async fn execute_steps(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                // The approval gate was already minted (DB record + kind:46010
+                // event) by the RequestApproval dispatch. Return the token and
+                // current state so the caller's finalize_run transitions the run
+                // to WaitingApproval with the execution trace so far.
                 return Ok(ExecutionResult {
                     approval_token: Some(approval_token),
                     step_index: i,

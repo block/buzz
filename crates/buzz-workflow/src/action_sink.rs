@@ -7,6 +7,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -69,5 +71,46 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Mint a workflow approval gate (WF-08): persist a pending approval
+    /// record and emit a relay-signed kind:46010 approval-requested event.
+    ///
+    /// The executor calls this when a `RequestApproval` step suspends a run.
+    /// The implementation:
+    /// - persists the pending approval (raw token hashed before storage) so
+    ///   the grant/deny handlers can resolve it by community + token hash, and
+    /// - emits the kind:46010 event whose `d` tag carries the hex token hash
+    ///   (the grant/deny reference), whose `p` tag carries the approver pubkey
+    ///   when the spec is an exact hex pubkey (feeding the needs-action feed),
+    ///   and whose `h` tag scopes it to the run's channel.
+    ///
+    /// - `community_id`: the server-resolved community that owns the workflow
+    ///   run; the minted event and DB row are scoped to *this* community.
+    /// - `run_id`: the suspended workflow run.
+    /// - `step_id` / `step_index`: the `RequestApproval` step that suspended.
+    /// - `approver_spec`: the `from` value ("" / "any" / 64-char hex pubkey).
+    /// - `message`: the approval-request message, carried as event content.
+    /// - `token`: the raw plaintext approval token (hashed before storage).
+    /// - `expires_at`: when the pending approval expires.
+    ///
+    /// Returns the minted event ID hex string on success.
+    ///
+    /// The eight parameters are the full mint surface (community/run/step
+    /// identity, approver spec, message, token, expiry); bundling them would
+    /// hide the wire contract behind a struct. Matches the
+    /// `#[allow(clippy::too_many_arguments)]` precedent on
+    /// `buzz_db::event::insert_reaction_event_with_thread_metadata`.
+    #[allow(clippy::too_many_arguments)]
+    fn request_approval(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_id: &str,
+        step_index: i32,
+        approver_spec: &str,
+        message: &str,
+        token: &str,
+        expires_at: DateTime<Utc>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

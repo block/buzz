@@ -8,10 +8,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
+use buzz_db::workflow::{hash_approval_token, CreateApprovalParams};
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
 use uuid::Uuid;
@@ -424,6 +425,170 @@ impl ActionSink for RelayActionSink {
                         owned.root_event_id.clone(),
                     );
                 }
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn request_approval(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_id: &str,
+        step_index: i32,
+        approver_spec: &str,
+        message: &str,
+        token: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let step_id = step_id.to_owned();
+        let approver_spec = approver_spec.to_owned();
+        let message = message.to_owned();
+        let token = token.to_owned();
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // The run carries its owning community; the approval row and the
+            // relay-signed kind:46010 event belong to *that* community. Fail
+            // closed if the community no longer maps to a host.
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // 1. Resolve the suspended run and its workflow, scoped to the run's
+            //    community — the same run/workflow UUID may exist in another
+            //    community, so a bare-id lookup could load the wrong row and
+            //    mint an approval under it.
+            let wf_run = state
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(format!("load workflow run: {e}")))?;
+            let workflow = state
+                .db
+                .get_workflow(community_id, wf_run.workflow_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(format!("load workflow: {e}")))?;
+            let channel_id = workflow.channel_id;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+            // 2. Persist the pending approval. The raw token is hashed (SHA-256)
+            //    before storage; the same digest feeds the event `d` tag so the
+            //    grant/deny handlers resolve the record by community + hash.
+            let token_hash = hash_approval_token(&token);
+            state
+                .db
+                .create_approval(CreateApprovalParams {
+                    community_id,
+                    token: token.as_str(),
+                    workflow_id: wf_run.workflow_id,
+                    run_id,
+                    step_id: step_id.as_str(),
+                    step_index,
+                    approver_spec: approver_spec.as_str(),
+                    expires_at,
+                })
+                .await
+                .map_err(|e| ActionSinkError::Database(format!("create approval: {e}")))?;
+
+            // 3. Build the kind:46010 approval-requested event.
+            //    - `d` tag: hex token hash — the grant/deny reference
+            //      (handle_approval_grant/deny read d-tag or e-tag).
+            //    - `p` tag: the approver pubkey when the spec is an exact hex
+            //      pubkey, so event_mentions indexes it and the needs-action
+            //      feed surfaces the request to the right person.
+            //    - `h` tag: the workflow's channel (NIP-29, canonical UUID) so
+            //      the event is channel-scoped like every other stream event.
+            //    Content carries the approval-request message.
+            let mut tags = vec![Tag::parse(["d", &hex::encode(&token_hash)])
+                .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?];
+
+            let spec = approver_spec.trim();
+            if spec.len() == 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
+                tags.push(
+                    Tag::parse(["p", &spec.to_lowercase()])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                );
+            }
+            if let Some(channel_uuid) = channel_id {
+                tags.push(
+                    Tag::parse(["h", &channel_uuid.to_string()])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                );
+            }
+
+            let kind = Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16);
+            let event = EventBuilder::new(kind, message)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            info!(
+                event_id = %event_id_hex,
+                run_id = %run_id,
+                step_id = %step_id,
+                channel_id = ?channel_id,
+                "Workflow RequestApproval: minted kind {KIND_WORKFLOW_APPROVAL_REQUESTED} event"
+            );
+
+            // 4. Persist the event. Approvals are not threaded messages, so
+            //    there is no reply ancestry; when the workflow is channel-scoped
+            //    we write a top-level thread-metadata row (matching the
+            //    send_message top-level path), and mention indexing for the `p`
+            //    tag happens inside Db::insert_event_with_thread_metadata.
+            let thread_meta = channel_id.map(|channel_uuid| buzz_db::event::ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at: {
+                    let ts = event.created_at.as_secs() as i64;
+                    DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+                },
+                channel_id: channel_uuid,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: false,
+            });
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    channel_id,
+                    thread_meta,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            // 5. Post-persist side effects (fan-out, search, audit, push) —
+            //    only if actually inserted (idempotency guard).
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    &owner_pubkey_hex,
+                    None,
+                )
+                .await;
             }
 
             Ok(event_id_hex)
