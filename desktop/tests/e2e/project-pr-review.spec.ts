@@ -1334,6 +1334,9 @@ test("overview tasks and reviews are grouped and selectable by project", async (
     const rows = firstGroup.locator(
       `[data-testid^="${section.rowTestIdPrefix}"]`,
     );
+    await expect(rows).toHaveCount(
+      Number(await firstGroup.getAttribute("data-project-group-size")),
+    );
     const rowCount = await rows.count();
     expect(rowCount).toBeGreaterThan(0);
 

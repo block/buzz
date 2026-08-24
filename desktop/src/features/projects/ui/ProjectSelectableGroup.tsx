@@ -44,6 +44,7 @@ export function ProjectSelectableGroup({
     <section
       className="pt-2 first:pt-0"
       data-project-group={groupKey}
+      data-project-group-size={items.length}
       data-testid={testId}
     >
       <div
