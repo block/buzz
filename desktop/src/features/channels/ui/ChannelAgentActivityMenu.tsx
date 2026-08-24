@@ -83,10 +83,11 @@ export function ChannelAgentActivityMenu({
                     {agent.name}
                     {agent.deleted ? " [已删除]" : ""} ·{" "}
                     {agent.ownerPubkey
-                    ? (ownerProfiles?.[agent.ownerPubkey.toLowerCase()]
-                        ?.displayName ??
-                      `用户 ${truncatePubkey(agent.ownerPubkey)}`)
-                    : "未知用户"} · {truncatePubkey(agent.pubkey)}
+                      ? (ownerProfiles?.[agent.ownerPubkey.toLowerCase()]
+                          ?.displayName ??
+                        `用户 ${truncatePubkey(agent.ownerPubkey)}`)
+                      : "未知用户"}{" "}
+                    · {truncatePubkey(agent.pubkey)}
                   </span>
                   {isWorking ? (
                     <span className="flex shrink-0 items-center gap-1.5 text-xs text-primary">
@@ -119,6 +120,7 @@ export function ChannelAgentActivityMenu({
       {handoffAgent ? (
         <AgentHandoffDialog
           agent={{ name: handoffAgent.name, pubkey: handoffAgent.pubkey }}
+          channelId={channelId}
           history=""
           initialMode="received"
           onOpenChange={(nextOpen) => {

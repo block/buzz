@@ -143,12 +143,14 @@ function ThreadPreviewRow({
 
 function WorkingAgentRow({
   avatarUrl,
+  channelId,
   elapsed,
   name,
   onOpen,
   pubkey,
 }: {
   avatarUrl: string | null;
+  channelId: string;
   elapsed: string;
   name: string;
   onOpen: () => void;
@@ -186,6 +188,7 @@ function WorkingAgentRow({
       <div className="absolute right-2 top-2 opacity-0 transition-opacity group-hover/agent:opacity-100 focus-within:opacity-100">
         <AgentHandoffDialog
           agent={{ name, pubkey }}
+          channelId={channelId}
           history=""
           initialMode="received"
         />
@@ -221,6 +224,7 @@ function WorkingAgentRows({
     return (
       <WorkingAgentRow
         avatarUrl={profile?.avatarUrl ?? null}
+        channelId={channelId}
         elapsed={elapsed}
         key={pubkey}
         name={name}
