@@ -245,6 +245,57 @@ async fn session_store_wal_concurrent_open_within_busy_timeout() {
     );
 }
 
+#[tokio::test]
+async fn session_store_worker_scoped_bindings_and_channel_removal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = db_path(dir.path());
+    let store = SqliteSessionStore::open(&path, scope_a()).expect("open");
+    let channel = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let worker0 = ContextKey::Channel(channel).for_worker(0);
+    let worker1 = ContextKey::Channel(channel).for_worker(1);
+    let other_key = ContextKey::Channel(other).for_worker(0);
+    store
+        .save_binding(&worker0, "ses_w0")
+        .await
+        .expect("save w0");
+    store
+        .save_binding(&worker1, "ses_w1")
+        .await
+        .expect("save w1");
+    store
+        .save_binding(&other_key, "ses_other")
+        .await
+        .expect("save other");
+    drop(store);
+
+    let store = SqliteSessionStore::open(&path, scope_a()).expect("reopen");
+    assert_eq!(
+        store
+            .load_binding(&worker0)
+            .await
+            .expect("load w0")
+            .unwrap()
+            .session_id,
+        "ses_w0"
+    );
+    store
+        .remove_bindings_for_channel(channel)
+        .await
+        .expect("remove channel");
+    assert!(store.load_binding(&worker0).await.unwrap().is_none());
+    assert!(store.load_binding(&worker1).await.unwrap().is_none());
+    assert_eq!(
+        store
+            .load_binding(&other_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id,
+        "ses_other"
+    );
+}
+
 fn table_columns(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))

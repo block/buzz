@@ -288,6 +288,25 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
+    async fn remove_bindings_for_channel(&self, channel_id: Uuid) -> Result<(), SessionStoreError> {
+        self.with_conn(move |conn, scope| {
+            conn.execute(
+                "DELETE FROM session_bindings
+                 WHERE scope_agent = ?1 AND scope_relay = ?2 AND scope_adapter = ?3
+                   AND (context_key = ?4 OR context_key LIKE '%:' || ?4)",
+                params![
+                    scope.agent_pubkey,
+                    scope.relay_url,
+                    scope.adapter,
+                    channel_id.to_string()
+                ],
+            )
+            .map_err(|e| SessionStoreError::Io(e.to_string()))?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn is_event_processed(&self, event_id: &str) -> Result<bool, SessionStoreError> {
         let event_id = event_id.to_string();
         self.with_conn(move |conn, scope| {

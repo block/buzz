@@ -13,7 +13,9 @@
 //! - Bindings are **deleted** only when a session is deliberately retired or
 //!   proven invalid: rotation (`MaxTokens` / `MaxTurnRequests` /
 //!   `max_turns_per_session`), `ControlSignal::Rotate` / `SwitchModel`,
-//!   channel membership removal, `session/load` failure, or a malformed row.
+//!   channel membership removal, `session/load` failure, a malformed row, or
+//!   a for-cause [`SessionState::invalidate`](crate::pool::SessionState)
+//!   (prompt / idle-timeout / cancel-cleanup errors).
 //! - Processed-event marking happens only after a successful turn, so
 //!   duplicate relay event IDs produce one reply. A crash mid-turn
 //!   re-processes (at-least-once).
@@ -21,9 +23,10 @@
 //! # Multi-worker invariant
 //!
 //! The store is process-global. In-memory session maps are per-worker.
-//! `EventQueue`'s `in_flight_channels` gate ensures one channel is processed
-//! by one worker at a time, so two workers cannot concurrently load the same
-//! binding.
+//! Bindings are keyed by worker slot (`{index}:{context}`) so two adapter
+//! subprocesses never attach the same session id. `EventQueue`'s
+//! `in_flight_channels` gate still ensures one channel is processed by one
+//! worker at a time.
 //!
 //! # Adapters
 //!
@@ -66,12 +69,15 @@ impl StoreScope {
 }
 
 /// What a session is bound to. Wire format: channel UUID string or `"heartbeat"`.
+/// Worker-scoped keys (from [`ContextKey::for_worker`]) use `{index}:{inner}`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContextKey {
     /// A NIP-29 channel.
     Channel(Uuid),
     /// The harness heartbeat session.
     Heartbeat,
+    /// Opaque pre-formatted wire key, including worker-scoped forms.
+    Wire(String),
 }
 
 impl ContextKey {
@@ -80,8 +86,22 @@ impl ContextKey {
         match self {
             Self::Channel(id) => id.to_string(),
             Self::Heartbeat => "heartbeat".to_string(),
+            Self::Wire(raw) => raw.clone(),
         }
     }
+
+    /// Scope this binding to one pool worker slot.
+    ///
+    /// Two workers must never `session/load` the same adapter session into
+    /// two subprocesses. Wire form: `{worker_index}:{inner}`.
+    pub fn for_worker(&self, worker_index: usize) -> Self {
+        Self::Wire(format!("{worker_index}:{}", self.as_wire()))
+    }
+}
+
+pub(crate) fn context_key_matches_channel(wire: &str, channel_id: Uuid) -> bool {
+    let id = channel_id.to_string();
+    wire == id || wire.ends_with(&format!(":{id}"))
 }
 
 /// A durable binding: IDs and timestamps only. No prompts, keys, or history.
@@ -131,6 +151,12 @@ pub trait SessionStore: Send + Sync {
 
     /// Delete the binding for `key`. Missing rows are success.
     async fn remove_binding(&self, key: &ContextKey) -> Result<(), SessionStoreError>;
+
+    /// Delete every binding for `channel_id`, including worker-scoped keys.
+    ///
+    /// Used when a channel is retired for all workers (membership removal,
+    /// idle `!rotate`). Missing rows are success.
+    async fn remove_bindings_for_channel(&self, channel_id: Uuid) -> Result<(), SessionStoreError>;
 
     /// Whether `event_id` was marked processed after a successful turn.
     async fn is_event_processed(&self, event_id: &str) -> Result<bool, SessionStoreError>;
@@ -225,6 +251,14 @@ impl SessionStore for InMemorySessionStore {
 
     async fn remove_binding(&self, key: &ContextKey) -> Result<(), SessionStoreError> {
         self.lock()?.bindings.remove(&key.as_wire());
+        Ok(())
+    }
+
+    async fn remove_bindings_for_channel(&self, channel_id: Uuid) -> Result<(), SessionStoreError> {
+        let mut inner = self.lock()?;
+        inner
+            .bindings
+            .retain(|wire, _| !context_key_matches_channel(wire, channel_id));
         Ok(())
     }
 
@@ -340,5 +374,52 @@ mod session_store_in_memory_tests {
         assert!(skip_if_already_processed(Some(&store), "seen").await);
         assert!(!skip_if_already_processed(Some(&store), "fresh").await);
         assert!(!skip_if_already_processed(None, "seen").await);
+    }
+
+    #[tokio::test]
+    async fn session_store_worker_keys_and_channel_removal_are_isolated() {
+        let store = InMemorySessionStore::new();
+        let cid = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let worker0 = ContextKey::Channel(cid).for_worker(0);
+        let worker1 = ContextKey::Channel(cid).for_worker(1);
+        let other_key = ContextKey::Channel(other).for_worker(0);
+        store.save_binding(&worker0, "ses_w0").await.unwrap();
+        store.save_binding(&worker1, "ses_w1").await.unwrap();
+        store.save_binding(&other_key, "ses_other").await.unwrap();
+
+        assert_eq!(worker0.as_wire(), format!("0:{cid}"));
+        assert_ne!(worker0.as_wire(), ContextKey::Channel(cid).as_wire());
+        assert_eq!(
+            store
+                .load_binding(&worker0)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            "ses_w0"
+        );
+        assert_eq!(
+            store
+                .load_binding(&worker1)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            "ses_w1"
+        );
+
+        store.remove_bindings_for_channel(cid).await.unwrap();
+        assert!(store.load_binding(&worker0).await.unwrap().is_none());
+        assert!(store.load_binding(&worker1).await.unwrap().is_none());
+        assert_eq!(
+            store
+                .load_binding(&other_key)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            "ses_other"
+        );
     }
 }

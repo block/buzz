@@ -2744,9 +2744,8 @@ async fn tokio_main() -> Result<()> {
                                         0
                                     };
                                     if let Some(store) = session_store.as_ref() {
-                                        if let Err(error) = store
-                                            .remove_binding(&session_store::ContextKey::Channel(ch))
-                                            .await
+                                        if let Err(error) =
+                                            store.remove_bindings_for_channel(ch).await
                                         {
                                             tracing::warn!(
                                                 %error,
@@ -2884,7 +2883,9 @@ async fn tokio_main() -> Result<()> {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
                                             if let Some(store) = session_store.as_ref() {
                                                 if let Err(error) = store
-                                                    .remove_binding(&session_store::ContextKey::Channel(buzz_event.channel_id))
+                                                    .remove_bindings_for_channel(
+                                                        buzz_event.channel_id,
+                                                    )
                                                     .await
                                                 {
                                                     tracing::warn!(
