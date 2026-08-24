@@ -355,6 +355,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     button.configuration?.showsActivityIndicator = false
     if let foregroundColor {
+      // Glass uses the view tint for its selected treatment. Keep it aligned
+      // with the Buzz theme instead of falling back to the system blue tint.
+      button.tintColor = foregroundColor
       button.configuration?.baseForegroundColor = foregroundColor
       activityIndicator.color = foregroundColor
     }

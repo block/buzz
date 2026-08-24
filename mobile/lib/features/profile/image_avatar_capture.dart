@@ -255,28 +255,27 @@ class ImageAvatarCapture extends HookConsumerWidget {
       isFlipping.value = true;
       flipDirection.value = nextLens == CameraLensDirection.back ? 1 : -1;
       error.value = null;
+      final flipMotion = reduceMotion
+          ? null
+          : flipAnimation.animateTo(
+              1,
+              duration: _cameraFlipHalfDuration * 2,
+              curve: Curves.easeInOutCubic,
+            );
       try {
-        if (!reduceMotion) {
-          await flipAnimation.animateTo(
-            0.5,
-            duration: _cameraFlipHalfDuration,
-            curve: Curves.easeInOutCubic,
-          );
-        }
+        if (!reduceMotion) await Future<void>.delayed(_cameraFlipHalfDuration);
         if (!context.mounted) return;
         await active.setDescription(matches.first);
         if (context.mounted) selectedLens.value = nextLens;
-      } on TickerCanceled {
-        return;
       } on CameraException {
         if (context.mounted) error.value = 'Could not switch cameras.';
       } finally {
-        if (context.mounted && !reduceMotion) {
-          await flipAnimation.animateTo(
-            1,
-            duration: _cameraFlipHalfDuration,
-            curve: Curves.easeInOutCubic,
-          );
+        if (context.mounted && flipMotion != null) {
+          try {
+            await flipMotion.orCancel;
+          } on TickerCanceled {
+            // The view was disposed while the camera was switching.
+          }
         }
         if (context.mounted) {
           flipAnimation.value = 0;

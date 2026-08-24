@@ -423,6 +423,10 @@ void runProfileEditMotionAndAccessibilityTests() {
         .where((params) => params['selected'] == true)
         .toList();
     expect(selectedControls.single['icon'], 'palette');
+    expect(
+      selectedControls.single['foregroundColor'],
+      AppTheme.light().colorScheme.primary.toARGB32(),
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
