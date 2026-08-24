@@ -634,11 +634,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       return;
     }
 
-    // Live subscriptions get batched.
+    // Live subscriptions get batched. An EVENT proves the stream is active,
+    // but not that a retry replay is complete; only EOSE is that boundary.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
       _resetClosedRetry(liveSub);
-      liveSub.onStatusChanged?.call(RelaySubscriptionStatus.ready);
       // Track last seen timestamp for reconnect replay.
       if (liveSub.lastSeenCreatedAt == null ||
           event.createdAt > liveSub.lastSeenCreatedAt!) {
@@ -664,20 +664,18 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       return;
     }
 
-    // Live subscription: signal ready.
+    // Live subscription: flush replay callbacks before signaling ready. This
+    // ordering matters for retry replays, whose original ready completer has
+    // already been released.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
       _resetClosedRetry(liveSub);
+      _flushBufferedEventsNow();
       liveSub.onStatusChanged?.call(RelaySubscriptionStatus.ready);
     }
     if (liveSub != null &&
         liveSub.readyCompleter != null &&
         !liveSub.readyCompleter!.isCompleted) {
-      // EOSE is the boundary between replay and live delivery. Flush any
-      // replay events before resolving subscribe(), so callers that begin a
-      // one-shot query immediately afterwards cannot classify a delayed batch
-      // callback as having arrived during that query.
-      _flushBufferedEventsNow();
       liveSub.readyCompleter!.complete();
       liveSub.readyCompleter = null;
     }

@@ -202,6 +202,7 @@ Widget _buildTestable({
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
   Future<Set<String>> Function()? loadChannelBotPubkeys,
+  bool watchChannelMembershipUpdates = false,
   Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
   Future<Map<String, String>> Function()? loadAgentOwners,
   _FakeUserCacheNotifier? userCacheNotifier,
@@ -284,9 +285,10 @@ Widget _buildTestable({
       ),
       if (huddleMembersNotifier != null)
         _mutableHuddleMembersProvider.overrideWith(() => huddleMembersNotifier),
-      channelBotPubkeysProvider(_channelId).overrideWith(
-        (ref) async => loadChannelBotPubkeys?.call() ?? const <String>{},
-      ),
+      if (!watchChannelMembershipUpdates)
+        channelBotPubkeysProvider(_channelId).overrideWith(
+          (ref) async => loadChannelBotPubkeys?.call() ?? const <String>{},
+        ),
       channelBotPubkeysProvider(_huddleChannelId).overrideWith(
         (ref) async => {
           for (final member in huddleMembers)
@@ -894,6 +896,91 @@ void main() {
       relaySession.disconnect();
       await tester.pumpAndSettle();
 
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps Huddle hidden until bot-role replay reaches EOSE', (
+      tester,
+    ) async {
+      final relaySession = _IdentityUpdateRelaySession();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Human DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          relaySessionNotifier: relaySession,
+          watchChannelMembershipUpdates: true,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+
+      relaySession.beginMembershipReplay();
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitReplayedMembership(
+        NostrEvent(
+          id: 'membership-self',
+          pubkey: 'relay',
+          createdAt: 1,
+          kind: 39002,
+          tags: const [
+            ['d', _channelId],
+            ['p', 'self'],
+          ],
+          content: '',
+          sig: 'sig',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitReplayedMembership(
+        NostrEvent(
+          id: 'membership-bot',
+          pubkey: 'relay',
+          createdAt: 2,
+          kind: 39002,
+          tags: const [
+            ['d', _channelId],
+            ['p', 'self'],
+            ['p', 'alice', '', 'bot'],
+          ],
+          content: '',
+          sig: 'sig',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.finishMembershipReplay();
+      await tester.pumpAndSettle();
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });
 
@@ -12859,6 +12946,9 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   NostrFilter? identityFilter;
   void Function(NostrEvent)? _identityListener;
   void Function(String message)? _identityClosedListener;
+  void Function(NostrEvent)? _membershipListener;
+  void Function(RelaySubscriptionStatus status)? _membershipStatusListener;
+  NostrEvent? membershipSnapshot;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -12867,7 +12957,7 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => const [];
+  }) async => membershipSnapshot == null ? const [] : [membershipSnapshot!];
 
   @override
   Future<void Function()> subscribeWithStatus(
@@ -12876,8 +12966,15 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
   }) async {
+    _membershipListener = onEvent;
+    _membershipStatusListener = onStatusChanged;
     onStatusChanged(RelaySubscriptionStatus.ready);
-    return () {};
+    return () {
+      if (identical(_membershipListener, onEvent)) {
+        _membershipListener = null;
+        _membershipStatusListener = null;
+      }
+    };
   }
 
   @override
@@ -12915,6 +13012,20 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
 
   void closeIdentitySubscription() {
     _identityClosedListener?.call('unsupported filter');
+  }
+
+  void beginMembershipReplay() {
+    _membershipStatusListener?.call(RelaySubscriptionStatus.retrying);
+  }
+
+  void emitReplayedMembership(NostrEvent event) {
+    membershipSnapshot = event;
+    _membershipListener?.call(event);
+    _membershipStatusListener?.call(RelaySubscriptionStatus.retrying);
+  }
+
+  void finishMembershipReplay() {
+    _membershipStatusListener?.call(RelaySubscriptionStatus.ready);
   }
 
   void disconnect() {

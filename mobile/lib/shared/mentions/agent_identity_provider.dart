@@ -217,7 +217,7 @@ class _ChannelBotRoleSubscription
           if (_isCurrent(subscriptionVersion)) {
             state = ChannelMembershipUpdateState(
               version: state.version + 1,
-              isReady: true,
+              isReady: state.isReady,
             );
           }
         },
