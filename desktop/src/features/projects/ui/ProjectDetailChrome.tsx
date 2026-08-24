@@ -3,9 +3,6 @@ import type * as React from "react";
 
 import { AppTopChromePortal } from "@/app/AppTopChromePortal";
 import type { Project, Repository } from "@/features/projects/hooks";
-import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
-import type { EntityLinkTab } from "@/shared/lib/entityLink";
-import { ShareLinkButton } from "./ShareLinkButton";
 
 export type ProjectDetailWorkItemCrumb = {
   category: string;
@@ -21,7 +18,6 @@ export function ProjectDetailChrome({
   onGoProjects,
   project,
   repository,
-  shareTab,
 }: {
   /** Repository-scoped controls, rendered left of the project-wide ones. */
   actions?: React.ReactNode;
@@ -31,7 +27,6 @@ export function ProjectDetailChrome({
   onGoProjects: () => void;
   project: Project;
   repository: Repository;
-  shareTab?: EntityLinkTab;
 }) {
   return (
     <AppTopChromePortal>
@@ -42,7 +37,7 @@ export function ProjectDetailChrome({
       >
         <nav
           aria-label="Project breadcrumb"
-          className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65"
+          className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
           style={{
             left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
           }}
@@ -120,12 +115,6 @@ export function ProjectDetailChrome({
           )}
         </nav>
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
-          <ShareLinkButton
-            className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            label="Copy project link"
-            link={projectShareLink(project, shareTab)}
-            testId="project-detail-copy-link"
-          />
           {actions}
         </div>
       </div>
@@ -156,7 +145,7 @@ export function ProjectsWorkspaceChrome({
       >
         <nav
           aria-label="Projects breadcrumb"
-          className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65"
+          className="absolute flex max-w-[50%] min-w-0 -translate-x-1/2 -translate-y-px items-center gap-0.5 text-xs text-sidebar-foreground/65 transition-[left] duration-200 ease-linear motion-reduce:transition-none"
           style={{
             left: "calc(50% + var(--app-top-chrome-center-offset, 0rem))",
           }}

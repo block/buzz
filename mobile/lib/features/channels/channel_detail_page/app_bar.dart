@@ -23,9 +23,7 @@ double _twoLineAppBarTitleContentHeight(
   BuildContext context, {
   required bool isDm,
 }) {
-  final titleStyle = isDm
-      ? context.textTheme.titleSmall
-      : context.textTheme.titleMedium;
+  final titleStyle = context.textTheme.titleSmall;
   final subtitleStyle = isDm
       ? context.textTheme.bodyMedium
       : context.textTheme.bodySmall;
@@ -68,49 +66,68 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                 width: _channelHeaderAvatarSize,
                 height: _channelHeaderAvatarSize,
                 decoration: BoxDecoration(
-                  color: context.colors.primaryContainer,
+                  color: context.colors.surface,
                   shape: BoxShape.circle,
+                  border: Border.fromBorderSide(
+                    BorderSide(
+                      color: context.colors.inverseSurface.withValues(
+                        alpha: 0.07,
+                      ),
+                      strokeAlign: BorderSide.strokeAlignOutside,
+                    ),
+                  ),
                 ),
                 child: Icon(
                   channelIcon(channel),
                   size: 20,
-                  color: context.colors.onPrimaryContainer,
+                  color: context.colors.primary,
                 ),
               ),
-              const SizedBox(width: Grid.xxs),
+              const SizedBox(width: Grid.twelve),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Text(
-                            channel.name,
-                            key: const ValueKey('channel-header-name'),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.titleMedium,
+                child: ConstrainedBox(
+                  key: const ValueKey('channel-header-text-stack'),
+                  constraints: const BoxConstraints(
+                    minHeight: _channelHeaderAvatarSize,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              channel.name,
+                              key: const ValueKey('channel-header-name'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: context.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (channel.isEphemeral) ...[
+                            const SizedBox(width: Grid.quarter),
+                            _HeaderEphemeralBadge(channel: channel),
+                          ],
+                        ],
+                      ),
+                      Text(
+                        memberLabel,
+                        key: const ValueKey('channel-header-member-count'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.textTheme.bodySmall?.copyWith(
+                          color: context.colors.onSurface.withValues(
+                            alpha: 0.65,
                           ),
                         ),
-                        if (channel.isEphemeral) ...[
-                          const SizedBox(width: Grid.quarter),
-                          _HeaderEphemeralBadge(channel: channel),
-                        ],
-                      ],
-                    ),
-                    Text(
-                      memberLabel,
-                      key: const ValueKey('channel-header-member-count'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.textTheme.bodySmall?.copyWith(
-                        color: context.colors.onSurfaceVariant,
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ],

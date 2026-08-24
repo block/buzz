@@ -111,6 +111,7 @@ export function markdownPropsAreEqual(
     prev.customEmoji === next.customEmoji &&
     prev.hardLineBreaks === next.hardLineBreaks &&
     prev.interactive === next.interactive &&
+    prev.blockCode === next.blockCode &&
     prev.mediaInset === next.mediaInset &&
     shallowRecordEqual(
       prev.agentMentionPubkeysByName,

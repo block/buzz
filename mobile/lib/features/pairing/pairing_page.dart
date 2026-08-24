@@ -10,6 +10,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
 import 'pairing_provider.dart';
 import 'pairing_qr_scanner.dart';
@@ -94,10 +95,27 @@ class PairingPage extends HookConsumerWidget {
         ? AppBar(
             foregroundColor: _onboardingInk,
             systemOverlayStyle: onboardingSystemOverlayStyle,
-            leading: IconButton(
-              icon: const Icon(LucideIcons.arrowLeft),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
+            leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
+                ? Grid.quarter + iosGlassChannelHeaderLeadingWidth
+                : null,
+            leading: Theme.of(context).platform == TargetPlatform.iOS
+                ? Padding(
+                    padding: const EdgeInsets.only(left: Grid.quarter),
+                    child: IosGlassNavigationButton(
+                      key: const ValueKey('pairing-ios-glass-back'),
+                      icon: IosGlassNavigationIcon.back,
+                      semanticLabel: 'Back',
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      width: iosGlassChannelHeaderLeadingWidth,
+                      buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                      foregroundColor: _onboardingInk,
+                    ),
+                  )
+                : IconButton(
+                    icon: const Icon(LucideIcons.arrowLeft),
+                    tooltip: 'Back',
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
             title: Text(
               identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
               style: context.textTheme.titleMedium?.copyWith(

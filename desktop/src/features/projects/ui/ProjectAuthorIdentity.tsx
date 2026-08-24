@@ -66,7 +66,7 @@ export function ProjectAuthorIdentity({
             />
             <span className="min-w-0">
               <span className="block truncate font-medium">{label}</span>
-              <span className="block text-primary-foreground/70">
+              <span className="block text-secondary-foreground/70">
                 {roleLabel}
               </span>
             </span>

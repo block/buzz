@@ -33,6 +33,9 @@ class AppTheme {
       success: const Color(0xFF40A02B), // Catppuccin Latte Green — universal
       warning: const Color(0xFFDF8E1D), // Latte Yellow
       accent: scheme.tertiary,
+      huddleDrawerSurface: const Color(0xFF000000),
+      huddleControlSurface: const Color(0xFF333333),
+      onHuddleDrawer: const Color(0xFFFAFAFA),
       topSectionGradient: topSectionGradient,
     );
 
@@ -56,6 +59,12 @@ class AppTheme {
       ), // Catppuccin Macchiato Green — universal
       warning: const Color(0xFFEED49F), // Macchiato Yellow
       accent: scheme.tertiary,
+      huddleDrawerSurface: scheme.primaryContainer,
+      huddleControlSurface: Color.alphaBlend(
+        scheme.onPrimaryContainer.withValues(alpha: 0.18),
+        scheme.primaryContainer,
+      ),
+      onHuddleDrawer: scheme.onPrimaryContainer,
       topSectionGradient: topSectionGradient,
     );
 

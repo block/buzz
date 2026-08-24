@@ -306,11 +306,15 @@ fn effective_discovery_provider_recovers_baked_provider_when_record_has_none() {
     }
 }
 
+/// A provider env-var name no environment sets, so this test does not depend on
+/// what the developer happens to have exported (e.g. `BUZZ_AGENT_PROVIDER`).
+const UNSET_PROVIDER_VAR: &str = "BUZZ_TEST_UNSET_DISCOVERY_PROVIDER";
+
 #[test]
 fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
     let env = BTreeMap::new();
     assert_eq!(
-        effective_discovery_provider(None, Some("BUZZ_AGENT_PROVIDER"), &env).as_deref(),
+        effective_discovery_provider(None, Some(UNSET_PROVIDER_VAR), &env).as_deref(),
         None
     );
     // A runtime that takes no provider env var has nothing to recover from.
@@ -318,10 +322,7 @@ fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
         effective_discovery_provider(
             None,
             None,
-            &BTreeMap::from([(
-                "BUZZ_AGENT_PROVIDER".to_string(),
-                "databricks_v2".to_string()
-            )])
+            &BTreeMap::from([(UNSET_PROVIDER_VAR.to_string(), "databricks_v2".to_string())])
         )
         .as_deref(),
         None

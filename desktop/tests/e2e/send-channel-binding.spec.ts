@@ -84,11 +84,11 @@ test("message with agent mention lands in compose-time channel despite mid-send 
   await input.press("Enter");
   await page.keyboard.type(` ${MESSAGE_TEXT}`);
 
-  // Verify the mention chip is present before submitting
-  const composerChip = input.locator(".agent-mention-highlight", {
-    hasText: "BotA",
-  });
-  await expect(composerChip).toBeVisible();
+  // Verify the agent is addressed before submitting.
+  await expect(input).toHaveText(` ${MESSAGE_TEXT}`);
+  await expect(
+    page.getByTestId(`composer-address-lock-${OUT_OF_CHANNEL_BOT_PUBKEY}`),
+  ).toBeVisible();
 
   // Snapshot the baseline command count before sending
   const baselineCommands = await readCommandLog(page);

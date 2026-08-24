@@ -336,7 +336,7 @@ mod tests {
         let _path_guard = crate::managed_agents::lock_path_mutex();
         let _registry_guard = registry_test_lock();
 
-        let entry = super::super::discover_acp_runtimes_from(None)
+        let entry = super::super::discover_acp_runtimes_from(None, true)
             .into_iter()
             .find(|entry| entry.id == "devin")
             .expect("Devin preset should appear in the runtime catalog");

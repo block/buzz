@@ -1,5 +1,4 @@
 import {
-  BookOpen,
   CircleDot,
   Files as FilesIcon,
   GitCommitHorizontal,
@@ -21,13 +20,13 @@ import type {
   Repository,
 } from "@/features/projects/hooks";
 import {
-  commitAuthorPubkeysFromPullRequests,
   gitContributorPubkeysFromCommits,
   type ProjectContributorActivityCounts,
   type ViewerGitIdentity,
 } from "@/features/projects/lib/projectContributorMatching";
 import { repositoryDiscussionQuery } from "@/features/projects/lib/discussionChannels";
 import type { ProjectRepoHost } from "@/features/projects/lib/projectRepoHost";
+import { projectReviewFilesChangedBody } from "@/features/projects/lib/projectReviewDisplay";
 import { projectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -63,6 +62,8 @@ import {
   type CreateIssueDialogInput,
 } from "./CreateIssueDialog";
 
+const SECTION_HEADER_CLASS = "mx-4 mb-2 rounded-xl bg-muted/40";
+
 type CreatePullRequestAction = {
   projects: Project[];
   reposDir?: string | null;
@@ -92,6 +93,7 @@ export function WorkspaceTabs({
   createIssueAction,
   createIssueRequestKey,
   createPullRequestAction,
+  createPullRequestRequestKey,
   updatePullRequestAction,
   initialTab,
   initialTabRequestKey,
@@ -106,6 +108,7 @@ export function WorkspaceTabs({
   repoDiffLoading,
   selectedCommitHash,
   selectedIssueId,
+  selectedPullRequest,
   selectedPullRequestId,
   sharedHeaderBackdrop,
   pullRequests,
@@ -116,7 +119,6 @@ export function WorkspaceTabs({
   onSelectedIssueIdChange,
   onSelectedPullRequestIdChange,
   onSelectedTabChange,
-  onBranchChange,
   onOpenMergeRecoveryTerminal,
   snapshot,
   snapshotError,
@@ -136,6 +138,7 @@ export function WorkspaceTabs({
   createIssueAction: CreateIssueAction;
   createIssueRequestKey?: number;
   createPullRequestAction?: CreatePullRequestAction;
+  createPullRequestRequestKey?: number;
   updatePullRequestAction?: UpdatePullRequestAction;
   /** Tab to open on mount (workspace vocabulary), e.g. from a share link. */
   initialTab?: string;
@@ -152,6 +155,7 @@ export function WorkspaceTabs({
   repoDiffLoading: boolean;
   selectedCommitHash: string | null;
   selectedIssueId: string | null;
+  selectedPullRequest: ProjectPullRequest | null;
   selectedPullRequestId: string | null;
   sharedHeaderBackdrop?: boolean;
   pullRequests: ProjectPullRequest[];
@@ -166,7 +170,6 @@ export function WorkspaceTabs({
   onSelectedPullRequestIdChange: (id: string | null) => void;
   /** Reports the active tab so the screen breadcrumb can mirror it. */
   onSelectedTabChange?: (tab: string) => void;
-  onBranchChange: (branch: string | null) => void;
   onOpenMergeRecoveryTerminal?: OpenMergeRecoveryTerminal;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
@@ -207,13 +210,13 @@ export function WorkspaceTabs({
     repoSource === "remote" && repoHost.kind === "external"
       ? repoHost.host
       : undefined;
-  const gitDataState: GitDataState = displayedSnapshotLoading
-    ? "checking"
-    : externalHost || displayedSnapshotError || !displayedSnapshot
-      ? "unavailable"
-      : files.length === 0
-        ? "empty"
-        : "available";
+  const gitDataState: GitDataState = displayedSnapshot
+    ? files.length === 0
+      ? "empty"
+      : "available"
+    : displayedSnapshotLoading
+      ? "checking"
+      : "unavailable";
   const unavailableReason =
     gitDataState === "unavailable" && !externalHost
       ? repoSource === "remote"
@@ -236,14 +239,11 @@ export function WorkspaceTabs({
         retryPending={sourceControls?.fetchPending}
       />
     ) : null;
-  const commitAuthorPubkeys = React.useMemo(
-    () => commitAuthorPubkeysFromPullRequests(pullRequests),
-    [pullRequests],
-  );
-  const selectedPullRequest =
-    pullRequests.find(
-      (pullRequest) => pullRequest.id === selectedPullRequestId,
-    ) ?? null;
+  const filesChangedBody = projectReviewFilesChangedBody({
+    hasPopulatedDiff: (repoDiff?.files.length ?? 0) > 0,
+    hasSelectedPullRequest: Boolean(selectedPullRequest),
+    repositoryUnavailable: Boolean(repositoryUnavailableState),
+  });
   const selectedCommitPullRequest = React.useMemo(
     () =>
       pullRequests.find(
@@ -275,6 +275,9 @@ export function WorkspaceTabs({
   const previousCreateIssueRequestKey = React.useRef(createIssueRequestKey);
   const [createPullRequestOpen, setCreatePullRequestOpen] =
     React.useState(false);
+  const previousCreatePullRequestRequestKey = React.useRef(
+    createPullRequestRequestKey,
+  );
 
   React.useEffect(() => {
     if (previousCreateIssueRequestKey.current === createIssueRequestKey) return;
@@ -283,17 +286,25 @@ export function WorkspaceTabs({
   }, [createIssueRequestKey]);
 
   React.useEffect(() => {
+    if (
+      previousCreatePullRequestRequestKey.current ===
+      createPullRequestRequestKey
+    ) {
+      return;
+    }
+    previousCreatePullRequestRequestKey.current = createPullRequestRequestKey;
+    setCreatePullRequestOpen(true);
+  }, [createPullRequestRequestKey]);
+
+  React.useEffect(() => {
     onSelectedTabChange?.(selectedTab);
   }, [onSelectedTabChange, selectedTab]);
 
   React.useEffect(() => {
     if (isPullRequestSelected) {
       setSelectedTab("prs");
-      if (selectedPullRequest?.branchName) {
-        onBranchChange(selectedPullRequest.branchName);
-      }
     }
-  }, [isPullRequestSelected, onBranchChange, selectedPullRequest?.branchName]);
+  }, [isPullRequestSelected]);
 
   React.useEffect(() => {
     if (selectedIssueId) {
@@ -337,12 +348,18 @@ export function WorkspaceTabs({
     [selectedPullRequestId],
   );
   const sectionHeader =
-    selectedTab === "overview" && readmeFile ? (
-      <ProjectSectionHeader icon={BookOpen} title="README" />
-    ) : selectedTab === "files" && files.length > 0 ? (
-      <ProjectSectionHeader icon={FilesIcon} title="Files" />
+    selectedTab === "files" && files.length > 0 ? (
+      <ProjectSectionHeader
+        className={SECTION_HEADER_CLASS}
+        icon={FilesIcon}
+        title="Files"
+      />
     ) : selectedTab === "activity" && !selectedCommitHash ? (
-      <ProjectSectionHeader icon={GitCommitHorizontal} title="Commits" />
+      <ProjectSectionHeader
+        className={SECTION_HEADER_CLASS}
+        icon={GitCommitHorizontal}
+        title="Commits"
+      />
     ) : selectedTab === "issues" && !selectedIssueId ? (
       <ProjectSectionHeader
         action={{
@@ -350,6 +367,7 @@ export function WorkspaceTabs({
           label: "Create task",
           onClick: () => setCreateIssueOpen(true),
         }}
+        className={SECTION_HEADER_CLASS}
         icon={CircleDot}
         title="Tasks"
       />
@@ -363,18 +381,27 @@ export function WorkspaceTabs({
           onClick: () => setCreatePullRequestOpen(true),
           title: "Create review — choose a repository and branches to compare",
         }}
+        className={SECTION_HEADER_CLASS}
         icon={GitPullRequest}
         title="Reviews"
       />
     ) : selectedTab === "channels" ? (
-      <ProjectSectionHeader icon={Hash} title="Channels" />
+      <ProjectSectionHeader
+        className={SECTION_HEADER_CLASS}
+        icon={Hash}
+        title="Channels"
+      />
     ) : selectedTab === "contributors" ? (
-      <ProjectSectionHeader icon={Users} title="Contributors" />
+      <ProjectSectionHeader
+        className={SECTION_HEADER_CLASS}
+        icon={Users}
+        title="Contributors"
+      />
     ) : null;
 
   return (
     <Tabs
-      className="min-w-0 space-y-3"
+      className="flex min-w-0 flex-1 flex-col space-y-3"
       onValueChange={handleTabChange}
       value={selectedTab}
     >
@@ -386,25 +413,29 @@ export function WorkspaceTabs({
           data-testid="project-workspace-tab-menu"
         >
           <ProjectTabsList prsActive={isPullRequestSelected} />
-          {updatePullRequestAction ? (
-            <Button
-              className="h-8 shrink-0 gap-1.5"
-              disabled={updatePullRequestAction.pending}
-              onClick={updatePullRequestAction.onUpdate}
-              size="sm"
-              title="Publish the pushed commit to this review"
-              variant="outline"
-            >
-              <RefreshCw className="h-4 w-4" />
-              {updatePullRequestAction.pending ? "Updating…" : "Update review"}
-            </Button>
-          ) : null}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {updatePullRequestAction ? (
+              <Button
+                className="h-8 shrink-0 gap-1.5"
+                disabled={updatePullRequestAction.pending}
+                onClick={updatePullRequestAction.onUpdate}
+                size="sm"
+                title="Publish the pushed commit to this review"
+                variant="outline"
+              >
+                <RefreshCw className="h-4 w-4" />
+                {updatePullRequestAction.pending
+                  ? "Updating…"
+                  : "Update review"}
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
       {/* Project content follows the same borderless flow as work-item details.
           Inner panels retain standalone chrome, neutralized here. */}
       <div
-        className="-mx-4 [&_[data-project-detail-panel]]:rounded-none [&_[data-project-detail-panel]]:border-0"
+        className="-mx-4 flex flex-1 flex-col [&_[data-project-detail-panel]]:rounded-none [&_[data-project-detail-panel]]:border-0"
         data-testid="project-workspace-panel"
       >
         {sectionHeader}
@@ -426,7 +457,10 @@ export function WorkspaceTabs({
           />
         </TabsContent>
 
-        <TabsContent className="m-0" value="activity">
+        <TabsContent
+          className="m-0 min-h-0 flex-1 flex-col data-[state=active]:flex"
+          value="activity"
+        >
           {repositoryUnavailableState ??
             (selectedCommitHash ? (
               <ProjectCommitDetailPanel
@@ -435,15 +469,12 @@ export function WorkspaceTabs({
                     (commit) => commit.hash === selectedCommitHash,
                   ) ?? null
                 }
-                commitAuthorPubkeys={commitAuthorPubkeys}
                 commitHash={selectedCommitHash}
-                viewerGitIdentity={viewerGitIdentity}
                 diff={commitDiff}
                 diffError={commitDiffError}
                 diffLoading={commitDiffLoading}
                 originAgentName={selectedCommitPullRequest?.originAgentName}
                 originChannelId={selectedCommitPullRequest?.channelId}
-                profiles={profiles}
                 project={project}
               />
             ) : (
@@ -455,6 +486,8 @@ export function WorkspaceTabs({
                   onSelectedCommitHashChange(commit.hash)
                 }
                 profiles={profiles}
+                project={project}
+                projectId={projectId}
                 pullRequests={pullRequests}
                 repoContributors={displayedContributors}
                 snapshot={displayedSnapshot}
@@ -481,8 +514,7 @@ export function WorkspaceTabs({
             }
             error={pullRequestsError}
             filesChanged={
-              repositoryUnavailableState ??
-              (selectedPullRequest ? (
+              filesChangedBody === "files" && selectedPullRequest ? (
                 <ProjectPullRequestFilesChangedPanel
                   diff={repoDiff}
                   error={repoDiffError}
@@ -497,7 +529,9 @@ export function WorkspaceTabs({
                   project={project}
                   pullRequest={selectedPullRequest}
                 />
-              ) : undefined)
+              ) : filesChangedBody === "unavailable" ? (
+                repositoryUnavailableState
+              ) : undefined
             }
             filesCount={repoDiff?.files.length}
             forceOpenFiles={
@@ -511,7 +545,7 @@ export function WorkspaceTabs({
             profiles={profiles}
             project={project}
             pullRequests={pullRequests}
-            selectedPullRequestId={selectedPullRequestId}
+            selectedPullRequest={selectedPullRequest}
           />
         </TabsContent>
 
@@ -549,6 +583,7 @@ export function WorkspaceTabs({
                 files={files}
                 isLoading={displayedSnapshotLoading}
                 onContextChange={onFilesContextChange}
+                onOpenCommit={onSelectedCommitHashChange}
                 profiles={profiles}
                 snapshot={displayedSnapshot}
                 unavailableMessage={

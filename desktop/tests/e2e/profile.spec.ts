@@ -2490,9 +2490,6 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   const getTextScaleState = () =>
     page.evaluate(() => ({
       rootFontSize: getComputedStyle(document.documentElement).fontSize,
-      textRemSize: getComputedStyle(document.documentElement)
-        .getPropertyValue("--buzz-type-rem")
-        .trim(),
       storedScale: localStorage.getItem("buzz:text-scale"),
       webviewZoom: (window as Window & { __BUZZ_E2E_WEBVIEW_ZOOM__?: number })
         .__BUZZ_E2E_WEBVIEW_ZOOM__,
@@ -2523,8 +2520,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    rootFontSize: "16px",
-    textRemSize: "17.6px",
+    rootFontSize: "17.6px",
     storedScale: "1.1",
     webviewZoom: 1,
   });
@@ -2533,7 +2529,6 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
 
   await expect.poll(getTextScaleState).toEqual({
     rootFontSize: "16px",
-    textRemSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
@@ -2542,8 +2537,7 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    rootFontSize: "16px",
-    textRemSize: "19.2px",
+    rootFontSize: "19.2px",
     storedScale: "1.2",
     webviewZoom: 1,
   });
@@ -2552,7 +2546,6 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
 
   await expect.poll(getTextScaleState).toEqual({
     rootFontSize: "16px",
-    textRemSize: "16px",
     storedScale: null,
     webviewZoom: 1,
   });
@@ -2586,56 +2579,54 @@ test("storage clear resets composed font size and keyboard zoom across windows",
     await dispatchZoomIn();
   }
 
-  await expect
-    .poll(() =>
-      page.evaluate(() => ({
+  // Zoom scales the real root; the Font size preference layers a text-only
+  // multiplier on top. Resolve the composed type rem through a rendered probe
+  // so the CSS calc is actually evaluated (root px × 15/14 for "larger").
+  const readTypographyState = () =>
+    page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.fontSize = "var(--buzz-type-rem)";
+      document.documentElement.appendChild(probe);
+      const typeRemPx =
+        Math.round(Number.parseFloat(getComputedStyle(probe).fontSize) * 100) /
+        100;
+      probe.remove();
+      return {
         fontSize: document.documentElement.dataset.fontSize,
-        textRemSize: getComputedStyle(document.documentElement)
-          .getPropertyValue("--buzz-type-rem")
-          .trim(),
+        rootFontSize: getComputedStyle(document.documentElement).fontSize,
+        typeRemPx,
         textScale: localStorage.getItem("buzz:text-scale"),
-      })),
-    )
-    .toEqual({
-      fontSize: "larger",
-      textRemSize: "25.714286px",
-      textScale: "1.5",
+      };
     });
+
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "larger",
+    rootFontSize: "24px",
+    typeRemPx: 25.71,
+    textScale: "1.5",
+  });
 
   const peerPage = await context.newPage();
   await installMockBridge(peerPage);
   await peerPage.goto("/");
   await peerPage.evaluate(() => localStorage.clear());
 
-  await expect
-    .poll(() =>
-      page.evaluate(() => ({
-        fontSize: document.documentElement.dataset.fontSize,
-        textRemSize: getComputedStyle(document.documentElement)
-          .getPropertyValue("--buzz-type-rem")
-          .trim(),
-        textScale: localStorage.getItem("buzz:text-scale"),
-      })),
-    )
-    .toEqual({
-      fontSize: "default",
-      textRemSize: "16px",
-      textScale: null,
-    });
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "16px",
+    typeRemPx: 16,
+    textScale: null,
+  });
 
   await page.keyboard.press(
     process.platform === "darwin" ? "Meta+-" : "Control+-",
   );
-  await expect
-    .poll(() =>
-      page.evaluate(() => ({
-        textRemSize: getComputedStyle(document.documentElement)
-          .getPropertyValue("--buzz-type-rem")
-          .trim(),
-        textScale: localStorage.getItem("buzz:text-scale"),
-      })),
-    )
-    .toEqual({ textRemSize: "14.4px", textScale: "0.9" });
+  await expect.poll(readTypographyState).toEqual({
+    fontSize: "default",
+    rootFontSize: "14.4px",
+    typeRemPx: 14.4,
+    textScale: "0.9",
+  });
 
   await peerPage.close();
 });
@@ -2681,9 +2672,8 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
 
   const agentsSecondaryColor = await agentsPage
-    .getByText(
-      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
-    )
+    .getByTestId("settings-automatic-agent-mentions")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   await page.getByTestId("settings-nav-appearance").click();
   const appearanceSecondaryColor = await page

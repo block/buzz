@@ -294,9 +294,8 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             child: Opacity(
               opacity: chromeOpacity,
               child: SafeArea(
-                child: _MediaViewerCircleButton(
+                child: _MediaViewerCloseButton(
                   key: const ValueKey('message-media-video-viewer-close'),
-                  icon: LucideIcons.x,
                   tooltip: 'Close video viewer',
                   onPressed: () => Navigator.of(context).maybePop(),
                 ),
