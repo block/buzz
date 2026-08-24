@@ -110,6 +110,10 @@ export default {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
+        notification: {
+          DEFAULT: "hsl(var(--notification))",
+          foreground: "hsl(var(--notification-foreground))",
+        },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
