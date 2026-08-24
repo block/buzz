@@ -175,6 +175,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
+  private var contentIcon = "back"
   private var buttonImage: UIImage?
   private var isBusy = false
 
@@ -247,7 +248,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     applyAppearance(from: args)
     channel.setMethodCallHandler { [weak self] call, result in
       if call.method == "setContent" {
-        self?.applyContent(from: call.arguments)
+        self?.setContent(from: call.arguments)
         result(nil)
         return
       }
@@ -367,6 +368,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private func applyContent(from value: Any?) {
     let arguments = value as? [String: Any]
     let icon = arguments?["icon"] as? String
+    contentIcon = icon ?? "back"
     buttonLabel = arguments?["label"] as? String
     if let accessibilityLabel = arguments?["accessibilityLabel"] as? String {
       button.accessibilityLabel = accessibilityLabel
@@ -411,7 +413,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         bottom: iconInset,
         trailing: iconInset
       )
-      let pointSize: CGFloat = icon == "shutter" ? 75 : 17
+      let pointSize: CGFloat = icon == "shutter" ? 80 : 17
       buttonImage = UIImage(
         systemName: buttonIconName,
         withConfiguration: UIImage.SymbolConfiguration(
@@ -422,6 +424,23 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     updateDisplayedContent()
     button.setNeedsUpdateConfiguration()
+  }
+
+  private func setContent(from value: Any?) {
+    let arguments = value as? [String: Any]
+    let nextIcon = arguments?["icon"] as? String ?? "back"
+    let nextLabel = arguments?["label"] as? String
+    guard nextIcon != contentIcon || nextLabel != buttonLabel else {
+      applyContent(from: value)
+      return
+    }
+    let duration = UIAccessibility.isReduceMotionEnabled ? 0 : 0.12
+    UIView.transition(
+      with: button,
+      duration: duration,
+      options: [.transitionCrossDissolve, .beginFromCurrentState, .allowAnimatedContent],
+      animations: { [weak self] in self?.applyContent(from: value) }
+    )
   }
 
   private func updateDisplayedContent() {

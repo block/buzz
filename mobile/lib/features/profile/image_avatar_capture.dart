@@ -384,11 +384,17 @@ class ImageAvatarCapture extends HookConsumerWidget {
                             child: _MorphingCameraAction(
                               key: const ValueKey('image-camera-left-action'),
                               width: sideWidth,
-                              icon: LucideIcons.x,
-                              iosIcon: IosGlassNavigationIcon.close,
+                              icon: isClosing.value
+                                  ? LucideIcons.camera
+                                  : LucideIcons.x,
+                              iosIcon: isClosing.value
+                                  ? IosGlassNavigationIcon.camera
+                                  : IosGlassNavigationIcon.close,
                               label: captured == null ? null : 'Retry',
                               semanticLabel: captured == null
-                                  ? 'Close camera'
+                                  ? isClosing.value
+                                        ? 'Camera'
+                                        : 'Close camera'
                                   : 'Retry',
                               onTap:
                                   isFlipping.value ||
@@ -427,11 +433,17 @@ class ImageAvatarCapture extends HookConsumerWidget {
                             child: _MorphingCameraAction(
                               key: const ValueKey('image-camera-right-action'),
                               width: sideWidth,
-                              icon: LucideIcons.switchCamera,
-                              iosIcon: IosGlassNavigationIcon.rotateCamera,
+                              icon: isClosing.value
+                                  ? LucideIcons.images
+                                  : LucideIcons.switchCamera,
+                              iosIcon: isClosing.value
+                                  ? IosGlassNavigationIcon.photoLibrary
+                                  : IosGlassNavigationIcon.rotateCamera,
                               label: captured == null ? null : 'Use Photo',
                               semanticLabel: captured == null
-                                  ? 'Flip camera'
+                                  ? isClosing.value
+                                        ? 'Photo Library'
+                                        : 'Flip camera'
                                   : 'Use Photo',
                               onTap: isClosing.value
                                   ? null
@@ -555,7 +567,7 @@ class _MorphingCameraAction extends StatelessWidget {
                   child: label == null
                       ? Icon(
                           icon,
-                          key: const ValueKey('camera-action-icon'),
+                          key: ValueKey('camera-action-icon-${iosIcon.name}'),
                           size: 26,
                           color: onTap == null
                               ? context.colors.onSurface.withValues(alpha: 0.38)
