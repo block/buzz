@@ -72,6 +72,7 @@ import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { StartupChangelogDialog } from "@/features/settings/ui/StartupChangelogDialog";
 
 const LOADING_TEXT = "Setting up your community...";
 
@@ -583,6 +584,12 @@ function CommunityApp({
   return (
     <>
       {appContent}
+      {activeCommunity &&
+      communityApplied &&
+      !community.needsSetup &&
+      !transaction ? (
+        <StartupChangelogDialog />
+      ) : null}
       {transaction ? (
         <div
           className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}

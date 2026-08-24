@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import { generateManagedAgentHandoff } from "@/shared/api/agentControl";
+import { sendChannelMessage } from "@/shared/api/tauri";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -95,13 +96,32 @@ export function AgentHandoffDialog({
     enabled: Boolean(selectedEvent),
   });
   const send = useMutation({
-    mutationFn: () =>
-      sendAgentHandoff({
+    mutationFn: async () => {
+      const result = await sendAgentHandoff({
         recipientPubkey: recipient,
         title,
         summary: summary.trim() || undefined,
         history: body,
-      }),
+      });
+      if (channelId) {
+        const recipientAgent = availableAgents.find(
+          (candidate) => candidate.pubkey === recipient,
+        );
+        const recipientName = recipientAgent?.name?.trim() || "Agent";
+        try {
+          await sendChannelMessage(
+            channelId,
+            `@${recipientName} 收到一份 Agent handoff，请运行 \`buzz agents handoff list\` 查看并继续处理：${title.trim() || "未命名任务"}`,
+            null,
+            undefined,
+            [recipient],
+          );
+        } catch (error) {
+          console.warn("Agent handoff notification could not be posted", error);
+        }
+      }
+      return result;
+    },
     onSuccess: () => {
       setOpen(false);
       setRecipient("");
