@@ -23,6 +23,8 @@ export type ChannelAgentSessionAgent = Pick<
   canInterruptTurn: boolean;
   channelIds?: string[];
   channels?: string[];
+  ownerPubkey?: string | null;
+  deleted?: boolean;
 };
 
 type UseChannelAgentSessionsOptions = {
@@ -71,6 +73,8 @@ export function buildChannelAgentSessionCandidates({
       canInterruptTurn: false,
       channelIds: agent.channelIds,
       channels: agent.channels,
+      ownerPubkey: agent.ownerPubkey,
+      deleted: agent.deleted,
     });
   }
 
@@ -85,6 +89,8 @@ export function buildChannelAgentSessionCandidates({
       canInterruptTurn: true,
       channelIds: existing?.channelIds,
       channels: existing?.channels,
+      ownerPubkey: existing?.ownerPubkey,
+      deleted: existing?.deleted,
     });
   }
 

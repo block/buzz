@@ -3,6 +3,8 @@ import { ArrowRightLeft, BookOpen, Send } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
   getAgentHandoff,
@@ -56,6 +58,15 @@ export function AgentHandoffDialog({
   const [summary, setSummary] = React.useState("");
   const [body, setBody] = React.useState(history);
   const relayAgents = useRelayAgentsQuery({ enabled: open }).data ?? [];
+  const ownerPubkeys = React.useMemo(
+    () =>
+      relayAgents.flatMap((agent) =>
+        agent.ownerPubkey ? [agent.ownerPubkey] : [],
+      ),
+    [relayAgents],
+  );
+  const ownerProfiles = useUsersBatchQuery(ownerPubkeys, { enabled: open }).data
+    ?.profiles;
   const queryClient = useQueryClient();
   const received = useQuery({
     queryKey: ["agent-handoffs"],
@@ -192,7 +203,14 @@ export function AgentHandoffDialog({
                   <option value="">Select an Agent</option>
                   {availableAgents.map((candidate) => (
                     <option key={candidate.pubkey} value={candidate.pubkey}>
-                      {candidate.name} ({candidate.pubkey.slice(0, 8)}…)
+                      {candidate.name}
+                      {candidate.deleted ? " [已删除]" : ""} ·{" "}
+                      {candidate.ownerPubkey
+                        ? (ownerProfiles?.[candidate.ownerPubkey.toLowerCase()]
+                            ?.displayName ??
+                          `用户 ${truncatePubkey(candidate.ownerPubkey)}`)
+                        : "未知用户"}{" "}
+                      · {truncatePubkey(candidate.pubkey)}
                     </option>
                   ))}
                 </select>

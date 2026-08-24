@@ -841,6 +841,8 @@ type RawSendChannelMessageResponse = {
 type RawRelayAgent = {
   pubkey: string;
   name: string;
+  owner_pubkey?: string | null;
+  deleted?: boolean;
   agent_type: string;
   channels: string[];
   channel_ids: string[];

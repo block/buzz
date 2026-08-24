@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use buzz_core_pkg::kind::{KIND_AGENT_PROFILE, KIND_MANAGED_AGENT};
+use buzz_core_pkg::kind::{KIND_AGENT_PROFILE, KIND_IA_ARCHIVED_LIST, KIND_MANAGED_AGENT};
 use nostr::Event;
 
 use super::{agents_from_events, first_tag_value, profile_valid_oa_owner_pubkey};
@@ -35,6 +35,36 @@ pub(crate) fn relay_agents_from_events(
     events: &[Event],
     identity_profiles: &[Event],
 ) -> Vec<RelayAgentInfo> {
+    let mut deleted: HashMap<String, String> = HashMap::new();
+    for event in events.iter().filter(|event| event.kind.as_u16() == 5) {
+        for tag in event.tags.iter() {
+            let values = tag.as_slice();
+            let Some(coordinate) = values.get(1) else { continue };
+            let mut parts = coordinate.split(':');
+            if parts.next() != Some("30177") { continue; }
+            let Some(owner) = parts.next() else { continue };
+            let Some(agent) = parts.next() else { continue };
+            if agent.len() == 64
+                && owner.len() == 64
+                && event.pubkey.to_hex().eq_ignore_ascii_case(owner)
+            {
+                deleted.insert(agent.to_ascii_lowercase(), owner.to_ascii_lowercase());
+            }
+        }
+    }
+    for event in events
+        .iter()
+        .filter(|event| event.kind.as_u16() as u32 == KIND_IA_ARCHIVED_LIST)
+    {
+        for tag in event.tags.iter() {
+            let values = tag.as_slice();
+            if values.first().map(String::as_str) == Some("p") {
+                if let Some(agent) = values.get(1).filter(|value| value.len() == 64) {
+                    deleted.entry(agent.to_ascii_lowercase()).or_default();
+                }
+            }
+        }
+    }
     let directory_events: Vec<Event> = events
         .iter()
         .filter(|event| event.kind.as_u16() as u32 == KIND_AGENT_PROFILE)
@@ -58,6 +88,19 @@ pub(crate) fn relay_agents_from_events(
         .filter_map(|event| {
             profile_valid_oa_owner_pubkey(event)
                 .map(|owner| (event.pubkey.to_hex(), owner.to_ascii_lowercase()))
+        })
+        .collect();
+    let profile_names: HashMap<String, String> = identity_profiles
+        .iter()
+        .filter_map(|event| {
+            let value: serde_json::Value = serde_json::from_str(event.content.as_ref()).ok()?;
+            let name = value
+                .get("display_name")
+                .or_else(|| value.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())?;
+            Some((event.pubkey.to_hex().to_ascii_lowercase(), name.to_string()))
         })
         .collect();
 
@@ -89,12 +132,26 @@ pub(crate) fn relay_agents_from_events(
         }
     }
 
+    for agent in &mut agents {
+        let key = agent.pubkey.to_ascii_lowercase();
+        agent.owner_pubkey = verified_owners
+            .get(&key)
+            .cloned()
+            .or_else(|| deleted.get(&key).cloned());
+        agent.deleted = deleted.contains_key(&key);
+    }
+
     for (pubkey, event) in managed_by_agent {
         let Ok(content) = managed_agent_content_from_event(event) else {
             continue;
         };
         if let Some(index) = agent_indexes.get(&pubkey).copied() {
             let agent = &mut agents[index];
+            agent.owner_pubkey = verified_owners
+                .get(&pubkey)
+                .cloned()
+                .or_else(|| deleted.get(&pubkey).cloned());
+            agent.deleted = deleted.contains_key(&pubkey);
             if !content.name.trim().is_empty() {
                 agent.name = content.name;
             }
@@ -105,8 +162,10 @@ pub(crate) fn relay_agents_from_events(
 
         agent_indexes.insert(pubkey.clone(), agents.len());
         agents.push(RelayAgentInfo {
-            pubkey,
+            pubkey: pubkey.clone(),
             name: content.name,
+            owner_pubkey: verified_owners.get(&pubkey).cloned().or_else(|| deleted.get(&pubkey).cloned()),
+            deleted: deleted.contains_key(&pubkey),
             agent_type: "agent".to_string(),
             channels: Vec::new(),
             channel_ids: Vec::new(),
@@ -114,6 +173,33 @@ pub(crate) fn relay_agents_from_events(
             status: "offline".to_string(),
             respond_to: Some(content.respond_to),
             respond_to_allowlist: content.respond_to_allowlist,
+        });
+    }
+
+    // Tombstones may remove the managed definition before the next directory
+    // refresh. Keep a useful historical row so a newly-created same-name agent
+    // cannot be confused with the retired identity.
+    for (pubkey, owner) in deleted {
+        if agent_indexes.contains_key(&pubkey) { continue; }
+        let name = agents
+            .iter()
+            .find(|agent| agent.pubkey.eq_ignore_ascii_case(&pubkey))
+            .map(|agent| agent.name.clone())
+            .or_else(|| profile_names.get(&pubkey).cloned())
+            .unwrap_or_else(|| format!("Agent {}", &pubkey[..8.min(pubkey.len())]));
+        agent_indexes.insert(pubkey.clone(), agents.len());
+        agents.push(RelayAgentInfo {
+            pubkey,
+            name,
+            owner_pubkey: (!owner.is_empty()).then_some(owner),
+            deleted: true,
+            agent_type: "agent".to_string(),
+            channels: Vec::new(),
+            channel_ids: Vec::new(),
+            capabilities: Vec::new(),
+            status: "offline".to_string(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
         });
     }
 
@@ -222,5 +308,26 @@ mod tests {
             Some(crate::managed_agents::RespondTo::Allowlist)
         );
         assert_eq!(agents[0].respond_to_allowlist, vec!["a".repeat(64)]);
+    }
+
+    #[test]
+    fn keeps_deleted_agent_with_owner_and_deleted_marker() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key().to_hex();
+        let owner_pubkey = owner_keys.public_key().to_hex();
+        let identity_profile = oa_profile_event_for(&agent_keys, &owner_keys, r#"{"name":"Old Debug"}"#);
+        let coordinate = format!("30177:{owner_pubkey}:{agent_pubkey}");
+        let deletion = EventBuilder::new(Kind::Custom(5), "")
+            .tags(vec![Tag::parse(["a", coordinate.as_str()]).expect("parse coordinate")])
+            .sign_with_keys(&owner_keys)
+            .expect("sign deletion");
+
+        let agents = relay_agents_from_events(&[deletion], &[identity_profile]);
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "Old Debug");
+        assert_eq!(agents[0].owner_pubkey.as_deref(), Some(owner_pubkey.as_str()));
+        assert!(agents[0].deleted);
     }
 }
