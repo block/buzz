@@ -567,9 +567,21 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final parentAgentPubkeys = ref.watch(
       agentMentionPubkeysProvider(invite.parentChannelId),
     );
+    // Ephemeral Huddle bot membership is authoritative for native enrollment;
+    // parent classification is only best-effort and may miss a valid Huddle
+    // bot. Union both so a Huddle-only agent still enters the preparing state.
+    final huddleBotPubkeys = <String>{
+      for (final member
+          in ref
+                  .watch(channelMembersProvider(invite.ephemeralChannelId))
+                  .value ??
+              const <ChannelMember>[])
+        if (member.isBot) member.pubkey.trim().toLowerCase(),
+    };
     final workingAgentPubkeys = <String>{
       for (final entry in huddleTypingEntries)
-        if (parentAgentPubkeys.contains(entry.pubkey.toLowerCase()))
+        if (parentAgentPubkeys.contains(entry.pubkey.toLowerCase()) ||
+            huddleBotPubkeys.contains(entry.pubkey.toLowerCase()))
           entry.pubkey.toLowerCase(),
     };
     final reactionSenderName = _huddleReactionSenderName(

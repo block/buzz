@@ -5693,6 +5693,17 @@ void main() {
         find.bySemanticsLabel('Pollen, preparing a response'),
         findsOneWidget,
       );
+      // The preparing transition must be announced live. The outer avatar node
+      // excludes descendant semantics, so it must itself become a live region.
+      expect(
+        tester
+            .getSemantics(
+              find.byKey(const ValueKey('huddle-participant-avatar-agent')),
+            )
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
       final dotFinder = find.byKey(const ValueKey('bouncing-dot-2'));
       final initialDotOffset = tester
           .widget<Transform>(dotFinder)
@@ -5744,6 +5755,79 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets(
+      'shows preparing indicator for a Huddle-only bot without a parent role',
+      (tester) async {
+        // Regression: a valid ephemeral Huddle bot with no parent bot role and
+        // no directory identity must still enter the preparing state from its
+        // Huddle typing. Classification must derive from authoritative
+        // ephemeral Huddle bot membership, not parent-channel classification.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final typing = _FakeTypingNotifier([
+          TypingEntry(
+            pubkey: 'agent',
+            expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+          ),
+        ], channelId: _huddleChannelId);
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+          },
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'huddle-only-working-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            // Bot membership is supplied ONLY through the ephemeral Huddle, and
+            // deliberately not through the parent channel (`members`).
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'bot',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            huddleTypingNotifier: typing,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(
+          find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-avatar-image-agent')),
+          findsNothing,
+        );
+        expect(
+          find.bySemanticsLabel('Pollen, preparing a response'),
+          findsOneWidget,
+        );
+      },
+    );
 
     testWidgets('does not revive response dots when typing follows audio', (
       tester,

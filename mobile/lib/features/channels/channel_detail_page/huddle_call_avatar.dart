@@ -106,6 +106,10 @@ class _HuddleCallAvatar extends HookConsumerWidget {
         label: semanticStates,
         hint: onTap == null ? null : 'Tap to focus participant',
         button: onTap != null,
+        // The outer node excludes descendant semantics, so the child
+        // indicator's live region never reaches assistive tech. Promote this
+        // node to a live region while preparing so the label change announces.
+        liveRegion: showPreparingResponse,
         onTap: onTap,
         excludeSemantics: true,
         child: GestureDetector(
