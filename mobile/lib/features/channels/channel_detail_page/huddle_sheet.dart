@@ -4,8 +4,6 @@ const _huddleLifetime = Duration(hours: 1);
 const _huddleAvatarRadius = 52.0;
 const _huddleAvatarFrameSize = 128.0;
 const _huddleSpeakingRingSize = 112.0;
-const _huddleDenseAvatarFrameSize = 104.0;
-const _huddleMinimumAvatarFrameSize = 48.0;
 const _huddleParticipantLabelSpace = 28.0;
 const _huddleDenseParticipantThreshold = 6;
 
@@ -656,6 +654,16 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     retryTooltip: retryTooltip,
                     retryIcon: retryIcon,
                     onRetry: onRetry,
+                    onParticipantTap: (pubkey) {
+                      final isSelf = pubkey == localPubkey || pubkey.isEmpty;
+                      _showHuddleParticipantSpotlight(
+                        context: context,
+                        pubkey: pubkey,
+                        isSelf: isSelf,
+                      );
+                    },
+                    onOverflowTap: () =>
+                        _showHuddleParticipantRoster(context: context),
                   ),
                 ),
                 if (connected)
@@ -742,7 +750,10 @@ class _HuddleCallHeader extends StatelessWidget {
           IconButton(
             key: const ValueKey('huddle-minimize'),
             tooltip: 'Minimize',
-            onPressed: onMinimize,
+            onPressed: () {
+              unawaited(HapticFeedback.selectionClick());
+              onMinimize();
+            },
             icon: const Icon(LucideIcons.chevronDown, size: 32),
           ),
           const Spacer(),
@@ -752,6 +763,7 @@ class _HuddleCallHeader extends StatelessWidget {
             icon: LucideIcons.phoneOff,
             foregroundColor: context.colors.error,
             backgroundColor: context.colors.surfaceContainerHighest,
+            useHapticFeedback: true,
             onPressed: isLeaving ? null : onLeave,
           ),
         ],
