@@ -909,6 +909,8 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
         image.compositeImage(
           person,
           scaledPerson,
+          dstW: scaledSize,
+          dstH: scaledSize,
           dstX:
               ((_outputSize - scaledSize) / 2 +
                       request.offsetX * previewTranslation * translationScale)
@@ -969,26 +971,6 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
   );
   return _EncodedAvatar(animation, poster);
 }
-
-/// Encodes one poster frame for validating animated-avatar framing parity.
-@visibleForTesting
-Uint8List encodeAnimatedAvatarPoster({
-  required Uint8List frame,
-  required double scale,
-}) => _encodeAvatar(
-  _EncodeRequest(
-    frames: [frame],
-    posterIndex: 0,
-    scale: scale,
-    offsetX: 0,
-    offsetY: 0,
-    backdropColor: 0xff0000ff,
-    personOutline: false,
-    shapeScale: 1,
-    shapeOffsetX: 0,
-    shapeOffsetY: 0,
-  ),
-).poster;
 
 extension<T> on Iterable<T> {
   Iterable<T> skipLast(int count) {

@@ -27,6 +27,18 @@ void main() {
     expect(center.r, 255);
   });
 
+  test('encoded poster preserves avatar scales above one', () {
+    final source = image.Image(width: 256, height: 256, numChannels: 4);
+    image.fill(source, color: image.ColorRgba8(255, 0, 0, 255));
+
+    final poster = image.decodePng(
+      encodeAnimatedAvatarPoster(frame: image.encodePng(source), scale: 1.5),
+    )!;
+
+    expect(poster.getPixel(8, 8).r, 255);
+    expect(poster.getPixel(247, 247).r, 255);
+  });
+
   test('capture frame workspaces are isolated', () async {
     final first = await createAnimatedAvatarFrameDirectory(
       parent: Directory.systemTemp,

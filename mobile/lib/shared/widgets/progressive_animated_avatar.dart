@@ -41,10 +41,6 @@ class ProgressiveAnimatedAvatar extends HookWidget {
         key: animationKey,
         url: descriptor.animationUrl,
         fit: fit,
-        // Keep APNG frames at their encoded canvas size. On iOS, resizing the
-        // codec can scale the first frame while later frames retain their
-        // original bounds, which paints the moving cutout in the upper-left.
-        boundDecodeToLayout: false,
         errorBuilder: (_, _, _) => const SizedBox.shrink(),
         frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
           if ((wasSynchronouslyLoaded || frame != null) &&
