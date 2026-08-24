@@ -257,6 +257,8 @@ impl ActionSink for RelayActionSink {
             //    - `p` tag attributes the message to the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
+            //    - `buzz:workflow-owner` lets harnesses apply the owner's
+            //      inbound-author policy after verifying the relay signature
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
             let mut tags = vec![
@@ -266,6 +268,8 @@ impl ActionSink for RelayActionSink {
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
                 Tag::parse(["buzz:workflow", "true"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["buzz:workflow-owner", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
             ];
 
             // Resolve thread ancestry when this is a threaded reply, so the
@@ -774,6 +778,18 @@ mod integration_tests {
         assert!(
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        );
+
+        let owner_tag = stored
+            .event
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow-owner"))
+            .and_then(|tag| tag.as_slice().get(1).map(String::as_str));
+        assert_eq!(
+            owner_tag,
+            Some(author_hex.as_str()),
+            "workflow owner must be explicit so consumers never infer it from p-tag order"
         );
     }
 

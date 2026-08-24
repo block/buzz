@@ -273,6 +273,67 @@ async fn author_allowed(
     }
 }
 
+/// Return the workflow owner attributed by a relay-signed workflow message.
+///
+/// The workflow tags alone are not authority: any ordinary event author can
+/// forge custom tags. Attribution is accepted only when the event signer
+/// matches the relay's NIP-11 `self` key, the event is a kind:9 stream
+/// message, and exactly one canonical marker and workflow-owner tag are
+/// present. Mention `p` tags are never used for attribution.
+fn verified_workflow_owner(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
+    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE {
+        return None;
+    }
+
+    let relay_self = nostr::PublicKey::from_hex(relay_self?).ok()?;
+    if event.pubkey != relay_self {
+        return None;
+    }
+
+    let markers: Vec<&[String]> = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow"))
+        .collect();
+    if markers.len() != 1 || markers[0] != ["buzz:workflow", "true"] {
+        return None;
+    }
+
+    let owners: Vec<&[String]> = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow-owner"))
+        .collect();
+    let [owner_tag] = owners.as_slice() else {
+        return None;
+    };
+    let [_, owner_value] = owner_tag else {
+        return None;
+    };
+    let owner = nostr::PublicKey::from_hex(owner_value).ok()?;
+
+    if event.verify().is_err() {
+        return None;
+    }
+
+    Some(owner.to_hex())
+}
+
+/// Return an author-gate decision only for a verified self-owned workflow.
+///
+/// `None` means the caller must apply the ordinary author policy. A self-owned
+/// workflow is the scheduled equivalent of a heartbeat, but `Nobody` remains
+/// an explicit proactive-only mode and therefore rejects it.
+fn self_owned_workflow_decision(
+    workflow_owner: Option<&str>,
+    agent_pubkey: &str,
+    respond_to: &RespondTo,
+) -> Option<bool> {
+    (workflow_owner == Some(agent_pubkey)).then_some(!matches!(respond_to, RespondTo::Nobody))
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -2017,6 +2078,26 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    let relay_self = match relay.rest_client().relay_self().await {
+        Ok(Some(pubkey)) => {
+            tracing::info!(relay_self = %pubkey, "verified relay signing identity via NIP-11");
+            Some(pubkey)
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "relay NIP-11 document has no stable `self` key; relay-authored workflow wakes will fail closed"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to verify relay signing identity; relay-authored workflow wakes will fail closed"
+            );
+            None
+        }
+    };
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -2866,21 +2947,36 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
-                                let allowed = author_allowed(
+                                let raw_author = buzz_event.event.pubkey.to_hex();
+                                let workflow_owner = verified_workflow_owner(
+                                    &buzz_event.event,
+                                    relay_self.as_deref(),
+                                );
+                                let allowed = match self_owned_workflow_decision(
+                                    workflow_owner.as_deref(),
+                                    &pubkey_hex,
                                     &config.respond_to,
-                                    &config.respond_to_allowlist,
-                                    &author,
-                                    is_dm,
-                                    &owner_cache,
-                                    &ctx.rest_client,
-                                )
-                                .await;
+                                ) {
+                                    Some(decision) => decision,
+                                    None => {
+                                        author_allowed(
+                                            &config.respond_to,
+                                            &config.respond_to_allowlist,
+                                            workflow_owner
+                                                .as_deref()
+                                                .unwrap_or(raw_author.as_str()),
+                                            is_dm,
+                                            &owner_cache,
+                                            &ctx.rest_client,
+                                        )
+                                        .await
+                                    }
+                                };
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
@@ -5333,6 +5429,153 @@ mod owner_cache_tests {
 #[cfg(test)]
 mod author_gate_tests {
     use super::*;
+
+    #[test]
+    fn test_verified_workflow_owner_accepts_relay_signed_workflow_message() {
+        let relay_keys = nostr::Keys::generate();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+            .tags([
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+
+        assert_eq!(
+            verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex())),
+            Some(workflow_owner)
+        );
+    }
+
+    #[test]
+    fn test_verified_workflow_owner_rejects_forged_workflow_tags() {
+        let relay_keys = nostr::Keys::generate();
+        let stranger_keys = nostr::Keys::generate();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+            .tags([
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&stranger_keys)
+            .unwrap();
+
+        assert_eq!(
+            verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_verified_workflow_owner_rejects_tampered_relay_event() {
+        let relay_keys = nostr::Keys::generate();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let mut event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+            .tags([
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+        event.content = "tampered".into();
+
+        assert_eq!(
+            verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_verified_workflow_owner_rejects_ambiguous_tags() {
+        let relay_keys = nostr::Keys::generate();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        for duplicate_tag in [
+            nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+            nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()]).unwrap(),
+        ] {
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+                .tags([
+                    nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                    nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()]).unwrap(),
+                    duplicate_tag,
+                ])
+                .sign_with_keys(&relay_keys)
+                .unwrap();
+
+            assert_eq!(
+                verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex())),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn test_verified_workflow_owner_rejects_wrong_kind() {
+        let relay_keys = nostr::Keys::generate();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(1), "run")
+            .tags([
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+
+        assert_eq!(
+            verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_owner_only_accepts_self_owned_relay_workflow() {
+        let relay_keys = nostr::Keys::generate();
+        let agent_keys = nostr::Keys::generate();
+        let agent_pubkey = agent_keys.public_key().to_hex();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+            .tags([
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow-owner", agent_pubkey.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+
+        let workflow_owner =
+            verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex()));
+        assert_eq!(
+            self_owned_workflow_decision(
+                workflow_owner.as_deref(),
+                &agent_pubkey,
+                &RespondTo::OwnerOnly,
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_nobody_rejects_self_owned_relay_workflow() {
+        let relay_keys = nostr::Keys::generate();
+        let agent_pubkey = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+            .tags([
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow-owner", agent_pubkey.as_str()]).unwrap(),
+            ])
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+
+        let workflow_owner =
+            verified_workflow_owner(&event, Some(&relay_keys.public_key().to_hex()));
+        assert_eq!(
+            self_owned_workflow_decision(
+                workflow_owner.as_deref(),
+                &agent_pubkey,
+                &RespondTo::Nobody,
+            ),
+            Some(false)
+        );
+    }
 
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
