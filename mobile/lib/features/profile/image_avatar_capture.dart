@@ -29,6 +29,7 @@ const _expandedControlOffset = 119.5;
 const _reviewControlGap = Grid.twelve;
 const _captureMotionDuration = Duration(milliseconds: 180);
 const _shutterExitDuration = Duration(milliseconds: 150);
+const _cameraFlipHalfDuration = Duration(milliseconds: 100);
 
 /// Builds the inline still-photo camera used by the profile avatar editor.
 typedef ImageAvatarCaptureBuilder =
@@ -80,6 +81,10 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final cameras = useState<List<CameraDescription>>(const []);
     final selectedLens = useState(CameraLensDirection.front);
     final cameraGeneration = useState(0);
+    final flipAnimation = useAnimationController(
+      duration: _cameraFlipHalfDuration * 2,
+    );
+    final flipDirection = useState(1.0);
     final isInitializing = useState(initialCapturedBytes == null);
     final isFlipping = useState(false);
     final isCapturing = useState(false);
@@ -248,14 +253,35 @@ class ImageAvatarCapture extends HookConsumerWidget {
       if (matches.isEmpty) return;
       unawaited(HapticFeedback.selectionClick());
       isFlipping.value = true;
+      flipDirection.value = nextLens == CameraLensDirection.back ? 1 : -1;
       error.value = null;
       try {
+        if (!reduceMotion) {
+          await flipAnimation.animateTo(
+            0.5,
+            duration: _cameraFlipHalfDuration,
+            curve: Curves.easeInOutCubic,
+          );
+        }
+        if (!context.mounted) return;
         await active.setDescription(matches.first);
         if (context.mounted) selectedLens.value = nextLens;
+      } on TickerCanceled {
+        return;
       } on CameraException {
         if (context.mounted) error.value = 'Could not switch cameras.';
       } finally {
-        if (context.mounted) isFlipping.value = false;
+        if (context.mounted && !reduceMotion) {
+          await flipAnimation.animateTo(
+            1,
+            duration: _cameraFlipHalfDuration,
+            curve: Curves.easeInOutCubic,
+          );
+        }
+        if (context.mounted) {
+          flipAnimation.value = 0;
+          isFlipping.value = false;
+        }
       }
     }
 
@@ -313,37 +339,56 @@ class ImageAvatarCapture extends HookConsumerWidget {
             top: 0,
             height: imageAvatarCameraPreviewSize,
             child: Center(
-              child: AnimatedContainer(
-                key: const ValueKey('image-camera-preview-size'),
-                duration: reduceMotion ? Duration.zero : _captureMotionDuration,
-                curve: Curves.easeOutCubic,
-                width: previewSize,
-                height: previewSize,
-                child: ClipOval(
-                  child: ColoredBox(
-                    color: Colors.black,
-                    child: captured != null
-                        ? Image.memory(captured, fit: BoxFit.cover)
-                        : controller.value != null
-                        ? _CameraPreview(controller: controller.value!)
-                        : initialPreview != null
-                        ? FittedBox(
-                            key: const ValueKey(
-                              'image-camera-initial-preview-scale',
+              child: AnimatedBuilder(
+                animation: flipAnimation,
+                builder: (context, child) {
+                  final progress = flipAnimation.value;
+                  final angle = progress <= 0.5
+                      ? progress * pi
+                      : (progress - 1) * pi;
+                  return Transform(
+                    key: const ValueKey('image-camera-preview-flip'),
+                    alignment: Alignment.center,
+                    transform: Matrix4.identity()
+                      ..setEntry(3, 2, 0.0015)
+                      ..rotateY(angle * flipDirection.value),
+                    child: child,
+                  );
+                },
+                child: AnimatedContainer(
+                  key: const ValueKey('image-camera-preview-size'),
+                  duration: reduceMotion
+                      ? Duration.zero
+                      : _captureMotionDuration,
+                  curve: Curves.easeOutCubic,
+                  width: previewSize,
+                  height: previewSize,
+                  child: ClipOval(
+                    child: ColoredBox(
+                      color: Colors.black,
+                      child: captured != null
+                          ? Image.memory(captured, fit: BoxFit.cover)
+                          : controller.value != null
+                          ? _CameraPreview(controller: controller.value!)
+                          : initialPreview != null
+                          ? FittedBox(
+                              key: const ValueKey(
+                                'image-camera-initial-preview-scale',
+                              ),
+                              fit: BoxFit.cover,
+                              child: SizedBox.square(
+                                dimension: _avatarPreviewSize,
+                                child: initialPreview,
+                              ),
+                            )
+                          : Center(
+                              child: isInitializing.value
+                                  ? const BuzzLoadingIndicator(
+                                      semanticLabel: 'Starting camera',
+                                    )
+                                  : const Icon(LucideIcons.cameraOff, size: 32),
                             ),
-                            fit: BoxFit.cover,
-                            child: SizedBox.square(
-                              dimension: _avatarPreviewSize,
-                              child: initialPreview,
-                            ),
-                          )
-                        : Center(
-                            child: isInitializing.value
-                                ? const BuzzLoadingIndicator(
-                                    semanticLabel: 'Starting camera',
-                                  )
-                                : const Icon(LucideIcons.cameraOff, size: 32),
-                          ),
+                    ),
                   ),
                 ),
               ),
