@@ -436,7 +436,9 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      // The thread providers auto-dispose without a listener; hold one for
+      // the test's duration, mirroring an open thread page.
+      container.listen(threadRepliesWithLocalProvider(args), (_, _) {});
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
@@ -515,7 +517,9 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      // The thread providers auto-dispose without a listener; hold one for
+      // the test's duration, mirroring an open thread page.
+      container.listen(threadRepliesWithLocalProvider(args), (_, _) {});
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
