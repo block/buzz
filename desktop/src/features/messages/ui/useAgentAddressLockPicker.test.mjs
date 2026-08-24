@@ -377,7 +377,7 @@ test("removing the last agent chip clears its automatic address", async () => {
   assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
 });
 
-test("removing human mentions and restored agent chips leaves pre-existing locks unchanged", async () => {
+test("removing human mentions is ignored while removing a restored agent chip clears its lock", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
@@ -418,8 +418,9 @@ test("removing human mentions and restored agent chips leaves pre-existing locks
     result.current.syncAddressedAgentsFromText("@Alice @Existing Agent"),
   );
   act(() => result.current.syncAddressedAgentsFromText("@Alice"));
+  assert.deepEqual(removedPubkeys, ["existing-lock"]);
   act(() => result.current.syncAddressedAgentsFromText(""));
-  assert.deepEqual(removedPubkeys, []);
+  assert.deepEqual(removedPubkeys, ["existing-lock"]);
 });
 
 test("selecting an agent from the explicit picker auto-addresses it", async () => {

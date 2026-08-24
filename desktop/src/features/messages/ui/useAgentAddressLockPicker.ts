@@ -82,11 +82,11 @@ export function useAgentAddressLockPicker({
     unpinnedAgentPubkeysRef.current.clear();
   }
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
-  const mentionAddressedAgentPubkeysRef = React.useRef(new Set<string>());
+  const visibleAgentMentionPubkeysRef = React.useRef(new Set<string>());
   const mentionSyncScopeRef = React.useRef(audienceScope);
   if (mentionSyncScopeRef.current !== audienceScope) {
     mentionSyncScopeRef.current = audienceScope;
-    mentionAddressedAgentPubkeysRef.current.clear();
+    visibleAgentMentionPubkeysRef.current.clear();
   }
   const [announcement, setAnnouncement] = React.useState("");
   const lockedAgents = React.useMemo<ComposerAddressAgent[]>(
@@ -117,7 +117,7 @@ export function useAgentAddressLockPicker({
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
       if (audienceScope && normalized) {
-        mentionAddressedAgentPubkeysRef.current.add(normalized);
+        visibleAgentMentionPubkeysRef.current.add(normalized);
       }
     },
     [audienceScope],
@@ -131,15 +131,15 @@ export function useAgentAddressLockPicker({
           .filter((ref) => ref.isAgent)
           .map((ref) => normalizePubkey(ref.pubkey)),
       );
-      for (const pubkey of mentionAddressedAgentPubkeysRef.current) {
+      for (const pubkey of visibleAgentMentionPubkeysRef.current) {
         if (
           !presentAgentPubkeys.has(pubkey) &&
           lockedAgentPubkeys.has(pubkey)
         ) {
-          mentionAddressedAgentPubkeysRef.current.delete(pubkey);
           audience.removePubkey(pubkey);
         }
       }
+      visibleAgentMentionPubkeysRef.current = presentAgentPubkeys;
     },
     [
       audience.removePubkey,
@@ -312,6 +312,11 @@ export function useAgentAddressLockPicker({
           return { pubkey, displayName };
         });
       const { text } = richText.getPlainTextAndCursor();
+      for (const agent of targetAgents) {
+        if (getMentionOffsets(text, agent.displayName).length > 0) {
+          visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
+        }
+      }
       const missingAgents = targetAgents.filter(
         (agent) =>
           (!unpinnedAgentPubkeysRef.current.has(agent.pubkey) ||
@@ -323,6 +328,7 @@ export function useAgentAddressLockPicker({
         mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
           isAgent: true,
         });
+        visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
       }
       const insertedText = `${missingAgents
         .map((agent) => `@${agent.displayName}`)
