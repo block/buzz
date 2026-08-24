@@ -83,13 +83,7 @@ class _AspectCorrectCameraPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final orientation = controller.value.deviceOrientation;
-    final isLandscape =
-        orientation == DeviceOrientation.landscapeLeft ||
-        orientation == DeviceOrientation.landscapeRight;
-    final aspectRatio = isLandscape
-        ? controller.value.aspectRatio
-        : 1 / controller.value.aspectRatio;
+    final aspectRatio = 1 / controller.value.aspectRatio;
     return FittedBox(
       fit: BoxFit.cover,
       clipBehavior: Clip.hardEdge,

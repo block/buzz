@@ -6,9 +6,7 @@ import 'package:buzz/features/profile/animated_avatar_capture.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image/image.dart' as image;
@@ -43,46 +41,15 @@ void main() {
     expect(first.path, isNot(second.path));
   });
 
-  group('animatedAvatarFrameRotationDegrees', () {
-    test('compensates front camera frames for every device orientation', () {
-      const expected = {
-        DeviceOrientation.portraitUp: 270,
-        DeviceOrientation.landscapeRight: 180,
-        DeviceOrientation.portraitDown: 90,
-        DeviceOrientation.landscapeLeft: 0,
-      };
-
-      for (final entry in expected.entries) {
-        expect(
-          animatedAvatarFrameRotationDegrees(
-            sensorOrientation: 270,
-            deviceOrientation: entry.key,
-            lensDirection: CameraLensDirection.front,
-          ),
-          entry.value,
-        );
-      }
-    });
-
-    test('compensates back camera frames for every device orientation', () {
-      const expected = {
-        DeviceOrientation.portraitUp: 90,
-        DeviceOrientation.landscapeRight: 180,
-        DeviceOrientation.portraitDown: 270,
-        DeviceOrientation.landscapeLeft: 0,
-      };
-
-      for (final entry in expected.entries) {
-        expect(
-          animatedAvatarFrameRotationDegrees(
-            sensorOrientation: 90,
-            deviceOrientation: entry.key,
-            lensDirection: CameraLensDirection.back,
-          ),
-          entry.value,
-        );
-      }
-    });
+  test('normalizes the fixed portrait camera sensor correction', () {
+    expect(
+      animatedAvatarPortraitFrameRotationDegrees(sensorOrientation: 270),
+      270,
+    );
+    expect(
+      animatedAvatarPortraitFrameRotationDegrees(sensorOrientation: 450),
+      90,
+    );
   });
 
   testWidgets('completed review frames survive lifecycle changes', (

@@ -152,6 +152,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
             enableAudio: false,
           );
           await next.initialize();
+          await next.lockCaptureOrientation(DeviceOrientation.portraitUp);
           if (disposed || generation != cameraGeneration.value) {
             await next.dispose();
             return;
@@ -266,6 +267,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
         if (!reduceMotion) await Future<void>.delayed(_cameraFlipHalfDuration);
         if (!context.mounted) return;
         await active.setDescription(matches.first);
+        await active.lockCaptureOrientation(DeviceOrientation.portraitUp);
         if (context.mounted) selectedLens.value = nextLens;
       } on CameraException {
         if (context.mounted) error.value = 'Could not switch cameras.';
@@ -586,13 +588,7 @@ class _CameraPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final orientation = controller.value.deviceOrientation;
-    final landscape =
-        orientation == DeviceOrientation.landscapeLeft ||
-        orientation == DeviceOrientation.landscapeRight;
-    final aspectRatio = landscape
-        ? controller.value.aspectRatio
-        : 1 / controller.value.aspectRatio;
+    final aspectRatio = 1 / controller.value.aspectRatio;
     return FittedBox(
       fit: BoxFit.cover,
       clipBehavior: Clip.hardEdge,

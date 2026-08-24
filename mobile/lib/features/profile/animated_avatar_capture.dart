@@ -144,6 +144,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                 : ImageFormatGroup.yuv420,
           );
           await next.initialize();
+          await next.lockCaptureOrientation(DeviceOrientation.portraitUp);
           if (disposed) {
             await next.dispose();
             return;
@@ -267,10 +268,8 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           try {
             final request = _FrameRequest.fromCameraImage(
               cameraImage,
-              rotationDegrees: animatedAvatarFrameRotationDegrees(
+              rotationDegrees: animatedAvatarPortraitFrameRotationDegrees(
                 sensorOrientation: active.description.sensorOrientation,
-                deviceOrientation: active.value.deviceOrientation,
-                lensDirection: active.description.lensDirection,
               ),
               mirror:
                   active.description.lensDirection == CameraLensDirection.front,
