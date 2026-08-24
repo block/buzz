@@ -8,15 +8,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_AGENT_WAKE, KIND_WORKFLOW_DEF};
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_db::event::EventQuery;
+use buzz_pubsub::EventTopic;
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, DoorbellContext};
+use buzz_workflow::executor::WorkflowCause;
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::handlers::event::dispatch_persistent_event;
+use crate::handlers::event::{dispatch_persistent_event, fan_out_event_to_local_subscribers};
 use crate::state::AppState;
 
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
@@ -148,6 +151,17 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+/// Producer-side rollout gate for the durable delivery protocol.
+fn ensure_workflow_agent_delivery_enabled(enabled: bool) -> Result<(), ActionSinkError> {
+    if enabled {
+        Ok(())
+    } else {
+        Err(ActionSinkError::InvalidInput(
+            "workflow agent delivery is disabled until ACP harnesses support durable wakes".into(),
+        ))
+    }
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -170,17 +184,23 @@ impl RelayActionSink {
 }
 
 impl ActionSink for RelayActionSink {
+    #[allow(clippy::too_many_arguments)]
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
+        step_id: &str,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        doorbell: &DoorbellContext,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let step_id = step_id.to_owned();
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
+        let doorbell = doorbell.clone();
         let reply_to = reply_to.map(str::to_owned);
 
         Box::pin(async move {
@@ -189,6 +209,13 @@ impl ActionSink for RelayActionSink {
                 .state
                 .upgrade()
                 .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // This producer-side rollout fence is intentionally before all
+            // workflow-message side effects. Legacy ACPs cannot recognize the
+            // durable protocol marker and `respond-to=anyone` would execute a
+            // visible relay-authored kind:9 without claiming its delivery row.
+            // Operators enable the protocol only after upgrading ACP harnesses.
+            ensure_workflow_agent_delivery_enabled(state.config.workflow_agent_delivery_enabled)?;
 
             // The run carries its owning community (`community_id`); the
             // relay-signed kind:9 message belongs to *that* community, never the
@@ -242,6 +269,58 @@ impl ActionSink for RelayActionSink {
             })?;
             let author_pubkey_bytes = author_pubkey.to_bytes().to_vec();
             let author_pubkey_hex = author_pubkey.to_hex();
+            // The referenced kind:30620 event is the managed agent's signed
+            // authority artifact. Resolve that immutable revision by exact ID;
+            // a human-owner management event may be the current coordinate
+            // replacement, but it must never become execution authority.
+            let mut definition_query = EventQuery::for_community(tenant.community());
+            definition_query.channel_id = Some(channel_uuid);
+            definition_query.kinds = Some(vec![KIND_WORKFLOW_DEF as i32]);
+            definition_query.ids = Some(vec![hex::decode(&doorbell.definition_event_id).map_err(
+                |_| ActionSinkError::InvalidInput("invalid workflow definition event id".into()),
+            )?]);
+            let definition = state
+                .db
+                .query_events(&definition_query)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "owner-signed workflow definition {workflow_id} is unavailable"
+                    ))
+                })?;
+            let definition_event_id = definition.event.id.to_hex();
+            if !definition_event_id.eq_ignore_ascii_case(&doorbell.definition_event_id) {
+                return Err(ActionSinkError::Database(
+                    "workflow definition changed while the run was executing".into(),
+                ));
+            }
+            // Mention routing comes only from the owner-signed template, never
+            // from values rendered out of a trigger event or webhook payload.
+            // This preserves explicit workflow targets without allowing source
+            // text such as `{{trigger.text}}` to wake a different agent.
+            let (signed_workflow, _) =
+                buzz_workflow::WorkflowEngine::parse_yaml(&definition.event.content).map_err(
+                    |e| ActionSinkError::InvalidInput(format!("invalid workflow definition: {e}")),
+                )?;
+            let routing_text = signed_workflow
+                .steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .and_then(|step| match &step.action {
+                    buzz_workflow::schema::ActionDef::SendMessage { text, .. } => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    ActionSinkError::InvalidInput(format!(
+                        "workflow step {step_id} is not a send_message action"
+                    ))
+                })?;
+
             let is_member = state
                 .is_member_cached(tenant.community(), channel_uuid, &author_pubkey_bytes)
                 .await
@@ -254,23 +333,19 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `workflow-owner` identifies the claimed principal, but ACP
+            //      grants authority only from the referenced owner-signed definition
+            //    - `workflow-definition` binds the exact kind:30620 event and step
+            //    - the owner is always p-tagged; extra wake targets are resolved
+            //      only from the owner-signed template, never rendered cause data
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
-            //    - one `p` tag per `@Name` that resolves to a channel member,
-            //      so mentioned agents are woken (wake is `p`-tag gated)
-            let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-                Tag::parse(["h", &channel_id_canonical])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            ];
-
-            // Resolve thread ancestry when this is a threaded reply, so the
-            // built event carries NIP-10 `root`/`reply` e-tags and persists real
-            // thread metadata (matching the ingest path) instead of top-level.
+            let cause_tag = match &doorbell.cause {
+                WorkflowCause::Event(id) => ["workflow-cause", "event", id.as_str()],
+                WorkflowCause::Schedule(slot) => ["workflow-cause", "schedule", slot.as_str()],
+                WorkflowCause::Command(id) => ["workflow-cause", "command", id.as_str()],
+                WorkflowCause::Webhook => ["workflow-cause", "webhook", ""],
+            };
             let reply_ancestry = match reply_to.as_deref() {
                 Some(parent_hex) => Some(
                     crate::handlers::ingest::resolve_relay_reply_thread_meta(
@@ -285,11 +360,47 @@ impl ActionSink for RelayActionSink {
                 None => None,
             };
 
-            // NIP-10 e-tags for the thread. Marked `root`/`reply` so clients and
-            // the ingest resolver read the ancestry the same way. A direct reply
-            // (parent == root) emits a single `reply` tag; a nested reply emits
-            // the `root` + `reply` pair — matching `buzz_sdk::builders::thread_tags`
-            // so every writer produces one wire shape per reply kind.
+            let mut tags = vec![
+                Tag::parse(["workflow-run", doorbell.run_id.to_string().as_str()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow-run tag: {e}")))?,
+                Tag::parse(["workflow-step", step_id.as_str()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow-step tag: {e}")))?,
+                Tag::parse(["workflow-owner", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow-owner tag: {e}")))?,
+                Tag::parse(["workflow-definition", &definition_event_id, &step_id]).map_err(
+                    |e| ActionSinkError::EventBuild(format!("workflow-definition tag: {e}")),
+                )?,
+                Tag::parse(cause_tag)
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow-cause tag: {e}")))?,
+                Tag::parse(["p", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["h", &channel_id_canonical])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "message-v1"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+
+            // Resolve only owner-signed `@Name` mentions to member pubkeys.
+            // Dynamic trigger/webhook values are deliberately excluded from
+            // routing, even though ACP may render them into the local prompt.
+            let members = state
+                .db
+                .get_members(tenant.community(), channel_uuid)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
+            let users = state
+                .db
+                .get_users_bulk(tenant.community(), &member_pubkeys)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let named_members: Vec<(String, String)> = users
+                .into_iter()
+                .filter_map(|u| {
+                    let name = u.display_name?;
+                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
+                })
+                .collect();
             if let Some(ancestry) = &reply_ancestry {
                 let root_hex = ancestry.root_hex();
                 let parent_hex = ancestry.parent_hex();
@@ -312,29 +423,8 @@ impl ActionSink for RelayActionSink {
                 }
             }
 
-            // Resolve `@Name` mentions to channel-member pubkeys and append a
-            // `p` tag for each (skipping the author, already tagged above). A
-            // resolution failure must not drop the message, so log and proceed
-            // with the base tags.
-            let members = state
-                .db
-                .get_members(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let users = state
-                .db
-                .get_users_bulk(tenant.community(), &member_pubkeys)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let named_members: Vec<(String, String)> = users
-                .into_iter()
-                .filter_map(|u| {
-                    let name = u.display_name?;
-                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
-                })
-                .collect();
-            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
+            let mut wake_targets = vec![author_pubkey_hex.clone()];
+            for mentioned in resolve_mention_pubkeys(&routing_text, &named_members) {
                 if mentioned == author_pubkey_hex {
                     continue;
                 }
@@ -342,80 +432,203 @@ impl ActionSink for RelayActionSink {
                     Tag::parse(["p", &mentioned])
                         .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
                 );
+                wake_targets.push(mentioned);
             }
 
-            let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
-            let event = EventBuilder::new(kind, &text)
-                .tags(tags)
-                .sign_with_keys(&state.relay_keypair)
-                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
-
-            let event_id_hex = event.id.to_hex();
-            let event_id_bytes = event.id.as_bytes().to_vec();
-            let kind_u32 = KIND_STREAM_MESSAGE;
-
-            let event_created_at = {
-                let ts = event.created_at.as_secs() as i64;
-                chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
-            };
-
-            info!(
-                event_id = %event_id_hex,
-                channel_id = %channel_id_canonical,
-                author = %author_pubkey,
-                "Workflow SendMessage: posting kind {kind_u32} event"
-            );
-
-            // 4. Persist event with thread metadata (matches REST handler path).
-            //    Threaded replies persist the resolved parent/root/depth; a
-            //    non-reply workflow message stays top-level (depth=0, no parent).
-            let thread_meta_owned = reply_ancestry.map(|ancestry| {
-                ancestry.into_thread_meta(event_id_bytes.clone(), event_created_at, channel_uuid)
-            });
-            let thread_meta = Some(match &thread_meta_owned {
-                Some(owned) => owned.as_params(),
-                None => buzz_db::event::ThreadMetadataParams {
-                    event_id: &event_id_bytes,
-                    event_created_at,
-                    channel_id: channel_uuid,
-                    parent_event_id: None,
-                    parent_event_created_at: None,
-                    root_event_id: None,
-                    root_event_created_at: None,
-                    depth: 0,
-                    broadcast: false,
-                },
-            });
-
-            let (stored_event, was_inserted) = state
+            // The owner is always the first durable target. Consult that
+            // identity before signing or publishing so a retry returns the
+            // canonical visible message instead of creating an orphan duplicate.
+            let (delivery_identity_lock, existing_message_event_id) = state
                 .db
-                .insert_event_with_thread_metadata(
+                .lock_workflow_agent_delivery_identity(
                     tenant.community(),
-                    &event,
-                    Some(channel_uuid),
-                    thread_meta,
+                    doorbell.run_id,
+                    &step_id,
+                    &author_pubkey_bytes,
                 )
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let kind_u32 = KIND_STREAM_MESSAGE;
+            let (event, event_id_bytes, event_created_at) = if let Some((message_id, created_at)) =
+                existing_message_event_id
+            {
+                let stored = state
+                    .db
+                    .get_event_by_id(tenant.community(), &message_id)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        ActionSinkError::Database(
+                            "workflow delivery references a missing visible event".into(),
+                        )
+                    })?;
+                wake_targets = stored
+                    .event
+                    .tags
+                    .iter()
+                    .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+                    .filter_map(|tag| tag.as_slice().get(1).cloned())
+                    .collect();
+                (None, message_id, created_at)
+            } else {
+                let event = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), text.clone())
+                    .tags(tags)
+                    .sign_with_keys(&state.relay_keypair)
+                    .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+                let created_at =
+                    chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+                        .unwrap_or_else(Utc::now);
+                let id = event.id.as_bytes().to_vec();
+                (Some(event), id, created_at)
+            };
+            let event_id_hex = nostr::EventId::from_slice(&event_id_bytes)
+                .map(|id| id.to_hex())
+                .map_err(|e| {
+                    ActionSinkError::Database(format!(
+                        "stored workflow delivery has invalid message id: {e}"
+                    ))
+                })?;
+            info!(event_id = %event_id_hex, channel_id = %channel_id_canonical, author = %author_pubkey,
+                "Workflow SendMessage: reconciling kind {kind_u32} event and targets");
 
-            // 5. Post-persist side effects (fan-out, search, audit)
-            //    Only if actually inserted (idempotency guard).
-            if was_inserted {
+            let run = state
+                .db
+                .get_workflow_run(tenant.community(), doorbell.run_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if run.workflow_id != workflow_id {
+                return Err(ActionSinkError::Database(
+                    "workflow delivery run does not belong to workflow".into(),
+                ));
+            }
+            let expires_at = Utc::now()
+                + chrono::Duration::seconds(buzz_core::workflow_delivery::ROW_LIFETIME_SECONDS);
+            let targets = wake_targets
+                .into_iter()
+                .map(|pubkey| {
+                    let key = nostr::PublicKey::from_hex(&pubkey).map_err(|e| {
+                        ActionSinkError::InvalidInput(format!("invalid wake target: {e}"))
+                    })?;
+                    Ok((
+                        pubkey,
+                        buzz_db::workflow::WorkflowAgentDeliveryTarget {
+                            id: Uuid::new_v4(),
+                            pubkey: key.to_bytes().to_vec(),
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, ActionSinkError>>()?;
+            let thread_meta_owned = match (event.as_ref(), reply_ancestry) {
+                (Some(_), Some(ancestry)) => Some(ancestry.into_thread_meta(
+                    event_id_bytes.clone(),
+                    event_created_at,
+                    channel_uuid,
+                )),
+                _ => None,
+            };
+            let top_level_thread_meta =
+                event
+                    .as_ref()
+                    .map(|_| buzz_db::event::ThreadMetadataParams {
+                        event_id: &event_id_bytes,
+                        event_created_at,
+                        channel_id: channel_uuid,
+                        parent_event_id: None,
+                        parent_event_created_at: None,
+                        root_event_id: None,
+                        root_event_created_at: None,
+                        depth: 0,
+                        broadcast: false,
+                    });
+            let thread_meta = thread_meta_owned
+                .as_ref()
+                .map(|owned| owned.as_params())
+                .or(top_level_thread_meta);
+            let (stored_event, created_ids) = state
+                .db
+                .commit_workflow_agent_deliveries(
+                    delivery_identity_lock,
+                    tenant.community(),
+                    event.as_ref(),
+                    &event_id_bytes,
+                    event_created_at,
+                    thread_meta,
+                    workflow_id,
+                    doorbell.run_id,
+                    &step_id,
+                    definition.event.id.as_bytes(),
+                    channel_uuid,
+                    &targets
+                        .iter()
+                        .map(
+                            |(_, target)| buzz_db::workflow::WorkflowAgentDeliveryTarget {
+                                id: target.id,
+                                pubkey: target.pubkey.clone(),
+                            },
+                        )
+                        .collect::<Vec<_>>(),
+                    &run.execution_trace,
+                    run.trigger_context.as_ref(),
+                    expires_at,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let created_ids = created_ids
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            for (target, delivery) in targets {
+                let delivery_id = delivery.id;
+                if !created_ids.contains(&delivery_id) {
+                    continue;
+                }
+
+                let wake = EventBuilder::new(Kind::from(KIND_WORKFLOW_AGENT_WAKE as u16), "")
+                    .tags([
+                        Tag::parse(["p", target.as_str()])
+                            .map_err(|e| ActionSinkError::EventBuild(format!("wake p tag: {e}")))?,
+                        Tag::parse(["h", channel_id_canonical.as_str()])
+                            .map_err(|e| ActionSinkError::EventBuild(format!("wake h tag: {e}")))?,
+                        Tag::parse(["delivery", delivery_id.to_string().as_str()]).map_err(
+                            |e| ActionSinkError::EventBuild(format!("wake delivery tag: {e}")),
+                        )?,
+                        Tag::parse(["workflow-definition", definition_event_id.as_str()]).map_err(
+                            |e| ActionSinkError::EventBuild(format!("wake definition tag: {e}")),
+                        )?,
+                        Tag::parse(["workflow-run", doorbell.run_id.to_string().as_str()])
+                            .map_err(|e| {
+                                ActionSinkError::EventBuild(format!("wake run tag: {e}"))
+                            })?,
+                        Tag::parse(["workflow-step", step_id.as_str()]).map_err(|e| {
+                            ActionSinkError::EventBuild(format!("wake step tag: {e}"))
+                        })?,
+                        Tag::parse(["message", event_id_hex.as_str()]).map_err(|e| {
+                            ActionSinkError::EventBuild(format!("wake message tag: {e}"))
+                        })?,
+                    ])
+                    .sign_with_keys(&state.relay_keypair)
+                    .map_err(|e| ActionSinkError::EventBuild(format!("wake signing: {e}")))?;
+                state.mark_local_event(tenant.community(), &wake.id);
+                state
+                    .pubsub
+                    .publish_event(&tenant, EventTopic::Channel(channel_uuid), &wake)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                let stored_wake = buzz_core::StoredEvent::new(wake, Some(channel_uuid));
+                fan_out_event_to_local_subscribers(&state, tenant.community(), &stored_wake).await;
+            }
+
+            // Post-commit side effects only for the newly inserted canonical event.
+            if let Some(stored_event) = stored_event.as_ref() {
                 let _ = dispatch_persistent_event(
                     &tenant,
                     &state,
-                    &stored_event,
+                    stored_event,
                     kind_u32,
                     &author_pubkey_hex,
                     None,
                 )
                 .await;
 
-                // A threaded reply changed its thread's counters — push a fresh
-                // relay-signed kind:39005 so subscribed clients update badge
-                // counts without refetching the head window, exactly as the
-                // ingest path does after a reply insert. Fan-out-only and
-                // best-effort; skipped for top-level (non-reply) messages.
                 if let Some(owned) = &thread_meta_owned {
                     crate::handlers::side_effects::emit_live_thread_summary(
                         &tenant,
@@ -558,6 +771,17 @@ mod tests {
     // original-vs-folded length; only `İ` does).
 
     #[test]
+    fn producer_gate_blocks_legacy_anyone_mixed_version_rollout() {
+        let error = ensure_workflow_agent_delivery_enabled(false)
+            .expect_err("disabled producer must not emit a visible kind:9");
+        assert!(matches!(error, ActionSinkError::InvalidInput(_)));
+        assert!(
+            ensure_workflow_agent_delivery_enabled(true).is_ok(),
+            "operator may enable delivery after ACP harnesses are upgraded"
+        );
+    }
+
+    #[test]
     fn combining_mark_in_name_matches() {
         // A name carrying a combining mark (`é` as `e` + U+0301) matches the same
         // sequence in text (1:1 folding) and terminates cleanly.
@@ -626,503 +850,5 @@ mod tests {
 }
 
 #[cfg(test)]
-mod integration_tests {
-    //! Regression test for `e3661764` / `7899c1a8`: a workflow `send_message`
-    //! that mentions a channel member by name (`@Name`) must emit a `p` tag for
-    //! that member so ACP agent wake (`event_mentions_agent`, p-tag gated) fires.
-    //!
-    //! Postgres-gated like the other DB-backed relay tests. Run with:
-    //!   `cargo test -p buzz-relay --lib workflow_sink -- --ignored`
-    use super::*;
-    use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
-    use buzz_db::CreateCommunityWithOwnerResult;
-    use std::sync::Arc;
-
-    /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
-    async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
-        config.require_relay_membership = false;
-        config.redis_url = "redis://127.0.0.1:1".to_string();
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .expect("pubsub manager"),
-        );
-        let audit = buzz_audit::AuditService::new(pool.clone());
-        let auth = buzz_auth::AuthService::new(config.auth.clone());
-        let search = buzz_search::SearchService::new(pool.clone());
-        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
-            db.clone(),
-            buzz_workflow::WorkflowConfig::default(),
-        ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
-            config,
-            db,
-            redis_pool,
-            audit,
-            pubsub,
-            auth,
-            search,
-            workflow_engine,
-            nostr::Keys::generate(),
-            media_storage,
-        );
-        Arc::new(state)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn workflow_send_message_p_tags_mentioned_member() {
-        let state = test_state().await;
-
-        let author = nostr::Keys::generate();
-        let author_hex = author.public_key().to_hex();
-        let agent = nostr::Keys::generate();
-        let agent_hex = agent.public_key().to_hex();
-        let agent_bytes = agent.public_key().to_bytes().to_vec();
-
-        let host = format!("wf-ptag-{}.example", uuid::Uuid::new_v4().simple());
-        let community = match state
-            .db
-            .create_community_with_owner(&host, &author_hex)
-            .await
-            .expect("create community")
-        {
-            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
-            other => panic!("expected fresh community, got {other:?}"),
-        };
-
-        // Open channel; the creator (author) is bootstrapped as an owner-member.
-        let channel = state
-            .db
-            .create_channel(
-                community,
-                "wf-ptag",
-                ChannelType::Stream,
-                ChannelVisibility::Open,
-                None,
-                &author.public_key().to_bytes(),
-                None,
-            )
-            .await
-            .expect("create channel");
-
-        // The mentioned agent is a real member with a resolvable display name.
-        state
-            .db
-            .ensure_user(community, &agent_bytes)
-            .await
-            .expect("ensure agent user row");
-        state
-            .db
-            .update_user_profile(community, &agent_bytes, Some("Robby"), None, None, None)
-            .await
-            .expect("set agent display name");
-        state
-            .db
-            .add_member(
-                community,
-                channel.id,
-                &agent_bytes,
-                MemberRole::Bot,
-                Some(&author.public_key().to_bytes()),
-            )
-            .await
-            .expect("add agent member");
-
-        let sink = RelayActionSink::new(&state);
-        let event_id_hex = sink
-            .send_message(
-                community,
-                &channel.id.to_string(),
-                "heads up @Robby — please take a look",
-                &author_hex,
-                None,
-            )
-            .await
-            .expect("send_message");
-
-        let id_bytes = nostr::EventId::from_hex(&event_id_hex)
-            .expect("event id")
-            .as_bytes()
-            .to_vec();
-        let stored = state
-            .db
-            .get_event_by_id(community, &id_bytes)
-            .await
-            .expect("query event")
-            .expect("event persisted");
-
-        let p_tag_targets: Vec<&str> = stored
-            .event
-            .tags
-            .iter()
-            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
-            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
-            .collect();
-
-        assert!(
-            p_tag_targets.contains(&author_hex.as_str()),
-            "author should still be attributed via p tag; got {p_tag_targets:?}"
-        );
-        assert!(
-            p_tag_targets.contains(&agent_hex.as_str()),
-            "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn workflow_reply_in_thread_threads_onto_parent() {
-        let state = test_state().await;
-
-        let author = nostr::Keys::generate();
-        let author_hex = author.public_key().to_hex();
-
-        let host = format!("wf-thread-{}.example", uuid::Uuid::new_v4().simple());
-        let community = match state
-            .db
-            .create_community_with_owner(&host, &author_hex)
-            .await
-            .expect("create community")
-        {
-            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
-            other => panic!("expected fresh community, got {other:?}"),
-        };
-
-        let channel = state
-            .db
-            .create_channel(
-                community,
-                "wf-thread",
-                ChannelType::Stream,
-                ChannelVisibility::Open,
-                None,
-                &author.public_key().to_bytes(),
-                None,
-            )
-            .await
-            .expect("create channel");
-
-        let sink = RelayActionSink::new(&state);
-
-        // 1. A top-level workflow message becomes the thread root.
-        let root_hex = sink
-            .send_message(
-                community,
-                &channel.id.to_string(),
-                "root message",
-                &author_hex,
-                None,
-            )
-            .await
-            .expect("send root");
-
-        // 2. A reply_in_thread message threads onto it.
-        let reply_hex = sink
-            .send_message(
-                community,
-                &channel.id.to_string(),
-                "threaded reply",
-                &author_hex,
-                Some(&root_hex),
-            )
-            .await
-            .expect("send reply");
-
-        // A direct reply carries a single NIP-10 reply e-tag at the root (no
-        // root marker), matching SDK `thread_tags`.
-        let reply_id_bytes = nostr::EventId::from_hex(&reply_hex)
-            .expect("reply id")
-            .as_bytes()
-            .to_vec();
-        let stored = state
-            .db
-            .get_event_by_id(community, &reply_id_bytes)
-            .await
-            .expect("query reply")
-            .expect("reply persisted");
-        let marker = |m: &str| -> Option<String> {
-            stored.event.tags.iter().find_map(|t| {
-                let p = t.as_slice();
-                if p.len() >= 4 && p[0] == "e" && p[3] == m {
-                    Some(p[1].clone())
-                } else {
-                    None
-                }
-            })
-        };
-        assert_eq!(
-            marker("reply").as_deref(),
-            Some(root_hex.as_str()),
-            "direct reply emits a single reply marker at the root"
-        );
-        assert_eq!(
-            marker("root"),
-            None,
-            "direct reply omits the root marker (matches SDK thread_tags)"
-        );
-
-        // Thread metadata reflects a depth-1 reply parented on the root.
-        let meta = state
-            .db
-            .get_thread_metadata_by_event(community, &reply_id_bytes)
-            .await
-            .expect("query meta")
-            .expect("reply has thread metadata");
-        assert_eq!(
-            meta.depth, 1,
-            "direct reply to a top-level message is depth 1"
-        );
-        let root_bytes = nostr::EventId::from_hex(&root_hex)
-            .expect("root id")
-            .as_bytes()
-            .to_vec();
-        assert_eq!(meta.parent_event_id.as_deref(), Some(root_bytes.as_slice()));
-        assert_eq!(meta.root_event_id.as_deref(), Some(root_bytes.as_slice()));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn workflow_replies_recover_metadata_less_parent_ancestry() {
-        // A parent that carries NIP-10 root/reply markers but has NO
-        // thread_metadata row (legacy or not-yet-indexed) must be recognized as
-        // nested: the workflow reply threads at depth 2 onto the parent's own
-        // root, not a false top-level depth 1.
-        let state = test_state().await;
-
-        let author = nostr::Keys::generate();
-        let author_hex = author.public_key().to_hex();
-
-        let host = format!("wf-legacy-{}.example", uuid::Uuid::new_v4().simple());
-        let community = match state
-            .db
-            .create_community_with_owner(&host, &author_hex)
-            .await
-            .expect("create community")
-        {
-            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
-            other => panic!("expected fresh community, got {other:?}"),
-        };
-
-        let channel = state
-            .db
-            .create_channel(
-                community,
-                "wf-legacy",
-                ChannelType::Stream,
-                ChannelVisibility::Open,
-                None,
-                &author.public_key().to_bytes(),
-                None,
-            )
-            .await
-            .expect("create channel");
-
-        let channel_hex = channel.id.to_string();
-
-        // A top-level root message, inserted WITHOUT any thread metadata row.
-        let root_event = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "root")
-            .tags([Tag::parse(["h", &channel_hex]).expect("h tag")])
-            .sign_with_keys(&author)
-            .expect("sign root");
-        let root_hex = root_event.id.to_hex();
-        state
-            .db
-            .insert_event(community, &root_event, Some(channel.id))
-            .await
-            .expect("insert root");
-
-        // A nested parent that marks its root/reply — but, crucially, is stored
-        // with NO thread_metadata row (the legacy/unindexed case F1 addresses).
-        let parent_event =
-            EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "nested parent")
-                .tags([
-                    Tag::parse(["h", &channel_hex]).expect("h tag"),
-                    Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
-                    Tag::parse(["e", &root_hex, "", "reply"]).expect("reply tag"),
-                ])
-                .sign_with_keys(&author)
-                .expect("sign parent");
-        let parent_hex = parent_event.id.to_hex();
-        state
-            .db
-            .insert_event(community, &parent_event, Some(channel.id))
-            .await
-            .expect("insert parent");
-        assert!(
-            state
-                .db
-                .get_thread_metadata_by_event(community, parent_event.id.as_bytes())
-                .await
-                .expect("query parent meta")
-                .is_none(),
-            "test premise: the nested parent must have no thread_metadata row"
-        );
-
-        // A workflow reply onto the metadata-less nested parent.
-        let reply_hex = RelayActionSink::new(&state)
-            .send_message(
-                community,
-                &channel_hex,
-                "workflow reply",
-                &author_hex,
-                Some(&parent_hex),
-            )
-            .await
-            .expect("send reply");
-
-        let reply_id_bytes = nostr::EventId::from_hex(&reply_hex)
-            .expect("reply id")
-            .as_bytes()
-            .to_vec();
-        let meta = state
-            .db
-            .get_thread_metadata_by_event(community, &reply_id_bytes)
-            .await
-            .expect("query meta")
-            .expect("reply has thread metadata");
-
-        assert_eq!(
-            meta.depth, 2,
-            "reply to a marked-but-unindexed nested parent is depth 2, not top-level"
-        );
-        let root_bytes = nostr::EventId::from_hex(&root_hex)
-            .expect("root id")
-            .as_bytes()
-            .to_vec();
-        let parent_bytes = parent_event.id.as_bytes().to_vec();
-        assert_eq!(
-            meta.root_event_id.as_deref(),
-            Some(root_bytes.as_slice()),
-            "root recovered from the parent's own NIP-10 markers"
-        );
-        assert_eq!(
-            meta.parent_event_id.as_deref(),
-            Some(parent_bytes.as_slice())
-        );
-
-        // The reply's own NIP-10 e-tags point root→the recovered root,
-        // reply→the immediate parent (matching the ingest resolver).
-        let stored = state
-            .db
-            .get_event_by_id(community, &reply_id_bytes)
-            .await
-            .expect("query reply")
-            .expect("reply persisted");
-        let marker = |m: &str| -> Option<String> {
-            stored.event.tags.iter().find_map(|t| {
-                let p = t.as_slice();
-                if p.len() >= 4 && p[0] == "e" && p[3] == m {
-                    Some(p[1].clone())
-                } else {
-                    None
-                }
-            })
-        };
-        assert_eq!(marker("root").as_deref(), Some(root_hex.as_str()));
-        assert_eq!(marker("reply").as_deref(), Some(parent_hex.as_str()));
-
-        // A root-only parent is top-level under the shared collapse rule, even
-        // without metadata. A workflow reply therefore starts a thread at P,
-        // rather than incorrectly inheriting the marker's unrelated root R.
-        let root_only_parent =
-            EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "root-only parent")
-                .tags([
-                    Tag::parse(["h", &channel_hex]).expect("h tag"),
-                    Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
-                ])
-                .sign_with_keys(&author)
-                .expect("sign root-only parent");
-        let root_only_parent_hex = root_only_parent.id.to_hex();
-        let root_only_parent_bytes = root_only_parent.id.as_bytes().to_vec();
-        state
-            .db
-            .insert_event(community, &root_only_parent, Some(channel.id))
-            .await
-            .expect("insert root-only parent");
-
-        let root_only_reply_hex = RelayActionSink::new(&state)
-            .send_message(
-                community,
-                &channel_hex,
-                "workflow reply to root-only parent",
-                &author_hex,
-                Some(&root_only_parent_hex),
-            )
-            .await
-            .expect("send root-only reply");
-        let root_only_reply_bytes = nostr::EventId::from_hex(&root_only_reply_hex)
-            .expect("reply id")
-            .as_bytes()
-            .to_vec();
-        let root_only_meta = state
-            .db
-            .get_thread_metadata_by_event(community, &root_only_reply_bytes)
-            .await
-            .expect("query root-only reply meta")
-            .expect("root-only reply has thread metadata");
-        assert_eq!(root_only_meta.depth, 1);
-        assert_eq!(
-            root_only_meta.parent_event_id.as_deref(),
-            Some(root_only_parent_bytes.as_slice())
-        );
-        assert_eq!(
-            root_only_meta.root_event_id.as_deref(),
-            Some(root_only_parent_bytes.as_slice())
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn workflow_reply_to_missing_parent_errors() {
-        let state = test_state().await;
-        let author = nostr::Keys::generate();
-        let author_hex = author.public_key().to_hex();
-        let host = format!("wf-missing-{}.example", uuid::Uuid::new_v4().simple());
-        let community = match state
-            .db
-            .create_community_with_owner(&host, &author_hex)
-            .await
-            .expect("create community")
-        {
-            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
-            other => panic!("expected fresh community, got {other:?}"),
-        };
-        let channel = state
-            .db
-            .create_channel(
-                community,
-                "wf-missing",
-                ChannelType::Stream,
-                ChannelVisibility::Open,
-                None,
-                &author.public_key().to_bytes(),
-                None,
-            )
-            .await
-            .expect("create channel");
-
-        let unknown = nostr::Keys::generate().public_key().to_hex();
-        let err = RelayActionSink::new(&state)
-            .send_message(
-                community,
-                &channel.id.to_string(),
-                "orphan reply",
-                &author_hex,
-                Some(&unknown),
-            )
-            .await
-            .expect_err("reply to a non-existent parent must fail");
-        assert!(
-            matches!(err, ActionSinkError::InvalidInput(_)),
-            "expected InvalidInput, got {err:?}"
-        );
-    }
-}
+#[path = "workflow_sink/integration_tests.rs"]
+mod integration_tests;

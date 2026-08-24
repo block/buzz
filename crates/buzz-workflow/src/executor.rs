@@ -18,6 +18,7 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::action_sink::DoorbellContext;
 use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
 use crate::WorkflowEngine;
@@ -43,6 +44,26 @@ pub struct TriggerContext {
     pub is_reply: bool,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
+    /// Exact owner-signed kind:30620 definition revision executed by this run.
+    #[serde(default)]
+    pub definition_event_id: String,
+    /// Semantic cause carried to workflow-generated agent doorbells.
+    #[serde(default)]
+    pub cause: Option<WorkflowCause>,
+}
+
+/// Provenance for the event that caused a workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum WorkflowCause {
+    /// Signed message, reaction, or diff event.
+    Event(String),
+    /// Deterministic UTC schedule slot.
+    Schedule(String),
+    /// Owner-signed kind:46020 manual-run command.
+    Command(String),
+    /// Unsigned external webhook payload.
+    Webhook,
 }
 
 impl TriggerContext {
@@ -622,13 +643,31 @@ pub async fn dispatch_action(
                         "SendMessage → {channel_id}: {text}"
                     );
 
+                    let doorbell = DoorbellContext {
+                        definition_event_id: trigger_ctx.definition_event_id.clone(),
+                        run_id,
+                        attempt: 1,
+                        cause: trigger_ctx.cause.clone().ok_or_else(|| {
+                            WorkflowError::InvalidDefinition(
+                                "SendMessage: workflow cause provenance is unavailable".into(),
+                            )
+                        })?,
+                    };
+                    if doorbell.definition_event_id.is_empty() {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "SendMessage: workflow definition provenance is unavailable".into(),
+                        ));
+                    }
                     let event_id = engine
                         .action_sink()?
                         .send_message(
                             community_id,
+                            workflow.id,
+                            step_id,
                             &channel_id,
                             text,
                             &owner_pubkey_hex,
+                            &doorbell,
                             reply_to,
                         )
                         .await
@@ -1263,6 +1302,28 @@ async fn execute_steps(
                     "output": output,
                 }));
                 step_outputs.insert(step.id.clone(), output);
+                // Checkpoint every completed step. A later agent wake can then
+                // reconstruct prior outputs from durable relay-owned run state.
+                engine
+                    .db
+                    .update_workflow_run(
+                        community_id,
+                        run_id,
+                        buzz_db::workflow::RunStatus::Running,
+                        (i + 1) as i32,
+                        &serde_json::Value::Array(trace.clone()),
+                        None,
+                    )
+                    .await
+                    .map_err(|error| {
+                        (
+                            WorkflowError::from(error),
+                            crate::error::PartialProgress {
+                                step_index: i,
+                                trace: trace.clone(),
+                            },
+                        )
+                    })?;
             }
             StepResult::Suspended { approval_token } => {
                 info!(
@@ -1312,6 +1373,8 @@ mod tests {
             message_id: "event-id-hex".to_owned(),
             is_reply: false,
             webhook_fields: HashMap::new(),
+            definition_event_id: String::new(),
+            cause: None,
         }
     }
 

@@ -100,6 +100,15 @@ enum PersistResult {
 /// operations (open_dm, hide_dm, update_approval, upsert_workflow).
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: &Event,
+    channel_id_override: Option<Uuid>,
+) -> Result<PersistResult, IngestError> {
+    persist_command_event_for_db(&state.db, tenant, event, channel_id_override).await
+}
+
+async fn persist_command_event_for_db(
     db: &buzz_db::Db,
     tenant: &TenantContext,
     event: &Event,
@@ -406,7 +415,7 @@ async fn handle_dm_open(
     }
 
     // Persist the command event (idempotency) — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -567,7 +576,7 @@ async fn handle_dm_add_member(
     }
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -673,7 +682,7 @@ async fn handle_dm_hide(
     }
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -810,7 +819,7 @@ async fn handle_workflow_def(
     let hash = compute_definition_hash(&definition_json_final);
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -849,6 +858,8 @@ async fn handle_workflow_def(
             &workflow_name,
             &definition_json_final,
             &hash,
+            event.id.as_bytes(),
+            def.enabled,
         )
         .await
         .map_err(|e| match e {
@@ -884,6 +895,23 @@ async fn handle_workflow_def(
     })
 }
 
+async fn caller_controls_workflow(
+    state: &Arc<AppState>,
+    community_id: CommunityId,
+    workflow_owner: &[u8],
+    caller: &[u8],
+) -> Result<bool, IngestError> {
+    if workflow_owner == caller {
+        return Ok(true);
+    }
+
+    state
+        .db
+        .is_agent_owner(community_id, workflow_owner, caller)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: workflow owner check: {e}")))
+}
+
 async fn handle_workflow_trigger(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -912,10 +940,11 @@ async fn handle_workflow_trigger(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow not found".into()))?;
 
-    // 3. Manual triggers execute with the workflow owner's authority, so only
-    // the owner may start them. Channel membership alone is insufficient: a
+    // 3. Manual triggers execute with the workflow owner's authority. Permit
+    // that principal and, when the owner is a managed agent, its immutable
+    // NIP-OA human owner. Channel membership alone remains insufficient: a
     // member could otherwise invoke another user's webhook or message actions.
-    if workflow.owner_pubkey != self_bytes {
+    if !caller_controls_workflow(state, community_id, &workflow.owner_pubkey, &self_bytes).await? {
         return Err(IngestError::Rejected(
             "forbidden: not authorized to trigger this workflow".into(),
         ));
@@ -949,7 +978,7 @@ async fn handle_workflow_trigger(
     // Persist the command event under the workflow channel even though the
     // trigger event itself only carries the workflow UUID. Storing channel
     // triggers as global events leaks workflow IDs to unrelated relay members.
-    let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
+    let tx = match persist_command_event(state, tenant, event, workflow.channel_id).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -961,25 +990,26 @@ async fn handle_workflow_trigger(
     };
 
     // 4. Execute: create workflow run
-    let mut trigger_ctx = TriggerContext {
+    let Some(definition_event_id) = workflow.definition_event_id.as_deref() else {
+        return Err(IngestError::Rejected(
+            "invalid: owner-signed workflow revision is unavailable".into(),
+        ));
+    };
+    // Manual commands are signed causes, not webhook cargo. Command content is
+    // never copied into arbitrary trigger fields; adding parameterized manual
+    // runs requires an explicit trust-labelled contract.
+    let trigger_ctx = TriggerContext {
         channel_id: workflow
             .channel_id
             .map(|id| id.to_string())
             .unwrap_or_default(),
         author: hex::encode(&self_bytes),
+        definition_event_id: hex::encode(definition_event_id),
+        cause: Some(buzz_workflow::executor::WorkflowCause::Command(
+            event.id.to_hex(),
+        )),
         ..Default::default()
     };
-    if !event.content.is_empty() {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&event.content) {
-            for (k, v) in map {
-                let val_str = match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                trigger_ctx.webhook_fields.insert(k, val_str);
-            }
-        }
-    }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
     let event_id_bytes = event.id.as_bytes().to_vec();
@@ -1133,7 +1163,7 @@ async fn handle_approval_grant(
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1244,7 +1274,7 @@ async fn handle_approval_deny(
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1446,7 +1476,7 @@ mod tests {
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect workflow persistence test database");
@@ -1567,7 +1597,7 @@ mod tests {
         let created_at = Timestamp::now().as_secs();
         let create = workflow_event(&keys, workflow_id, created_at, None, "create");
 
-        let PersistResult::Inserted(tx) = persist_command_event(&db, &tenant, &create, None)
+        let PersistResult::Inserted(tx) = persist_command_event_for_db(&db, &tenant, &create, None)
             .await
             .expect("persist create")
         else {
@@ -1575,7 +1605,7 @@ mod tests {
         };
         tx.commit().await.expect("commit create");
         assert!(matches!(
-            persist_command_event(&db, &tenant, &create, None)
+            persist_command_event_for_db(&db, &tenant, &create, None)
                 .await
                 .expect("replay create"),
             PersistResult::Duplicate
@@ -1607,7 +1637,7 @@ mod tests {
             .find(|candidate| candidate.id.as_bytes() > update.id.as_bytes())
             .expect("find same-second CAS-matching update dominated by current head");
 
-        let PersistResult::Inserted(tx) = persist_command_event(&db, &tenant, &update, None)
+        let PersistResult::Inserted(tx) = persist_command_event_for_db(&db, &tenant, &update, None)
             .await
             .expect("persist update")
         else {
@@ -1615,13 +1645,14 @@ mod tests {
         };
         tx.commit().await.expect("commit update");
         assert!(matches!(
-            persist_command_event(&db, &tenant, &update, None)
+            persist_command_event_for_db(&db, &tenant, &update, None)
                 .await
                 .expect("replay update"),
             PersistResult::Duplicate
         ));
 
-        let error = match persist_command_event(&db, &tenant, &dominated_update, None).await {
+        let error = match persist_command_event_for_db(&db, &tenant, &dominated_update, None).await
+        {
             Err(error) => error,
             Ok(_) => panic!("distinct dominated CAS update must not report duplicate success"),
         };

@@ -346,6 +346,10 @@ fn apply_completed_before_control_signal(
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
+    /// Stop a turn whose workflow delivery entered terminal handling. Preserve
+    /// the triggering batch so the queue can remove only terminal workflow
+    /// events while retaining unrelated co-batched work.
+    TerminalWorkflowCancel,
     /// Stop the current turn and requeue its triggering batch for a merged
     /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
@@ -759,7 +763,7 @@ impl AgentPool {
         &mut self,
         channel_id: Uuid,
         request: SteerRequest,
-    ) -> Result<(), SteerError> {
+    ) -> Result<String, SteerError> {
         let meta = self
             .task_map
             .values_mut()
@@ -770,7 +774,8 @@ impl AgentPool {
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .map_err(|e| SteerError::Transport(e.to_string()))?;
+        Ok(meta.turn_id.clone())
     }
 
     /// Durably associate a successful steer with the exact ACP session that
@@ -3965,13 +3970,25 @@ fn requeue_cancelled_batch(
     signal: ControlSignal,
     batch: Option<FlushBatch>,
 ) -> Option<FlushBatch> {
-    let reason = match signal {
-        ControlSignal::Steer => CancelReason::Steer,
-        ControlSignal::Interrupt | ControlSignal::SwitchModel { .. } => CancelReason::Interrupt,
+    let (reason, preserve_in_drop) = match signal {
+        ControlSignal::Steer => (CancelReason::Steer, false),
+        // A terminal workflow cancellation is workflow-specific recovery, not
+        // a global change to Drop semantics. Preserve the checked-out batch so
+        // EventQueue can tombstone the terminal workflow event and retain only
+        // the remaining co-batched work.
+        ControlSignal::TerminalWorkflowCancel => (CancelReason::Interrupt, true),
+        ControlSignal::Interrupt | ControlSignal::SwitchModel { .. } => {
+            (CancelReason::Interrupt, false)
+        }
         // Cancel/Rotate discard the batch — no merged re-prompt.
         ControlSignal::Cancel | ControlSignal::Rotate => return None,
     };
-    requeue_batch_if_queue(ctx, batch).map(|mut b| {
+    let batch = if preserve_in_drop {
+        batch
+    } else {
+        requeue_batch_if_queue(ctx, batch)
+    };
+    batch.map(|mut b| {
         b.cancel_reason = Some(reason);
         b
     })
@@ -6856,9 +6873,39 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     #[test]
+    fn terminal_workflow_cancel_is_the_only_drop_mode_cancel_that_preserves_batch() {
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Drop;
+
+        let terminal = requeue_cancelled_batch(
+            &ctx,
+            ControlSignal::TerminalWorkflowCancel,
+            Some(one_event_batch(Uuid::new_v4())),
+        )
+        .expect("terminal workflow cancellation must preserve its exact batch");
+        assert_eq!(terminal.cancel_reason, Some(CancelReason::Interrupt));
+
+        for signal in [ControlSignal::Steer, ControlSignal::Interrupt] {
+            assert!(
+                requeue_cancelled_batch(
+                    &ctx,
+                    signal.clone(),
+                    Some(one_event_batch(Uuid::new_v4())),
+                )
+                .is_none(),
+                "ordinary {signal:?} must retain Drop semantics"
+            );
+        }
+    }
+
+    #[test]
     fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
         let cases = [
             (ControlSignal::Steer, Some(CancelReason::Steer)),
+            (
+                ControlSignal::TerminalWorkflowCancel,
+                Some(CancelReason::Interrupt),
+            ),
             (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
             (
                 ControlSignal::SwitchModel {

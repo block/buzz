@@ -31,6 +31,7 @@ CREATE TYPE member_role AS ENUM ('owner', 'admin', 'member', 'guest', 'bot');
 CREATE TYPE workflow_status AS ENUM ('active', 'disabled', 'archived');
 CREATE TYPE run_status AS ENUM ('pending', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled');
 CREATE TYPE approval_status AS ENUM ('pending', 'granted', 'denied', 'expired');
+CREATE TYPE workflow_agent_delivery_status AS ENUM ('pending', 'claimed', 'delivered', 'failed', 'expired');
 CREATE TYPE delivery_method AS ENUM ('webhook', 'websocket');
 CREATE TYPE subscription_status AS ENUM ('active', 'paused', 'deleted');
 CREATE TYPE pause_reason AS ENUM ('user', 'system', 'rate_limit');
@@ -368,6 +369,9 @@ CREATE TABLE workflows (
     channel_id      UUID,
     definition      JSONB NOT NULL,
     definition_hash BYTEA NOT NULL,
+    -- Exact owner-signed kind:30620 revision that materialized this row.
+    -- Nullable only for pre-0032 rows; workflow doorbells fail closed until re-saved.
+    definition_event_id BYTEA,
     status          workflow_status NOT NULL DEFAULT 'active',
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -405,6 +409,48 @@ CREATE TABLE workflow_runs (
 
 CREATE INDEX idx_workflow_runs_workflow ON workflow_runs (community_id, workflow_id);
 CREATE INDEX idx_workflow_runs_status ON workflow_runs (community_id, status);
+
+-- ── Durable workflow-agent deliveries ────────────────────────────────────────
+CREATE TABLE workflow_agent_deliveries (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    id UUID NOT NULL,
+    workflow_id UUID NOT NULL,
+    run_id UUID NOT NULL,
+    step_id VARCHAR(64) NOT NULL,
+    definition_event_id BYTEA NOT NULL,
+    message_event_id BYTEA NOT NULL,
+    message_event_created_at TIMESTAMPTZ NOT NULL,
+    channel_id UUID NOT NULL,
+    target_pubkey BYTEA NOT NULL,
+    status workflow_agent_delivery_status NOT NULL DEFAULT 'pending',
+    attempt INT NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 3),
+    claim_token UUID,
+    claim_owner BYTEA,
+    claim_expires_at TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    delivered_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
+    failure_code TEXT,
+    failure_message TEXT,
+    execution_trace JSONB NOT NULL,
+    trigger_context JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, id),
+    UNIQUE (community_id, run_id, step_id, target_pubkey),
+    FOREIGN KEY (community_id, workflow_id) REFERENCES workflows (community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, run_id) REFERENCES workflow_runs (community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, message_event_created_at, message_event_id)
+        REFERENCES events (community_id, created_at, id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_workflow_agent_deliveries_pending
+    ON workflow_agent_deliveries (community_id, target_pubkey, next_attempt_at, created_at)
+    WHERE status IN ('pending', 'claimed');
+CREATE INDEX idx_workflow_agent_deliveries_run
+    ON workflow_agent_deliveries (community_id, run_id, step_id);
+
 
 -- ── Workflow approvals ────────────────────────────────────────────────────────
 -- token-hash lookup scoped: approval token grants cannot act on another
@@ -1744,6 +1790,7 @@ SELECT attach_community_write_fence('scheduled_workflow_fires');
 SELECT attach_community_write_fence('subscriptions');
 SELECT attach_community_write_fence('thread_metadata');
 SELECT attach_community_write_fence('users');
+SELECT attach_community_write_fence('workflow_agent_deliveries');
 SELECT attach_community_write_fence('workflow_approvals');
 SELECT attach_community_write_fence('workflow_runs');
 SELECT attach_community_write_fence('workflows');

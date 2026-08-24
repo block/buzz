@@ -657,6 +657,61 @@ async fn main() -> anyhow::Result<()> {
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
 
+    // Durable managed-agent delivery reaper. Expired leases become retryable by
+    // the claim query; exhausted or TTL-expired rows become terminal here and
+    // emit one owner-visible channel signal from the rows returned by the
+    // guarded UPDATE.
+    {
+        let delivery_reaper_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let terminal = match delivery_reaper_state
+                    .db
+                    .reap_workflow_agent_deliveries()
+                    .await
+                {
+                    Ok(deliveries) => deliveries,
+                    Err(error) => {
+                        error!(%error, "Workflow agent delivery reaper failed");
+                        continue;
+                    }
+                };
+                for delivery in terminal {
+                    let Ok(Some(host)) = delivery_reaper_state
+                        .db
+                        .lookup_community_host(delivery.community_id)
+                        .await
+                    else {
+                        error!(delivery_id = %delivery.id, "Workflow delivery tenant lookup failed");
+                        continue;
+                    };
+                    let tenant =
+                        buzz_core::tenant::TenantContext::resolved(delivery.community_id, host);
+                    if let Err(error) = buzz_relay::handlers::side_effects::emit_system_message(
+                        &tenant,
+                        &delivery_reaper_state,
+                        delivery.channel_id,
+                        serde_json::json!({
+                            "type": "workflow_agent_delivery_failed",
+                            "workflow_id": delivery.workflow_id,
+                            "run_id": delivery.run_id,
+                            "step_id": delivery.step_id,
+                            "delivery_id": delivery.id,
+                            "status": delivery.status,
+                        }),
+                    )
+                    .await
+                    {
+                        error!(delivery_id = %delivery.id, %error, "Workflow delivery failure signal failed");
+                    }
+                }
+            }
+        });
+    }
+
     // Ephemeral channel reaper — archives channels whose TTL deadline has passed.
     // Runs every 60s, matching the workflow cron loop pattern. The SQL UPDATE
     // uses `archived_at IS NULL` as a guard, so concurrent runs from multiple

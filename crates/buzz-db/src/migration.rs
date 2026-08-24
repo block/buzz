@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 34);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1066,6 +1066,34 @@ mod tests {
         assert!(roster_fence.contains("roster_tag.tag_json->>3"));
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
+
+        // Durable workflow-agent delivery schema must remain byte-for-byte equivalent at the
+        // statement level between migration and desired-state bootstrap. A fresh pgschema
+        // database does not run migration 0034, so drift here silently breaks the live path.
+        assert_eq!(migrations[33].version, 34);
+        let delivery_migration = migrations[33].sql.as_str();
+        for prefix in [
+            "CREATE TYPE workflow_agent_delivery_status",
+            "CREATE TABLE workflow_agent_deliveries",
+            "CREATE INDEX idx_workflow_agent_deliveries_pending",
+            "CREATE INDEX idx_workflow_agent_deliveries_run",
+        ] {
+            let from_migration = split_sql_statements(delivery_migration)
+                .into_iter()
+                .find(|statement| statement.trim_start().starts_with(prefix))
+                .unwrap_or_else(|| panic!("migration 0034 is missing {prefix}"));
+            let from_schema = split_sql_statements(desired_schema)
+                .into_iter()
+                .find(|statement| statement.trim_start().starts_with(prefix))
+                .unwrap_or_else(|| panic!("schema.sql is missing {prefix}"));
+            assert_eq!(
+                normalize_sql(&from_schema),
+                normalize_sql(&from_migration),
+                "desired-state {prefix} drifted from migration 0034"
+            );
+        }
+        assert!(desired_schema
+            .contains("SELECT attach_community_write_fence('workflow_agent_deliveries')"));
 
         // Fresh desired-state bootstrap must install the identical executable
         // fence as migration 0032. CI and isolated relay startup use schema.sql
@@ -1542,6 +1570,8 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // Added by migration 0034 and therefore absent from migration 0029.
+        expected_fences.insert("workflow_agent_deliveries".to_string());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -1966,6 +1996,37 @@ mod tests {
         .await
         .expect("read post-push search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_agent_delivery_migration_binds_the_partitioned_event_key() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+
+        MIGRATOR
+            .run_to(33, &pool)
+            .await
+            .expect("apply migrations through workflow definition event identity");
+        MIGRATOR
+            .run_to(34, &pool)
+            .await
+            .expect("apply workflow agent delivery migration");
+
+        assert_eq!(applied_versions(&pool).await.last(), Some(&34));
+        let foreign_key: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conrelid = 'workflow_agent_deliveries'::regclass \
+               AND contype = 'f' AND confrelid = 'events'::regclass",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read delivery-to-event foreign key");
+        assert_eq!(
+            foreign_key,
+            "FOREIGN KEY (community_id, message_event_created_at, message_event_id) \
+             REFERENCES events(community_id, created_at, id) ON DELETE CASCADE"
+        );
     }
 
     #[tokio::test]

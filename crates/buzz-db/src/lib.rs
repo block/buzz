@@ -3864,6 +3864,8 @@ impl Db {
         name: &str,
         definition_json: &str,
         definition_hash: &[u8],
+        definition_event_id: &[u8],
+        enabled: bool,
     ) -> Result<()> {
         workflow::upsert_workflow(
             &self.pool,
@@ -3874,6 +3876,8 @@ impl Db {
             name,
             definition_json,
             definition_hash,
+            definition_event_id,
+            enabled,
         )
         .await
     }
@@ -4128,6 +4132,188 @@ impl Db {
             limit,
         )
         .await
+    }
+
+    /// Serialize one durable delivery identity and return its canonical message.
+    pub async fn lock_workflow_agent_delivery_identity(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_id: &str,
+        target_pubkey: &[u8],
+    ) -> Result<(
+        sqlx::Transaction<'static, sqlx::Postgres>,
+        Option<(Vec<u8>, chrono::DateTime<chrono::Utc>)>,
+    )> {
+        workflow::lock_workflow_agent_delivery_identity(
+            &self.pool,
+            community_id,
+            run_id,
+            step_id,
+            target_pubkey,
+        )
+        .await
+    }
+
+    /// Atomically persist a workflow message and reconcile all signed targets.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_workflow_agent_deliveries(
+        &self,
+        transaction: sqlx::Transaction<'static, sqlx::Postgres>,
+        community_id: CommunityId,
+        event: Option<&nostr::Event>,
+        message_event_id: &[u8],
+        message_event_created_at: chrono::DateTime<chrono::Utc>,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        workflow_id: Uuid,
+        run_id: Uuid,
+        step_id: &str,
+        definition_event_id: &[u8],
+        channel_id: Uuid,
+        targets: &[workflow::WorkflowAgentDeliveryTarget],
+        execution_trace: &serde_json::Value,
+        trigger_context: Option<&serde_json::Value>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Option<StoredEvent>, Vec<Uuid>)> {
+        let result = workflow::commit_workflow_agent_deliveries(
+            transaction,
+            community_id,
+            event,
+            message_event_id,
+            message_event_created_at,
+            thread_meta,
+            workflow_id,
+            run_id,
+            step_id,
+            definition_event_id,
+            channel_id,
+            targets,
+            execution_trace,
+            trigger_context,
+            expires_at,
+        )
+        .await?;
+        if result.0.is_some() {
+            if let Some(event) = event {
+                if let Err(error) =
+                    insert_mentions(&self.pool, community_id, event, Some(channel_id)).await
+                {
+                    tracing::warn!(event_id = %event.id, %error, "failed to insert workflow message mentions");
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Create one durable managed-agent workflow delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_workflow_agent_delivery(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        workflow_id: Uuid,
+        run_id: Uuid,
+        step_id: &str,
+        definition_event_id: &[u8],
+        message_event_id: &[u8],
+        message_event_created_at: chrono::DateTime<chrono::Utc>,
+        channel_id: Uuid,
+        target_pubkey: &[u8],
+        execution_trace: &serde_json::Value,
+        trigger_context: Option<&serde_json::Value>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        workflow::create_workflow_agent_delivery(
+            &self.pool,
+            community_id,
+            id,
+            workflow_id,
+            run_id,
+            step_id,
+            definition_event_id,
+            message_event_id,
+            message_event_created_at,
+            channel_id,
+            target_pubkey,
+            execution_trace,
+            trigger_context,
+            expires_at,
+        )
+        .await
+    }
+
+    /// Claim the oldest due delivery for this managed agent.
+    pub async fn claim_workflow_agent_delivery(
+        &self,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        delivery_id: Option<Uuid>,
+        expected: Option<&workflow::WorkflowAgentDeliveryBinding>,
+        lease_seconds: i64,
+    ) -> Result<Option<workflow::WorkflowAgentDeliveryRecord>> {
+        workflow::claim_workflow_agent_delivery(
+            &self.pool,
+            community_id,
+            target_pubkey,
+            delivery_id,
+            expected,
+            lease_seconds,
+        )
+        .await
+    }
+
+    /// Extend a live delivery claim using its owner/token fencing stamp.
+    pub async fn renew_workflow_agent_delivery(
+        &self,
+        community_id: CommunityId,
+        id: uuid::Uuid,
+        target_pubkey: &[u8],
+        claim_token: uuid::Uuid,
+        lease_seconds: i64,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        workflow::renew_workflow_agent_delivery(
+            &self.pool,
+            community_id,
+            id,
+            target_pubkey,
+            claim_token,
+            lease_seconds,
+        )
+        .await
+    }
+
+    /// Fence and complete one claimed delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_workflow_agent_delivery(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        target_pubkey: &[u8],
+        claim_token: Uuid,
+        delivered: bool,
+        retryable: bool,
+        failure_code: Option<&str>,
+        failure_message: Option<&str>,
+    ) -> Result<bool> {
+        workflow::finish_workflow_agent_delivery(
+            &self.pool,
+            community_id,
+            id,
+            target_pubkey,
+            claim_token,
+            delivered,
+            retryable,
+            failure_code,
+            failure_message,
+        )
+        .await
+    }
+
+    /// Mark expired or retry-exhausted managed-agent deliveries failed.
+    pub async fn reap_workflow_agent_deliveries(
+        &self,
+    ) -> Result<Vec<workflow::WorkflowAgentDeliveryRecord>> {
+        workflow::reap_workflow_agent_deliveries(&self.pool).await
     }
 
     /// Update a workflow run's status.

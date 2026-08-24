@@ -833,6 +833,7 @@ dependencies = [
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-workflow",
  "chrono",
  "clap",
  "evalexpr",

@@ -204,6 +204,15 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Enables durable workflow-to-agent delivery (`BUZZ_WORKFLOW_AGENT_DELIVERY_ENABLED`).
+    ///
+    /// Defaults to `false` so deploying a new relay before every ACP harness has
+    /// durable-wake support cannot expose relay-authored workflow prompts to
+    /// legacy `respond-to=anyone` consumers. Operators enable this only after
+    /// upgrading ACP harnesses; the relay then publishes the visible kind:9 and
+    /// its durable delivery rows as one protocol.
+    pub workflow_agent_delivery_enabled: bool,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -624,6 +633,9 @@ impl Config {
             .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
             .unwrap_or(false);
 
+        let workflow_agent_delivery_enabled =
+            parse_bool("BUZZ_WORKFLOW_AGENT_DELIVERY_ENABLED", false)?;
+
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -1018,6 +1030,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            workflow_agent_delivery_enabled,
             allow_nip_oa_auth,
             media,
             media_max_concurrent_uploads,
@@ -1135,6 +1148,10 @@ mod tests {
         assert!(
             config.relay_operator_pubkeys.is_empty(),
             "relay_operator_pubkeys should default empty (provisioning disabled)"
+        );
+        assert!(
+            !config.workflow_agent_delivery_enabled,
+            "workflow_agent_delivery_enabled should default to false"
         );
         assert!(
             !config.allow_nip_oa_auth,

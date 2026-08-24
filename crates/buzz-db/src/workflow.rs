@@ -12,10 +12,13 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
+use nostr::Event;
+
+use crate::event::ThreadMetadataParams;
 
 use crate::error::{DbError, Result};
 
@@ -177,6 +180,8 @@ pub struct WorkflowRecord {
     pub definition: serde_json::Value,
     /// SHA-256 hash of the canonical definition JSON.
     pub definition_hash: Vec<u8>,
+    /// Exact owner-signed kind:30620 event that materialized this revision.
+    pub definition_event_id: Option<Vec<u8>>,
     /// Current lifecycle status of the workflow definition.
     pub status: WorkflowStatus,
     /// Whether the workflow will fire on matching events.
@@ -223,6 +228,43 @@ pub struct WorkflowRunRecord {
     pub error_code: Option<String>,
     /// When the run record was created.
     pub created_at: DateTime<Utc>,
+}
+
+/// A workflow message awaiting or completing managed-agent delivery.
+#[derive(Debug, Clone)]
+pub struct WorkflowAgentDeliveryRecord {
+    /// Stable delivery identifier referenced by private wake hints.
+    pub id: Uuid,
+    /// Community that owns this delivery.
+    pub community_id: CommunityId,
+    /// Workflow whose action created the delivery.
+    pub workflow_id: Uuid,
+    /// Execution run containing the action.
+    pub run_id: Uuid,
+    /// Stable step identifier within the workflow definition.
+    pub step_id: String,
+    /// Exact signed workflow-definition event required for admission.
+    pub definition_event_id: Vec<u8>,
+    /// Exact persisted visible message event required for admission.
+    pub message_event_id: Vec<u8>,
+    /// Channel shared by the definition and visible message.
+    pub channel_id: Uuid,
+    /// Managed agent allowed to claim and complete this delivery.
+    pub target_pubkey: Vec<u8>,
+    /// Durable delivery state.
+    pub status: String,
+    /// Number of leases issued, including the current lease when claimed.
+    pub attempt: i32,
+    /// Fencing token for the current lease, if claimed.
+    pub claim_token: Option<Uuid>,
+    /// Expiry of the current claim lease, if claimed.
+    pub claim_expires_at: Option<DateTime<Utc>>,
+    /// Absolute delivery expiry after which no new lease may be issued.
+    pub expires_at: DateTime<Utc>,
+    /// Immutable execution state used to verify rendering and prior-step output.
+    pub execution_trace: serde_json::Value,
+    /// Immutable trigger input, including private webhook fields when present.
+    pub trigger_context: Option<serde_json::Value>,
 }
 
 /// A winning scheduled workflow fire claim.
@@ -322,16 +364,20 @@ pub async fn upsert_workflow(
     name: &str,
     definition_json: &str,
     definition_hash: &[u8],
+    definition_event_id: &[u8],
+    enabled: bool,
 ) -> Result<()> {
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
-            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id, status, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, 'active', $9)
         ON CONFLICT (community_id, id) DO UPDATE
         SET name = EXCLUDED.name,
             definition = EXCLUDED.definition,
             definition_hash = EXCLUDED.definition_hash,
+            definition_event_id = EXCLUDED.definition_event_id,
+            enabled = EXCLUDED.enabled,
             updated_at = NOW()
         WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
           AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
@@ -345,6 +391,8 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(definition_event_id)
+    .bind(enabled)
     .fetch_optional(pool)
     .await?;
 
@@ -370,7 +418,7 @@ pub async fn get_workflow(
 ) -> Result<WorkflowRecord> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND id = $2
@@ -401,7 +449,7 @@ pub async fn list_channel_workflows(
 
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND channel_id = $2
@@ -432,7 +480,7 @@ pub async fn list_enabled_channel_workflows(
 ) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1
@@ -460,7 +508,7 @@ pub async fn list_enabled_channel_workflows(
 pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
+        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash, w.definition_event_id,
                w.status::text AS status, w.enabled, w.created_at, w.updated_at
         FROM workflows w
         JOIN communities c ON c.id = w.community_id
@@ -961,6 +1009,409 @@ pub async fn update_workflow_run(
     Ok(())
 }
 
+/// Serialize creation of one durable delivery identity and return its canonical message.
+///
+/// The transaction-scoped advisory lock remains held by the returned transaction.
+/// Callers keep it alive until the visible event and durable row are published, so
+/// concurrent retries cannot both pass the preflight and sign duplicate events.
+pub async fn lock_workflow_agent_delivery_identity(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_id: &str,
+    _target_pubkey: &[u8],
+) -> Result<(
+    Transaction<'static, Postgres>,
+    Option<(Vec<u8>, DateTime<Utc>)>,
+)> {
+    let mut transaction = pool.begin().await?;
+    let identity = format!("{}:{run_id}:{step_id}", community_id.as_uuid(),);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(identity)
+        .execute(&mut *transaction)
+        .await?;
+    let message_event_id = sqlx::query_as::<_, (Vec<u8>, DateTime<Utc>)>(
+        r#"
+        SELECT message_event_id, message_event_created_at
+        FROM workflow_agent_deliveries
+        WHERE community_id = $1 AND run_id = $2 AND step_id = $3
+        ORDER BY created_at, id LIMIT 1
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    Ok((transaction, message_event_id))
+}
+
+/// One target in an atomic visible-message delivery commit.
+pub struct WorkflowAgentDeliveryTarget {
+    /// Stable delivery identity used by wake hints and claim fencing.
+    pub id: Uuid,
+    /// Immutable managed-agent recipient.
+    pub pubkey: Vec<u8>,
+}
+
+/// Atomically persist the canonical visible event and every signed routing target.
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_workflow_agent_deliveries(
+    mut transaction: Transaction<'static, Postgres>,
+    community_id: CommunityId,
+    event: Option<&Event>,
+    message_event_id: &[u8],
+    message_event_created_at: DateTime<Utc>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    step_id: &str,
+    definition_event_id: &[u8],
+    channel_id: Uuid,
+    targets: &[WorkflowAgentDeliveryTarget],
+    execution_trace: &serde_json::Value,
+    trigger_context: Option<&serde_json::Value>,
+    expires_at: DateTime<Utc>,
+) -> Result<(Option<StoredEvent>, Vec<Uuid>)> {
+    let stored_event = if let Some(event) = event {
+        let (stored, _) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut transaction,
+            community_id,
+            event,
+            Some(channel_id),
+            thread_meta,
+        )
+        .await?;
+        Some(stored)
+    } else {
+        None
+    };
+    let mut created = Vec::new();
+    for target in targets {
+        let affected = sqlx::query(
+            r#"INSERT INTO workflow_agent_deliveries
+               (community_id, id, workflow_id, run_id, step_id, definition_event_id,
+                message_event_id, message_event_created_at, channel_id, target_pubkey,
+                execution_trace, trigger_context, expires_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+               ON CONFLICT (community_id, run_id, step_id, target_pubkey) DO NOTHING"#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(target.id)
+        .bind(workflow_id)
+        .bind(run_id)
+        .bind(step_id)
+        .bind(definition_event_id)
+        .bind(message_event_id)
+        .bind(message_event_created_at)
+        .bind(channel_id)
+        .bind(&target.pubkey)
+        .bind(execution_trace)
+        .bind(trigger_context)
+        .bind(expires_at)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected == 1 {
+            created.push(target.id);
+        }
+    }
+    transaction.commit().await?;
+    Ok((stored_event, created))
+}
+
+/// Create one durable agent delivery after its immutable visible event exists.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_workflow_agent_delivery(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    step_id: &str,
+    definition_event_id: &[u8],
+    message_event_id: &[u8],
+    message_event_created_at: DateTime<Utc>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    execution_trace: &serde_json::Value,
+    trigger_context: Option<&serde_json::Value>,
+    expires_at: DateTime<Utc>,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        r#"
+        INSERT INTO workflow_agent_deliveries
+            (community_id, id, workflow_id, run_id, step_id, definition_event_id,
+             message_event_id, message_event_created_at, channel_id, target_pubkey, execution_trace, trigger_context, expires_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT (community_id, run_id, step_id, target_pubkey) DO NOTHING
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(workflow_id)
+    .bind(run_id)
+    .bind(step_id)
+    .bind(definition_event_id)
+    .bind(message_event_id)
+    .bind(message_event_created_at)
+    .bind(channel_id)
+    .bind(target_pubkey)
+    .bind(execution_trace)
+    .bind(trigger_context)
+    .bind(expires_at)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected == 1)
+}
+
+/// Immutable wake bindings that must match before a specific live delivery is claimed.
+#[derive(Debug, Clone)]
+pub struct WorkflowAgentDeliveryBinding {
+    /// Run identifier carried by the authenticated wake.
+    pub run_id: Uuid,
+    /// Step identifier carried by the authenticated wake.
+    pub step_id: String,
+    /// Definition event identifier carried by the authenticated wake.
+    pub definition_event_id: Vec<u8>,
+    /// Visible message event identifier carried by the authenticated wake.
+    pub message_event_id: Vec<u8>,
+    /// Receiving channel carried by the authenticated wake.
+    pub channel_id: Uuid,
+}
+
+/// Atomically acquire one due pending delivery for an agent.
+///
+/// The requested lease must fit entirely within the row lifetime. Once claimed,
+/// delivery retry belongs exclusively to the ACP runtime; an expired claim is
+/// terminalized by the reaper rather than reacquired by another runtime.
+pub async fn claim_workflow_agent_delivery(
+    pool: &PgPool,
+    community_id: CommunityId,
+    target_pubkey: &[u8],
+    delivery_id: Option<Uuid>,
+    expected: Option<&WorkflowAgentDeliveryBinding>,
+    lease_seconds: i64,
+) -> Result<Option<WorkflowAgentDeliveryRecord>> {
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT community_id, id
+            FROM workflow_agent_deliveries
+            WHERE community_id = $1 AND target_pubkey = $2
+              AND ($3::uuid IS NULL OR id = $3::uuid)
+              AND ($5::uuid IS NULL OR run_id = $5::uuid)
+              AND ($6::text IS NULL OR step_id = $6::text)
+              AND ($7::bytea IS NULL OR definition_event_id = $7::bytea)
+              AND ($8::bytea IS NULL OR message_event_id = $8::bytea)
+              AND ($9::uuid IS NULL OR channel_id = $9::uuid)
+              AND expires_at >= NOW() + make_interval(secs => $4)
+              AND next_attempt_at <= NOW()
+              AND attempt < 3
+              AND status = 'pending'
+            ORDER BY created_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        ), claimed AS (
+            UPDATE workflow_agent_deliveries d
+            SET status = 'claimed',
+                attempt = d.attempt + 1,
+                claim_token = gen_random_uuid(), claim_owner = $2,
+                claim_expires_at = NOW() + make_interval(secs => $4), updated_at = NOW()
+            FROM candidate c
+            WHERE d.community_id = c.community_id AND d.id = c.id
+            RETURNING d.*
+        )
+        SELECT c.*, c.status::text AS status_text
+        FROM claimed c
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(target_pubkey)
+    .bind(delivery_id)
+    .bind(lease_seconds as f64)
+    .bind(expected.map(|binding| binding.run_id))
+    .bind(expected.map(|binding| binding.step_id.as_str()))
+    .bind(expected.map(|binding| binding.definition_event_id.as_slice()))
+    .bind(expected.map(|binding| binding.message_event_id.as_slice()))
+    .bind(expected.map(|binding| binding.channel_id))
+    .fetch_optional(pool)
+    .await?;
+    row.map(row_to_agent_delivery_record).transpose()
+}
+
+/// Extend a live delivery claim. The owner and token fence stale renewals.
+pub async fn renew_workflow_agent_delivery(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    target_pubkey: &[u8],
+    claim_token: Uuid,
+    lease_seconds: i64,
+) -> Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        r#"
+        UPDATE workflow_agent_deliveries
+        SET claim_expires_at = LEAST(
+                expires_at,
+                GREATEST(claim_expires_at, NOW() + make_interval(secs => $1))
+            ),
+            updated_at = NOW()
+        WHERE community_id = $2 AND id = $3 AND target_pubkey = $4
+          AND claim_owner = $4 AND status = 'claimed'
+          AND claim_token = $5 AND claim_expires_at > NOW()
+        RETURNING claim_expires_at
+        "#,
+    )
+    .bind(lease_seconds as f64)
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(target_pubkey)
+    .bind(claim_token)
+    .fetch_optional(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Finish a claimed delivery. The token fences late/concurrent completions.
+#[allow(clippy::too_many_arguments)]
+pub async fn finish_workflow_agent_delivery(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    target_pubkey: &[u8],
+    claim_token: Uuid,
+    delivered: bool,
+    retryable: bool,
+    failure_code: Option<&str>,
+    failure_message: Option<&str>,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflow_agent_deliveries
+        SET status = CASE
+                WHEN $1 THEN 'delivered'::workflow_agent_delivery_status
+                WHEN $2 AND attempt < 3 AND expires_at > NOW()
+                    THEN 'pending'::workflow_agent_delivery_status
+                ELSE 'failed'::workflow_agent_delivery_status
+            END,
+            delivered_at = CASE WHEN $1 THEN NOW() ELSE delivered_at END,
+            failed_at = CASE WHEN NOT $1 AND NOT ($2 AND attempt < 3 AND expires_at > NOW())
+                THEN NOW() ELSE failed_at END,
+            next_attempt_at = CASE WHEN NOT $1 AND $2 AND attempt < 3 AND expires_at > NOW()
+                THEN NOW() + make_interval(secs => LEAST(300, 5 * power(2, attempt - 1))::double precision)
+                ELSE next_attempt_at END,
+            claim_token = CASE
+                WHEN NOT $1 AND $2 AND attempt < 3 AND expires_at > NOW() THEN NULL
+                ELSE claim_token
+            END,
+            claim_owner = CASE
+                WHEN NOT $1 AND $2 AND attempt < 3 AND expires_at > NOW() THEN NULL
+                ELSE claim_owner
+            END,
+            claim_expires_at = CASE
+                WHEN NOT $1 AND $2 AND attempt < 3 AND expires_at > NOW() THEN NULL
+                ELSE claim_expires_at
+            END,
+            failure_code = $3, failure_message = $4, updated_at = NOW()
+        WHERE community_id = $5 AND id = $6 AND target_pubkey = $7
+          AND claim_owner = $7 AND status = 'claimed'
+          AND claim_token = $8 AND claim_expires_at > NOW()
+        "#,
+    )
+    .bind(delivered)
+    .bind(retryable)
+    .bind(failure_code)
+    .bind(failure_message)
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(target_pubkey)
+    .bind(claim_token)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if affected == 1 {
+        return Ok(true);
+    }
+
+    // A successful terminal update may race a lost HTTP response. Keep the
+    // fencing token on terminal rows and accept only an exact replay of the
+    // same disposition; a stale owner can never change the recorded outcome.
+    let replayed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM workflow_agent_deliveries
+            WHERE community_id = $1 AND id = $2 AND target_pubkey = $3
+              AND claim_owner = $3 AND claim_token = $4
+              AND status = CASE WHEN $5 THEN 'delivered'::workflow_agent_delivery_status
+                                ELSE 'failed'::workflow_agent_delivery_status END
+              AND ($5 OR (failure_code IS NOT DISTINCT FROM $6
+                          AND failure_message IS NOT DISTINCT FROM $7))
+        )
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(target_pubkey)
+    .bind(claim_token)
+    .bind(delivered)
+    .bind(failure_code)
+    .bind(failure_message)
+    .fetch_one(pool)
+    .await?;
+    Ok(replayed)
+}
+
+/// Terminalize rows whose delivery lifetime or exclusive claim has expired.
+pub async fn reap_workflow_agent_deliveries(
+    pool: &PgPool,
+) -> Result<Vec<WorkflowAgentDeliveryRecord>> {
+    sqlx::query(
+        r#"
+        WITH terminal AS (
+            UPDATE workflow_agent_deliveries
+            SET status = CASE WHEN expires_at <= NOW() THEN 'expired'::workflow_agent_delivery_status ELSE 'failed'::workflow_agent_delivery_status END,
+                failed_at = NOW(), failure_code = CASE WHEN expires_at <= NOW() THEN 'delivery_expired' ELSE 'delivery_claim_expired' END,
+                failure_message = CASE WHEN expires_at <= NOW()
+                    THEN 'managed agent did not claim the workflow delivery'
+                    ELSE 'managed agent lost exclusive workflow delivery ownership' END,
+                updated_at = NOW()
+            WHERE (status IN ('pending','claimed') AND expires_at <= NOW())
+               OR (status = 'claimed' AND claim_expires_at <= NOW())
+            RETURNING *
+        )
+        SELECT t.*, t.status::text AS status_text FROM terminal t
+        "#,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(row_to_agent_delivery_record)
+    .collect()
+}
+
+fn row_to_agent_delivery_record(row: sqlx::postgres::PgRow) -> Result<WorkflowAgentDeliveryRecord> {
+    Ok(WorkflowAgentDeliveryRecord {
+        id: row.try_get("id")?,
+        community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+        workflow_id: row.try_get("workflow_id")?,
+        run_id: row.try_get("run_id")?,
+        step_id: row.try_get("step_id")?,
+        definition_event_id: row.try_get("definition_event_id")?,
+        message_event_id: row.try_get("message_event_id")?,
+        channel_id: row.try_get("channel_id")?,
+        target_pubkey: row.try_get("target_pubkey")?,
+        status: row.try_get("status_text")?,
+        attempt: row.try_get("attempt")?,
+        claim_token: row.try_get("claim_token")?,
+        claim_expires_at: row.try_get("claim_expires_at")?,
+        expires_at: row.try_get("expires_at")?,
+        execution_trace: row.try_get("execution_trace")?,
+        trigger_context: row.try_get("trigger_context")?,
+    })
+}
+
 // -- Approval CRUD ------------------------------------------------------------
 
 /// Parameters for creating a new approval request.
@@ -1183,6 +1634,7 @@ fn row_to_workflow_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRecord> 
         channel_id,
         definition: row.try_get("definition")?,
         definition_hash: row.try_get("definition_hash")?,
+        definition_event_id: row.try_get("definition_event_id")?,
         status,
         enabled,
         created_at: row.try_get("created_at")?,
@@ -1247,7 +1699,7 @@ pub async fn find_by_owner_and_name(
 ) -> Result<Option<WorkflowRecord>> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND owner_pubkey = $2 AND name = $3
@@ -1381,6 +1833,7 @@ mod tests {
             owner_pubkey: vec![0xab; 32],
             channel_id: Some(channel_id),
             definition: def.clone(),
+            definition_event_id: None,
             definition_hash: vec![0x01, 0x02, 0x03, 0x04],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1411,6 +1864,7 @@ mod tests {
             owner_pubkey: vec![0x00; 32],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1433,6 +1887,7 @@ mod tests {
             owner_pubkey: vec![0x01; 32],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![0xAA],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1462,6 +1917,7 @@ mod tests {
                 owner_pubkey: vec![],
                 channel_id: None,
                 definition: serde_json::json!({}),
+                definition_event_id: None,
                 definition_hash: vec![],
                 status: status.clone(),
                 enabled: true,
@@ -1482,6 +1938,7 @@ mod tests {
             owner_pubkey: vec![],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![],
             status: WorkflowStatus::Active,
             enabled: false,
@@ -1774,7 +2231,7 @@ mod tests {
 
     use crate::user::ensure_user;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")

@@ -153,6 +153,10 @@ pub struct EventQueue {
     /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
     /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
     cancel_reasons: HashMap<Uuid, CancelReason>,
+    /// Workflow events whose durable claims entered terminal handling while a
+    /// turn was in flight. They stay tombstoned until that turn returns so its
+    /// cancelled batch cannot resurrect them as ordinary prompts.
+    terminal_workflow_events: HashMap<Uuid, HashSet<String>>,
     /// Events withheld from `queues` while a goose-native steer is in flight
     /// for that event. Invisible to `flush_next` / `has_flushable_work` /
     /// `drain` (the events have been moved out of `queues`), so the queue's
@@ -187,6 +191,7 @@ impl EventQueue {
             dedup_mode,
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
+            terminal_workflow_events: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
@@ -278,6 +283,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.terminal_workflow_events.remove(&id);
             // Recover any withheld goose-native steer events for the expired
             // channel back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -393,6 +399,10 @@ impl EventQueue {
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
+        // `requeue_as_cancelled` runs before `mark_complete`; the returning
+        // batch has now crossed the tombstone and can no longer resurrect a
+        // terminal workflow event.
+        self.terminal_workflow_events.remove(&channel_id);
         let now = Instant::now();
         match self.retry_after.get(&channel_id) {
             // Active throttle → channel was requeued; keep retry_counts intact.
@@ -426,7 +436,11 @@ impl EventQueue {
     ///
     /// Note: does NOT remove from `in_flight_channels` — caller must call
     /// `mark_complete` separately.
-    pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
+    pub fn requeue(&mut self, mut batch: FlushBatch) -> Option<FlushBatch> {
+        self.filter_terminal_workflow_events(&mut batch);
+        if batch.events.is_empty() && batch.cancelled_events.is_empty() {
+            return None;
+        }
         let channel_id = batch.channel_id;
         let attempt = {
             let count = self.retry_counts.entry(channel_id).or_insert(0);
@@ -474,7 +488,7 @@ impl EventQueue {
 
         let queue = self.queues.entry(channel_id).or_default();
         // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
+        for be in batch.cancelled_events.into_iter().chain(batch.events).rev() {
             queue.push_front(QueuedEvent {
                 channel_id,
                 event: be.event,
@@ -505,11 +519,12 @@ impl EventQueue {
     ///
     /// Does NOT set `retry_after`. Does NOT remove from `in_flight_channels` —
     /// caller must call `mark_complete` separately.
-    pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
+    pub fn requeue_preserve_timestamps(&mut self, mut batch: FlushBatch) {
+        self.filter_terminal_workflow_events(&mut batch);
         let channel_id = batch.channel_id;
         let queue = self.queues.entry(channel_id).or_default();
         // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
+        for be in batch.cancelled_events.into_iter().chain(batch.events).rev() {
             queue.push_front(QueuedEvent {
                 channel_id,
                 event: be.event,
@@ -539,12 +554,18 @@ impl EventQueue {
     /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
-    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
+    pub fn requeue_as_cancelled(&mut self, mut batch: FlushBatch, reason: CancelReason) {
+        self.filter_terminal_workflow_events(&mut batch);
         let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
-        self.cancel_reasons.insert(batch.channel_id, reason);
+        if entry.is_empty() {
+            self.cancelled_batches.remove(&batch.channel_id);
+            self.cancel_reasons.remove(&batch.channel_id);
+        } else {
+            self.cancel_reasons.insert(batch.channel_id, reason);
+        }
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -574,6 +595,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.terminal_workflow_events.remove(&id);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired channel so they are
             // not permanently orphaned in the side table.
@@ -656,16 +678,19 @@ impl EventQueue {
     /// Returns the event IDs of dropped events so the caller can clean up
     /// any reactions (👀) that were added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
-            .queues
-            .remove(&channel_id)
-            .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
-            .unwrap_or_default();
+        let mut ids = Vec::new();
+        if let Some(events) = self.queues.remove(&channel_id) {
+            ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+        }
+        if let Some(events) = self.cancelled_batches.remove(&channel_id) {
+            ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+        }
+        if let Some(events) = self.withheld_native_steer.remove(&channel_id) {
+            ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+        }
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
-        self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -764,6 +789,66 @@ impl EventQueue {
                 limit = MAX_PENDING_PER_CHANNEL,
                 "release_native_steer overflow — dropped newest event to enforce cap"
             );
+        }
+    }
+
+    /// Whether an event remains under local queue ownership, including a
+    /// cancel-merge batch or a pending native steer.
+    pub fn contains_event(&self, channel_id: Uuid, event_id: &str) -> bool {
+        self.queues.get(&channel_id).is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event.event.id.to_hex() == event_id)
+        }) || self
+            .cancelled_batches
+            .get(&channel_id)
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event.event.id.to_hex() == event_id)
+            })
+            || self
+                .withheld_native_steer
+                .get(&channel_id)
+                .is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|event| event.event.id.to_hex() == event_id)
+                })
+    }
+
+    /// Remove terminal workflow events from a returning or recovered batch.
+    /// Every batch-fate path must cross this authority before requeueing.
+    fn filter_terminal_workflow_events(&self, batch: &mut FlushBatch) {
+        let Some(terminal) = self.terminal_workflow_events.get(&batch.channel_id) else {
+            return;
+        };
+        batch
+            .cancelled_events
+            .retain(|event| !terminal.contains(&event.event.id.to_hex()));
+        batch
+            .events
+            .retain(|event| !terminal.contains(&event.event.id.to_hex()));
+    }
+
+    /// Remove a terminal workflow event from every queued store and keep it
+    /// tombstoned until the current turn returns. Ordinary cancellation keeps
+    /// its existing re-prompt behavior; only callers that have begun durable
+    /// terminal handling use this fence.
+    pub fn terminalize_workflow_event(&mut self, channel_id: Uuid, event_id: &str) {
+        self.remove_event(channel_id, event_id);
+        if let Some(events) = self.cancelled_batches.get_mut(&channel_id) {
+            events.retain(|event| event.event.id.to_hex() != event_id);
+            if events.is_empty() {
+                self.cancelled_batches.remove(&channel_id);
+                self.cancel_reasons.remove(&channel_id);
+            }
+        }
+        if self.in_flight_channels.contains(&channel_id) {
+            self.terminal_workflow_events
+                .entry(channel_id)
+                .or_default()
+                .insert(event_id.to_owned());
         }
     }
 
@@ -3965,6 +4050,29 @@ mod tests {
     }
 
     #[test]
+    fn test_drain_channel_reports_cancelled_and_withheld_events() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let cancelled = make_queued(ch, "cancelled");
+        let withheld = make_queued(ch, "withheld");
+        let cancelled_id = cancelled.event.id.to_hex();
+        let withheld_id = withheld.event.id.to_hex();
+
+        q.push(cancelled);
+        let batch = q.flush_next().expect("cancelled batch");
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+        q.push(withheld);
+        assert!(q.mark_native_steer_pending(ch, &withheld_id));
+
+        let drained = q.drain_channel(ch);
+        assert!(drained.contains(&cancelled_id));
+        assert!(drained.contains(&withheld_id));
+        assert!(!q.contains_event(ch, &cancelled_id));
+        assert!(!q.contains_event(ch, &withheld_id));
+    }
+
+    #[test]
     fn test_drain_channel_empty_returns_empty() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -4093,6 +4201,121 @@ mod tests {
             2,
             "should have 2 cancelled events"
         );
+    }
+
+    #[test]
+    fn terminal_workflow_in_checked_out_batch_never_reflushes() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let workflow = make_queued(ch, "terminal workflow");
+        let workflow_id = workflow.event.id.to_hex();
+        q.push(workflow);
+        q.push(make_queued(ch, "unrelated in flight"));
+        let batch = q.flush_next().expect("checked-out batch");
+        q.push(make_queued(ch, "unrelated queued"));
+        q.terminalize_workflow_event(ch, &workflow_id);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let next = q.flush_next().expect("unrelated events survive");
+        let contents = next
+            .events
+            .iter()
+            .chain(&next.cancelled_events)
+            .map(|event| event.event.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contents.len(), 2);
+        assert!(contents.contains(&"unrelated in flight"));
+        assert!(contents.contains(&"unrelated queued"));
+        assert!(!contents.contains(&"terminal workflow"));
+        q.mark_complete(ch);
+        assert!(q.flush_next().is_none(), "terminal workflow cannot reflush");
+    }
+
+    #[test]
+    fn terminal_workflow_already_cancel_merged_never_reflushes() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let workflow = make_queued(ch, "terminal workflow");
+        let workflow_id = workflow.event.id.to_hex();
+        q.push(workflow);
+        let first = q.flush_next().expect("first batch");
+        q.push(make_queued(ch, "unrelated merged"));
+        q.requeue_as_cancelled(first, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let merged = q.flush_next().expect("cancel-merged batch");
+        q.push(make_queued(ch, "unrelated queued"));
+        q.terminalize_workflow_event(ch, &workflow_id);
+        q.requeue_as_cancelled(merged, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let next = q.flush_next().expect("unrelated events survive");
+        let contents = next
+            .events
+            .iter()
+            .chain(&next.cancelled_events)
+            .map(|event| event.event.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contents.len(), 2);
+        assert!(contents.contains(&"unrelated merged"));
+        assert!(contents.contains(&"unrelated queued"));
+        assert!(!contents.contains(&"terminal workflow"));
+        q.mark_complete(ch);
+        assert!(q.flush_next().is_none(), "terminal workflow cannot reflush");
+    }
+
+    #[test]
+    fn terminal_workflow_retry_filters_both_event_buckets() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let workflow = make_queued(ch, "terminal workflow");
+        let workflow_id = workflow.event.id.to_hex();
+        q.push(workflow);
+        q.push(make_queued(ch, "unrelated event"));
+        let mut batch = q.flush_next().unwrap();
+        batch.cancelled_events.push(BatchEvent {
+            event: make_event("unrelated cancelled"),
+            prompt_tag: "test".into(),
+            received_at: Instant::now(),
+        });
+        batch.cancelled_events.push(batch.events[0].clone());
+        q.terminalize_workflow_event(ch, &workflow_id);
+        assert!(q.requeue(batch).is_none());
+        q.mark_complete(ch);
+        assert!(!q.contains_event(ch, &workflow_id));
+        assert_eq!(q.queued_event_count(&ch), 2);
+    }
+
+    #[test]
+    fn terminal_workflow_preserve_retry_filters_both_event_buckets() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let workflow = make_queued(ch, "terminal workflow");
+        let workflow_id = workflow.event.id.to_hex();
+        q.push(workflow);
+        q.push(make_queued(ch, "unrelated event"));
+        let mut batch = q.flush_next().unwrap();
+        batch.cancelled_events.push(BatchEvent {
+            event: make_event("unrelated cancelled"),
+            prompt_tag: "test".into(),
+            received_at: Instant::now(),
+        });
+        batch.cancelled_events.push(batch.events[0].clone());
+        q.terminalize_workflow_event(ch, &workflow_id);
+        q.requeue_preserve_timestamps(batch);
+        q.mark_complete(ch);
+        assert!(!q.contains_event(ch, &workflow_id));
+        assert_eq!(q.queued_event_count(&ch), 2);
+    }
+
+    #[test]
+    fn ordinary_cancellation_still_reflushes() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "ordinary"));
+        let batch = q.flush_next().expect("ordinary batch");
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let retry = q.flush_next().expect("ordinary cancellation reflushes");
+        assert_eq!(retry.events[0].event.content, "ordinary");
     }
 
     #[test]

@@ -24,6 +24,10 @@ use crate::{
 
 const DEFAULT_RUN_LIMIT: i64 = 20;
 const MAX_RUN_LIMIT: i64 = 100;
+use buzz_core::workflow_delivery::{
+    DEFAULT_LEASE_SECONDS as DEFAULT_DELIVERY_LEASE_SECONDS,
+    MAX_LEASE_SECONDS as MAX_DELIVERY_LEASE_SECONDS,
+};
 
 /// Pagination query for workflow run history.
 #[derive(Debug, Deserialize, Default)]
@@ -193,6 +197,254 @@ pub async fn run_approvals(
     Ok(Json(serde_json::json!({
         "approvals": approvals.iter().map(approval_json).collect::<Vec<_>>(),
     })))
+}
+
+/// Authenticated request to claim either a specific or the oldest due delivery.
+#[derive(Debug, Deserialize)]
+pub struct ClaimDeliveryRequest {
+    #[serde(default)]
+    delivery_id: Option<Uuid>,
+    #[serde(default)]
+    expected: Option<ClaimDeliveryBindingRequest>,
+    #[serde(default = "default_delivery_lease_seconds")]
+    lease_seconds: i64,
+}
+
+/// Immutable delivery bindings authenticated from a relay-authored live wake.
+#[derive(Debug, Deserialize)]
+pub struct ClaimDeliveryBindingRequest {
+    run_id: Uuid,
+    step_id: String,
+    definition_event_id: String,
+    message_event_id: String,
+    channel_id: Uuid,
+}
+
+fn default_delivery_lease_seconds() -> i64 {
+    DEFAULT_DELIVERY_LEASE_SECONDS
+}
+
+/// Authenticated request to extend a fenced delivery lease.
+#[derive(Debug, Deserialize)]
+pub struct RenewDeliveryRequest {
+    claim_token: Uuid,
+    lease_seconds: i64,
+}
+
+/// Authenticated completion result for a fenced delivery lease.
+#[derive(Debug, Deserialize)]
+pub struct FinishDeliveryRequest {
+    claim_token: Uuid,
+    delivered: bool,
+    #[serde(default)]
+    retryable: bool,
+    #[serde(default)]
+    failure_code: Option<String>,
+    #[serde(default)]
+    failure_message: Option<String>,
+}
+
+async fn authorize_delivery_write(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<(TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "relay community not found"))?;
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
+    let (pubkey, event_id) = bridge::verify_bridge_auth(
+        headers,
+        "POST",
+        &url,
+        Some(body),
+        state.config.require_auth_token,
+    )?;
+    bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
+    bridge::check_nip98_replay(state, &tenant, event_id).await?;
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    super::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        &pubkey.to_bytes(),
+        auth_tag,
+    )
+    .await?;
+    Ok((tenant, pubkey))
+}
+
+/// Claim the oldest due workflow delivery for the authenticated managed agent.
+pub async fn claim_agent_delivery(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = "/workflows/agent-deliveries/claim";
+    let (tenant, agent) = authorize_delivery_write(&state, &headers, path, &body).await?;
+    let request: ClaimDeliveryRequest = serde_json::from_slice(&body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid claim JSON: {error}"),
+        )
+    })?;
+    if !(DEFAULT_DELIVERY_LEASE_SECONDS..=MAX_DELIVERY_LEASE_SECONDS)
+        .contains(&request.lease_seconds)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "lease_seconds is outside the supported range",
+        ));
+    }
+    if request.delivery_id.is_none() && request.expected.is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "expected wake bindings require a specific delivery_id",
+        ));
+    }
+    let expected = request
+        .expected
+        .map(|binding| {
+            let definition_event_id = hex::decode(&binding.definition_event_id)
+                .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid definition_event_id"))?;
+            let message_event_id = hex::decode(&binding.message_event_id)
+                .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid message_event_id"))?;
+            if definition_event_id.len() != 32
+                || message_event_id.len() != 32
+                || binding.step_id.is_empty()
+            {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid expected wake bindings",
+                ));
+            }
+            Ok(buzz_db::workflow::WorkflowAgentDeliveryBinding {
+                run_id: binding.run_id,
+                step_id: binding.step_id,
+                definition_event_id,
+                message_event_id,
+                channel_id: binding.channel_id,
+            })
+        })
+        .transpose()?;
+    let delivery = state
+        .db
+        .claim_workflow_agent_delivery(
+            tenant.community(),
+            &agent.to_bytes(),
+            request.delivery_id,
+            expected.as_ref(),
+            request.lease_seconds,
+        )
+        .await
+        .map_err(|error| internal_error(&format!("claim workflow delivery: {error}")))?;
+    Ok(Json(serde_json::json!({
+        "delivery": delivery.as_ref().map(delivery_json),
+    })))
+}
+
+/// Extend a workflow delivery lease using its owner/token fencing stamp.
+pub async fn renew_agent_delivery(
+    State(state): State<Arc<AppState>>,
+    Path(delivery_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflows/agent-deliveries/{delivery_id}/renew");
+    let (tenant, agent) = authorize_delivery_write(&state, &headers, &path, &body).await?;
+    let request: RenewDeliveryRequest = serde_json::from_slice(&body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid renewal JSON: {error}"),
+        )
+    })?;
+    if !(DEFAULT_DELIVERY_LEASE_SECONDS..=MAX_DELIVERY_LEASE_SECONDS)
+        .contains(&request.lease_seconds)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "lease_seconds is outside the supported range",
+        ));
+    }
+    let claim_expires_at = state
+        .db
+        .renew_workflow_agent_delivery(
+            tenant.community(),
+            delivery_id,
+            &agent.to_bytes(),
+            request.claim_token,
+            request.lease_seconds,
+        )
+        .await
+        .map_err(|error| internal_error(&format!("renew workflow delivery: {error}")))?
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, "delivery claim is stale or expired"))?;
+    Ok(Json(serde_json::json!({
+        "renewed": true,
+        "claim_expires_at": claim_expires_at,
+    })))
+}
+
+/// Complete a workflow delivery using its lease token as a fencing stamp.
+pub async fn finish_agent_delivery(
+    State(state): State<Arc<AppState>>,
+    Path(delivery_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflows/agent-deliveries/{delivery_id}/finish");
+    let (tenant, agent) = authorize_delivery_write(&state, &headers, &path, &body).await?;
+    let request: FinishDeliveryRequest = serde_json::from_slice(&body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid finish JSON: {error}"),
+        )
+    })?;
+    let completed = state
+        .db
+        .finish_workflow_agent_delivery(
+            tenant.community(),
+            delivery_id,
+            &agent.to_bytes(),
+            request.claim_token,
+            request.delivered,
+            request.retryable,
+            request.failure_code.as_deref(),
+            request.failure_message.as_deref(),
+        )
+        .await
+        .map_err(|error| internal_error(&format!("finish workflow delivery: {error}")))?;
+    if !completed {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "delivery claim is stale or expired",
+        ));
+    }
+    Ok(Json(serde_json::json!({"completed": true})))
+}
+
+fn delivery_json(delivery: &buzz_db::workflow::WorkflowAgentDeliveryRecord) -> Value {
+    serde_json::json!({
+        "id": delivery.id,
+        "workflow_id": delivery.workflow_id,
+        "run_id": delivery.run_id,
+        "step_id": delivery.step_id,
+        "definition_event_id": hex::encode(&delivery.definition_event_id),
+        "message_event_id": hex::encode(&delivery.message_event_id),
+        "channel_id": delivery.channel_id,
+        "target_pubkey": hex::encode(&delivery.target_pubkey),
+        "attempt": delivery.attempt,
+        "claim_token": delivery.claim_token,
+        "claim_expires_at": delivery.claim_expires_at,
+        "expires_at": delivery.expires_at,
+        "execution_trace": delivery.execution_trace,
+        "trigger_context": delivery.trigger_context,
+    })
 }
 
 fn run_json(run: &buzz_db::workflow::WorkflowRunRecord) -> Value {

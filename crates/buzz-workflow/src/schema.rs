@@ -211,6 +211,18 @@ impl WorkflowDef {
                     step.id
                 )));
             }
+            if let ActionDef::SendMessage {
+                channel: Some(channel),
+                ..
+            } = &step.action
+            {
+                if !channel.trim().is_empty() {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "send_message channel overrides are not supported; workflows are bound to their definition channel"
+                            .into(),
+                    ));
+                }
+            }
         }
 
         // `reply_in_thread` requires a triggering message to reply to. Schedule
@@ -389,7 +401,7 @@ mod tests {
             "name: All Actions\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: msg\n    action: send_message\n    text: Hello\n    channel: general\n",
+            "  - id: msg\n    action: send_message\n    text: Hello\n",
             "  - id: dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: You triggered this\n",
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
@@ -874,6 +886,20 @@ mod tests {
         );
         let (def, _) = parse_yaml(yaml).expect("unique step IDs should be valid");
         assert_eq!(def.steps.len(), 3);
+    }
+
+    #[test]
+    fn validate_rejects_send_message_channel_override() {
+        let yaml = concat!(
+            "name: Cross Channel\ntrigger:\n  on: message_posted\n",
+            "steps:\n  - id: notify\n    action: send_message\n",
+            "    text: hi\n    channel: 11111111-1111-1111-1111-111111111111\n",
+        );
+        let error = parse_yaml(yaml).unwrap_err();
+        assert!(
+            matches!(&error, WorkflowError::InvalidDefinition(message) if message.contains("channel overrides are not supported")),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

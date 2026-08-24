@@ -1480,6 +1480,31 @@ mod tests {
     }
 
     #[test]
+    fn workflow_wake_filter_is_visible_only_to_its_p_recipient() {
+        let recipient = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
+        let recipient_hex = recipient.public_key().to_hex();
+        let outsider_hex = outsider.public_key().to_hex();
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_WORKFLOW_AGENT_WAKE as u16);
+        let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+
+        let recipient_filter = nostr::Filter::new()
+            .kind(kind)
+            .custom_tags(p_tag, [recipient_hex.clone()]);
+        assert!(p_gated_filters_authorized(
+            &[recipient_filter],
+            &recipient_hex
+        ));
+
+        let missing_p = nostr::Filter::new().kind(kind);
+        assert!(!p_gated_filters_authorized(&[missing_p], &outsider_hex));
+        let wrong_p = nostr::Filter::new()
+            .kind(kind)
+            .custom_tags(p_tag, [recipient_hex]);
+        assert!(!p_gated_filters_authorized(&[wrong_p], &outsider_hex));
+    }
+
+    #[test]
     fn request_local_access_cache_positive_no_db_no_repair() {
         let ch = uuid::Uuid::new_v4();
         let mut accessible = vec![ch];

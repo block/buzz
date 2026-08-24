@@ -7,6 +7,22 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use uuid::Uuid;
+
+use crate::executor::WorkflowCause;
+
+/// Provenance attached to a workflow-generated agent doorbell.
+#[derive(Debug, Clone)]
+pub struct DoorbellContext {
+    /// Exact controller-signed kind:30620 definition revision.
+    pub definition_event_id: String,
+    /// Durable execution whose state authorizes this delivery.
+    pub run_id: Uuid,
+    /// Execution attempt for this step.
+    pub attempt: u32,
+    /// Semantic cause of this run.
+    pub cause: WorkflowCause,
+}
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -53,21 +69,27 @@ pub trait ActionSink: Send + Sync {
     ///   under *this* community, never the deployment/default tenant — the run
     ///   carries its owning community so a workflow in community B posts into B
     ///   even though the side effect has no inbound connection to bind.
+    /// - `workflow_id`: UUID of the owner-signed kind:30620 definition
+    /// - `step_id`: ID of the `send_message` step being executed
     /// - `channel_id`: UUID string of the target channel
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
-    ///   the `p` attribution tag; the relay keypair signs the event)
-    /// - `reply_to`: when `Some(event_id_hex)`, the message is posted as a
-    ///   threaded reply to that event (NIP-10 root/reply tags + real thread
-    ///   metadata); when `None`, it is a top-level channel message.
+    ///   the dedicated `workflow-owner` authority tag and a `p` attribution
+    ///   tag; the relay keypair signs the event)
+    /// - `reply_to`: when present, reply to this triggering message while
+    ///   preserving NIP-10 ancestry and durable thread metadata
     ///
     /// Returns the event ID hex string on success.
+    #[allow(clippy::too_many_arguments)]
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
+        step_id: &str,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        doorbell: &DoorbellContext,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

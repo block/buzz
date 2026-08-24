@@ -42,6 +42,8 @@ pub mod relay;
 pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+/// Durable workflow-delivery lease bounds shared by clients and the relay.
+pub mod workflow_delivery;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

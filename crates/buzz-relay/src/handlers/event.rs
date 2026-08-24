@@ -677,6 +677,16 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    if buzz_core::kind::is_relay_only_kind(kind_u32) {
+        reject("invalid");
+        conn.send(RelayMessage::ok(
+            &event_id_hex,
+            false,
+            "restricted: relay-only kind",
+        ));
+        return;
+    }
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
