@@ -1,8 +1,15 @@
 # Pi harness integration for Buzz managed agents
 
-Status: proposed pilot architecture  
-Kanban: `228ca147-4522-43b1-8222-7864db1fe9fa`  
-Scope: one canary managed agent; no fleet rollout
+- Status: proposed pilot architecture; Phase 1 RPC spike implemented
+- Kanban: `228ca147-4522-43b1-8222-7864db1fe9fa`
+- Scope: one canary managed agent; no fleet rollout
+
+Implementation evidence:
+
+- non-shipping spike: [`tools/pi-acp-rpc-spike`](../tools/pi-acp-rpc-spike/README.md);
+- automated ACP lifecycle, steering, cancellation, usage, blank-prompt, and isolation tests;
+- real `pi --mode rpc` readiness handshake validated locally;
+- no managed-agent command or production identity has been changed.
 
 ## Decision summary
 
