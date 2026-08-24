@@ -430,7 +430,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "local"))
     .toEqual([managedPubkey]);
-  await expect(input).toBeEmpty();
+  await expect(input).toHaveText("@carl ");
 
   await page.getByTestId(`composer-address-lock-${managedPubkey}`).click();
   await input.fill("@carl");
@@ -720,7 +720,7 @@ test("defers agent mentions until DM members finish loading", async ({
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
-  await expect(input).toBeEmpty();
+  await expect(input).toHaveText("@alice ");
   await expect(threadPanel).toContainText("before members resolve");
 });
 
@@ -1290,7 +1290,8 @@ test("managed relay-profile agents with member roles use the agent address tray"
   await expect(dropdown.getByText("agent")).toBeVisible();
   await input.press("Enter");
 
-  await expect(input).toBeEmpty();
+  await expect(input).toHaveText("@charlie ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveText("charlie");
   await expect(
     page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
@@ -2642,8 +2643,8 @@ test("selecting a managed non-member agent from a DM addresses it", async ({
   await expect(input.locator(".mention-chip")).toHaveCount(0);
   await input.press("Enter");
 
-  await expect(input).toBeEmpty();
-  await expect(input.locator(".mention-chip")).toHaveCount(0);
+  await expect(input).toHaveText("@charlie ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveText("charlie");
   await expect(
     page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
