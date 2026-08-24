@@ -374,6 +374,7 @@ void _sendTypingIndicator(
       content: '',
       tags: tags,
       secretKey: privkeyHex,
+      pubkey: pubkeyForPrivkey(privkeyHex),
       verify: false,
     );
 

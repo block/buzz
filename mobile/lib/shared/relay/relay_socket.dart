@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'event_signing.dart';
 import 'nostr_models.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
@@ -221,6 +222,7 @@ class RelaySocket {
         content: '',
         tags: tags,
         secretKey: privkeyHex,
+        pubkey: pubkeyForPrivkey(privkeyHex),
       );
 
       _pendingAuthEventId = event.id;

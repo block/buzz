@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'event_signing.dart';
 import 'relay_provider.dart';
 
 const _mediaGetAuthKind = 24242;
@@ -118,6 +119,7 @@ class MediaGetAuthService {
       content: 'Get buzz-media',
       tags: tags,
       secretKey: privkeyHex,
+      pubkey: pubkeyForPrivkey(privkeyHex),
       verify: false,
     );
   }
