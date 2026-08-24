@@ -54,6 +54,20 @@ describe("activeAgentTurnsStore", () => {
     resetActiveAgentTurnsStore();
   });
 
+  describe("active turn summaries", () => {
+    it("retains every concurrent turn id in one channel deterministically", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "turn-z", channelId: "c1" }),
+        makeEvent({ seq: 2, turnId: "turn-a", channelId: "c1" }),
+      ]);
+
+      assert.deepEqual(getActiveTurnsForAgent(AGENT)[0].turnIds, [
+        "turn-a",
+        "turn-z",
+      ]);
+    });
+  });
+
   describe("seq filtering", () => {
     it("processes events with increasing seq", () => {
       syncAgentTurnsFromEvents(AGENT, [

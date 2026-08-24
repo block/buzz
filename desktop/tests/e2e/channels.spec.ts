@@ -2052,57 +2052,900 @@ test("shows and clears activity indicators for active channel agents", async ({
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
   await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ === "function",
+    null,
+    { timeout: 10_000 },
+  );
 
+  // A typing-only agent folds into the combined typing indicator group with
+  // the humans — status pills are observer-backed only, so no pill mounts
+  // (ChannelComposerActivityRow's source partition).
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "agents",
       pubkey,
     });
   }, TEST_IDENTITIES.alice.pubkey);
-
-  await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  await expect(page.getByTestId("message-typing-indicator")).toBeVisible();
   await expect(
-    page.getByTestId("bot-activity-composer-trigger"),
-  ).not.toContainText("View activity");
-  await page.getByTestId("bot-activity-composer-trigger").click();
-  const aliceActivityItem = page.getByTestId(
-    `bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`,
+    page.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice");
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
+    0,
   );
-  await expect(aliceActivityItem).toBeVisible();
-  await expect(aliceActivityItem).toContainText("View activity");
-  await aliceActivityItem.click({ force: true });
+
+  // An observer-backed turn promotes the agent into a status pill; the
+  // observer signal outranks the typing fallback for the same channel, so
+  // the agent leaves the typing group at the same time.
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "indicator-turn",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  await seedPillActivityMessage(page, {
+    agentPubkey: TEST_IDENTITIES.alice.pubkey,
+    atMs: Date.now(),
+    seq: Date.now(),
+    text: "Alice: indexing the channel history",
+    turnId: "indicator-turn",
+  });
+
+  const activityPill = page.getByTestId("bot-activity-composer-trigger");
+  await expect(activityPill).toBeVisible();
+  await expect(activityPill).toContainText("indexing the channel history");
+  await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
+  // The harness refreshes typing throughout the turn. Observer activity must
+  // remain authoritative instead of regressing the pill to "is typing…".
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "agents",
+      pubkey,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+  await expect(activityPill).toContainText("indexing the channel history");
+  // Hovering the pill opens the live-activity preview.
+  await activityPill.hover();
+  await expect(page.getByTestId("composer-live-activity-feed")).toBeVisible();
+  // Clicking the pill promotes the agent's runtime into the aux panel,
+  // scoped to this channel and showing the agent's live transcript.
+  await activityPill.click();
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-session-scope-label")).toContainText(
+    "#agents",
+  );
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
-    "alice",
+    "Alice: indexing the channel history",
   );
   // Opened from the composer with no prior pane: there is nowhere to go
   // "back" to, so the header shows only the close affordance.
   await expect(page.getByTestId("agent-session-back")).toHaveCount(0);
   await expect(page.getByTestId("auxiliary-panel-close")).toBeVisible();
-  await expect(page.getByTestId("agent-transcript-now-summary")).toHaveCount(0);
   await page.getByTestId("agent-session-settings-menu-trigger").click();
   await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();
   await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
   await page.keyboard.press("Escape");
-  await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
-    "No ACP activity yet",
-  );
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
-  await page.evaluate((pubkey) => {
-    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-      channelName: "agents",
-      content: "Done.",
-      pubkey,
-    });
-  }, TEST_IDENTITIES.alice.pubkey);
+  // Completion makes raw typing the fallback again until the final message
+  // clears it.
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "indicator-turn",
+        kind: "turn_completed",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  await expect(activityPill).toContainText("alice is typing");
+
+  await page.evaluate(
+    ({ pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "agents",
+        content: "Done.",
+        pubkey,
+      });
+    },
+    { pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
 
   await expect(page.getByTestId("message-timeline")).toContainText("Done.");
   await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
     0,
   );
 
-  await page.waitForTimeout(1_200);
+  // A fresh turn re-mounts the pill without presenting the prior turn's last
+  // action as current work.
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "indicator-turn-2",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toContainText(
+    "alice is working",
+  );
+});
+
+test("thread agent typing promotes only when activity exists", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ === "function" &&
+      typeof window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ === "function",
+  );
+
+  const threadHeadId = await page.evaluate(() => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "agents",
+      content: "Thread activity partition root",
+    });
+    if (!root) throw new Error("Failed to seed thread root");
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "agents",
+      content: "Thread activity partition reply",
+      parentEventId: root.id,
+    });
+    return root.id;
+  });
+  const summary = page.locator(
+    `[data-testid="message-thread-summary"][data-thread-head-id="${threadHeadId}"]`,
+  );
+  await expect(summary).toBeVisible();
+  await summary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  await page.evaluate(
+    ({ pubkey, threadHeadId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+        channelName: "agents",
+        pubkey,
+        threadHeadId,
+      });
+    },
+    { pubkey: TEST_IDENTITIES.alice.pubkey, threadHeadId },
+  );
+
+  // Thread-only typing has no observer-backed session to preview, so it joins
+  // the thread typing group and must not manufacture an interactive pill.
+  await expect(
+    threadPanel.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice");
+  await expect(
+    threadPanel.getByTestId("bot-activity-composer-trigger"),
+  ).toHaveCount(0);
+
+  // Once channel-scoped observer activity exists, the same thread typer earns
+  // a pill and leaves the combined typing group. Active observer work remains
+  // authoritative over the concurrent thread typing signal.
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "thread-indicator-turn",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  await seedPillActivityMessage(page, {
+    agentPubkey: TEST_IDENTITIES.alice.pubkey,
+    atMs: Date.now(),
+    seq: Date.now(),
+    text: "Alice: inspecting the thread context",
+    turnId: "thread-indicator-turn",
+  });
+  const pill = threadPanel.getByTestId("bot-activity-composer-trigger");
+  await expect(pill).toBeVisible();
+  await expect(pill).toContainText("inspecting the thread context");
+  await expect(threadPanel.getByTestId("message-typing-indicator")).toHaveCount(
+    0,
+  );
+  // A later typing refresh still cannot mask the live action.
+  await page.evaluate(
+    ({ pubkey, threadHeadId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+        channelName: "agents",
+        pubkey,
+        threadHeadId,
+      });
+    },
+    { pubkey: TEST_IDENTITIES.alice.pubkey, threadHeadId },
+  );
+  await expect(pill).toContainText("inspecting the thread context");
+
+  // Once the observer turn completes, thread typing becomes the fallback and
+  // the eventual reply clears the pill in the same scope.
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "thread-indicator-turn",
+        kind: "turn_completed",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  await expect(pill).toContainText("alice is typing");
+  await page.evaluate(
+    ({ pubkey, threadHeadId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "agents",
+        content: "Thread done.",
+        parentEventId: threadHeadId,
+        pubkey,
+      });
+    },
+    { pubkey: TEST_IDENTITIES.alice.pubkey, threadHeadId },
+  );
+  await expect(
+    threadPanel.getByTestId("bot-activity-composer-trigger"),
+  ).toHaveCount(0);
+});
+
+test("composer does not shift when the activity row mounts and clears", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ === "function",
+    null,
+    { timeout: 10_000 },
+  );
+
+  // The activity row below the composer has a fixed height (h-8.5 in
+  // ChannelComposerActivityRow) so the bottom-anchored composer must not move
+  // when the bot-activity trigger mounts into it or clears from it.
+  const composerBox = async () => {
+    const box = await page.getByTestId("message-composer").boundingBox();
+    if (!box) {
+      throw new Error("Composer is not visible.");
+    }
+    return box;
+  };
+  const idleComposerTop = (await composerBox()).y;
+
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "no-shift-turn",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  expect((await composerBox()).y).toBeCloseTo(idleComposerTop, 0);
+
+  await page.evaluate(
+    ({ channelId, pubkey }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey: pubkey,
+        channelId,
+        turnId: "no-shift-turn",
+        kind: "turn_completed",
+      });
+    },
+    { channelId: AGENTS_CHANNEL_ID, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
+    0,
+  );
+  expect((await composerBox()).y).toBeCloseTo(idleComposerTop, 0);
+
+  // The combined typing group mounts into the same fixed row — it must not
+  // move the composer either.
+  await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "agents",
+      pubkey,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+  await expect(page.getByTestId("message-typing-indicator")).toBeVisible();
+  expect((await composerBox()).y).toBeCloseTo(idleComposerTop, 0);
+});
+
+// ── Composer pill hover freeze ───────────────────────────────────────────────
+// Working pills hold a stable turn-start order (earliest worker left-most);
+// slots only change when MEMBERSHIP does — an agent starting work appends a
+// pill on the right, a finishing agent's pill exits. While the cursor is
+// anywhere over the activity bar OR a hover card is showing, membership is
+// frozen so an exit/enter can't slide the strip under the cursor; the queued
+// membership change applies (animated) only after the hold releases. Width
+// pinning is narrower — placement-aware: the hover card is anchored to its
+// pill's LEFT edge (side="top" align="start"), so only the anchor pill and
+// the pills left of it pin their widths, and only while a card is open.
+// Pills right of the anchor — and every pill when no card is open — resize
+// freely with their label swaps (BotActivityBar strip-level hover popover +
+// bar-hover membership hold).
+
+const PILL_AGENT_NOVA = "cc".repeat(32);
+const PILL_AGENT_ASTRA = "dd".repeat(32);
+const PILL_AGENT_LYRA = "ee".repeat(32);
+const PILL_AGENT_SEEDS = [
+  {
+    pubkey: PILL_AGENT_NOVA,
+    name: "nova",
+    status: "running" as const,
+    channelNames: ["agents"],
+  },
+  {
+    pubkey: PILL_AGENT_ASTRA,
+    name: "astra",
+    status: "running" as const,
+    channelNames: ["agents"],
+  },
+  // Not seeded as working by the shared helper — the membership-freeze test
+  // starts lyra's turn mid-hover to prove a queued pill append.
+  {
+    pubkey: PILL_AGENT_LYRA,
+    name: "lyra",
+    status: "running" as const,
+    channelNames: ["agents"],
+  },
+];
+
+/**
+ * Seed one channel-scoped assistant-message observer event. The message
+ * drives the pill's LABEL (the newest headline-able transcript item wins) —
+ * pill ORDER is anchored to turn start and does not move on messages.
+ * `turnId` must match the agent's seeded active turn so the event refreshes
+ * that turn's liveness instead of resurrecting a phantom sibling turn
+ * (which would keep the agent "working" after its real turn completes).
+ */
+async function seedPillActivityMessage(
+  page: import("@playwright/test").Page,
+  input: {
+    agentPubkey: string;
+    atMs: number;
+    seq: number;
+    text: string;
+    turnId: string;
+  },
+) {
+  await page.evaluate(
+    ({ agentPubkey, atMs, channelId, seq, text, turnId }) => {
+      const sessionId = `seed-session-${agentPubkey.slice(0, 6)}`;
+      window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__?.({
+        agentPubkey,
+        events: [
+          {
+            seq,
+            timestamp: new Date(atMs).toISOString(),
+            kind: "acp_read",
+            agentIndex: 0,
+            channelId,
+            sessionId,
+            turnId,
+            payload: {
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: {
+                sessionId,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  messageId: `seed-msg-${agentPubkey.slice(0, 6)}-${seq}`,
+                  content: { type: "text", text },
+                },
+              },
+            },
+          },
+        ],
+      });
+    },
+    { ...input, channelId: AGENTS_CHANNEL_ID },
+  );
+}
+
+/**
+ * Wait until every pill trigger's box holds still across a 150ms window.
+ * Label swaps resize the pills (widths are no longer pinned on bar hover)
+ * and the growth animates via the slot layout spring, so tests must not
+ * measure geometry — or park the cursor relative to it — mid-animation.
+ */
+async function waitForSettledPillBoxes(
+  page: import("@playwright/test").Page,
+  triggers: import("@playwright/test").Locator,
+) {
+  await expect(async () => {
+    const count = await triggers.count();
+    const measure = () =>
+      Promise.all(
+        Array.from({ length: count }, (_, index) =>
+          triggers.nth(index).boundingBox(),
+        ),
+      );
+    const before = await measure();
+    await page.waitForTimeout(150);
+    expect(await measure()).toEqual(before);
+  }).toPass();
+}
+
+/**
+ * Open #agents with two seeded working agents. Pill order follows turn
+ * START anchors (earliest worker left-most): nova's turn starts 60s before
+ * base and astra's 30s before, so the strip renders [nova, astra] — well
+ * clear of the ordering's whole-second anchor quantization, and unaffected
+ * by later message activity. Returns the shared trigger locator and the
+ * timestamp base used for the seeds.
+ */
+async function openAgentsChannelWithTwoWorkingPills(
+  page: import("@playwright/test").Page,
+) {
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ === "function",
+    null,
+    { timeout: 10_000 },
+  );
+
+  const baseMs = Date.now();
+  await page.evaluate(
+    ({ channelId, turns }) => {
+      for (const turn of turns) {
+        window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({ channelId, ...turn });
+      }
+    },
+    {
+      channelId: AGENTS_CHANNEL_ID,
+      turns: [
+        {
+          agentPubkey: PILL_AGENT_NOVA,
+          turnId: "pill-turn-nova",
+          atMs: baseMs - 60_000,
+        },
+        {
+          agentPubkey: PILL_AGENT_ASTRA,
+          turnId: "pill-turn-astra",
+          atMs: baseMs - 30_000,
+        },
+      ],
+    },
+  );
+  // Seeded messages give each pill a distinctive action headline (labels
+  // hold the newest headline-able item) without touching the turn-start
+  // order.
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_ASTRA,
+    atMs: baseMs + 1_000,
+    seq: baseMs + 10_001,
+    text: "Astra: reviewing the composer wiring",
+    turnId: "pill-turn-astra",
+  });
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_NOVA,
+    atMs: baseMs + 2_000,
+    seq: baseMs + 10_002,
+    text: "Nova: tracing the observer store",
+    turnId: "pill-turn-nova",
+  });
+
+  const triggers = page.getByTestId("bot-activity-composer-trigger");
+  await expect(triggers).toHaveCount(2);
+  await expect(triggers.first()).toHaveAttribute(
+    "aria-label",
+    "nova is working. View activity.",
+  );
+  // The pills mount with the generic "<name> is working…" label and GROW
+  // when the seeded headlines tick in. Wait for the swap and for the boxes
+  // to settle so callers measure — and park the cursor against — final
+  // geometry, not a strip that is still expanding rightward.
+  await expect(triggers.first()).toContainText(
+    "Nova: tracing the observer store",
+  );
+  await expect(triggers.nth(1)).toContainText(
+    "Astra: reviewing the composer wiring",
+  );
+  await waitForSettledPillBoxes(page, triggers);
+  return { baseMs, triggers };
+}
+
+test("hover card freezes pill membership; queued pill append applies on close", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  const { baseMs, triggers } = await openAgentsChannelWithTwoWorkingPills(page);
+
+  const astraPill = page.getByRole("button", {
+    name: "astra is working. View activity.",
+  });
+  await astraPill.hover();
+  const feed = page.getByTestId("composer-live-activity-feed");
+  await expect(feed).toBeVisible();
+  await expect(page.getByTestId("composer-live-activity-open")).toHaveAttribute(
+    "aria-label",
+    /^Open astra's full activity/,
+  );
+  const heldBox = await astraPill.boundingBox();
+  if (!heldBox) {
+    throw new Error("Hovered pill is not visible.");
+  }
+
+  // Lyra starting a turn would append her pill on the right — but a hover
+  // card is showing, so the strip's membership must not change. Waiting on
+  // the hovered pill's label to swap to the new message text proves the
+  // store updates reached this strip's render; a broken freeze would have
+  // mounted lyra's pill in that same commit, so no blind animation-length
+  // sleep is needed.
+  await page.evaluate(
+    ({ agentPubkey, atMs, channelId }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId,
+        turnId: "pill-turn-lyra",
+        atMs,
+      });
+    },
+    {
+      agentPubkey: PILL_AGENT_LYRA,
+      atMs: baseMs + 4_000,
+      channelId: AGENTS_CHANNEL_ID,
+    },
+  );
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_ASTRA,
+    atMs: baseMs + 5_000,
+    seq: baseMs + 10_003,
+    text: "Astra: verifying the turn-resurrection path",
+    turnId: "pill-turn-astra",
+  });
+  await expect(astraPill).toContainText(
+    "Astra: verifying the turn-resurrection path",
+  );
+  await expect(feed).toBeVisible();
+  await expect(triggers).toHaveCount(2);
+  await expect(triggers.first()).toHaveAttribute(
+    "aria-label",
+    "nova is working. View activity.",
+  );
+  const stillHeldBox = await astraPill.boundingBox();
+  if (!stillHeldBox) {
+    throw new Error("Hovered pill is not visible after the membership change.");
+  }
+  // Frozen membership + pinned width: the hovered pill's slot and size held
+  // even though its label swapped to the new (longer) message text.
+  expect(stillHeldBox.x).toBeCloseTo(heldBox.x, 0);
+  expect(stillHeldBox.width).toBeCloseTo(heldBox.width, 0);
+
+  // Release the hover: the card closes and the queued append applies —
+  // lyra's pill enters at the END (turn-start order: newest starter last),
+  // leaving the existing pills' slots untouched.
+  await page.getByTestId("chat-title").hover();
+  await expect(feed).toBeHidden();
+  await expect(triggers).toHaveCount(3);
+  await expect(triggers.first()).toHaveAttribute(
+    "aria-label",
+    "nova is working. View activity.",
+  );
+  await expect(triggers.nth(2)).toHaveAttribute(
+    "aria-label",
+    "lyra is working. View activity.",
+  );
+});
+
+test("hovering the bar itself freezes pill membership without opening a card", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  const { baseMs, triggers } = await openAgentsChannelWithTwoWorkingPills(page);
+
+  // Park the cursor on the strip past the last pill — over the bar, not a
+  // pill trigger. The strip root is a flex-1 row item, so the space right of
+  // the pills is strip-not-pill. Widths are no longer pinned on bar hover,
+  // so the inter-pill gap is unsafe: a label swap growing the left pill
+  // would push the trigger under a cursor parked there and open a card.
+  // This alone must engage the membership freeze; no card opens.
+  const novaBox = await triggers.first().boundingBox();
+  const astraBox = await triggers.nth(1).boundingBox();
+  if (!novaBox || !astraBox) {
+    throw new Error("Both pills must be visible.");
+  }
+  await page.mouse.move(
+    astraBox.x + astraBox.width + 60,
+    novaBox.y + novaBox.height / 2,
+  );
+  // Bar hover alone no longer pins pill widths (the pin is placement-aware
+  // and engages only for pills at/left of an OPEN card's anchor) — the strip
+  // exposes the membership hold via data-hold; waiting for it proves the
+  // freeze is engaged before the membership change below.
+  await expect(page.getByTestId("bot-activity-strip")).toHaveAttribute(
+    "data-hold",
+    "true",
+  );
+  // No card is open, so no pill is width-pinned.
+  await expect(triggers.first()).not.toHaveAttribute("style", /width/);
+  await expect(triggers.nth(1)).not.toHaveAttribute("style", /width/);
+  await expect(page.getByTestId("composer-live-activity-feed")).toHaveCount(0);
+
+  // Astra's turn completes — her pill would exit, sliding the strip under
+  // the parked cursor. The cursor is over the bar, so membership stays
+  // frozen and the pill holds. Nova's label swap confirms the store updates
+  // reached the strip without a blind sleep.
+  await page.evaluate(
+    ({ agentPubkey, atMs, channelId }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId,
+        turnId: "pill-turn-astra",
+        kind: "turn_completed",
+        atMs,
+      });
+    },
+    {
+      agentPubkey: PILL_AGENT_ASTRA,
+      atMs: baseMs + 4_000,
+      channelId: AGENTS_CHANNEL_ID,
+    },
+  );
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_NOVA,
+    atMs: baseMs + 5_000,
+    seq: baseMs + 10_003,
+    text: "Nova: confirming the frozen strip",
+    turnId: "pill-turn-nova",
+  });
+  await expect(triggers.first()).toContainText(
+    "Nova: confirming the frozen strip",
+  );
+  await expect(page.getByTestId("composer-live-activity-feed")).toHaveCount(0);
+  await expect(triggers).toHaveCount(2);
+  await expect(triggers.nth(1)).toHaveAttribute(
+    "aria-label",
+    "astra is working. View activity.",
+  );
+
+  // Leaving the bar releases the hold: the queued exit applies and astra's
+  // pill leaves the strip.
+  await page.getByTestId("chat-title").hover();
+  await expect(triggers).toHaveCount(1);
+  await expect(triggers.first()).toHaveAttribute(
+    "aria-label",
+    "nova is working. View activity.",
+  );
+});
+
+test("open card pins only its anchor pill and the pills left of it", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  const { baseMs, triggers } = await openAgentsChannelWithTwoWorkingPills(page);
+
+  const novaPill = page.getByRole("button", {
+    name: "nova is working. View activity.",
+  });
+  const astraPill = page.getByRole("button", {
+    name: "astra is working. View activity.",
+  });
+  const feed = page.getByTestId("composer-live-activity-feed");
+
+  // Give astra a SHORT label first so the long label seeded mid-hover below
+  // grows her pill by a measurable amount (the helper's default label may
+  // already sit near the pill's max-width cap).
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_ASTRA,
+    atMs: baseMs + 3_000,
+    seq: baseMs + 10_003,
+    text: "Astra: ok",
+    turnId: "pill-turn-astra",
+  });
+  await expect(astraPill).toContainText("Astra: ok");
+  // The shrink animates via the slot layout spring — settle before
+  // measuring baseline geometry.
+  await waitForSettledPillBoxes(page, triggers);
+
+  // Card on the FIRST pill: the card anchors to nova's left edge, so astra
+  // (right of the anchor) stays free to resize — her growth cannot move it.
+  await novaPill.hover();
+  await expect(feed).toBeVisible();
+  // Only the anchor pill carries the inline width pin.
+  await expect(novaPill).toHaveAttribute("style", /width/);
+  await expect(astraPill).not.toHaveAttribute("style", /width/);
+  const novaBox = await novaPill.boundingBox();
+  const astraBox = await astraPill.boundingBox();
+  const feedBox = await feed.boundingBox();
+  if (!novaBox || !astraBox || !feedBox) {
+    throw new Error("Both pills and the card must be visible.");
+  }
+
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_ASTRA,
+    atMs: baseMs + 4_000,
+    seq: baseMs + 10_004,
+    text: "Astra: expanding into a much longer running action label",
+    turnId: "pill-turn-astra",
+  });
+  await expect(astraPill).toContainText("much longer running action");
+  // Astra's pill grew with the label swap (no pin right of the anchor)...
+  await expect
+    .poll(async () => (await astraPill.boundingBox())?.width ?? 0)
+    .toBeGreaterThan(astraBox.width + 4);
+  // ...while the anchor pill and its open card never moved. The card gets a
+  // 2px tolerance: Radix's popper re-measures on content changes and lands
+  // with sub-pixel rounding jitter that toBeCloseTo(…, 0) would flag.
+  const novaAfter = await novaPill.boundingBox();
+  const feedAfter = await feed.boundingBox();
+  expect(novaAfter?.x).toBeCloseTo(novaBox.x, 0);
+  expect(novaAfter?.width).toBeCloseTo(novaBox.width, 0);
+  expect(Math.abs((feedAfter?.x ?? Number.NaN) - feedBox.x)).toBeLessThan(2);
+  expect(Math.abs((feedAfter?.y ?? Number.NaN) - feedBox.y)).toBeLessThan(2);
+
+  // Inverse: a card on the SECOND pill pins the pill left of the anchor —
+  // nova resizing would shift astra's left edge and drag the card with it.
+  await page.getByTestId("chat-title").hover();
+  await expect(feed).toBeHidden();
+  await astraPill.hover();
+  await expect(feed).toBeVisible();
+  await expect(novaPill).toHaveAttribute("style", /width/);
+  await expect(astraPill).toHaveAttribute("style", /width/);
+  const novaPinned = await novaPill.boundingBox();
+  if (!novaPinned) {
+    throw new Error("Nova's pill must be visible.");
+  }
+  await seedPillActivityMessage(page, {
+    agentPubkey: PILL_AGENT_NOVA,
+    atMs: baseMs + 5_000,
+    seq: baseMs + 10_005,
+    text: "Nova: ok",
+    turnId: "pill-turn-nova",
+  });
+  await expect(novaPill).toContainText("Nova: ok");
+  // The shorter label swapped in but truncates inside the FROZEN width —
+  // the pill can't shrink and shift the card's anchor.
+  const novaHeld = await novaPill.boundingBox();
+  expect(novaHeld?.x).toBeCloseTo(novaPinned.x, 0);
+  expect(novaHeld?.width).toBeCloseTo(novaPinned.width, 0);
+  await expect(feed).toBeVisible();
+});
+
+test("hovering across pills switches a single live-activity card", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  await openAgentsChannelWithTwoWorkingPills(page);
+
+  const novaPill = page.getByRole("button", {
+    name: "nova is working. View activity.",
+  });
+  const astraPill = page.getByRole("button", {
+    name: "astra is working. View activity.",
+  });
+  const feed = page.getByTestId("composer-live-activity-feed");
+  const openOverlay = page.getByTestId("composer-live-activity-open");
+
+  await novaPill.hover();
+  await expect(feed).toBeVisible();
+  await expect(openOverlay).toHaveAttribute(
+    "aria-label",
+    /^Open nova's full activity/,
+  );
+
+  // Traveling to the other pill swaps the card immediately — one card, no
+  // double-open, no stuck card from the old pill's close timer. Wait for the
+  // old card's ~150ms exit animation with retrying count assertions first;
+  // attribute assertions would hit a non-retrying strict-mode violation
+  // while both cards are briefly mounted.
+  await astraPill.hover();
+  await expect(openOverlay).toHaveCount(1);
+  await expect(feed).toHaveCount(1);
+  await expect(openOverlay).toHaveAttribute(
+    "aria-label",
+    /^Open astra's full activity/,
+  );
+});
+
+test("narrow strip scrolls horizontally with edge fades instead of compressing pills", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  await openAgentsChannelWithTwoWorkingPills(page);
+
+  // Constrain the activity row directly (instead of resizing the whole
+  // window) so the overflow condition is deterministic regardless of the
+  // app's responsive layout — this mirrors a narrow thread panel, where the
+  // same strip renders in the thread composer toolbar.
+  await page
+    .getByTestId("channel-composer-activity-row")
+    .evaluate((element) => {
+      element.style.width = "300px";
+    });
+
+  const scroller = page.getByTestId("bot-activity-strip-scroller");
+  await expect
+    .poll(() => scroller.evaluate((el) => el.scrollWidth - el.clientWidth))
+    .toBeGreaterThan(0);
+
+  // Pills keep a readable natural width instead of compressing into
+  // slivers to fit.
+  const triggers = page.getByTestId("bot-activity-composer-trigger");
+  const firstBox = await triggers.first().boundingBox();
+  expect(firstBox?.width ?? 0).toBeGreaterThan(120);
+
+  // At rest the strip is pinned to the start: clipped content (and its
+  // fade affordance) on the trailing side only.
+  await expect(page.getByTestId("bot-activity-strip-fade-end")).toBeVisible();
+  await expect(page.getByTestId("bot-activity-strip-fade-start")).toHaveCount(
+    0,
+  );
+
+  // The fade sits at the STRIP's visual edge, not at its padded content box:
+  // the full-bleed viewport cancels the strip's px-5 gutter, so pills scroll
+  // under the gradient instead of getting cut mid-strip with a dead gutter.
+  // Main's shared channel accessory intentionally adds a separate pl-2 host
+  // inset, so the strip's leading edge is not the outer row's leading edge.
+  const rowBox = await page
+    .getByTestId("channel-composer-activity-row")
+    .boundingBox();
+  const stripBox = await page.getByTestId("bot-activity-strip").boundingBox();
+  const fadeEndBox = await page
+    .getByTestId("bot-activity-strip-fade-end")
+    .boundingBox();
+  expect(fadeEndBox).not.toBeNull();
+  expect(rowBox).not.toBeNull();
+  expect(stripBox).not.toBeNull();
+  if (fadeEndBox && stripBox) {
+    expect(
+      Math.abs(fadeEndBox.x + fadeEndBox.width - (stripBox.x + stripBox.width)),
+    ).toBeLessThanOrEqual(1);
+  }
+
+  // Scrolling to the far end swaps the fades to the leading side.
+  await scroller.evaluate((el) => {
+    el.scrollLeft = el.scrollWidth;
+  });
+  await expect(page.getByTestId("bot-activity-strip-fade-start")).toBeVisible();
+  await expect(page.getByTestId("bot-activity-strip-fade-end")).toHaveCount(0);
+
+  // Same pinning on the strip's leading edge once scrolled.
+  const fadeStartBox = await page
+    .getByTestId("bot-activity-strip-fade-start")
+    .boundingBox();
+  expect(fadeStartBox).not.toBeNull();
+  if (fadeStartBox && stripBox) {
+    expect(Math.abs(fadeStartBox.x - stripBox.x)).toBeLessThanOrEqual(1);
+  }
+});
+
+test("typing group renders inside the pill strip and scrolls under the edge fades", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  await openAgentsChannelWithTwoWorkingPills(page);
+  await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
+
+  // A human typer joins the strip as the trailing slot sibling of the
+  // pills — same scroller, same edge fades, same slot animations — instead
+  // of a separate row sibling outside the scroll viewport.
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "agents",
@@ -2110,8 +2953,106 @@ test("shows and clears activity indicators for active channel agents", async ({
     });
   }, TEST_IDENTITIES.alice.pubkey);
 
-  await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
+  const scroller = page.getByTestId("bot-activity-strip-scroller");
+  const typingIndicator = scroller.getByTestId("message-typing-indicator");
+  await expect(typingIndicator).toBeVisible();
+  await expect(
+    scroller.getByTestId("message-typing-indicator-label"),
+  ).toContainText("alice is typing");
+
+  // Trailing slot: the typing group sits after the last pill.
+  const lastPillBox = await page
+    .getByTestId("bot-activity-composer-trigger")
+    .last()
+    .boundingBox();
+  const typingBox = await typingIndicator.boundingBox();
+  expect(typingBox).not.toBeNull();
+  expect(lastPillBox).not.toBeNull();
+  if (typingBox && lastPillBox) {
+    expect(typingBox.x).toBeGreaterThanOrEqual(
+      lastPillBox.x + lastPillBox.width,
+    );
+  }
+
+  // Constrained, the strip overflows into scroll with the trailing fade:
+  // the typing group is part of the scrollable content and clips under the
+  // fade rather than holding a reserved spot outside the scroller.
+  await page
+    .getByTestId("channel-composer-activity-row")
+    .evaluate((element) => {
+      element.style.width = "300px";
+    });
+  await expect
+    .poll(() => scroller.evaluate((el) => el.scrollWidth - el.clientWidth))
+    .toBeGreaterThan(0);
+  await expect(page.getByTestId("bot-activity-strip-fade-end")).toBeVisible();
+
+  // Scrolled to the far end, the typing group's right edge lands inside the
+  // row — it scrolled WITH the pills.
+  await scroller.evaluate((el) => {
+    el.scrollLeft = el.scrollWidth;
+  });
+  await expect(page.getByTestId("bot-activity-strip-fade-start")).toBeVisible();
+  const constrainedRowBox = await page
+    .getByTestId("channel-composer-activity-row")
+    .boundingBox();
+  const scrolledTypingBox = await typingIndicator.boundingBox();
+  expect(scrolledTypingBox).not.toBeNull();
+  expect(constrainedRowBox).not.toBeNull();
+  if (scrolledTypingBox && constrainedRowBox) {
+    expect(scrolledTypingBox.x + scrolledTypingBox.width).toBeLessThanOrEqual(
+      constrainedRowBox.x + constrainedRowBox.width + 1,
+    );
+  }
+});
+
+test("lone pill shrinks to fit a narrow container without scroll fades", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: PILL_AGENT_SEEDS });
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ === "function",
+    null,
+    { timeout: 10_000 },
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId }) => {
+      window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId,
+        turnId: "lone-pill-turn",
+      });
+    },
+    { agentPubkey: PILL_AGENT_NOVA, channelId: AGENTS_CHANNEL_ID },
+  );
+
+  const trigger = page.getByTestId("bot-activity-composer-trigger");
+  await expect(trigger).toHaveCount(1);
+
+  // Narrower than the pill's natural width: a lone pill must shrink and
+  // ellipsize rather than overflow into scroll — an edge fade over a single
+  // pill reads as a cut-off bug, not a "more pills off view" affordance.
+  const row = page.getByTestId("channel-composer-activity-row");
+  await row.evaluate((element) => {
+    element.style.width = "160px";
+  });
+
+  const scroller = page.getByTestId("bot-activity-strip-scroller");
+  await expect
+    .poll(() => scroller.evaluate((el) => el.scrollWidth - el.clientWidth))
+    .toBe(0);
+  await expect(page.getByTestId("bot-activity-strip-fade-end")).toHaveCount(0);
+  await expect(page.getByTestId("bot-activity-strip-fade-start")).toHaveCount(
     0,
+  );
+
+  const pillBox = await trigger.boundingBox();
+  const rowBox = await row.boundingBox();
+  expect(pillBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
+    rowBox?.width ?? 0,
   );
 });
 
@@ -2363,6 +3304,52 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   await expect(
     page.getByTestId("message-typing-indicator-label"),
   ).toContainText("alice and bob are typing");
+});
+
+test("lone typing group uses the full row width instead of truncating at the strip cap", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", KIND_TYPING_INDICATOR);
+
+  // Three typers push the label past the strip's shared-slot cap (max-w-64,
+  // 256px): with no pills the typing group is the strip's LONE item and must
+  // consume the row's free width instead of cutting the label off mid-name.
+  for (const identity of [
+    TEST_IDENTITIES.alice,
+    TEST_IDENTITIES.bob,
+    TEST_IDENTITIES.charlie,
+  ]) {
+    await page.evaluate((pubkey) => {
+      window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+        channelName: "random",
+        pubkey,
+      });
+    }, identity.pubkey);
+  }
+
+  const label = page.getByTestId("message-typing-indicator-label");
+  await expect(label).toContainText("alice, bob, and charlie are typing");
+
+  // No truncation with room to spare: the label's content fits its box.
+  await expect
+    .poll(() => label.evaluate((el) => el.scrollWidth - el.clientWidth))
+    .toBeLessThanOrEqual(0);
+
+  // Genuinely narrow, the lone group still shrinks with the container and
+  // ellipsizes (rather than overflowing into scroll under an edge fade).
+  await page
+    .getByTestId("channel-composer-activity-row")
+    .evaluate((element) => {
+      element.style.width = "200px";
+    });
+  await expect
+    .poll(() => label.evaluate((el) => el.scrollWidth - el.clientWidth))
+    .toBeGreaterThan(0);
+  await expect(page.getByTestId("bot-activity-strip-fade-end")).toHaveCount(0);
 });
 
 test("sidebar shows unread indicator for newly active channels", async ({

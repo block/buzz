@@ -39,6 +39,8 @@ import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSig
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
+import { useThreadComposerActivity } from "@/features/channels/ui/useThreadComposerActivity";
+import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerGuidanceLayer,
@@ -363,20 +365,16 @@ export const ChannelPane = React.memo(function ChannelPane({
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
-  const threadComposerBotTypingPubkeys = React.useMemo(() => {
-    if (!openThreadHeadId) return [];
-    return botTypingEntries
-      .filter((entry) => entry.threadHeadId === openThreadHeadId)
-      .map((entry) => entry.pubkey)
-      .filter(
-        (pubkey, index, all) =>
-          all.findIndex(
-            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
-          ) === index,
-      );
-  }, [botTypingEntries, openThreadHeadId]);
-  const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+  const {
+    combinedTypingPubkeys: combinedThreadTypingPubkeys,
+    hasActivity: hasThreadComposerActivity,
+    pillBotPubkeys: threadPillBotPubkeys,
+  } = useThreadComposerActivity({
+    botTypingEntries,
+    channelId: activeChannel?.id ?? null,
+    threadHeadId: openThreadHeadId,
+    typingPubkeys: threadTypingPubkeys,
+  });
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -743,11 +741,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                     channel={activeChannel}
                     currentPubkey={currentPubkey}
                     onOpenAgentSession={onOpenAgentSession}
-                    openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
                     typingPubkeys={typingPubkeys}
                     visible={hasComposerBottomActivity}
-                    workingBotPubkeys={composerWorkingBotPubkeys}
                   />
                 </div>
               </div>
@@ -837,18 +833,27 @@ export const ChannelPane = React.memo(function ChannelPane({
                   threadHeadMessage.id,
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
-                threadTypingPubkeys={threadTypingPubkeys}
-                activityAccessoryVisible={hasThreadComposerBotActivity}
+                activityAccessoryVisible={hasThreadComposerActivity}
                 activityAccessoryContent={
-                  hasThreadComposerBotActivity ? (
+                  hasThreadComposerActivity ? (
                     <BotActivityComposerAction
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
                       onOpenAgentSession={onOpenAgentSession}
-                      openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
-                      variant="inline"
+                      typingBotPubkeys={threadPillBotPubkeys}
+                      typingIndicator={
+                        combinedThreadTypingPubkeys.length > 0 ? (
+                          <TypingIndicatorRow
+                            channel={activeChannel}
+                            className="min-w-0 shrink px-0 py-0 sm:px-0"
+                            currentPubkey={currentPubkey}
+                            profiles={profiles}
+                            typingPubkeys={combinedThreadTypingPubkeys}
+                          />
+                        ) : null
+                      }
+                      workingBotPubkeys={threadPillBotPubkeys}
                     />
                   ) : null
                 }

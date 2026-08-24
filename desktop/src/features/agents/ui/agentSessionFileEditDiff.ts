@@ -197,7 +197,8 @@ function getDiffStats(
   return null;
 }
 
-function basename(path: string) {
+/** Final path segment (cross-platform); returns the input when empty. */
+export function basename(path: string) {
   const parts = path.replace(/\\/g, "/").split("/");
   return parts[parts.length - 1] || path;
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
 import {
+  getAgentChannelTypingSince,
   getAgentWorkingState,
   getWorkingAgentPubkeysForChannel,
   getWorkingChannels,
@@ -113,6 +114,32 @@ describe("getAgentWorkingState", () => {
     reportChannelBotTyping("chan-1", [AGENT, AGENT_2]);
     const again = getAgentWorkingState(AGENT).channels[0].anchorAt;
     assert.equal(again, first);
+  });
+});
+
+describe("getAgentChannelTypingSince", () => {
+  it("returns null when the agent is not typing in the channel", () => {
+    assert.equal(getAgentChannelTypingSince(AGENT, "chan-1"), null);
+    reportChannelBotTyping("chan-1", [AGENT_2]);
+    assert.equal(getAgentChannelTypingSince(AGENT, "chan-1"), null);
+    assert.equal(getAgentChannelTypingSince(AGENT_2, "chan-2"), null);
+    assert.equal(getAgentChannelTypingSince(null, "chan-1"), null);
+    assert.equal(getAgentChannelTypingSince(AGENT, null), null);
+  });
+
+  it("returns the first-seen anchor while typing", () => {
+    reportChannelBotTyping("chan-1", [AGENT]);
+    const since = getAgentChannelTypingSince(AGENT, "chan-1");
+    assert.ok(since !== null && since <= Date.now());
+    reportChannelBotTyping("chan-1", []);
+    assert.equal(getAgentChannelTypingSince(AGENT, "chan-1"), null);
+  });
+
+  it("is NOT folded under observer precedence (unlike getAgentWorkingState)", () => {
+    startTurn(AGENT, "chan-1");
+    reportChannelBotTyping("chan-1", [AGENT]);
+    assert.equal(getAgentWorkingState(AGENT, "chan-1").source, "observer");
+    assert.notEqual(getAgentChannelTypingSince(AGENT, "chan-1"), null);
   });
 });
 

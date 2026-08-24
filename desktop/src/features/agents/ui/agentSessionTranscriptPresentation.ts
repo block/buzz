@@ -1,5 +1,9 @@
 import type { TranscriptItem } from "./agentSessionTypes";
-import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import { basename } from "./agentSessionFileEditDiff";
+import {
+  buildCompactToolSummary,
+  type CompactToolSummary,
+} from "./agentSessionToolSummary";
 
 /**
  * Whether a polished activity row should render the opt-in timestamp footer.
@@ -26,10 +30,54 @@ const LIFECYCLE_NOISE = new Set([
   "wire parse error",
 ]);
 
-/** Human-readable headline for a single transcript item. */
+/**
+ * Render classes whose action object is a filesystem path — compact to the
+ * basename for terse headlines. Shell commands are deliberately excluded:
+ * they legitimately contain "/" (e.g. `cat src/foo.ts`) and must not be
+ * reduced to their last path segment.
+ */
+const PATHLIKE_RENDER_CLASSES = new Set([
+  "file-read",
+  "file-edit",
+  "skill-read",
+]);
+
+function terseActionObject(summary: CompactToolSummary): string | null {
+  if (summary.fileEditSummary) {
+    return summary.fileEditSummary.filename;
+  }
+  const object = summary.action?.object ?? null;
+  if (
+    object &&
+    PATHLIKE_RENDER_CLASSES.has(summary.kind) &&
+    /[\\/]/.test(object)
+  ) {
+    return basename(object);
+  }
+  return object;
+}
+
+/**
+ * Human-readable headline for a single transcript item.
+ *
+ * Tool items use the terse action tier — verb + compact object (file paths
+ * reduced to their basename), e.g. "Read foo.ts" rather than
+ * "Read file · src/agents/ui/foo.ts" — so the composer pill's 200px cap
+ * shows the informative part instead of ellipsizing a long preview.
+ *
+ * Action headlines are past-tense verb phrases throughout ("Read foo.ts",
+ * "Thought", "Updated plan") — plan and thought items are normalized here
+ * so no bare noun ("Plan") or present participle ("Thinking") leaks into
+ * the pill next to the past-tense tool verbs.
+ */
 export function getActivityHeadline(item: TranscriptItem): string | null {
   if (item.type === "tool") {
     const summary = buildCompactToolSummary(item);
+    if (summary.action) {
+      return [summary.action.verb, terseActionObject(summary)]
+        .filter(Boolean)
+        .join(" ");
+    }
     return [summary.label, summary.preview].filter(Boolean).join(" · ");
   }
 
@@ -50,7 +98,14 @@ export function getActivityHeadline(item: TranscriptItem): string | null {
   }
 
   if (item.type === "thought") {
-    return item.title === "Plan" ? "Planning" : item.title;
+    if (item.title === "Plan") {
+      return "Planned";
+    }
+    return item.title === "Thinking" ? "Thought" : item.title;
+  }
+
+  if (item.type === "plan") {
+    return item.isUpdate ? "Updated plan" : "Created plan";
   }
 
   if (item.type === "metadata") {

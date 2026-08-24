@@ -62,6 +62,8 @@ type ActiveTurn = {
 export type ActiveTurnSummary = {
   channelId: string;
   anchorAt: number;
+  /** Live turn ids in this channel, used to scope current observer activity. */
+  turnIds: string[];
 };
 
 /** One channel with active agent work, aggregated across agents. */
@@ -505,21 +507,30 @@ export function getActiveTurnsForAgent(
 
   const offset = clockOffsetByAgent.get(key) ?? 0;
 
-  // Collapse multiple turns in one channel to the earliest start — the badge
-  // should count from when the channel's oldest live turn began. Anchors are
-  // derived here (startedAt + offset) so the latest skew estimate applies.
-  const earliestByChannel = new Map<string, number>();
+  // Collapse multiple turns in one channel to the earliest start while
+  // retaining every live turn id. The badge counts from the oldest live turn;
+  // current observer headlines need the ids to reject prior-turn transcript.
+  const byChannel = new Map<string, { startedAt: number; turnIds: string[] }>();
   for (const turn of agentTurns.values()) {
-    const prior = earliestByChannel.get(turn.channelId);
-    if (prior === undefined || turn.startedAt < prior) {
-      earliestByChannel.set(turn.channelId, turn.startedAt);
+    const summary = byChannel.get(turn.channelId);
+    if (!summary) {
+      byChannel.set(turn.channelId, {
+        startedAt: turn.startedAt,
+        turnIds: [turn.turnId],
+      });
+      continue;
+    }
+    summary.turnIds.push(turn.turnId);
+    if (turn.startedAt < summary.startedAt) {
+      summary.startedAt = turn.startedAt;
     }
   }
 
-  const result = [...earliestByChannel.entries()]
-    .map(([channelId, startedAt]) => ({
+  const result = [...byChannel.entries()]
+    .map(([channelId, { startedAt, turnIds }]) => ({
       channelId,
       anchorAt: startedAt + offset,
+      turnIds: turnIds.sort(),
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedTurnSummaries.set(key, result);

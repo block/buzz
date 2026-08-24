@@ -35,6 +35,8 @@ export type AgentWorkingChannel = {
   /** Desktop-clock anchor for elapsed displays (turn start / first typing). */
   anchorAt: number;
   source: Exclude<AgentWorkingSource, "none">;
+  /** Live observer turn ids; empty for typing-backed fallback channels. */
+  turnIds: string[];
 };
 
 export type AgentWorkingState = {
@@ -130,6 +132,27 @@ export function reportChannelBotTyping(
   notify();
 }
 
+/**
+ * First-seen timestamp (ms) of the agent's channel-scoped typing entry, or
+ * null when the agent is not typing there.
+ *
+ * Raw registry read: unlike `getAgentWorkingState`, this does NOT fold
+ * typing under observer precedence. The composer activity pill uses it as a
+ * fallback before observer telemetry arrives and after an observer turn ends,
+ * without spawning a second, separate typing-group item.
+ */
+export function getAgentChannelTypingSince(
+  agentPubkey: string | null | undefined,
+  channelId: string | null | undefined,
+): number | null {
+  if (!agentPubkey || !channelId) {
+    return null;
+  }
+  return (
+    typingByChannel.get(channelId)?.get(normalizePubkey(agentPubkey)) ?? null
+  );
+}
+
 function computeAgentWorkingState(
   agentPubkey: string,
   channelId: string | null,
@@ -141,6 +164,7 @@ function computeAgentWorkingState(
     channelId: turn.channelId,
     anchorAt: turn.anchorAt,
     source: "observer" as const,
+    turnIds: turn.turnIds,
   }));
   const observerChannelIds = new Set(turns.map((turn) => turn.channelId));
 
@@ -154,6 +178,7 @@ function computeAgentWorkingState(
         channelId: typingChannelId,
         anchorAt: since,
         source: "typing",
+        turnIds: [],
       });
     }
   }

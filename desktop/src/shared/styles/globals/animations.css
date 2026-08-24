@@ -238,6 +238,15 @@
   -webkit-text-fill-color: transparent;
 }
 
+/* Truncated hosts (Tailwind `truncate`): ellipsize the overlay copy the same
+   way as the base text so the highlight sweeps the ellipsis, instead of
+   revealing the clipped characters at the right edge. `white-space: nowrap`
+   is inherited from the host; overflow rules are not, so restate them. */
+.buzz-shimmer.truncate::before {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @keyframes buzz-shimmer {
   0%,
   100% {

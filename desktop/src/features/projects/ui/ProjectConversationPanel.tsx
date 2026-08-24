@@ -280,7 +280,6 @@ export function ProjectConversationPanel({
         threadHead={panelData.threadHead}
         threadReplies={panelData.visibleReplies}
         threadRepliesPending={false}
-        threadTypingPubkeys={[]}
         widthPx={widthPx}
       />,
       {

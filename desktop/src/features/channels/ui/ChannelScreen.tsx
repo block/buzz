@@ -283,6 +283,7 @@ export function ChannelScreen({
     currentPubkey,
     latestMessageEvent,
     relaySelfPubkey,
+    threadReplyEvents,
   );
   const activeDmParticipantPubkeys = React.useMemo(
     () =>
