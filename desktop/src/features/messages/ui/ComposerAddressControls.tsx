@@ -58,7 +58,7 @@ function AddressedAgentAvatar({
   return (
     <motion.span
       animate={controls}
-      className="relative block h-5 w-5 shrink-0"
+      className="relative block h-4.5 w-4.5 shrink-0"
       data-pulse-version={pulseVersion}
       data-shake-version={shakeVersion}
       data-testid={`composer-address-lock-${agent.pubkey}`}
@@ -66,7 +66,7 @@ function AddressedAgentAvatar({
     >
       <UserAvatar
         avatarUrl={agent.avatarUrl}
-        className="h-5 w-5"
+        className="h-4.5 w-4.5"
         displayName={agent.displayName}
         size="xs"
         testId="composer-address-lock-avatar"
