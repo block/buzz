@@ -335,6 +335,7 @@ class ChannelsPage extends HookConsumerWidget {
             : 20,
         showBottomDivider: false,
         leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        centerTitle: false,
         titleStyle: headerTitleStyle,
         title: _CommunityHeaderTitle(
           style: headerTitleStyle,
@@ -347,6 +348,7 @@ class ChannelsPage extends HookConsumerWidget {
             child: Center(
               child: ProfileAvatar(
                 size: _kTopSectionProfileAvatarSize,
+                showPresence: false,
                 onTap: () {
                   unawaited(HapticFeedback.lightImpact());
                   final route = _SettingsPageRoute(
@@ -392,8 +394,8 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
          transitionsBuilder: _buildSettingsTransition,
          opaque: false,
          allowSnapshotting: false,
-         transitionDuration: const Duration(milliseconds: 220),
-         reverseTransitionDuration: const Duration(milliseconds: 190),
+         transitionDuration: const Duration(milliseconds: 150),
+         reverseTransitionDuration: const Duration(milliseconds: 150),
        );
 
   final ValueChanged<double> onTransitionProgress;

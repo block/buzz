@@ -172,6 +172,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
+  private var buttonLabel: String?
 
   init(
     frame: CGRect,
@@ -195,8 +196,12 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       (arguments?["hitTargetWidth"] as? NSNumber)?.doubleValue ?? 48
     let hitTargetHeight =
       (arguments?["hitTargetHeight"] as? NSNumber)?.doubleValue ?? 48
+    let label = arguments?["label"] as? String
+    buttonLabel = label
     let icon = arguments?["icon"] as? String
     let symbolName = icon == "close" ? "xmark" : "chevron.backward"
+    let controlWidth =
+      (arguments?["controlWidth"] as? NSNumber)?.doubleValue ?? 40
 
     var configuration: UIButton.Configuration
     if #available(iOS 26.0, *) {
@@ -206,14 +211,28 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       configuration.baseBackgroundColor = UIColor.secondarySystemBackground
     }
     configuration.cornerStyle = .capsule
-    configuration.image = UIImage(
-      systemName: symbolName,
-      withConfiguration: UIImage.SymbolConfiguration(
-        pointSize: 17,
-        weight: .semibold
+    if let label {
+      configuration.title = label
+      configuration.titleLineBreakMode = .byClipping
+      configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
+        incoming in
+        var outgoing = incoming
+        let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
+        outgoing.font = UIFont.systemFont(ofSize: preferred.pointSize, weight: .semibold)
+        return outgoing
+      }
+    } else {
+      configuration.image = UIImage(
+        systemName: symbolName,
+        withConfiguration: UIImage.SymbolConfiguration(
+          pointSize: 17,
+          weight: .semibold
+        )
       )
-    )
+    }
     button.configuration = configuration
+    button.titleLabel?.numberOfLines = 1
+    button.titleLabel?.lineBreakMode = .byClipping
     button.hitTargetInsets = UIEdgeInsets(
       top: max(0, (hitTargetHeight - 40) / 2),
       left: max(0, buttonCenterX - 20),
@@ -246,7 +265,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         constant: buttonCenterX
       ),
       button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
-      button.widthAnchor.constraint(equalToConstant: 40),
+      button.widthAnchor.constraint(equalToConstant: controlWidth),
       button.heightAnchor.constraint(equalToConstant: 40),
     ])
   }
@@ -311,10 +330,13 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let colorValue = (arguments?["foregroundColor"] as? NSNumber)?.uint32Value
     let foregroundColor = colorValue.map(Self.color(from:))
     let enabled = arguments?["enabled"] as? Bool ?? true
+    let busy = arguments?["busy"] as? Bool ?? false
 
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
+    button.configuration?.showsActivityIndicator = busy
+    button.configuration?.title = busy ? nil : buttonLabel
     if let foregroundColor {
       button.configuration?.baseForegroundColor = foregroundColor
     }
@@ -333,6 +355,106 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let green = CGFloat((value >> 8) & 0xFF) / 255
     let blue = CGFloat(value & 0xFF) / 255
     return UIColor(red: red, green: green, blue: blue, alpha: alpha)
+  }
+
+  deinit {
+    channel.setMethodCallHandler(nil)
+  }
+}
+
+final class NativeSegmentedControlFactory: NSObject, FlutterPlatformViewFactory {
+  private let messenger: FlutterBinaryMessenger
+
+  init(messenger: FlutterBinaryMessenger) {
+    self.messenger = messenger
+    super.init()
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    FlutterStandardMessageCodec.sharedInstance()
+  }
+
+  func create(
+    withFrame frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?
+  ) -> FlutterPlatformView {
+    NativeSegmentedControlPlatformView(
+      frame: frame,
+      viewIdentifier: viewId,
+      arguments: args,
+      messenger: messenger
+    )
+  }
+}
+
+final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
+  private let containerView: UIView
+  private let channel: FlutterMethodChannel
+  private let segmentedControl: UISegmentedControl
+
+  init(
+    frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?,
+    messenger: FlutterBinaryMessenger
+  ) {
+    let arguments = args as? [String: Any]
+    let items = arguments?["items"] as? [String] ?? []
+    containerView = UIView(frame: frame)
+    channel = FlutterMethodChannel(
+      name: "buzz/native_segmented_control/\(viewId)",
+      binaryMessenger: messenger
+    )
+    segmentedControl = UISegmentedControl(items: items)
+    super.init()
+
+    containerView.backgroundColor = .clear
+    containerView.isOpaque = false
+    segmentedControl.translatesAutoresizingMaskIntoConstraints = false
+    segmentedControl.addTarget(
+      self,
+      action: #selector(selectionChanged),
+      for: .valueChanged
+    )
+    applyState(from: arguments)
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "setState" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      self?.applyState(from: call.arguments)
+      result(nil)
+    }
+
+    containerView.addSubview(segmentedControl)
+    NSLayoutConstraint.activate([
+      segmentedControl.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+      segmentedControl.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+      segmentedControl.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
+    ])
+  }
+
+  func view() -> UIView {
+    containerView
+  }
+
+  @objc private func selectionChanged() {
+    channel.invokeMethod("changed", arguments: segmentedControl.selectedSegmentIndex)
+  }
+
+  private func applyState(from value: Any?) {
+    let arguments = value as? [String: Any]
+    let selectedIndex = (arguments?["selectedIndex"] as? NSNumber)?.intValue ?? 0
+    let brightness = arguments?["brightness"] as? String
+    let enabled = arguments?["enabled"] as? Bool ?? true
+    let interfaceStyle: UIUserInterfaceStyle = brightness == "dark" ? .dark : .light
+
+    containerView.overrideUserInterfaceStyle = interfaceStyle
+    segmentedControl.overrideUserInterfaceStyle = interfaceStyle
+    segmentedControl.selectedSegmentIndex = selectedIndex
+    segmentedControl.isEnabled = enabled
   }
 
   deinit {
