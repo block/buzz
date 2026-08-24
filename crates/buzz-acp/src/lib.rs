@@ -62,24 +62,77 @@ fn is_subcommand(name: &str) -> bool {
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Channels present in a discovery result but not yet subscribed.
-///
-/// Used by the periodic re-discovery sweep. Deliberately additive only: the
-/// kind:44101 member-removed path owns unsubscription (it drains queued events
-/// and invalidates sessions), and a transient partial discovery result must
-/// never evict live subscriptions. Deterministic order (ascending UUID) keeps
-/// logs stable across sweeps.
-fn missing_channel_ids(
-    discovered: &HashMap<Uuid, relay::ChannelInfo>,
-    subscribed: &HashSet<Uuid>,
-) -> Vec<Uuid> {
-    let mut missing: Vec<Uuid> = discovered
-        .keys()
-        .filter(|id| !subscribed.contains(id))
-        .copied()
-        .collect();
-    missing.sort_unstable();
-    missing
+/// Hard bound for a background channel discovery sweep.
+const CHANNEL_DISCOVERY_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
+/// Successful discovery sweeps required before treating a missing channel as a removal.
+const CHANNEL_REMOVAL_CONFIRMATION_SWEEPS: u8 = 2;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ChannelDiscoveryChanges {
+    added: Vec<Uuid>,
+    removed: Vec<Uuid>,
+}
+
+#[derive(Debug, Default)]
+struct ChannelDiscoveryReconciler {
+    missing_sweeps: HashMap<Uuid, u8>,
+}
+
+impl ChannelDiscoveryReconciler {
+    /// Compare one complete, successful discovery result with active subscriptions.
+    ///
+    /// Additions apply immediately. A removal requires two consecutive successful
+    /// sweeps so a transient partial response cannot evict a live subscription.
+    fn observe(
+        &mut self,
+        discovered: &HashMap<Uuid, relay::ChannelInfo>,
+        subscribed: &HashSet<Uuid>,
+    ) -> ChannelDiscoveryChanges {
+        let mut added: Vec<Uuid> = discovered
+            .keys()
+            .filter(|id| !subscribed.contains(id))
+            .copied()
+            .collect();
+        let mut removed = Vec::new();
+
+        self.missing_sweeps
+            .retain(|id, _| subscribed.contains(id) && !discovered.contains_key(id));
+        for channel_id in subscribed {
+            if discovered.contains_key(channel_id) {
+                self.missing_sweeps.remove(channel_id);
+                continue;
+            }
+            let misses = self.missing_sweeps.entry(*channel_id).or_default();
+            *misses = misses.saturating_add(1);
+            if *misses >= CHANNEL_REMOVAL_CONFIRMATION_SWEEPS {
+                removed.push(*channel_id);
+            }
+        }
+        for channel_id in &removed {
+            self.missing_sweeps.remove(channel_id);
+        }
+
+        added.sort_unstable();
+        removed.sort_unstable();
+        ChannelDiscoveryChanges { added, removed }
+    }
+
+    fn forget(&mut self, channel_id: Uuid) {
+        self.missing_sweeps.remove(&channel_id);
+    }
+}
+
+/// Stable ±20% startup phase derived from the agent identity. Agents launched
+/// together therefore do not converge on the same periodic query instant.
+fn channel_discovery_initial_delay(interval: Duration, identity: &str) -> Duration {
+    let hash = identity
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    let factor = 0.8 + (hash as f64 / u64::MAX as f64) * 0.4;
+    interval.mul_f64(factor)
 }
 
 #[cfg(test)]
@@ -95,48 +148,121 @@ mod channel_discovery_refresh_tests {
     }
 
     #[test]
-    fn missing_channel_ids_reports_only_unsubscribed_channels() {
+    fn additions_are_reported_immediately_in_stable_order() {
         let joined: Uuid = "e8beeeff-0210-4aa3-8357-a3d50a003085".parse().unwrap();
+        let joined_two: Uuid = "997cd0eb-2fba-453d-9c18-ab897425a3c8".parse().unwrap();
         let known: Uuid = "770c5d49-b99f-4c57-a4a2-8cfb84d8b6ba".parse().unwrap();
 
         let mut discovered = HashMap::new();
         discovered.insert(joined, info());
+        discovered.insert(joined_two, info());
         discovered.insert(known, info());
 
         let mut subscribed = HashSet::new();
         subscribed.insert(known);
 
-        assert_eq!(missing_channel_ids(&discovered, &subscribed), vec![joined]);
+        let changes = ChannelDiscoveryReconciler::default().observe(&discovered, &subscribed);
+        assert_eq!(changes.added, vec![joined_two, joined]);
+        assert!(changes.removed.is_empty());
     }
 
     #[test]
-    fn missing_channel_ids_is_empty_when_fully_subscribed() {
-        let joined: Uuid = "e8beeeff-0210-4aa3-8357-a3d50a003085".parse().unwrap();
-
-        let mut discovered = HashMap::new();
-        discovered.insert(joined, info());
-
+    fn removal_requires_two_complete_successful_sweeps() {
+        let channel: Uuid = "e8beeeff-0210-4aa3-8357-a3d50a003085".parse().unwrap();
         let mut subscribed = HashSet::new();
-        subscribed.insert(joined);
+        subscribed.insert(channel);
+        let mut reconciler = ChannelDiscoveryReconciler::default();
 
-        assert!(missing_channel_ids(&discovered, &subscribed).is_empty());
+        let first = reconciler.observe(&HashMap::new(), &subscribed);
+        assert!(first.removed.is_empty());
+        let second = reconciler.observe(&HashMap::new(), &subscribed);
+        assert_eq!(second.removed, vec![channel]);
     }
 
     #[test]
-    fn missing_channel_ids_is_sorted_for_stable_logs() {
-        let a: Uuid = "997cd0eb-2fba-453d-9c18-ab897425a3c8".parse().unwrap();
-        let b: Uuid = "f27869c3-3097-417c-bd03-b16ca82fc0ed".parse().unwrap();
-
-        // Insert in reverse order; a bare key-set iteration would be
-        // nondeterministic across sweeps.
+    fn rediscovery_clears_a_pending_removal() {
+        let channel: Uuid = "e8beeeff-0210-4aa3-8357-a3d50a003085".parse().unwrap();
+        let mut subscribed = HashSet::new();
+        subscribed.insert(channel);
+        let mut reconciler = ChannelDiscoveryReconciler::default();
+        assert!(reconciler
+            .observe(&HashMap::new(), &subscribed)
+            .removed
+            .is_empty());
         let mut discovered = HashMap::new();
-        discovered.insert(b, info());
-        discovered.insert(a, info());
+        discovered.insert(channel, info());
+        assert!(reconciler
+            .observe(&discovered, &subscribed)
+            .removed
+            .is_empty());
+        assert!(reconciler
+            .observe(&HashMap::new(), &subscribed)
+            .removed
+            .is_empty());
+    }
 
-        assert_eq!(
-            missing_channel_ids(&discovered, &HashSet::new()),
-            vec![a, b]
-        );
+    #[test]
+    fn initial_delay_is_stable_and_jittered() {
+        let interval = Duration::from_secs(90);
+        let alpha = channel_discovery_initial_delay(interval, "alpha");
+        assert_eq!(alpha, channel_discovery_initial_delay(interval, "alpha"));
+        assert!(alpha >= Duration::from_secs(72));
+        assert!(alpha <= Duration::from_secs(108));
+        assert_ne!(alpha, channel_discovery_initial_delay(interval, "venice"));
+    }
+}
+
+struct ChannelRemovalContext<'a> {
+    relay: &'a mut HarnessRelay,
+    queue: &'a mut EventQueue,
+    pool: &'a mut AgentPool,
+    pool_ready: bool,
+    subscribed_channel_ids: &'a mut HashSet<Uuid>,
+    removed_channels: &'a mut HashSet<Uuid>,
+    typing_channels: &'a mut HashMap<Uuid, ThreadTags>,
+    rest_client: &'a relay::RestClient,
+}
+
+impl ChannelRemovalContext<'_> {
+    async fn remove(&mut self, channel_id: Uuid, reason: &'static str) {
+        self.subscribed_channel_ids.remove(&channel_id);
+        tracing::info!(%channel_id, reason, "unsubscribing from channel");
+        if let Err(error) = self.relay.unsubscribe_channel(channel_id).await {
+            tracing::warn!(%channel_id, %error, "failed to unsubscribe from channel");
+        }
+
+        // Drain queued events and invalidate sessions for the removed channel.
+        // Events already in-flight complete normally; relay authorization rejects
+        // any action the departed agent is no longer allowed to perform.
+        let drained_ids = self.queue.drain_channel(channel_id);
+        let invalidated = if self.pool_ready {
+            self.pool.invalidate_channel_sessions(channel_id)
+        } else {
+            0
+        };
+        self.removed_channels.insert(channel_id);
+        self.typing_channels.remove(&channel_id);
+
+        // Best-effort: clean up 👀 on drained events. The relay revokes membership
+        // before a live notification, so this may 403 on non-open channels.
+        if !drained_ids.is_empty() {
+            let rest_client = self.rest_client.clone();
+            let reaction_ids = drained_ids.clone();
+            tokio::spawn(async move {
+                for event_id in &reaction_ids {
+                    pool::reaction_remove(&rest_client, event_id, "👀").await;
+                }
+            });
+        }
+        if !drained_ids.is_empty() || invalidated > 0 {
+            tracing::info!(
+                %channel_id,
+                drained = drained_ids.len(),
+                invalidated,
+                reason,
+                "cleaned up after membership removal"
+            );
+        }
     }
 }
 
@@ -2339,23 +2465,25 @@ async fn tokio_main() -> Result<()> {
         None
     };
 
-    // Periodic channel re-discovery: the live kind:44100 member-added
-    // notification is the primary subscribe trigger for channels joined after
-    // startup, but it only fires when the roster mutation goes through the
-    // relay. Rosters can also change while this harness is offline or via
-    // writers that bypass relay side effects entirely (e.g. an operator
-    // console writing the store directly). The sweep re-runs startup discovery
-    // and subscribes to anything new so a running agent converges regardless
-    // of who wrote the roster.
+    // Membership notifications are primary. This bounded, phase-jittered
+    // background sweep repairs missed add/remove notifications without
+    // blocking WebSocket event handling.
     let mut channel_discovery_refresh = if config.channel_discovery_refresh_secs > 0 {
         let interval = Duration::from_secs(config.channel_discovery_refresh_secs);
-        Some(tokio::time::interval_at(
-            tokio::time::Instant::now() + interval,
-            interval,
-        ))
+        let initial_delay = channel_discovery_initial_delay(interval, &pubkey_hex);
+        let mut timer =
+            tokio::time::interval_at(tokio::time::Instant::now() + initial_delay, interval);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Some(timer)
     } else {
         None
     };
+    let discovery_rest_client = relay.rest_client();
+    let discovery_pubkey = pubkey_hex.clone();
+    let mut channel_discovery_task: Option<
+        tokio::task::JoinHandle<Result<HashMap<Uuid, relay::ChannelInfo>, String>>,
+    > = None;
+    let mut channel_discovery_reconciler = ChannelDiscoveryReconciler::default();
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -2782,6 +2910,7 @@ async fn tokio_main() -> Result<()> {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
+                                    channel_discovery_reconciler.forget(ch);
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
@@ -2796,48 +2925,19 @@ async fn tokio_main() -> Result<()> {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
-                                    subscribed_channel_ids.remove(&ch);
-                                    tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
-                                    if let Err(e) = relay.unsubscribe_channel(ch).await {
-                                        tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
+                                    channel_discovery_reconciler.forget(ch);
+                                    ChannelRemovalContext {
+                                        relay: &mut relay,
+                                        queue: &mut queue,
+                                        pool: &mut pool,
+                                        pool_ready,
+                                        subscribed_channel_ids: &mut subscribed_channel_ids,
+                                        removed_channels: &mut removed_channels,
+                                        typing_channels: &mut typing_channels,
+                                        rest_client: &ctx.rest_client,
                                     }
-                                    // Drain queued events and invalidate sessions for the
-                                    // removed channel. Events already in-flight will
-                                    // complete normally (the relay may reject actions if
-                                    // the agent lost access).
-                                    let drained_ids = queue.drain_channel(ch);
-                                    let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
-                                    } else {
-                                        0
-                                    };
-                                    // Track removed channels so checked-out agents get
-                                    // their sessions stripped when they return to the pool.
-                                    removed_channels.insert(ch);
-                                    typing_channels.remove(&ch);
-                                    // Best-effort: clean up 👀 on drained events.
-                                    // Note: the relay revokes membership before
-                                    // emitting the notification, so this DELETE may
-                                    // 403 on non-open channels. Stale 👀 in that
-                                    // case is a known limitation — fix belongs in
-                                    // the relay (clean up bot reactions on removal).
-                                    if !drained_ids.is_empty() {
-                                        let rc = ctx.rest_client.clone();
-                                        let ids = drained_ids.clone();
-                                        tokio::spawn(async move {
-                                            for eid in &ids {
-                                                pool::reaction_remove(&rc, eid, "👀").await;
-                                            }
-                                        });
-                                    }
-                                    if !drained_ids.is_empty() || invalidated > 0 {
-                                        tracing::info!(
-                                            channel_id = %ch,
-                                            drained = drained_ids.len(),
-                                            invalidated,
-                                            "cleaned up after membership removal"
-                                        );
-                                    }
+                                    .remove(ch, "membership notification")
+                                    .await;
                                 }
                                 continue;
                             }
@@ -3238,42 +3338,96 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    match relay.discover_channels().await {
-                        Ok(discovered) => {
-                            for ch in missing_channel_ids(&discovered, &subscribed_channel_ids) {
-                                // Same rule resolution as the live member-added
-                                // path, so --channels allowlists and config-mode
-                                // rules are honored identically.
-                                match config::resolve_dynamic_channel_filter(&config, ch, &rules)
-                                {
+                    if channel_discovery_task.is_none() {
+                        let rest_client = discovery_rest_client.clone();
+                        let pubkey = discovery_pubkey.clone();
+                        channel_discovery_task = Some(tokio::spawn(async move {
+                            match tokio::time::timeout(
+                                CHANNEL_DISCOVERY_REFRESH_TIMEOUT,
+                                relay::discover_channels_with(&rest_client, &pubkey),
+                            )
+                            .await
+                            {
+                                Ok(Ok(discovered)) => Ok(discovered),
+                                Ok(Err(error)) => Err(error.to_string()),
+                                Err(_) => Err(format!(
+                                    "timed out after {}s",
+                                    CHANNEL_DISCOVERY_REFRESH_TIMEOUT.as_secs()
+                                )),
+                            }
+                        }));
+                    } else {
+                        tracing::debug!("channel discovery refresh still running — skipping tick");
+                    }
+                    None
+                }
+                discovery_result = async {
+                    match channel_discovery_task.as_mut() {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx;
+                    channel_discovery_task = None;
+                    match discovery_result {
+                        Ok(Ok(discovered)) => {
+                            let changes = channel_discovery_reconciler
+                                .observe(&discovered, &subscribed_channel_ids);
+                            for channel_id in changes.added {
+                                match config::resolve_dynamic_channel_filter(
+                                    &config,
+                                    channel_id,
+                                    &rules,
+                                ) {
                                     Some(filter) => {
-                                        if let Err(e) =
-                                            relay.subscribe_channel(ch, filter).await
+                                        if let Err(error) = relay
+                                            .subscribe_channel_from(
+                                                channel_id,
+                                                filter,
+                                                Some(startup_watermark),
+                                            )
+                                            .await
                                         {
                                             tracing::warn!(
-                                                channel_id = %ch,
-                                                error = %e,
+                                                %channel_id,
+                                                %error,
                                                 "discovery refresh: subscribe failed"
                                             );
                                         } else {
-                                            subscribed_channel_ids.insert(ch);
+                                            removed_channels.remove(&channel_id);
+                                            subscribed_channel_ids.insert(channel_id);
                                             tracing::info!(
-                                                channel_id = %ch,
+                                                %channel_id,
                                                 "discovery refresh: subscribed to new channel"
                                             );
                                         }
                                     }
                                     None => tracing::debug!(
-                                        channel_id = %ch,
+                                        %channel_id,
                                         "discovery refresh: no matching rules — skipping"
                                     ),
                                 }
                             }
+                            for channel_id in changes.removed {
+                                ChannelRemovalContext {
+                                    relay: &mut relay,
+                                    queue: &mut queue,
+                                    pool: &mut pool,
+                                    pool_ready,
+                                    subscribed_channel_ids: &mut subscribed_channel_ids,
+                                    removed_channels: &mut removed_channels,
+                                    typing_channels: &mut typing_channels,
+                                    rest_client: &ctx.rest_client,
+                                }
+                                .remove(channel_id, "discovery reconciliation")
+                                .await;
+                            }
                         }
-                        Err(e) => {
-                            // Transient discovery failures must never evict
-                            // existing subscriptions — this sweep only ever adds.
-                            tracing::warn!(error = %e, "channel discovery refresh failed");
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, "channel discovery refresh failed");
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "channel discovery refresh task failed");
                         }
                     }
                     None
@@ -3649,6 +3803,12 @@ async fn tokio_main() -> Result<()> {
     // Cancel any in-flight presence heartbeat before sending offline.
     if let Some(h) = presence_task.take() {
         h.abort();
+    }
+
+    // Discovery owns only cloned HTTP state; abort it before relay shutdown so
+    // no background request outlives the harness.
+    if let Some(task) = channel_discovery_task.take() {
+        task.abort();
     }
 
     // Best-effort: set presence to offline before exiting.

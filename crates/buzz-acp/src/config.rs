@@ -38,11 +38,10 @@ pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 /// Default interval (seconds) between periodic channel re-discovery sweeps.
 ///
 /// The live kind:44100 member-added notification is the primary subscribe
-/// trigger for newly joined channels, but it only fires when the roster
-/// mutation goes through the relay. Rosters can also change while the harness
-/// is offline or via writers that bypass relay side effects entirely; the
-/// periodic sweep re-runs startup discovery so a running agent converges no
-/// matter who wrote the roster.
+/// trigger for newly joined channels. Notifications can still be missed during
+/// outages, backpressure, or compatibility with older relay/writer versions;
+/// the periodic sweep re-runs startup discovery so a running agent converges.
+/// Removals require two consecutive successful sweeps before cleanup.
 ///
 /// Override via `--channel-discovery-refresh-secs` /
 /// `BUZZ_ACP_CHANNEL_DISCOVERY_REFRESH_SECS`. 0 disables.
@@ -400,10 +399,9 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_TYPING")]
     pub no_typing: bool,
 
-    /// Seconds between periodic channel re-discovery sweeps that subscribe to
-    /// channels the agent joined since startup (or joined via a writer that
-    /// emits no kind:44100 notification). 0 disables the sweep; live
-    /// member-added notifications remain active either way.
+    /// Seconds between periodic channel re-discovery sweeps that reconcile
+    /// missed channel joins and removals. 0 disables the sweep; live membership
+    /// notifications remain active either way.
     #[arg(
         long,
         env = "BUZZ_ACP_CHANNEL_DISCOVERY_REFRESH_SECS",
