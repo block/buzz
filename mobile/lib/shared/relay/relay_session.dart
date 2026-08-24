@@ -249,6 +249,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     void Function(String message)? onClosed,
   }) => _subscribe(filter, onEvent, onClosed: onClosed);
 
+  /// Subscribe to a live stream and observe its recovery lifecycle.
+  ///
+  /// The returned future completes after initial EOSE (or the existing
+  /// fallback timeout) and yields a cleanup callback. [onStatusChanged] emits
+  /// [RelaySubscriptionStatus.ready] at each EOSE after buffered replay events
+  /// have been delivered, and [RelaySubscriptionStatus.retrying] immediately
+  /// when a retryable or rate-limited CLOSED begins backoff. Terminal CLOSED
+  /// invokes [onClosed] and removes the subscription instead of retrying it.
+  /// Calling the cleanup callback cancels pending retries and sends CLOSE.
   Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {

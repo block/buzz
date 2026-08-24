@@ -122,7 +122,7 @@ Future<bool> _preloadMembers(
       ...participantPubkeys,
     }.toList();
     if (pubkeys.isNotEmpty) {
-      return notifier.preload(pubkeys);
+      return notifier.refresh(pubkeys);
     }
     return true;
   } catch (_) {

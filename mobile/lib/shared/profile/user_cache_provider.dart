@@ -52,6 +52,34 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     return completer.future;
   }
 
+  /// Force-refresh profiles for identity-sensitive gates.
+  ///
+  /// Unlike [preload], this fetches cached pubkeys too so stale human profiles
+  /// cannot be trusted after a verified agent-owner profile was published.
+  Future<bool> refresh(List<String> pubkeys) async {
+    final normalized = pubkeys
+        .map((pubkey) => pubkey.toLowerCase())
+        .where((pubkey) => pubkey.isNotEmpty)
+        .toSet()
+        .toList();
+    if (normalized.isEmpty) return true;
+    try {
+      final session = ref.read(relaySessionProvider.notifier);
+      final events = await session.fetchHistory(
+        NostrFilters.profilesBatch(normalized),
+      );
+      final updated = Map<String, UserProfile>.from(state);
+      for (final event in events) {
+        final profile = _profileFromEvent(event);
+        updated[profile.pubkey] = profile;
+      }
+      state = updated;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Applies a live kind:0 profile event to the cache.
   ///
   /// Surfaces that keep a participant-scoped profile subscription can use this

@@ -663,6 +663,53 @@ void main() {
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
     });
 
+    testWidgets('force-refreshes cached profiles before enabling Huddle', (
+      tester,
+    ) async {
+      late final _FakeUserCacheNotifier userCache;
+      userCache = _FakeUserCacheNotifier(
+        const {
+          'agent': UserProfile(pubkey: 'agent', displayName: 'Cached Human'),
+        },
+        preload: (_) async {
+          await Future<void>.delayed(Duration.zero);
+          userCache.replace(
+            const UserProfile(
+              pubkey: 'agent',
+              displayName: 'Agent',
+              ownerPubkey: 'owner',
+            ),
+          );
+          return true;
+        },
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(userCache.state['agent']?.ownerPubkey, 'owner');
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
     testWidgets('keeps Huddle hidden while a verified owner profile loads', (
       tester,
     ) async {
@@ -13380,6 +13427,9 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
   @override
   Future<bool> preload(List<String> pubkeys) =>
       _preload?.call(pubkeys) ?? Future.value(true);
+
+  @override
+  Future<bool> refresh(List<String> pubkeys) => preload(pubkeys);
 
   void replace(UserProfile profile) {
     state = {...state, profile.pubkey.toLowerCase(): profile};
