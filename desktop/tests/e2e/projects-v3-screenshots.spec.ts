@@ -1,9 +1,54 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/projects-v3-screenshots";
+
+async function expectSinglePrimaryTextColumn(row: Locator) {
+  const primary = row.locator('[data-projects-text-priority="primary"]');
+  const secondary = row.locator('[data-projects-text-priority="secondary"]');
+  await expect(primary).toHaveCount(1);
+  expect(await secondary.count()).toBeGreaterThan(0);
+  const primaryColor = await primary.evaluate(
+    (element) => getComputedStyle(element).color,
+  );
+  const secondaryColors = await secondary.evaluateAll((elements) =>
+    elements.map((element) => getComputedStyle(element).color),
+  );
+  expect(secondaryColors.every((color) => color !== primaryColor)).toBe(true);
+}
+
+async function expectProjectContextGroups(
+  panel: Locator,
+  { hasActions }: { hasActions: boolean },
+) {
+  const detailsHeading = panel.getByRole("heading", {
+    name: "Details",
+    exact: true,
+  });
+  await expect(detailsHeading).toBeVisible();
+  if (hasActions) {
+    await expect(panel.getByTestId("project-context-actions")).toBeVisible();
+  } else {
+    await expect(panel.getByTestId("project-context-actions")).toHaveCount(0);
+  }
+  for (const name of [
+    "Actions",
+    "Assignment",
+    "Discussion",
+    "People",
+    "Task details",
+    "Review details",
+    "Review activity",
+    "Repository activity",
+  ]) {
+    await expect(panel.getByRole("heading", { name, exact: true })).toHaveCount(
+      0,
+    );
+  }
+  await expect(panel.getByTestId("project-repository-people")).toHaveCount(0);
+}
 
 async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -17,6 +62,78 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
 }
+
+test("projects activity overview screenshot", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "light");
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
+  const activityHeader = page.getByTestId("projects-page-header");
+  const relayIcon = page.getByTestId("projects-activity-relay-icon");
+  await expect(activityHeader).toBeVisible();
+  await expect(relayIcon).toBeVisible();
+  const [activityHeaderBox, relayIconBox] = await Promise.all([
+    activityHeader.boundingBox(),
+    relayIcon.boundingBox(),
+  ]);
+  expect(activityHeaderBox).not.toBeNull();
+  expect(relayIconBox).not.toBeNull();
+  expect((relayIconBox?.y ?? 0) + (relayIconBox?.height ?? 0)).toBeLessThan(
+    activityHeaderBox?.y ?? 0,
+  );
+  await expect(page.getByTestId("projects-activity-search")).toBeVisible();
+  await expect(page.getByTestId("projects-activity-intro")).toContainText(
+    "Projects Activity",
+  );
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("projects-overview-create-project"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("projects-activity-group").first(),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/00-projects-pulse.png` });
+});
+
+test("submitted project context stays compact and expandable", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-prs").click();
+  await page.getByRole("button", { name: "List layout" }).click();
+  await page.getByTestId("projects-overview-chat-toggle").click();
+
+  const panel = page.getByTestId("project-agent-chat-panel");
+  await panel.getByTestId("message-input").fill("Summarize these reviews");
+  await panel.getByTestId("message-input").press("Enter");
+  const context = panel.getByTestId("project-agent-sent-context");
+  await expect(context).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: "Preview message context" }),
+  ).toBeVisible();
+
+  await waitForAnimations(page);
+  await panel.screenshot({
+    path: `${SHOTS}/08-agent-context-collapsed.png`,
+  });
+
+  await context.getByRole("button", { name: "Show sent context" }).click();
+  await expect(
+    context.getByTestId("project-agent-sent-context-payload"),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await panel.screenshot({
+    path: `${SHOTS}/09-agent-context-expanded.png`,
+  });
+});
 
 test("sidebar project add flow browses before creating", async ({ page }) => {
   await installMockBridge(page);
@@ -165,7 +282,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   const repositoryActionsPanel = page.getByTestId(
     "project-repository-actions-panel",
   );
-  const expectFullWidthSection = async () => {
+  const expectInsetSection = async () => {
     const sectionHeader = workspacePanel.getByTestId("project-section-header");
     const [workspaceBox, headerBox, menuBox] = await Promise.all([
       workspacePanel.boundingBox(),
@@ -175,8 +292,14 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     expect(workspaceBox).not.toBeNull();
     expect(headerBox).not.toBeNull();
     expect(menuBox).not.toBeNull();
-    expect(headerBox?.x).toBe(workspaceBox?.x);
-    expect(headerBox?.width).toBe(workspaceBox?.width);
+    expect(Math.round((headerBox?.x ?? 0) - (workspaceBox?.x ?? 0))).toBe(16);
+    expect(
+      Math.round(
+        (workspaceBox?.x ?? 0) +
+          (workspaceBox?.width ?? 0) -
+          ((headerBox?.x ?? 0) + (headerBox?.width ?? 0)),
+      ),
+    ).toBe(16);
     expect(workspaceBox?.x).toBe(menuBox?.x);
     expect((workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0)).toBe(
       (menuBox?.x ?? 0) + (menuBox?.width ?? 0),
@@ -209,21 +332,12 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   });
   await expect(repositoryHeading).toBeVisible();
   await expect(repositoryHeading).toHaveCSS("font-size", "14px");
-  await expect(
-    repositoryActionsPanel.getByRole("heading", {
-      name: "Actions",
-      exact: true,
-    }),
-  ).toHaveCount(0);
+  await expectProjectContextGroups(repositoryActionsPanel, {
+    hasActions: true,
+  });
   await expect(
     repositoryActionsPanel.getByRole("heading", {
       name: "Languages",
-      exact: true,
-    }),
-  ).toHaveCount(0);
-  await expect(
-    repositoryActionsPanel.getByRole("heading", {
-      name: "People",
       exact: true,
     }),
   ).toHaveCount(0);
@@ -231,18 +345,13 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     name: "Details",
     exact: true,
   });
-  const peopleContent = repositoryActionsPanel.getByTestId(
-    "project-repository-people",
-  );
-  const peopleSection = peopleContent.locator("..");
   const fetchButton = repositoryActionsPanel.getByRole("button", {
     name: "Fetch",
     exact: true,
   });
-  await expect(peopleSection).toHaveCSS("border-top-width", "1px");
   await expect(detailsHeading.locator("..")).toHaveCSS(
     "border-top-width",
-    "1px",
+    "0px",
   );
   expect(
     await repositoryHeading.evaluate(
@@ -251,37 +360,25 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ).toBe(
     await detailsHeading.evaluate((element) => getComputedStyle(element).color),
   );
-  const actionsSection = repositoryActionsPanel
-    .getByRole("button", { name: "Terminal", exact: true })
-    .locator("..")
-    .locator("..");
-  const [actionsSectionBounds, peopleSectionBounds, detailsHeadingBounds] =
+  const actionsSection = repositoryActionsPanel.getByTestId(
+    "project-context-actions",
+  );
+  const detailsSection = repositoryActionsPanel.getByTestId(
+    "project-context-details",
+  );
+  const [actionsSectionBounds, detailsSectionBounds, detailsHeadingBounds] =
     await Promise.all([
       actionsSection.boundingBox(),
-      peopleSection.boundingBox(),
+      detailsSection.boundingBox(),
       detailsHeading.boundingBox(),
     ]);
   expect(
-    (peopleSectionBounds?.y ?? 0) -
+    (detailsSectionBounds?.y ?? 0) -
       ((actionsSectionBounds?.y ?? 0) + (actionsSectionBounds?.height ?? 0)),
   ).toBe(8);
-  expect(
-    (detailsHeadingBounds?.y ?? 0) - (peopleSectionBounds?.y ?? 0) - 1,
-  ).toBe(8);
-  const people = repositoryActionsPanel.getByTestId(
-    "project-repository-person",
+  expect((detailsHeadingBounds?.y ?? 0) - (detailsSectionBounds?.y ?? 0)).toBe(
+    8,
   );
-  const [firstPersonBounds, secondPersonBounds] = await Promise.all([
-    people.nth(0).boundingBox(),
-    people.nth(1).boundingBox(),
-  ]);
-  expect(secondPersonBounds?.x ?? 0).toBeLessThan(
-    (firstPersonBounds?.x ?? 0) + (firstPersonBounds?.width ?? 0),
-  );
-  await people.first().hover();
-  await expect(
-    page.getByTestId("project-repository-person-tooltip").first(),
-  ).toBeVisible();
   await expect(fetchButton).toHaveCSS("text-align", "left");
   const sourceButton = repositoryActionsPanel.getByRole("button", {
     name: "Remote",
@@ -294,6 +391,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     alignedDetailsHeadingBounds,
     sourceButtonBounds,
     sourceSectionBounds,
+    repositoryActionListBounds,
     sourceTrailingIconBounds,
     fetchButtonBounds,
     fetchIconBounds,
@@ -304,7 +402,12 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ] = await Promise.all([
     detailsHeading.boundingBox(),
     sourceButton.boundingBox(),
-    sourceButton.locator("..").locator("..").boundingBox(),
+    repositoryActionsPanel
+      .getByTestId("project-context-source-controls")
+      .boundingBox(),
+    repositoryActionsPanel
+      .getByTestId("project-context-repository-actions")
+      .boundingBox(),
     sourceButton.locator("svg").last().boundingBox(),
     fetchButton.boundingBox(),
     fetchButton.locator("svg").first().boundingBox(),
@@ -324,7 +427,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   expect(fetchButtonBounds?.height).toBe(28);
   expect(latestDetailRowBounds?.height).toBe(28);
   expect(
-    (actionsSectionBounds?.y ?? 0) -
+    (repositoryActionListBounds?.y ?? 0) -
       ((sourceSectionBounds?.y ?? 0) + (sourceSectionBounds?.height ?? 0)),
   ).toBe(2);
   expect(fetchButtonBounds?.x ?? 0).toBeLessThan(
@@ -433,6 +536,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (sharedHeaderBackdropBounds?.x ?? 0) +
       (sharedHeaderBackdropBounds?.width ?? 0),
   ).toBeLessThan(repositoryActionsPanelBounds?.x ?? 0);
+  const contextRail = page.getByTestId("project-context-rail");
   const resizeHandle = repositoryActionsPanel.getByTestId(
     "right-auxiliary-pane-resize-handle",
   );
@@ -442,10 +546,16 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (resizeHandleBounds?.x ?? 0) + (resizeHandleBounds?.width ?? 0) / 2;
   const resizeStartY =
     (resizeHandleBounds?.y ?? 0) + (resizeHandleBounds?.height ?? 0) / 2;
-  await page.mouse.move(resizeStartX, resizeStartY);
-  await page.mouse.down();
+  await resizeHandle.dispatchEvent("pointerdown", {
+    button: 0,
+    clientX: resizeStartX,
+    clientY: resizeStartY,
+    pointerId: 1,
+    pointerType: "mouse",
+  });
+  await expect(contextRail).toHaveAttribute("data-resizing", "true");
+  await expect(contextRail).toHaveCSS("transition-duration", "0s");
   await page.mouse.move(resizeStartX - 40, resizeStartY);
-  await page.mouse.up();
   await expect
     .poll(async () =>
       repositoryActionsPanel.evaluate((element) =>
@@ -453,6 +563,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
       ),
     )
     .toBe(320);
+  await page.mouse.up();
+  await expect(contextRail).toHaveAttribute("data-resizing", "false");
+  await expect(contextRail).toHaveCSS("transition-duration", "0.2s");
   await resizeHandle.dblclick();
   await expect
     .poll(async () =>
@@ -467,32 +580,50 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   const chatPanelTab = page.getByTestId("project-right-panel-chat-tab");
   const terminalButton = page.getByTestId("project-terminal-toggle");
   const terminalIcon = page.getByTestId("project-terminal-icon");
+  const repositoryContextIcon = page.getByTestId(
+    "project-right-panel-repository-icon",
+  );
   await expect(repositoryPanelTab).toHaveAttribute("aria-pressed", "true");
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
     "Hide project context",
   );
   await expect(terminalIcon).toBeVisible();
+  await expect(repositoryPanelTab).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(repositoryContextIcon).toHaveCSS("opacity", "1");
+  await expect(contextRail).toHaveCSS("width", "288px");
+  await expect(contextRail).toHaveCSS("transition-duration", "0.2s");
+  // The icon is an inline SVG drawn with currentColor, so it must inherit
+  // the toggle button's text color to stay tinted with button state.
   expect(
-    await terminalIcon.evaluate((element) => {
-      const style = getComputedStyle(element);
-      return {
-        backgroundColor: style.backgroundColor,
-        maskImage: style.maskImage || style.webkitMaskImage,
-        parentColor: getComputedStyle(element.parentElement ?? element).color,
-      };
-    }),
+    await terminalIcon.evaluate((element) => ({
+      color: getComputedStyle(element).color,
+      strokesCurrentColor: Array.from(element.querySelectorAll("rect")).some(
+        (rect) =>
+          rect.getAttribute("stroke") === "currentColor" ||
+          rect.getAttribute("fill") === "currentColor",
+      ),
+      tagName: element.tagName.toLowerCase(),
+    })),
   ).toMatchObject({
-    backgroundColor: await terminalButton.evaluate(
+    color: await terminalButton.evaluate(
       (element) => getComputedStyle(element).color,
     ),
-    maskImage: expect.not.stringMatching(/^none$/),
+    strokesCurrentColor: true,
+    tagName: "svg",
   });
-  const [repositoryTabBounds, chatTabBounds] = await Promise.all([
-    repositoryPanelTab.boundingBox(),
-    chatPanelTab.boundingBox(),
-  ]);
+  const [repositoryTabBounds, chatTabBounds, terminalTabBounds] =
+    await Promise.all([
+      repositoryPanelTab.boundingBox(),
+      chatPanelTab.boundingBox(),
+      terminalButton.boundingBox(),
+    ]);
   expect(repositoryTabBounds?.width).toBe(chatTabBounds?.width);
+  expect(terminalTabBounds?.x).toBeLessThan(chatTabBounds?.x ?? 0);
+  expect(chatTabBounds?.x).toBeLessThan(repositoryTabBounds?.x ?? 0);
   await chatPanelTab.click();
   const agentChatPanel = page.getByTestId("project-agent-chat-panel");
   await expect(agentChatPanel).toBeVisible();
@@ -511,6 +642,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(agentContext).toBeVisible();
   await expect(agentContext).toContainText("Overview");
   await expect(agentContext).not.toContainText("Buzz /");
+  // The context rail reveals the chat panel with a width transition; measure
+  // only after it settles or the panel's unclipped box overhangs the rail.
+  await waitForAnimations(page);
   const [
     attachedSharedHeaderBackdropBounds,
     tabMenuHeaderBounds,
@@ -587,7 +721,10 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     agentChatPanel.getByText("A persisted threaded agent response."),
   ).toBeVisible();
   await chatPanelTab.click();
-  await expect(agentChatPanel).toHaveCount(0);
+  // The rail collapses but retains the panel so conversation state survives
+  // toggling; assert the collapsed rail instead of a full unmount.
+  await expect(contextRail).toHaveCSS("width", "0px");
+  await expect(contextRail).toHaveAttribute("aria-hidden", "true");
   await expect(chatPanelTab).toHaveAttribute("aria-label", "Show project chat");
   await chatPanelTab.click();
   await expect(
@@ -601,7 +738,8 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     page.getByTestId("project-repository-selection-row"),
   ).toHaveCount(0);
   await repositoryPanelTab.click();
-  await expect(repositoryActionsPanel).toHaveCount(0);
+  await expect(contextRail).toHaveCSS("width", "0px");
+  await expect(repositoryContextIcon).toHaveCSS("opacity", "0.6");
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
     "Show project context",
@@ -613,11 +751,18 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     ]);
   expect(attachedContentSurfaceBounds).not.toBeNull();
   await expect(appContentSurface).toHaveCSS("box-shadow", "none");
-  expect(attachedContentSurfaceBounds?.x).toBe(projectContentPodBounds?.x);
-  expect(attachedContentSurfaceBounds?.y).toBe(projectContentPodBounds?.y);
-  expect(attachedContentSurfaceBounds?.height).toBe(
-    projectContentPodBounds?.height,
-  );
+  // The detached pod fills the surface minus its hairline top/left inset and
+  // the 8px bottom gutter (ml-px mt-px mb-2 on the pod wrapper).
+  expect(
+    (projectContentPodBounds?.x ?? 0) - (attachedContentSurfaceBounds?.x ?? 0),
+  ).toBe(1);
+  expect(
+    (projectContentPodBounds?.y ?? 0) - (attachedContentSurfaceBounds?.y ?? 0),
+  ).toBe(1);
+  expect(
+    (attachedContentSurfaceBounds?.height ?? 0) -
+      (projectContentPodBounds?.height ?? 0),
+  ).toBe(9);
   const viewportSize = page.viewportSize();
   expect(collapsedMainPaneBounds).not.toBeNull();
   expect(viewportSize).not.toBeNull();
@@ -629,15 +774,14 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     ),
   ).toBeLessThanOrEqual(8);
   await repositoryPanelTab.click();
+  await expect(contextRail).toHaveCSS("width", "288px");
+  await expect(repositoryContextIcon).toHaveCSS("opacity", "1");
   await expect(repositoryActionsPanel).toBeVisible();
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
     "Hide project context",
   );
-  await expect(page.getByTestId("project-detail-copy-link")).toBeVisible();
-  await expect(
-    repositoryActionsPanel.getByTestId("project-detail-copy-link"),
-  ).toHaveCount(0);
+  await expect(page.getByTestId("project-detail-copy-link")).toHaveCount(0);
   await expect(
     workspacePanel.getByTestId("project-workspace-tab-menu"),
   ).toHaveCount(0);
@@ -670,10 +814,12 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     .getByRole("button", { name: "Clone", exact: true })
     .click();
   const localSourceTrigger = repositoryActionsPanel.getByRole("button", {
-    name: "Local",
-    exact: true,
+    name: /^Local /,
   });
   await expect(localSourceTrigger).toBeVisible();
+  await expect(
+    repositoryActionsPanel.getByTestId("project-repository-local-path"),
+  ).toHaveText("…/buzz/REPOS/buzz");
   await expect(
     repositoryActionsPanel.getByRole("button", {
       name: "Open",
@@ -699,6 +845,13 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(
     workspacePanel.getByTestId("project-repository-entry-icon").first(),
   ).toHaveCSS("border-radius", "8px");
+  const repositoryEntryCell = workspacePanel
+    .getByTestId("project-repository-entry-row")
+    .first()
+    .locator("td")
+    .first();
+  await expect(repositoryEntryCell).toHaveCSS("border-radius", "0px");
+  await expect(repositoryEntryCell).toHaveCSS("border-bottom-width", "0px");
   await chatPanelTab.click();
   await expect(agentContext).toContainText("Files");
   await expect(
@@ -706,13 +859,13 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ).toBeVisible();
   await repositoryPanelTab.click();
   await expect(repositoryActionsPanel).toBeVisible();
-  await expectFullWidthSection();
+  await expectInsetSection();
   await page.getByRole("tab", { name: "Commits" }).click();
   await expect(repositoryActionsPanel).toBeVisible();
   await expect(
     workspacePanel.getByRole("heading", { name: "Commits", exact: true }),
   ).toBeVisible();
-  await expectFullWidthSection();
+  await expectInsetSection();
   const commitRow = page.getByTestId("project-activity-feed-item").first();
   const commitDate = commitRow.getByTestId("project-commit-row-date");
   const commitHash = commitRow.getByTitle(/^View commit /);
@@ -723,7 +876,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   expect(commitHashBounds).not.toBeNull();
   expect(commitDateBounds?.x).toBeGreaterThan(commitHashBounds?.x ?? 0);
   await contributorsTab.click();
-  await expectFullWidthSection();
+  await expectInsetSection();
   const contributorRow = page.getByTestId("project-contributor-row").first();
   await expect(
     contributorRow.getByTestId("project-contributor-commit-count"),
@@ -769,12 +922,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(
     repositoryActionsPanel.getByText("Working copy", { exact: true }),
   ).toHaveCount(0);
-  await expect(
-    repositoryActionsPanel.getByRole("heading", {
-      name: "Actions",
-      exact: true,
-    }),
-  ).toHaveCount(0);
+  await expectProjectContextGroups(repositoryActionsPanel, {
+    hasActions: false,
+  });
   for (const action of ["Clone", "Fetch", "Terminal"]) {
     await expect(
       repositoryActionsPanel.getByRole("button", {
@@ -783,35 +933,34 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
       }),
     ).toHaveCount(0);
   }
-  await expectFullWidthSection();
+  await expectInsetSection();
 
   // Issues tab: the create action lives in the section header.
   await page.getByRole("tab", { name: "Tasks", exact: true }).click();
   await expect(repositoryActionsPanel).toBeVisible();
-  await expect(
-    repositoryActionsPanel
-      .getByTestId("project-repository-people")
-      .locator(".."),
-  ).toHaveCSS("border-top-width", "1px");
+  await expectProjectContextGroups(repositoryActionsPanel, {
+    hasActions: true,
+  });
   await expect(
     repositoryActionsPanel.getByRole("heading", {
       name: "Task activity",
       exact: true,
     }),
   ).toHaveCount(0);
-  const taskDetailsHeading = repositoryActionsPanel.getByRole("heading", {
-    name: "Details",
-    exact: true,
-  });
-  await expect(taskDetailsHeading).toBeVisible();
-  const [taskDetailsBounds, taskPeopleBounds] = await Promise.all([
-    taskDetailsHeading.boundingBox(),
-    repositoryActionsPanel
-      .getByTestId("project-repository-people")
-      .boundingBox(),
+  const taskActionsSection = repositoryActionsPanel.getByTestId(
+    "project-context-actions",
+  );
+  const taskDetailsSection = repositoryActionsPanel.getByTestId(
+    "project-context-details",
+  );
+  const [taskActionsBounds, taskDetailsBounds] = await Promise.all([
+    taskActionsSection.boundingBox(),
+    taskDetailsSection.boundingBox(),
   ]);
-  expect(taskDetailsBounds?.y ?? 0).toBeLessThan(taskPeopleBounds?.y ?? 0);
-  await expectFullWidthSection();
+  expect(taskDetailsBounds?.y ?? 0).toBeGreaterThan(
+    (taskActionsBounds?.y ?? 0) + (taskActionsBounds?.height ?? 0),
+  );
+  await expectInsetSection();
   const newIssueButton = workspacePanel.getByRole("button", {
     name: "Create task",
   });
@@ -849,8 +998,14 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (firstIssueBounds?.y ?? 0) -
       ((issueHeaderBounds?.y ?? 0) + (issueHeaderBounds?.height ?? 0)),
   ).toBe(4);
-  expect(firstIssueBounds?.x).toBe(issueHeaderBounds?.x);
-  expect(firstIssueBounds?.width).toBe(issueHeaderBounds?.width);
+  expect(
+    Math.round((firstIssueBounds?.x ?? 0) - (issueHeaderBounds?.x ?? 0)),
+  ).toBe(8);
+  expect(
+    Math.round(
+      (issueHeaderBounds?.width ?? 0) - (firstIssueBounds?.width ?? 0),
+    ),
+  ).toBe(16);
   expect(
     (secondIssueBounds?.y ?? 0) -
       ((firstIssueBounds?.y ?? 0) + (firstIssueBounds?.height ?? 0)),
@@ -886,6 +1041,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     });
   }
   await expect(page.getByTestId("project-issue-copy-link")).toBeVisible();
+  await expectProjectContextGroups(repositoryActionsPanel, {
+    hasActions: true,
+  });
   const issueDetail = page.getByTestId("project-issue-detail");
   await expect(issueDetail).toHaveCSS("max-width", "768px");
   await expect(
@@ -911,7 +1069,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/03-issue-detail.png` });
 
-  // PR list: section header owns creation; detail keeps its entity header.
+  // PR list: the create action lives in both the section header and context.
   await page
     .getByRole("navigation", { name: "Project breadcrumb" })
     .getByRole("button", { name: "Tasks", exact: true })
@@ -921,12 +1079,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(
     repositoryActionsPanel.getByTestId("project-right-panel-scope"),
   ).toHaveCount(0);
-  await expect(
-    repositoryActionsPanel.getByRole("heading", {
-      name: "Review activity",
-      exact: true,
-    }),
-  ).toBeVisible();
+  await expectProjectContextGroups(repositoryActionsPanel, {
+    hasActions: true,
+  });
   await expect(
     workspacePanel.getByRole("heading", {
       name: "Reviews",
@@ -936,7 +1091,15 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(
     workspacePanel.getByRole("button", { name: "Create review" }),
   ).toBeVisible();
-  await expectFullWidthSection();
+  const contextCreateReviewButton = repositoryActionsPanel.getByRole("button", {
+    name: "Create review",
+    exact: true,
+  });
+  await expect(contextCreateReviewButton).toBeVisible();
+  await contextCreateReviewButton.click();
+  await expect(page.getByTestId("create-pull-request-dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expectInsetSection();
   await expect(
     tabMenu.getByRole("button", { name: "Create review" }),
   ).toHaveCount(0);
@@ -952,8 +1115,14 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (firstReviewBounds?.y ?? 0) -
       ((reviewHeaderBounds?.y ?? 0) + (reviewHeaderBounds?.height ?? 0)),
   ).toBe(4);
-  expect(firstReviewBounds?.x).toBe(reviewHeaderBounds?.x);
-  expect(firstReviewBounds?.width).toBe(reviewHeaderBounds?.width);
+  expect(
+    Math.round((firstReviewBounds?.x ?? 0) - (reviewHeaderBounds?.x ?? 0)),
+  ).toBe(8);
+  expect(
+    Math.round(
+      (reviewHeaderBounds?.width ?? 0) - (firstReviewBounds?.width ?? 0),
+    ),
+  ).toBe(16);
   expect(
     (secondReviewBounds?.y ?? 0) -
       ((firstReviewBounds?.y ?? 0) + (firstReviewBounds?.height ?? 0)),
@@ -970,6 +1139,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(
     page.getByTestId("project-pull-request-copy-link"),
   ).toBeVisible();
+  await expectProjectContextGroups(repositoryActionsPanel, {
+    hasActions: true,
+  });
   const pullRequestDetail = page.getByTestId("project-pull-request-detail");
   await expect(pullRequestDetail).toHaveCSS("max-width", "768px");
   await expect(
@@ -1011,26 +1183,67 @@ test("projects v3 work-item list metadata", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
+  await page.getByTestId("projects-section-all").click();
+  await expectSinglePrimaryTextColumn(
+    page.getByTestId("projects-activity-card").first(),
+  );
+
+  await page.getByTestId("projects-section-projects").click();
+  await expect(page.getByTestId("projects-list-header")).toHaveCSS(
+    "border-left-width",
+    "0px",
+  );
+  const projectRow = page.getByTestId(/^project-row-/).first();
+  await expectSinglePrimaryTextColumn(projectRow);
+  const [projectTitleBox, repositoryCountBox] = await Promise.all([
+    projectRow.locator('[data-projects-text-priority="primary"]').boundingBox(),
+    projectRow.getByTestId("projects-row-context").boundingBox(),
+  ]);
+  expect(projectTitleBox).not.toBeNull();
+  expect(repositoryCountBox).not.toBeNull();
+  expect(
+    Math.round(
+      (repositoryCountBox?.x ?? 0) -
+        ((projectTitleBox?.x ?? 0) + (projectTitleBox?.width ?? 0)),
+    ),
+  ).toBe(12);
+
+  await page.getByTestId("projects-section-repositories").click();
+  await expectSinglePrimaryTextColumn(
+    page.getByTestId(/^repository-row-/).first(),
+  );
+
   await page.getByTestId("projects-section-prs").click();
-  const reviewTable = page.getByTestId("projects-list-container");
-  await expect(reviewTable.locator("thead")).toHaveClass(/sr-only/);
+  const reviewList = page.getByTestId("projects-list-container");
+  await expect(reviewList).toBeVisible();
   const pullRequestRow = page.getByTestId(/^projects-pr-row-/).first();
   await expect(pullRequestRow).toBeVisible();
-  await expect(pullRequestRow).toContainText("Review");
-  await expect(pullRequestRow).toContainText("opened this in");
-  await expect(pullRequestRow).toContainText(/from\s*feature\/mock-2-0/);
-  await expect(pullRequestRow).not.toContainText(/#[0-9a-f]{8}/);
+  await expectSinglePrimaryTextColumn(pullRequestRow);
+  await expect(pullRequestRow).toContainText(/relay-tools|buzz|design-system/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/05-pr-list-metadata.png` });
 
   await page.getByTestId("projects-section-issues").click();
-  const taskTable = page.getByTestId("projects-list-container");
-  await expect(taskTable.locator("thead")).toHaveClass(/sr-only/);
+  const taskList = page.getByTestId("projects-list-container");
+  await expect(taskList).toBeVisible();
   const issueRow = page.getByTestId(/^projects-issue-row-/).first();
   await expect(issueRow).toBeVisible();
-  await expect(issueRow).toContainText("Issue");
-  await expect(issueRow).toContainText(/opened this in\s*relay-tools/);
-  await expect(issueRow).not.toContainText(/#[0-9a-f]{8}/);
+  await expectSinglePrimaryTextColumn(issueRow);
+  await expect(issueRow).toContainText(/relay-tools|buzz|design-system/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/06-issue-list-metadata.png` });
+
+  await page.getByTestId("projects-section-channels").click();
+  const channelRow = page.getByTestId("project-channel-row").first();
+  await expect(channelRow).toBeVisible();
+  await expectSinglePrimaryTextColumn(channelRow);
+  await expect(channelRow).toContainText("#general");
+  await expect(
+    page.getByTestId("project-channel-project").first(),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("project-channel-repository").first(),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/07-channels-list.png` });
 });

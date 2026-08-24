@@ -449,9 +449,14 @@ test.describe("inbox refactor screenshots", () => {
           if (!header || !body) {
             throw new Error("Inbox message spacing geometry is missing");
           }
+          // Round to 0.1px: under Cmd +/- zoom the rem gap is fractional and
+          // layout snaps it to 1/64px.
           return (
-            body.getBoundingClientRect().top -
-            header.getBoundingClientRect().bottom
+            Math.round(
+              (body.getBoundingClientRect().top -
+                header.getBoundingClientRect().bottom) *
+                10,
+            ) / 10
           );
         }),
         selectedAuthor.evaluate((element) => {
@@ -558,21 +563,22 @@ test.describe("inbox refactor screenshots", () => {
       );
     });
 
+    // Cmd +/- is a true zoom: the root rem scales, so conversation text AND
+    // the rem-based row padding / body gap grow together (4px → 4.4px,
+    // 2px → 2.2px). Text-only zoom with frozen spacing is the regression
+    // this guards against.
     await expect
       .poll(async () => [
-        await page.evaluate(() =>
-          window
-            .getComputedStyle(document.documentElement)
-            .getPropertyValue("--buzz-type-rem")
-            .trim(),
+        await page.evaluate(
+          () => window.getComputedStyle(document.documentElement).fontSize,
         ),
         ...(await readConversationMetrics()),
       ])
       .toEqual([
         "17.6px",
         { fontSize: "15.4px", lineHeight: "22px" },
-        { paddingBottom: "4px", paddingTop: "4px" },
-        2,
+        { paddingBottom: "4.4px", paddingTop: "4.4px" },
+        2.2,
         { fontSize: "15.4px", lineHeight: "17.6px" },
         { fontSize: "15.4px", lineHeight: "22px" },
         { fontSize: "13.2px", lineHeight: "17.6px" },

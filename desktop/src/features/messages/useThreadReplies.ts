@@ -6,74 +6,14 @@ import {
 } from "@tanstack/react-query";
 
 import {
-  collectMessageIdsForAuxBackfill,
-  fetchStructuralAuxForMessages,
-} from "@/features/messages/lib/auxBackfill";
-import {
   threadRepliesKey,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
-import { relayClient } from "@/shared/api/relayClient";
-import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import { getThreadReplies } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, ThreadCursor } from "@/shared/api/types";
 
 const THREAD_PAGE_LIMIT = 200;
 const MAX_THREAD_PAGES = 500;
-
-/**
- * Append the structural aux closure (edits/deletions) for the fetched replies.
- * The server thread-subtree query resolves deletions itself but omits
- * kind:40003 edits, so a bare refetch would render every edited reply with its
- * original text. Best-effort: an aux failure logs and returns the replies
- * unadorned rather than failing the whole thread load.
- */
-async function fetchThreadAuxBestEffort(
-  label: string,
-  channelId: string,
-  fetchAux: () => Promise<RelayEvent[]>,
-): Promise<RelayEvent[]> {
-  try {
-    return await fetchAux();
-  } catch (error) {
-    console.error(
-      `Failed to backfill thread reply ${label} for channel`,
-      channelId,
-      error,
-    );
-    return [];
-  }
-}
-
-export function collectThreadAuxMessageIds(
-  threadRootId: string,
-  replies: RelayEvent[],
-): string[] {
-  return [
-    ...new Set([threadRootId, ...collectMessageIdsForAuxBackfill(replies)]),
-  ];
-}
-
-async function withThreadAux(
-  channelId: string,
-  threadRootId: string,
-  replies: RelayEvent[],
-): Promise<RelayEvent[]> {
-  const messageIds = collectThreadAuxMessageIds(threadRootId, replies);
-  const [structuralAux, reactions] = await Promise.all([
-    fetchThreadAuxBestEffort("structural aux", channelId, () =>
-      fetchStructuralAuxForMessages(channelId, messageIds),
-    ),
-    fetchThreadAuxBestEffort("reactions", channelId, () =>
-      relayClient.fetchAuxEventsByReference(
-        channelId,
-        messageIds,
-        buildChannelReactionAuxFilter,
-      ),
-    ),
-  ]);
-  return sortMessages([...replies, ...structuralAux, ...reactions]);
-}
 
 async function loadThreadReplies(
   queryClient: QueryClient,
@@ -92,12 +32,11 @@ async function loadThreadReplies(
     });
     replies.push(...response.events);
     if (!response.nextCursor) {
-      const fetched = await withThreadAux(channelId, rootId, replies);
       const current = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const receivedInFlight = current.filter(
         (event) => !idsAtStart.has(event.id),
       );
-      return sortMessages([...fetched, ...receivedInFlight]);
+      return sortMessages([...replies, ...receivedInFlight]);
     }
     cursor = response.nextCursor;
   }
@@ -129,6 +68,39 @@ export function useThreadReplies(
 }
 
 /**
+ * Aggregate a set of per-root thread-reply query results into one view for a
+ * multi-root consumer. Pure over the results array so the load-bearing
+ * error-surfacing contract is unit-testable without a live QueryClient.
+ *
+ * `isError`/`error` expose aggregate terminal failure so a consumer never
+ * silently drops a failed reply subtree — the same false-empty class the
+ * single-root panel guards against. `error` carries the first failed subtree's
+ * error; `refetch` re-runs only the failed queries so a partial success is not
+ * needlessly re-fetched.
+ */
+export function combineThreadRepliesResults(
+  results: readonly {
+    data?: RelayEvent[];
+    isPending: boolean;
+    isError: boolean;
+    error: unknown;
+    refetch: () => unknown;
+  }[],
+) {
+  return {
+    events: sortMessages(results.flatMap((result) => result.data ?? [])),
+    isPending: results.some((result) => result.isPending),
+    isError: results.some((result) => result.isError),
+    error: results.find((result) => result.isError)?.error ?? null,
+    refetch: () => {
+      for (const result of results) {
+        if (result.isError) void result.refetch();
+      }
+    },
+  };
+}
+
+/**
  * Load every summarized reply subtree for a channel-style Huddle transcript.
  * Ordinary channels keep replies in their thread panels; Huddles flatten those
  * replies into the chat timeline so companion and in-app presentations show the
@@ -148,9 +120,6 @@ export function useThreadRepliesForRoots(
       staleTime: 0,
       gcTime: 60 * 60 * 1_000,
     })),
-    combine: (results) => ({
-      events: sortMessages(results.flatMap((result) => result.data ?? [])),
-      isPending: results.some((result) => result.isPending),
-    }),
+    combine: combineThreadRepliesResults,
   });
 }

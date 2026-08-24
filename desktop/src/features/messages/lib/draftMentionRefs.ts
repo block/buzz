@@ -1,5 +1,6 @@
 import { hasMention } from "@/features/messages/lib/hasMention";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { isThreadReply } from "@/features/messages/lib/threading";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
@@ -95,6 +96,7 @@ export function buildMessageComposerEditTarget(
     author: message.author,
     body: message.body,
     id: message.id,
+    isThreadReply: isThreadReply(message.tags ?? []),
     imetaMedia: imetaMediaFromTags(message.tags),
     ...mentionState,
   };

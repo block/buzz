@@ -115,11 +115,24 @@ export function SelectionFormattingTray({
 }: SelectionFormattingTrayProps) {
   const [position, setPosition] = React.useState<TrayPosition | null>(null);
   const rafRef = React.useRef<number | null>(null);
+  const suppressRightClickUpdatesRef = React.useRef(false);
   const trayRef = React.useRef<HTMLDivElement | null>(null);
   const [trayWidth, setTrayWidth] = React.useState(0);
 
+  const cancelScheduledUpdate = React.useCallback(() => {
+    if (rafRef.current === null) return;
+    window.cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+  }, []);
+
   const updatePosition = React.useCallback(() => {
-    if (!editor || disabled || !editor.isEditable || !editor.isFocused) {
+    if (
+      suppressRightClickUpdatesRef.current ||
+      !editor ||
+      disabled ||
+      !editor.isEditable ||
+      !editor.isFocused
+    ) {
       setPosition(null);
       return;
     }
@@ -127,44 +140,66 @@ export function SelectionFormattingTray({
   }, [disabled, editor, trayWidth]);
 
   const scheduleUpdate = React.useCallback(() => {
-    if (rafRef.current !== null) {
-      window.cancelAnimationFrame(rafRef.current);
+    if (suppressRightClickUpdatesRef.current) {
+      cancelScheduledUpdate();
+      setPosition(null);
+      return;
     }
+    cancelScheduledUpdate();
     rafRef.current = window.requestAnimationFrame(() => {
       rafRef.current = null;
       updatePosition();
     });
-  }, [updatePosition]);
+  }, [cancelScheduledUpdate, updatePosition]);
 
   React.useEffect(() => {
+    suppressRightClickUpdatesRef.current = false;
+
     if (!editor) {
+      cancelScheduledUpdate();
       setPosition(null);
       return;
     }
 
+    const editorDom = editor.view.dom;
     const hide = () => setPosition(null);
+    const handleContextMenu = () => {
+      suppressRightClickUpdatesRef.current = true;
+      cancelScheduledUpdate();
+      setPosition(null);
+    };
+    const clearSuppression = () => {
+      suppressRightClickUpdatesRef.current = false;
+      scheduleUpdate();
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button === 0) clearSuppression();
+    };
 
     scheduleUpdate();
     editor.on("selectionUpdate", scheduleUpdate);
     editor.on("transaction", scheduleUpdate);
     editor.on("focus", scheduleUpdate);
     editor.on("blur", hide);
+    editorDom.addEventListener("contextmenu", handleContextMenu);
+    editorDom.addEventListener("pointerdown", handlePointerDown);
+    editorDom.addEventListener("keydown", clearSuppression);
     window.addEventListener("resize", scheduleUpdate);
     window.addEventListener("scroll", scheduleUpdate, true);
 
     return () => {
-      if (rafRef.current !== null) {
-        window.cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
+      cancelScheduledUpdate();
       editor.off("selectionUpdate", scheduleUpdate);
       editor.off("transaction", scheduleUpdate);
       editor.off("focus", scheduleUpdate);
       editor.off("blur", hide);
+      editorDom.removeEventListener("contextmenu", handleContextMenu);
+      editorDom.removeEventListener("pointerdown", handlePointerDown);
+      editorDom.removeEventListener("keydown", clearSuppression);
       window.removeEventListener("resize", scheduleUpdate);
       window.removeEventListener("scroll", scheduleUpdate, true);
     };
-  }, [editor, scheduleUpdate]);
+  }, [cancelScheduledUpdate, editor, scheduleUpdate]);
 
   React.useLayoutEffect(() => {
     if (!position || !trayRef.current) return;

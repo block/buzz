@@ -1,11 +1,20 @@
 @layer base {
   :root {
     /*
-     * A virtual typography rem. Font preferences and Cmd +/- change this
-     * token while the browser root remains 16px, so text scales without also
-     * resizing rem-based widths, gaps, radii, and controls.
+     * Two independent dials compose here:
+     *
+     * - Cmd +/- zoom scales the real root font-size (see
+     *   useWebviewZoomShortcuts), so every rem in the app — text, gaps,
+     *   widths, radii — grows and shrinks together. True zoom.
+     * - The Font size preference sets `data-font-size` on the root; it nudges
+     *   only the type scale below, so text changes without moving layout.
+     *
+     * Every text token derives from this virtual typography rem, which is
+     * rem-relative so it rides on top of zoom automatically. At the default
+     * preference and zoom it equals 16px, making `text-sm` 14px.
      */
-    --buzz-type-rem: 1rem;
+    --buzz-type-scale: 1;
+    --buzz-type-rem: calc(1rem * var(--buzz-type-scale));
     --text-xs: calc(var(--buzz-type-rem) * 0.75);
     --text-sm: calc(var(--buzz-type-rem) * 0.875);
     --text-base: var(--buzz-type-rem);
@@ -31,6 +40,15 @@
     --conversation-list-item-gap: 0.375rem;
     --conversation-timestamp-font-size: calc(var(--buzz-type-rem) * 0.75);
     --conversation-timestamp-line-height: var(--buzz-type-rem);
+  }
+
+  /* Conversation text contract: 13 / 14 / 15px before keyboard zoom. */
+  :root[data-font-size="smaller"] {
+    --buzz-type-scale: calc(13 / 14);
+  }
+
+  :root[data-font-size="larger"] {
+    --buzz-type-scale: calc(15 / 14);
   }
 
   :root[data-conversation-density="compact"] {

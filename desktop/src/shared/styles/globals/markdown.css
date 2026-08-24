@@ -87,6 +87,31 @@
   color: hsl(var(--primary));
 }
 
+.message-markdown .mention-chip.wrapping-inline-chip {
+  display: inline;
+  line-height: calc(
+    1em +
+    var(--inline-chip-padding-block-start) +
+    var(--inline-chip-padding-block-end) +
+    0.25rem
+  );
+  overflow-wrap: anywhere;
+  text-align: left;
+  white-space: normal;
+}
+
+.message-markdown .mention-chip.buzz-link-unavailable,
+.message-markdown .mention-chip.buzz-link-unavailable:hover {
+  background: hsl(var(--secondary));
+  color: hsl(var(--secondary-foreground) / 0.7);
+}
+
+.message-markdown .mention-chip.buzz-link-deleted,
+.message-markdown .mention-chip.buzz-link-deleted:hover {
+  background: hsl(var(--destructive) / 0.12);
+  color: hsl(var(--destructive));
+}
+
 .message-markdown .mention-chip.inbox-channel-chip {
   background: hsl(var(--muted));
   color: hsl(var(--muted-foreground) / 0.82);
@@ -137,6 +162,7 @@
 .message-markdown.inbox-preview-markdown .inline-code-chip,
 .message-markdown.inbox-preview-markdown :not(pre) > code {
   display: inline;
+  line-height: 1;
   overflow: visible;
   overflow-wrap: normal;
   text-overflow: clip;
@@ -164,6 +190,30 @@
   background: currentColor;
   pointer-events: none;
   transform: translateY(-50%);
+}
+
+.message-markdown .wrapping-inline-chip.inline-chip-with-icon {
+  padding-left: var(--inline-chip-padding-inline);
+}
+
+.message-markdown .wrapping-inline-chip.inline-chip-with-icon::before {
+  display: none;
+}
+
+.message-markdown .inline-chip-leading-fragment.inline-chip-with-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding-left: calc(
+    var(--inline-chip-icon-size) +
+    var(--inline-chip-icon-gap)
+  );
+  white-space: nowrap;
+}
+
+.message-markdown .inline-chip-leading-fragment.inline-chip-with-icon::before {
+  display: block;
+  left: 0;
 }
 
 .message-markdown .inline-chip-icon-message::before {
@@ -250,6 +300,21 @@
 .mention-chip-hover:hover {
   background: hsl(var(--primary) / 0.25);
   color: hsl(var(--primary) / 0.9);
+}
+
+/* @mentions use an opaque highlighter-yellow treatment so they scan
+   differently from channel links while retaining AA contrast on every theme.
+   Shared by human and agent chips in both timeline and composer. */
+.message-markdown .mention-chip.inline-chip-icon-human,
+.message-markdown .mention-chip.inline-chip-icon-agent {
+  background: hsl(var(--mention-highlight));
+  color: hsl(var(--buzz-content-dark));
+}
+
+.message-markdown .mention-chip-hover.inline-chip-icon-human:hover,
+.message-markdown .mention-chip-hover.inline-chip-icon-agent:hover {
+  background: hsl(var(--mention-highlight-hover));
+  color: hsl(var(--buzz-content-dark));
 }
 
 .message-markdown .mention-prefix-hidden {

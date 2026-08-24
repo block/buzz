@@ -25,11 +25,9 @@ import { isProjectOwnedByCurrentUser } from "@/features/projects/lib/projectsVie
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
 import {
   addProjectToSidebar,
-  PROJECT_SIDEBAR_MEMBERSHIP_EVENT,
-  type ProjectSidebarMembershipChange,
-  readProjectSidebarMembership,
   removeProjectFromSidebar,
 } from "@/features/projects/lib/projectSidebarMembership";
+import { useProjectSidebarMembership } from "@/features/projects/lib/useProjectSidebarMembership";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { projectMatchesRouteId } from "@/features/projects/projectRoutes";
 import { ProjectBrowserDialog } from "@/features/projects/ui/ProjectBrowserDialog";
@@ -152,42 +150,13 @@ function SidebarProjectsSectionContent() {
     React.useState<SidebarProjectExpansionState>(() =>
       readSidebarProjectExpansion(relayOrigin, currentPubkey),
     );
-  const [addedProjectAddresses, setAddedProjectAddresses] = React.useState<
-    string[]
-  >(() => readProjectSidebarMembership(relayOrigin, currentPubkey));
+  const addedProjectAddresses = useProjectSidebarMembership(
+    relayOrigin,
+    currentPubkey,
+  );
   const createProjectMutation = useCreateProjectMutation();
   const deleteProjectMutation = useDeleteProjectMutation();
   const isPending = projectsQuery.isPending || identityQuery.isPending;
-  React.useEffect(() => {
-    setAddedProjectAddresses(
-      readProjectSidebarMembership(relayOrigin, currentPubkey),
-    );
-    // Consume the membership carried on the event: when persistence is
-    // unavailable the change lives only in the event detail, and re-reading
-    // localStorage would silently revert the user's add/remove.
-    const onChange = (event: Event) => {
-      const detail = (event as CustomEvent<ProjectSidebarMembershipChange>)
-        .detail;
-      if (
-        detail &&
-        detail.relayOrigin === relayOrigin &&
-        currentPubkey &&
-        detail.pubkey.toLowerCase() === currentPubkey.toLowerCase()
-      ) {
-        setAddedProjectAddresses(detail.addresses);
-        return;
-      }
-      setAddedProjectAddresses(
-        readProjectSidebarMembership(relayOrigin, currentPubkey),
-      );
-    };
-    globalThis.addEventListener(PROJECT_SIDEBAR_MEMBERSHIP_EVENT, onChange);
-    return () =>
-      globalThis.removeEventListener(
-        PROJECT_SIDEBAR_MEMBERSHIP_EVENT,
-        onChange,
-      );
-  }, [currentPubkey, relayOrigin]);
   React.useEffect(() => {
     setProjectExpansion(
       readSidebarProjectExpansion(relayOrigin, currentPubkey),
@@ -357,14 +326,7 @@ function SidebarProjectsSectionContent() {
                       isActive={isActive}
                       isExpanded={isExpanded}
                       onDelete={() => setProjectToDelete(project)}
-                      onOpen={() => {
-                        if (isActive) {
-                          setProjectExpanded(project, !isExpanded);
-                          return;
-                        }
-                        setProjectExpanded(project, true);
-                        void goProject(project.id);
-                      }}
+                      onOpen={() => setProjectExpanded(project, !isExpanded)}
                       onRemove={() => handleRemove(project)}
                       project={project}
                     />
@@ -631,8 +593,10 @@ function SidebarProjectRow({
             tooltip={project.name}
             type="button"
           >
-            <ProjectIcon className="h-4 w-4" />
-            <SidebarMenuLabel>{project.name}</SidebarMenuLabel>
+            <ProjectIcon className={cn("h-4 w-4", !isActive && "opacity-80")} />
+            <SidebarMenuLabel className={cn(!isActive && "opacity-80")}>
+              {project.name}
+            </SidebarMenuLabel>
           </SidebarMenuButton>
           {canDelete ? (
             <SidebarMenuAction

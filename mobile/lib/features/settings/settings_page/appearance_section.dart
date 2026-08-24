@@ -25,6 +25,7 @@ class _AppearanceSection extends ConsumerWidget {
 
     return AppListCard(
       label: 'Style · This community',
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.sunMoon,

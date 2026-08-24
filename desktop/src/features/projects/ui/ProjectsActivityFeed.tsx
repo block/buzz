@@ -1,3 +1,7 @@
+import * as React from "react";
+
+import { useNow } from "@/shared/lib/useNow";
+
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -12,6 +16,21 @@ import type {
   ProjectRepoSnapshot,
   Repository,
 } from "@/features/projects/hooks";
+import type { ProjectsOverviewAgentContextItem } from "@/features/projects/lib/projectDetailAgentContext";
+import {
+  commitShareLink,
+  issueShareLink,
+  projectShareLink,
+  pullRequestShareLink,
+} from "@/features/projects/lib/projectShareLinks";
+import {
+  selectionItemFromCommit,
+  selectionItemFromProject,
+  selectionItemFromReview,
+  selectionItemFromTask,
+  type ProjectSelectionItem,
+} from "@/features/projects/lib/projectSelection";
+import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
 import {
   formatExactTimestamp,
   markdownToPlainText,
@@ -30,6 +49,7 @@ import {
   PROJECT_EVENT_VISUALS,
   type ProjectEventKind,
 } from "./ProjectEventTypeIcon";
+import { ProjectEntitySelectControl } from "./ProjectEntityListRow";
 
 type ActivityKind = ProjectEventKind;
 
@@ -62,6 +82,12 @@ type ProjectActivityItem = {
   target: ActivityTarget;
 };
 
+type ProjectActivityGroup = {
+  key: string;
+  label: string;
+  items: ProjectActivityItem[];
+};
+
 type ProjectsActivityFeedProps = {
   compact?: boolean;
   isLoading: boolean;
@@ -85,9 +111,58 @@ type ProjectsActivityFeedProps = {
 };
 
 const ACTIVITY_LIMIT = 30;
+const WEEK_SECONDS = 7 * 24 * 60 * 60;
 
 function contentPreview(content: string) {
   return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
+function activitySelectionItem(
+  item: ProjectActivityItem,
+): ProjectSelectionItem | null {
+  const project = item.target.project;
+  const repository =
+    item.target.type === "issue" || item.target.type === "pull-request"
+      ? item.target.repository
+      : project.repositories[0];
+  const channelId = repository?.channelId ?? project.projectChannelId;
+  if (item.target.type === "commit") {
+    return selectionItemFromCommit({
+      author: item.actorPubkey,
+      channelId,
+      commitHash: item.target.commitHash,
+      projectId: project.id,
+      shareLink: repository
+        ? commitShareLink(repository, item.target.commitHash)
+        : null,
+      title: item.title,
+    });
+  }
+  if (item.target.type === "issue") {
+    return selectionItemFromTask({
+      author: item.target.issue.author,
+      channelId,
+      id: item.target.issue.id,
+      shareLink: issueShareLink(item.target.issue),
+      title: item.target.issue.title,
+    });
+  }
+  if (item.target.type === "pull-request") {
+    return selectionItemFromReview({
+      author: item.target.pullRequest.author,
+      channelId,
+      id: item.target.pullRequest.id,
+      shareLink: pullRequestShareLink(item.target.pullRequest),
+      title: item.target.pullRequest.title,
+    });
+  }
+  return selectionItemFromProject({
+    channelId: project.projectChannelId,
+    id: project.id,
+    owner: project.owner,
+    shareLink: projectShareLink(project),
+    title: project.name,
+  });
 }
 
 function buildActivityItems({
@@ -110,7 +185,7 @@ function buildActivityItems({
       actorName: null,
       action: "created the repository",
       title: project.name,
-      body: contentPreview(project.description),
+      body: project.description,
       detail: null,
       target: { type: "project", project },
     });
@@ -157,7 +232,7 @@ function buildActivityItems({
       actorName: null,
       action: "opened a review in",
       title: pullRequest.title,
-      body: contentPreview(pullRequest.content),
+      body: pullRequest.content,
       detail: pullRequest.status,
       target,
     });
@@ -170,7 +245,7 @@ function buildActivityItems({
         actorName: null,
         action: "updated a review in",
         title: pullRequest.title,
-        body: contentPreview(update.content),
+        body: update.content,
         detail: update.commit?.slice(0, 7) ?? null,
         target,
       });
@@ -204,7 +279,7 @@ function buildActivityItems({
                 ? "requested review in"
                 : "commented on a review in",
         title: pullRequest.title,
-        body: contentPreview(comment.content),
+        body: comment.content,
         detail:
           kind === "approval"
             ? "Approved"
@@ -226,7 +301,7 @@ function buildActivityItems({
       actorName: null,
       action: "created a task in",
       title: issue.title,
-      body: contentPreview(issue.content),
+      body: issue.content,
       detail: issue.status,
       target,
     });
@@ -239,16 +314,84 @@ function buildActivityItems({
         actorName: null,
         action: "commented on a task in",
         title: issue.title,
-        body: contentPreview(comment.content),
+        body: comment.content,
         detail: null,
         target,
       });
     }
   }
 
-  return items
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, ACTIVITY_LIMIT);
+  return (
+    items
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .slice(0, ACTIVITY_LIMIT)
+      // Bodies are carried raw until here so the markdown flattening runs for
+      // the rendered window only — every issue/PR/comment in the community
+      // used to be flattened just to be sorted and discarded.
+      .map((item) =>
+        item.body === null
+          ? item
+          : { ...item, body: contentPreview(item.body) },
+      )
+  );
+}
+
+export function buildProjectsActivityAgentContextItems(
+  input: Pick<
+    ProjectsActivityFeedProps,
+    "issues" | "projects" | "pullRequests" | "snapshots"
+  >,
+): ProjectsOverviewAgentContextItem[] {
+  return buildActivityItems(input).map((item) => {
+    const project = item.target.project;
+    const repository =
+      item.target.type === "issue" || item.target.type === "pull-request"
+        ? item.target.repository.name
+        : null;
+    return {
+      detail: [
+        item.action,
+        repository ? `${project.name} / ${repository}` : project.name,
+        item.detail,
+        item.body,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      kind: item.kind,
+      reference: item.id,
+      title: item.title,
+    };
+  });
+}
+
+function startOfWeek(timestamp: number) {
+  const date = new Date(timestamp * 1_000);
+  date.setHours(0, 0, 0, 0);
+  const daysSinceMonday = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - daysSinceMonday);
+  return Math.floor(date.getTime() / 1_000);
+}
+
+function groupActivityItems(items: ProjectActivityItem[], nowMs: number) {
+  const thisWeek = startOfWeek(Math.floor(nowMs / 1_000));
+  const lastWeek = thisWeek - WEEK_SECONDS;
+  const groups: ProjectActivityGroup[] = [
+    { key: "this-week", label: "This week", items: [] },
+    { key: "last-week", label: "Last week", items: [] },
+    { key: "earlier", label: "Earlier", items: [] },
+  ];
+
+  for (const item of items) {
+    if (item.createdAt >= thisWeek) {
+      groups[0].items.push(item);
+    } else if (item.createdAt >= lastWeek) {
+      groups[1].items.push(item);
+    } else {
+      groups[2].items.push(item);
+    }
+  }
+
+  return groups.filter((group) => group.items.length > 0);
 }
 
 function ActivityCard({
@@ -259,6 +402,7 @@ function ActivityCard({
   onOpen,
   onOpenProject,
   profiles,
+  rangeItems,
 }: {
   compact: boolean;
   isFirst: boolean;
@@ -267,6 +411,7 @@ function ActivityCard({
   onOpen: () => void;
   onOpenProject: () => void;
   profiles?: UserProfileLookup;
+  rangeItems: ProjectSelectionItem[];
 }) {
   const visual = PROJECT_EVENT_VISUALS[item.kind];
   const TypeIcon = visual.icon;
@@ -276,13 +421,21 @@ function ActivityCard({
   const actorLabel = item.actorPubkey
     ? resolveUserLabel({ profiles, pubkey: item.actorPubkey })
     : item.actorName || "Someone";
+  const selection = useProjectSelection();
+  const selectionItem = activitySelectionItem(item);
+  const selected = Boolean(
+    selectionItem && selection?.isSelected(selectionItem.id),
+  );
+  const showSelectControl = Boolean(selectionItem && selection && selected);
 
   return (
     <div
       className={cn(
-        "relative block w-full rounded-xl bg-transparent text-left transition-colors hover:bg-muted/20",
+        "group relative block w-full rounded-xl bg-transparent text-left transition-colors hover:bg-muted/20",
         compact ? "py-3 pr-3" : "py-4 pr-4",
+        selected && "bg-muted/40",
       )}
+      data-selected={selected ? "true" : undefined}
       data-testid="projects-activity-card"
     >
       <button
@@ -292,6 +445,27 @@ function ActivityCard({
         type="button"
       />
       <div className="pointer-events-none relative flex min-w-0 items-start gap-3">
+        {selectionItem && selection ? (
+          <span
+            className={cn(
+              "mt-0.5 flex w-4 shrink-0 justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+              showSelectControl && "opacity-100",
+            )}
+          >
+            <ProjectEntitySelectControl
+              checked={selected}
+              label={`Select ${selectionItem.title}`}
+              onToggle={({ shiftKey }) =>
+                selection.toggle(selectionItem, {
+                  rangeItems,
+                  shiftKey,
+                })
+              }
+            />
+          </span>
+        ) : (
+          <span className="w-4 shrink-0" />
+        )}
         {/* Avatar gutter: a vertical spine runs through the avatar centers
             to connect consecutive cards. Segments extend into the card's
             vertical padding so they meet the neighbouring card's segments;
@@ -347,7 +521,10 @@ function ActivityCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-start gap-2">
-            <div className="min-w-0 flex-1 text-xs text-muted-foreground/70">
+            <div
+              className="min-w-0 flex-1 text-xs text-muted-foreground/70"
+              data-projects-text-priority="secondary"
+            >
               <span>
                 {item.actorPubkey ? (
                   <UserProfilePopover
@@ -355,7 +532,7 @@ function ActivityCard({
                     triggerElement="span"
                   >
                     <button
-                      className="pointer-events-auto relative z-10 rounded-sm font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                      className="pointer-events-auto relative z-10 rounded-sm font-semibold text-muted-foreground/75 hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                       type="button"
                     >
                       {actorLabel}
@@ -366,7 +543,7 @@ function ActivityCard({
                 )}{" "}
                 {item.action}{" "}
                 <button
-                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
+                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom font-semibold text-muted-foreground/75 hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
                   onClick={onOpenProject}
                   type="button"
                 >
@@ -406,16 +583,20 @@ function ActivityCard({
                 aria-hidden="true"
                 className={cn("mt-0.5 h-4 w-4 shrink-0", visual.iconClassName)}
               />
-              <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-foreground">
+              <p
+                className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-foreground"
+                data-projects-text-priority="primary"
+              >
                 {item.title}
               </p>
             </div>
             {item.body ? (
               <p
                 className={cn(
-                  "mt-0.5 text-sm leading-6 text-muted-foreground",
+                  "mt-0.5 text-sm leading-6 text-muted-foreground/65",
                   compact ? "line-clamp-1" : "line-clamp-2",
                 )}
+                data-projects-text-priority="secondary"
               >
                 {item.body}
               </p>
@@ -429,7 +610,27 @@ function ActivityCard({
 
 /** Mixed GitHub-style workspace activity shown beneath the overview callouts. */
 export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
-  const items = buildActivityItems(props);
+  const { issues, projects, pullRequests, snapshots } = props;
+  // Memoized: this feed re-renders with every parent state change (profiles
+  // landing, selection, hover), and an unmemoized rebuild re-flattened and
+  // re-sorted the whole community's activity each time.
+  const items = React.useMemo(
+    () => buildActivityItems({ issues, projects, pullRequests, snapshots }),
+    [issues, projects, pullRequests, snapshots],
+  );
+  // Week buckets are clock-derived; ticked so the memo cannot freeze "This
+  // week" across a week boundary. Coarse cadence — the boundary moves weekly.
+  const now = useNow(600_000);
+  const groups = React.useMemo(
+    () => groupActivityItems(items, now),
+    [items, now],
+  );
+  const rangeItems = groups.flatMap((group) =>
+    group.items.flatMap((item) => {
+      const selectionItem = activitySelectionItem(item);
+      return selectionItem ? [selectionItem] : [];
+    }),
+  );
 
   if (props.isLoading && items.length === 0) {
     return <BuzzLoadingState label="Loading project activity" />;
@@ -450,45 +651,60 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
 
   return (
     <div
-      className="relative bg-transparent"
+      className="relative space-y-7 bg-transparent"
       data-testid="projects-activity-timeline"
     >
-      {items.map((item, index) => {
-        return (
-          <div className="relative" key={item.id}>
-            <ActivityCard
-              compact={props.compact === true}
-              isFirst={index === 0}
-              isLast={index === items.length - 1}
-              item={item}
-              onOpen={() => {
-                if (item.target.type === "project") {
-                  props.onOpenProject(item.target.project);
-                } else if (item.target.type === "commit") {
-                  props.onOpenCommit(
-                    item.target.project,
-                    item.target.commitHash,
-                  );
-                } else if (item.target.type === "pull-request") {
-                  props.onOpenPullRequest(
-                    item.target.project,
-                    item.target.repository,
-                    item.target.pullRequest,
-                  );
-                } else {
-                  props.onOpenIssue(
-                    item.target.project,
-                    item.target.repository,
-                    item.target.issue,
-                  );
-                }
-              }}
-              onOpenProject={() => props.onOpenProject(item.target.project)}
-              profiles={props.profiles}
-            />
+      {groups.map((group) => (
+        <section data-testid="projects-activity-group" key={group.key}>
+          <div className="mb-1 flex items-center gap-3">
+            <h3 className="shrink-0 text-xs font-medium text-muted-foreground">
+              {group.label}
+            </h3>
+            <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
           </div>
-        );
-      })}
+          <div>
+            {group.items.map((item, index) => {
+              return (
+                <div className="relative" key={item.id}>
+                  <ActivityCard
+                    compact={props.compact === true}
+                    isFirst={index === 0}
+                    isLast={index === group.items.length - 1}
+                    item={item}
+                    onOpen={() => {
+                      if (item.target.type === "project") {
+                        props.onOpenProject(item.target.project);
+                      } else if (item.target.type === "commit") {
+                        props.onOpenCommit(
+                          item.target.project,
+                          item.target.commitHash,
+                        );
+                      } else if (item.target.type === "pull-request") {
+                        props.onOpenPullRequest(
+                          item.target.project,
+                          item.target.repository,
+                          item.target.pullRequest,
+                        );
+                      } else {
+                        props.onOpenIssue(
+                          item.target.project,
+                          item.target.repository,
+                          item.target.issue,
+                        );
+                      }
+                    }}
+                    onOpenProject={() =>
+                      props.onOpenProject(item.target.project)
+                    }
+                    profiles={props.profiles}
+                    rangeItems={rangeItems}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

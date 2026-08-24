@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  databricksRegistryLabelForRecords,
   ManifestSchema,
   resolveModelCapabilities,
 } from "./modelCapabilities.ts";
@@ -23,10 +24,43 @@ const corpus = JSON.parse(readFileSync(fileURLToPath(corpusUrl), "utf8"));
 // (`_group`) are skipped. Mirrors the Rust corpus filter.
 const executable = corpus.filter((entry) => entry.expect != null);
 
-test("corpus has exactly 103 executable vectors", () => {
+test("corpus has exactly 113 executable vectors", () => {
   // Locks the vector count so a silent corpus edit can't quietly drop coverage;
   // must equal the gate in the Rust suite (model_capabilities.rs).
-  assert.equal(executable.length, 103);
+  assert.equal(executable.length, 113);
+});
+
+test("registry label aliases refuse an unprefixed query", () => {
+  const records = [
+    {
+      provider: "databricks_v2",
+      raw_model_id: "databricks-gpt-5",
+      registry_label: "GPT-5",
+    },
+  ];
+  assert.equal(
+    databricksRegistryLabelForRecords("gpt-5", records, ["gpt-"]),
+    null,
+  );
+});
+
+test("registry label aliases refuse ambiguous stripped record keys", () => {
+  const records = [
+    {
+      provider: "databricks_v2",
+      raw_model_id: "databricks-gpt-5-6",
+      registry_label: "Databricks GPT-5.6",
+    },
+    {
+      provider: "databricks_v2",
+      raw_model_id: "partner-gpt-5-6",
+      registry_label: "Partner GPT-5.6",
+    },
+  ];
+  assert.equal(
+    databricksRegistryLabelForRecords("goose-gpt-5-6", records, ["gpt-"]),
+    null,
+  );
 });
 
 test("every executable corpus vector resolves to its expected six-axis profile", () => {

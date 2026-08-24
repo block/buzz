@@ -46,6 +46,13 @@ if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+""")
             "resources), got: " + worktreeLabel,
     )
 }
+val worktreeAppName = worktreeProps.getProperty("appName")?.takeIf { it.isNotBlank() }
+if (worktreeAppName != null && !worktreeAppName.matches(Regex("""[A-Za-z0-9._() \-]+"""))) {
+    throw GradleException(
+        "worktree.properties appName must contain only letters, numbers, spaces, ., _, -, or " +
+            "parentheses, got: " + worktreeAppName,
+    )
+}
 val worktreeIdSuffix =
     worktreeProps.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
 val debugIdSuffix =
@@ -133,10 +140,12 @@ android {
             if (debugIdSuffix != null) {
                 applicationIdSuffix = debugIdSuffix
             }
-            if (debugAppName != null) {
-                resValue("string", "app_name", debugAppName)
-            } else if (worktreeLabel != null) {
-                resValue("string", "app_name", "Buzz ($worktreeLabel)")
+            val resolvedAppName =
+                debugAppName
+                    ?: worktreeAppName
+                    ?: worktreeLabel?.let { "Buzz ($it)" }
+            if (resolvedAppName != null) {
+                resValue("string", "app_name", resolvedAppName)
             }
         }
         release {
