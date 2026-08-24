@@ -21,10 +21,19 @@ class ProfileTextEditSheet extends HookWidget {
     required this.onSave,
   });
 
+  /// The heading displayed in the sheet header.
   final String title;
+
+  /// The value loaded into the text field when the sheet opens.
   final String initialValue;
+
+  /// Placeholder text displayed while the text field is empty.
   final String hintText;
+
+  /// Whether the text field accepts and displays multiple lines.
   final bool multiline;
+
+  /// Persists the submitted value before the sheet closes.
   final Future<void> Function(String value) onSave;
 
   @override
