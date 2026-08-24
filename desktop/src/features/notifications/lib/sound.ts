@@ -1,5 +1,4 @@
 import {
-  KIND_APPROVAL_REQUEST,
   KIND_JOB_ACCEPTED,
   KIND_JOB_ERROR,
   KIND_JOB_PROGRESS,
@@ -115,17 +114,39 @@ export function resolveSlotSound(
   return prefs.sounds[slot];
 }
 
+/**
+ * Pick the sound slot for a home-feed item.
+ *
+ * `category` is the backend's per-item classification (`FeedItemCategory` in
+ * `desktop/src-tauri/src/models.rs`). Every known category maps explicitly;
+ * anything else falls back to `needs_action` so a contract drift costs the
+ * user the wrong sound rather than a missed alert — and warns so the drift
+ * is visible to developers instead of silently masquerading as intended.
+ */
 export function slotForFeedKind(
   kind: number,
   category: FeedItemCategory,
 ): SoundSlot {
-  if (category === "mention") return "mention";
   if (kind === KIND_JOB_ACCEPTED) return "job_accepted";
   if (kind === KIND_JOB_PROGRESS) return "job_progress";
   if (kind === KIND_JOB_RESULT) return "job_result";
   if (kind === KIND_JOB_ERROR) return "job_error";
-  if (kind === KIND_APPROVAL_REQUEST) return "needs_action";
-  return "needs_action";
+
+  switch (category) {
+    case "mention":
+      return "mention";
+    case "needs_action":
+    case "activity":
+    case "agent_activity":
+      return "needs_action";
+    default: {
+      const unexpected: never = category;
+      console.warn(
+        `[notifications] unknown feed item category ${JSON.stringify(unexpected)} for kind ${kind}; falling back to needs_action`,
+      );
+      return "needs_action";
+    }
+  }
 }
 
 export function shouldPlayNotificationSound(

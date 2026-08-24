@@ -236,3 +236,43 @@ fn provided_thread_ref_validates_and_preserves_root_and_parent() {
     assert_eq!(thread_ref.parent_event_id.to_hex(), parent);
     assert!(thread_ref::provided_thread_ref("not-hex", &parent).is_err());
 }
+
+/// `FeedItem.category` is a wire contract with the desktop frontend
+/// (`desktop/src/shared/api/types.ts`). The frontend routes notification
+/// sounds, titles, mute-bypass, and inbox labels off these exact strings, so
+/// the serialized form must stay singular `mention` — not the plural section
+/// name `mentions` used by `FeedSections` and the `--types` filter.
+#[test]
+fn feed_item_category_serializes_to_frontend_contract() {
+    let cases = [
+        (FeedItemCategory::Mention, "mention"),
+        (FeedItemCategory::NeedsAction, "needs_action"),
+        (FeedItemCategory::Activity, "activity"),
+        (FeedItemCategory::AgentActivity, "agent_activity"),
+    ];
+    for (category, expected) in cases {
+        let value = serde_json::to_value(category).expect("category should serialize");
+        assert_eq!(value, serde_json::Value::String(expected.to_string()));
+    }
+}
+
+#[test]
+fn feed_item_from_event_carries_singular_mention_category() {
+    let pubkey = Keys::generate().public_key().to_hex();
+    let event = build_managed_agent_channel_message(
+        uuid::Uuid::new_v4(),
+        "hey @you",
+        None,
+        std::slice::from_ref(&pubkey),
+        &[],
+    )
+    .expect("message should build")
+    .sign_with_keys(&Keys::generate())
+    .expect("message should sign");
+
+    let item = feed_item_from_event(&event, FeedItemCategory::Mention);
+    let json = serde_json::to_value(&item).expect("feed item should serialize");
+
+    assert_eq!(json["category"], "mention");
+    assert_eq!(json["id"], event.id.to_hex());
+}

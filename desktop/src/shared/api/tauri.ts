@@ -64,7 +64,7 @@ type RawFeedItem = {
   channel_name: string;
   channel_type: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: HomeFeedResponse["feed"]["mentions"][number]["category"];
 };
 
 type RawHomeFeedResponse = {
