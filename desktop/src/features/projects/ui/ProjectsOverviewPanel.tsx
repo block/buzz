@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   Project,
   ProjectActivitySummary,
@@ -26,6 +27,7 @@ import { useProjectSelection } from "@/features/projects/lib/useProjectSelection
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ProjectsCreateMenu } from "./ProjectsCreateMenu";
+import { ProjectsOverviewPeople } from "./ProjectsOverviewRail";
 import { ProjectsSelectionCountMenu } from "./ProjectsSelectionCountMenu";
 import {
   type OverviewContextStatIcon,
@@ -60,6 +62,7 @@ type ProjectsOverviewContextPanelProps = {
   onCreateProject: () => void;
   onCreatePullRequest: () => void;
   onSelectSection: (section: ProjectsOverviewSection) => void;
+  profiles?: UserProfileLookup;
   projects: Project[];
   pullRequests: ProjectPullRequest[];
   summaries?: Record<string, ProjectActivitySummary>;
@@ -174,6 +177,7 @@ export function ProjectsOverviewContextPanel({
   onCreateProject,
   onCreatePullRequest,
   onSelectSection,
+  profiles,
   projects,
   pullRequests,
   summaries,
@@ -261,6 +265,14 @@ export function ProjectsOverviewContextPanel({
                 />
               ))}
             </section>
+            {context.people.length > 0 ? (
+              <div className="mt-3 space-y-3 py-3">
+                <ProjectsOverviewPeople
+                  people={context.people}
+                  profiles={profiles}
+                />
+              </div>
+            ) : null}
           </div>
         )}
       </div>

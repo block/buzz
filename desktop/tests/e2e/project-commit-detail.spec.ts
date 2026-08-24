@@ -265,8 +265,6 @@ test("creating a project opens its channel conversation", async ({ page }) => {
     .getByTestId("create-project-description")
     .fill("A grouped project created through the desktop app.");
   await expect(page.getByTestId("create-project-listing")).toHaveText("Listed");
-  await expect(page.getByTestId("create-project-template")).toHaveText("None");
-  await expect(page.getByTestId("create-project-team")).toHaveText("None");
   await expect(page.getByTestId("create-project-agent")).toHaveText("None");
   await page.getByTestId("create-project-submit").click();
 

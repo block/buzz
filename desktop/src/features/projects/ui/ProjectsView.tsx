@@ -146,7 +146,7 @@ export function ProjectsView() {
   const repositoryActivitySummariesQuery = useRepositoryActivitySummariesQuery(
     filter === "repositories" ? projectReadModels : [],
   );
-  const projectsWorkItemsQuery = useProjectsWorkItemsQuery(projects);
+  const projectsWorkItemsQuery = useProjectsWorkItemsQuery(projectReadModels);
   // One blobless clone per primary Buzz repository, only while the overview
   // header is visible.
   const snapshotProjects = React.useMemo(
@@ -603,6 +603,7 @@ export function ProjectsView() {
     onCreateIssue: () => setCreateIssueOpen(true),
     onCreateProject: () => setCreateProjectOpen(true),
     onCreatePullRequest: () => setCreatePullRequestOpen(true),
+    profiles,
     projects,
     pullRequests: contextPullRequests,
     summaries: activitySummariesQuery.data,
@@ -840,7 +841,7 @@ export function ProjectsView() {
                                 />
                               ) : filter === "channels" ? (
                                 <ProjectsChannelsList
-                                  projects={projects}
+                                  projects={projectReadModels}
                                   searchQuery={searchQuery}
                                 />
                               ) : filter === "projects" ? (

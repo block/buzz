@@ -402,6 +402,7 @@ export function DiscussionChannelsPanel({
   if (channels.length === 0) {
     return (
       <ProjectPanelState
+        className="px-4"
         description="Paste this repository, review, or task link in a channel and it will appear here."
         testId="project-discussion-channels-panel"
         title="No linked channels yet"

@@ -2176,8 +2176,12 @@ test("Projects search replaces and restores the section tabs", async ({
     page.getByTestId("projects-page-tabs").getByRole("combobox"),
   ).toHaveValue("updated");
 
-  await search.fill("Space Invaders");
-  await expect(page.getByTestId("project-row-space-invaders-3d")).toBeVisible();
+  await search.fill("buzz");
+  await expect(
+    page.locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    ),
+  ).toBeVisible();
 
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("projects-section-search")).toHaveCount(0);
