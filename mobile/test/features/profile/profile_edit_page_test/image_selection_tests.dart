@@ -142,6 +142,137 @@ void runProfileEditImageSelectionTests() {
     );
   });
 
+  testWidgets(
+    'fades and scales image source controls back after camera close',
+    (tester) async {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+          child: ProfileEditPage(
+            startInPhotoEditor: true,
+            imageAvatarCaptureBuilder:
+                ({required height, required onAccepted, required onClosed}) =>
+                    _FakeImageAvatarCapture(
+                      onAccepted: onAccepted,
+                      onClosed: onClosed,
+                    ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('image-source-camera')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('fake-image-camera-close')));
+      await tester.pump();
+
+      AnimatedOpacity opacity() => tester.widget(
+        find.byKey(const ValueKey('image-source-return-opacity')),
+      );
+      AnimatedScale scale() => tester.widget(
+        find.byKey(const ValueKey('image-source-return-scale')),
+      );
+      expect(opacity().opacity, 0);
+      expect(scale().scale, 0.96);
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 70));
+      final fadedOpacity = tester
+          .widget<FadeTransition>(
+            find.descendant(
+              of: find.byKey(const ValueKey('image-source-return-opacity')),
+              matching: find.byType(FadeTransition),
+            ),
+          )
+          .opacity
+          .value;
+      final animatedScale = tester
+          .widget<ScaleTransition>(
+            find.descendant(
+              of: find.byKey(const ValueKey('image-source-return-scale')),
+              matching: find.byType(ScaleTransition),
+            ),
+          )
+          .scale
+          .value;
+      expect(fadedOpacity, greaterThan(0));
+      expect(fadedOpacity, lessThan(1));
+      expect(animatedScale, greaterThan(0.96));
+      expect(animatedScale, lessThan(1));
+
+      await tester.pump(const Duration(milliseconds: 70));
+      expect(opacity().opacity, 1);
+      expect(scale().scale, 1);
+    },
+  );
+
+  testWidgets('provides haptics when closing or accepting a camera photo', (
+    tester,
+  ) async {
+    final haptics = <Object?>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'HapticFeedback.vibrate') {
+          haptics.add(call.arguments);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Scaffold(
+          body: ImageAvatarCapture(
+            key: const ValueKey('close-haptic-camera'),
+            height: 400,
+            onAccepted: (_) {},
+            onClosed: () {},
+            loadCameras: () async => const [],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 180));
+    final closeAction = find.byKey(const ValueKey('image-camera-left-action'));
+    tester
+        .widget<InkWell>(
+          find.descendant(of: closeAction, matching: find.byType(InkWell)),
+        )
+        .onTap!();
+    await tester.pump();
+    expect(haptics, contains('HapticFeedbackType.selectionClick'));
+    await tester.pump(const Duration(milliseconds: 180));
+
+    final bytes = Uint8List.fromList(
+      image.encodeJpg(image.Image(width: 8, height: 8)),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Scaffold(
+          body: ImageAvatarCapture(
+            key: const ValueKey('accept-haptic-camera'),
+            height: 400,
+            initialCapturedBytes: bytes,
+            onAccepted: (_) {},
+            onClosed: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Use Photo'));
+    await tester.pump();
+    expect(haptics, contains('HapticFeedbackType.mediumImpact'));
+    await tester.pump(const Duration(milliseconds: 180));
+  });
+
   testWidgets('reviews a captured photo before scaling down to accept it', (
     tester,
   ) async {

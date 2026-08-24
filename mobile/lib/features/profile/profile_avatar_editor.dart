@@ -139,6 +139,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
     final isCapturingImage = useState(false);
+    final animateImageControlsEntrance = useState(false);
     final imageSelectionGeneration = useRef(0);
     final currentMode = useRef(mode)..value = mode;
     final error = useState<String?>(null);
@@ -166,6 +167,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         imageSelectionGeneration.value++;
         isPickingImage.value = false;
         isCapturingImage.value = false;
+        animateImageControlsEntrance.value = false;
         onImageCameraActiveChanged(false);
       }
       if (!reduceMotion) modeTransitionController.value = 0;
@@ -228,6 +230,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     }
 
     void closeImageCamera() {
+      animateImageControlsEntrance.value = true;
       isCapturingImage.value = false;
       onImageCameraActiveChanged(false);
     }
@@ -384,7 +387,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             key: const ValueKey(0),
             height: modeHeight,
             isPicking: isPickingImage.value,
+            animateEntrance: animateImageControlsEntrance.value,
             onCamera: () {
+              animateImageControlsEntrance.value = false;
               isCapturingImage.value = true;
               onImageCameraActiveChanged(true);
             },
@@ -676,56 +681,85 @@ class _AvatarModeControl extends StatelessWidget {
   );
 }
 
-class _ImageMode extends StatelessWidget {
+class _ImageMode extends HookWidget {
   const _ImageMode({
     super.key,
     required this.height,
     required this.isPicking,
+    required this.animateEntrance,
     required this.onCamera,
     required this.onLibrary,
   });
 
   final double height;
   final bool isPicking;
+  final bool animateEntrance;
   final VoidCallback onCamera;
   final VoidCallback onLibrary;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: height,
-    child: Column(
-      children: [
-        const Spacer(),
-        Row(
-          children: [
-            const Spacer(),
-            Expanded(
-              child: _ImageSourceOption(
-                key: const ValueKey('image-source-camera'),
-                icon: LucideIcons.camera,
-                iosIcon: IosGlassNavigationIcon.camera,
-                label: 'Camera',
-                onTap: isPicking ? null : onCamera,
-                labelMaxWidth: 96,
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final controlsVisible = useState(!animateEntrance || reduceMotion);
+    useEffect(() {
+      if (!animateEntrance || reduceMotion) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) controlsVisible.value = true;
+      });
+      return null;
+    }, const []);
+    final duration = reduceMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 140);
+
+    return SizedBox(
+      height: height,
+      child: Column(
+        children: [
+          const Spacer(),
+          AnimatedOpacity(
+            key: const ValueKey('image-source-return-opacity'),
+            opacity: controlsVisible.value ? 1 : 0,
+            duration: duration,
+            curve: Curves.easeOutCubic,
+            child: AnimatedScale(
+              key: const ValueKey('image-source-return-scale'),
+              scale: controlsVisible.value ? 1 : 0.96,
+              duration: duration,
+              curve: Curves.easeOutCubic,
+              child: Row(
+                children: [
+                  const Spacer(),
+                  Expanded(
+                    child: _ImageSourceOption(
+                      key: const ValueKey('image-source-camera'),
+                      icon: LucideIcons.camera,
+                      iosIcon: IosGlassNavigationIcon.camera,
+                      label: 'Camera',
+                      onTap: isPicking ? null : onCamera,
+                      labelMaxWidth: 96,
+                    ),
+                  ),
+                  const SizedBox(width: Grid.half),
+                  Expanded(
+                    child: _ImageSourceOption(
+                      key: const ValueKey('image-source-library'),
+                      icon: LucideIcons.images,
+                      iosIcon: IosGlassNavigationIcon.photoLibrary,
+                      label: 'Photo Library',
+                      onTap: isPicking ? null : onLibrary,
+                      labelMaxWidth: 104,
+                    ),
+                  ),
+                  const Spacer(),
+                ],
               ),
             ),
-            const SizedBox(width: Grid.half),
-            Expanded(
-              child: _ImageSourceOption(
-                key: const ValueKey('image-source-library'),
-                icon: LucideIcons.images,
-                iosIcon: IosGlassNavigationIcon.photoLibrary,
-                label: 'Photo Library',
-                onTap: isPicking ? null : onLibrary,
-                labelMaxWidth: 104,
-              ),
-            ),
-            const Spacer(),
-          ],
-        ),
-      ],
-    ),
-  );
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ImageSourceOption extends StatelessWidget {

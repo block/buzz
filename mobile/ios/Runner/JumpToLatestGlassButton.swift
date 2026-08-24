@@ -172,8 +172,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
+  private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
+  private var buttonImage: UIImage?
+  private var isBusy = false
 
   init(
     frame: CGRect,
@@ -229,6 +232,17 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       },
       for: .touchUpInside
     )
+
+    activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+    activityIndicator.hidesWhenStopped = true
+    activityIndicator.isUserInteractionEnabled = false
+    button.addSubview(activityIndicator)
+    NSLayoutConstraint.activate([
+      activityIndicator.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+      activityIndicator.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+      activityIndicator.widthAnchor.constraint(equalToConstant: 24),
+      activityIndicator.heightAnchor.constraint(equalToConstant: 24),
+    ])
 
     applyAppearance(from: args)
     channel.setMethodCallHandler { [weak self] call, result in
@@ -329,15 +343,16 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
     button.isSelected = selected
+    isBusy = busy
     if selected {
       button.accessibilityTraits.insert(.selected)
     } else {
       button.accessibilityTraits.remove(.selected)
     }
-    button.configuration?.showsActivityIndicator = busy
-    button.configuration?.title = busy ? nil : buttonLabel
+    button.configuration?.showsActivityIndicator = false
     if let foregroundColor {
       button.configuration?.baseForegroundColor = foregroundColor
+      activityIndicator.color = foregroundColor
     }
     if #unavailable(iOS 26.0) {
       button.configuration?.baseBackgroundColor = Self.fallbackBackgroundColor(
@@ -345,6 +360,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         interfaceStyle: interfaceStyle
       )
     }
+    updateDisplayedContent()
     button.setNeedsUpdateConfiguration()
   }
 
@@ -367,15 +383,14 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "shutter": buttonIconName = "circle.fill"
     default: buttonIconName = "chevron.backward"
     }
-    if let buttonLabel {
+    if buttonLabel != nil {
+      buttonImage = nil
       button.configuration?.contentInsets = NSDirectionalEdgeInsets(
         top: 8,
         leading: 8,
         bottom: 8,
         trailing: 8
       )
-      button.configuration?.title = buttonLabel
-      button.configuration?.image = nil
       button.configuration?.titleLineBreakMode = .byClipping
       button.configuration?.titleTextAttributesTransformer =
         UIConfigurationTextAttributesTransformer { incoming in
@@ -388,18 +403,16 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
           return outgoing
         }
     } else {
-      button.configuration?.title = nil
       button.configuration?.titleTextAttributesTransformer = nil
-      if icon == "shutter" {
-        button.configuration?.contentInsets = NSDirectionalEdgeInsets(
-          top: 16,
-          leading: 16,
-          bottom: 16,
-          trailing: 16
-        )
-      }
-      let pointSize: CGFloat = icon == "shutter" ? 83 : 17
-      button.configuration?.image = UIImage(
+      let iconInset: CGFloat = icon == "shutter" ? 20 : 8
+      button.configuration?.contentInsets = NSDirectionalEdgeInsets(
+        top: iconInset,
+        leading: iconInset,
+        bottom: iconInset,
+        trailing: iconInset
+      )
+      let pointSize: CGFloat = icon == "shutter" ? 75 : 17
+      buttonImage = UIImage(
         systemName: buttonIconName,
         withConfiguration: UIImage.SymbolConfiguration(
           pointSize: pointSize,
@@ -407,7 +420,20 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         )
       )
     }
+    updateDisplayedContent()
     button.setNeedsUpdateConfiguration()
+  }
+
+  private func updateDisplayedContent() {
+    if isBusy {
+      button.configuration?.title = nil
+      button.configuration?.image = nil
+      activityIndicator.startAnimating()
+    } else {
+      button.configuration?.title = buttonLabel
+      button.configuration?.image = buttonLabel == nil ? buttonImage : nil
+      activityIndicator.stopAnimating()
+    }
   }
 
   private static func color(from value: UInt32) -> UIColor {

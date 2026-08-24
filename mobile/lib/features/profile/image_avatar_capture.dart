@@ -264,6 +264,11 @@ class ImageAvatarCapture extends HookConsumerWidget {
 
     Future<void> leaveCamera(Uint8List? acceptedBytes) async {
       if (isClosing.value) return;
+      unawaited(
+        acceptedBytes == null
+            ? HapticFeedback.selectionClick()
+            : HapticFeedback.mediumImpact(),
+      );
       isClosing.value = true;
       controlsExpanded.value = false;
       if (!reduceMotion) await Future<void>.delayed(_captureMotionDuration);
