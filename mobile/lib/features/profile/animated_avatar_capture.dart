@@ -641,10 +641,15 @@ class _ErrorText extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(top: Grid.xs),
-    child: Text(
-      message,
-      textAlign: TextAlign.center,
-      style: context.textTheme.bodySmall?.copyWith(color: context.colors.error),
+    child: Semantics(
+      liveRegion: true,
+      child: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: context.textTheme.bodySmall?.copyWith(
+          color: context.colors.error,
+        ),
+      ),
     ),
   );
 }

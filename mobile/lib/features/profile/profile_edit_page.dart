@@ -25,6 +25,7 @@ import 'profile_avatar_editor.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_provider.dart';
 import 'profile_text_editor.dart';
+import 'profile_text_edit_sheet.dart';
 
 /// Edits the current user's public profile metadata.
 class ProfileEditPage extends HookConsumerWidget {
@@ -86,10 +87,11 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) => showBuzzModalBottomSheet<void>(
       context: context,
-      title: title,
       isScrollControlled: true,
       requestFocus: true,
-      builder: (_) => _ProfileTextEditSheet(
+      showCloseButton: false,
+      builder: (_) => ProfileTextEditSheet(
+        title: title,
         initialValue: initialValue,
         hintText: hintText,
         multiline: multiline,
@@ -579,90 +581,4 @@ class _EditChevron extends StatelessWidget {
     size: 18,
     color: context.colors.onSurfaceVariant,
   );
-}
-
-class _ProfileTextEditSheet extends HookWidget {
-  const _ProfileTextEditSheet({
-    required this.initialValue,
-    required this.hintText,
-    required this.multiline,
-    required this.onSave,
-  });
-
-  final String initialValue;
-  final String hintText;
-  final bool multiline;
-  final Future<void> Function(String value) onSave;
-
-  @override
-  Widget build(BuildContext context) {
-    final controller = useTextEditingController(text: initialValue);
-    useListenable(controller);
-    final isSaving = useState(false);
-    final error = useState<String?>(null);
-    final hasChanges = controller.text.trim() != initialValue.trim();
-
-    Future<void> save() async {
-      if (!hasChanges || isSaving.value) return;
-      isSaving.value = true;
-      error.value = null;
-      try {
-        await onSave(controller.text);
-        if (context.mounted) Navigator.of(context).pop();
-      } on ProfileCommunityChangedException {
-        if (context.mounted) Navigator.of(context).pop();
-      } catch (_) {
-        error.value = "We couldn't save this change. Try again.";
-      } finally {
-        if (context.mounted) isSaving.value = false;
-      }
-    }
-
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          Grid.gutter,
-          Grid.xxs,
-          Grid.gutter,
-          MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              key: const ValueKey('profile-field-input'),
-              controller: controller,
-              autofocus: true,
-              enabled: !isSaving.value,
-              minLines: multiline ? 4 : 1,
-              maxLines: multiline ? 6 : 1,
-              textCapitalization: TextCapitalization.sentences,
-              textInputAction: multiline
-                  ? TextInputAction.newline
-                  : TextInputAction.done,
-              onSubmitted: multiline ? null : (_) => unawaited(save()),
-              decoration: InputDecoration(hintText: hintText),
-            ),
-            if (error.value != null) ...[
-              const SizedBox(height: Grid.xxs),
-              Text(
-                error.value!,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.error,
-                ),
-              ),
-            ],
-            const SizedBox(height: Grid.xs),
-            FilledButton(
-              key: const ValueKey('profile-field-save'),
-              onPressed: hasChanges && !isSaving.value ? save : null,
-              child: Text(isSaving.value ? 'Saving…' : 'Save'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }

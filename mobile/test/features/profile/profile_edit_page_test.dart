@@ -898,6 +898,13 @@ class _FakeProfileNotifier extends ProfileNotifier {
   }
 }
 
+class _FailingPreparationMediaUploadService extends _FakeMediaUploadService {
+  @override
+  Future<Uint8List> prepareImageBytes(XFile image) async {
+    throw Exception('image preparation failed');
+  }
+}
+
 class _FakeMediaUploadService extends MediaUploadService {
   _FakeMediaUploadService({this.delayGallery = false})
     : super(

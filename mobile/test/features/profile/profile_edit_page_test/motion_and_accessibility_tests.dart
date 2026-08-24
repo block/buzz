@@ -53,6 +53,33 @@ void runProfileEditMotionAndAccessibilityTests() {
     );
   });
 
+  testWidgets('photo preparation errors are accessibility live regions', (
+    tester,
+  ) async {
+    final uploadService = _FailingPreparationMediaUploadService();
+    addTearDown(uploadService.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Photo Library'));
+    await tester.pumpAndSettle();
+
+    final message = find.text("We couldn't prepare that photo. Try again.");
+    expect(message, findsOneWidget);
+    final errorSemantics = tester.widget<Semantics>(
+      find.ancestor(of: message, matching: find.byType(Semantics)).first,
+    );
+    expect(errorSemantics.properties.liveRegion, isTrue);
+  });
+
   testWidgets('exposes the selected avatar mode on Android', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);

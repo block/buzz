@@ -517,11 +517,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 left: Grid.gutter,
                 right: Grid.gutter,
                 bottom: _editorControlsBottom + _editorRailHeight,
-                child: Text(
-                  error.value!,
-                  textAlign: TextAlign.center,
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.error,
+                child: Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    error.value!,
+                    textAlign: TextAlign.center,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.error,
+                    ),
                   ),
                 ),
               ),
