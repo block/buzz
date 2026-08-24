@@ -8,6 +8,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { matchBackForwardChord } from "@/app/navigation/backForwardChords";
+import { traverseHistory } from "@/app/navigation/navigationGuard";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
@@ -59,7 +60,7 @@ export function useBackForwardControls() {
       return;
     }
 
-    router.history.back();
+    traverseHistory(router.history, "back");
   }, [canGoBack, router.history]);
 
   const goForward = React.useCallback(() => {
@@ -67,7 +68,7 @@ export function useBackForwardControls() {
       return;
     }
 
-    router.history.forward();
+    traverseHistory(router.history, "forward");
   }, [canGoForward, router.history]);
 
   const handleKeyDown = React.useEffectEvent((event: KeyboardEvent) => {

@@ -10,6 +10,7 @@ import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigatio
 import {
   allowNavigation,
   type GuardedNavigation,
+  traverseHistory,
 } from "@/app/navigation/navigationGuard";
 import type { SearchHit } from "@/shared/api/types";
 
@@ -369,7 +370,7 @@ export function useAppNavigation() {
 
   const closeSettings = React.useCallback(() => {
     if (canGoBack) {
-      router.history.back();
+      traverseHistory(router.history, "back");
       return;
     }
 
@@ -378,7 +379,7 @@ export function useAppNavigation() {
 
   const closeWorkflowDetail = React.useCallback(() => {
     if (canGoBack) {
-      router.history.back();
+      traverseHistory(router.history, "back");
       return;
     }
 
@@ -388,7 +389,7 @@ export function useAppNavigation() {
   const closeForumPost = React.useCallback(
     (channelId: string) => {
       if (canGoBack) {
-        router.history.back();
+        traverseHistory(router.history, "back");
         return;
       }
 

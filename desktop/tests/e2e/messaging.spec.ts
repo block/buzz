@@ -4095,6 +4095,100 @@ test("a refused channel switch preserves the reply edit and retries after cancel
   await expect(page).not.toHaveURL(navigationBefore.url);
 });
 
+for (const backInput of ["button", "keyboard"] as const) {
+  test(`a refused ${backInput} Back preserves the reply edit and retries after cancel`, async ({
+    page,
+  }) => {
+    const sourceRoot = `History guard root ${backInput} ${Date.now()}`;
+    const sourceReply = `History guard reply ${backInput} ${Date.now()}`;
+    const dirtyReply = `${sourceReply}  unsaved byte-for-byte 🧵`;
+
+    await page.goto("/");
+    await page.waitForFunction(
+      () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+    );
+    const { sourceReplyId, sourceRootId } = await page.evaluate(
+      ({ sourceReply, sourceRoot }) => {
+        const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        if (!emit) throw new Error("Mock message emitter is unavailable.");
+        const root = emit({ channelName: "general", content: sourceRoot });
+        const reply = emit({
+          channelName: "general",
+          content: sourceReply,
+          parentEventId: root.id,
+        });
+        return { sourceReplyId: reply.id, sourceRootId: root.id };
+      },
+      { sourceReply, sourceRoot },
+    );
+
+    await page.getByTestId("channel-random").click();
+    await page.getByTestId("channel-general").click();
+    const source = page
+      .getByTestId("message-timeline")
+      .locator(`[data-message-id="${sourceRootId}"]`);
+    await source.hover();
+    await source.getByRole("button", { name: "Reply" }).click({ force: true });
+
+    const threadPanel = page.getByTestId("message-thread-panel");
+    const threadInput = threadPanel.getByTestId("message-input");
+    const reply = threadPanel.locator(`[data-message-id="${sourceReplyId}"]`);
+    await reply.hover();
+    await reply.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Edit message" }).click();
+    await threadInput.fill(dirtyReply);
+
+    const navigationBefore = await page.evaluate(() => ({
+      historyLength: history.length,
+      url: location.href,
+    }));
+    const sendsBefore = await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "send_channel_message",
+        ).length,
+    );
+    const invokeBack = async () => {
+      if (backInput === "button") {
+        await page.getByTestId("global-back").click();
+        return;
+      }
+      await page.keyboard.press(
+        process.platform === "darwin" ? "Meta+[" : "Alt+ArrowLeft",
+      );
+    };
+
+    await invokeBack();
+
+    await expect(
+      page.getByText("Finish or cancel your edit before leaving the thread."),
+    ).toHaveCount(1);
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(threadPanel).toBeVisible();
+    await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+    await expect(threadInput).toHaveText(dirtyReply);
+    expect(await threadInput.textContent()).toBe(dirtyReply);
+    await expect(page).toHaveURL(navigationBefore.url);
+    expect(await page.evaluate(() => history.length)).toBe(
+      navigationBefore.historyLength,
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    ).toBe(sendsBefore);
+
+    await threadInput.press("Escape");
+    await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+    await expect(page.getByTestId("global-back")).toBeEnabled();
+    await invokeBack();
+    await expect(page).not.toHaveURL(navigationBefore.url);
+  });
+}
+
 test("ArrowUp in an empty composer edits your last message right after sending", async ({
   page,
 }) => {
