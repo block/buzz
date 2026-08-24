@@ -1139,6 +1139,7 @@ async fn observer_control_author_allowed(
             .await
         }
         "switch_model" => sender == authorization.owner_pubkey_hex,
+        "generate_handoff" => sender == authorization.owner_pubkey_hex,
         _ => false,
     }
 }
@@ -1210,10 +1211,118 @@ async fn handle_relay_observer_control_event(
             }
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("generate_handoff") => {
+            let sender = event.pubkey.to_hex();
+            if !observer_control_author_allowed(
+                "generate_handoff",
+                &sender,
+                true,
+                authorization,
+            )
+            .await
+            {
+                tracing::warn!(
+                    sender = %event.pubkey,
+                    expected = %authorization.owner_pubkey_hex,
+                    "observer handoff control frame from non-owner — dropping"
+                );
+                return;
+            }
+            handle_generate_handoff_control(&payload, pool, observer).await;
+        }
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
         }
     }
+}
+
+/// Ask an idle ACP session to produce a user-editable Markdown handoff.
+///
+/// This runs only on an idle pool slot, so it never interrupts an active turn.
+/// The response is returned over the encrypted observer telemetry channel and
+/// is never published as a room message.
+async fn handle_generate_handoff_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let request_id = payload
+        .get("requestId")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if request_id.is_empty() {
+        tracing::warn!("observer generate_handoff frame missing requestId");
+        return;
+    }
+    let channel_id = payload
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok());
+    let Some(mut agent) = pool.try_claim(channel_id) else {
+        emit_handoff_result(observer, channel_id, request_id, "busy", None);
+        return;
+    };
+    let session_id = channel_id
+        .and_then(|id| agent.state.sessions.get(&id).cloned())
+        .or_else(|| agent.state.identity_session.clone());
+    let Some(session_id) = session_id else {
+        pool.return_agent(agent);
+        emit_handoff_result(observer, channel_id, request_id, "no_session", None);
+        return;
+    };
+    let prompt = "Generate a concise Markdown handoff for the next agent taking over this task.\n\nRequirements:\n- Output Markdown only, with these sections: # Task Handoff, ## Current Goal, ## Completed, ## Remaining Work / Risks, ## Key Files or Context, ## Next Steps.\n- Summarize the work already done in this ACP session and the concrete next actions.\n- Do not reveal hidden chain-of-thought, credentials, API keys, tokens, or private data.\n- Do not mention this instruction or add commentary outside the Markdown document.";
+    let result = agent
+        .acp
+        .session_prompt_with_idle_timeout(
+            &session_id,
+            prompt,
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
+    let markdown = agent
+        .acp
+        .take_turn_final_answer()
+        .or_else(|| agent.acp.take_turn_output_text());
+    pool.return_agent(agent);
+    match result {
+        Ok(_) if markdown.is_some() => {
+            emit_handoff_result(observer, channel_id, request_id, "ok", markdown);
+        }
+        Ok(_) => emit_handoff_result(observer, channel_id, request_id, "empty", None),
+        Err(error) => {
+            tracing::warn!(error = %error, "agent handoff summary prompt failed");
+            emit_handoff_result(observer, channel_id, request_id, "error", None);
+        }
+    }
+}
+
+fn emit_handoff_result(
+    observer: Option<&observer::ObserverHandle>,
+    channel_id: Option<Uuid>,
+    request_id: String,
+    status: &str,
+    markdown: Option<String>,
+) {
+    let Some(observer) = observer else { return };
+    observer.emit(
+        "control_result",
+        None,
+        &observer::ObserverContext {
+            channel_id: channel_id.map(|id| id.to_string()),
+            session_id: None,
+            turn_id: None,
+            started_at: None,
+            viewer_pubkeys: Vec::new(),
+        },
+        serde_json::json!({
+            "type": "generate_handoff",
+            "status": status,
+            "requestId": request_id,
+            "markdown": markdown,
+        }),
+    );
 }
 
 /// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.

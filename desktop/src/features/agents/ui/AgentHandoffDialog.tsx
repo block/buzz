@@ -1,8 +1,9 @@
 import * as React from "react";
-import { ArrowRightLeft, BookOpen, Send } from "lucide-react";
+import { ArrowRightLeft, BookOpen, RefreshCw, Send } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
+import { generateManagedAgentHandoff } from "@/shared/api/agentControl";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -26,6 +27,7 @@ import {
 type AgentHandoffDialogProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name">;
   history: string;
+  channelId?: string | null;
   initialMode?: "send" | "received";
   trigger?: React.ReactNode;
   open?: boolean;
@@ -35,6 +37,7 @@ type AgentHandoffDialogProps = {
 export function AgentHandoffDialog({
   agent,
   history,
+  channelId = null,
   initialMode = "send",
   trigger,
   open: controlledOpen,
@@ -57,6 +60,10 @@ export function AgentHandoffDialog({
   const [title, setTitle] = React.useState("");
   const [summary, setSummary] = React.useState("");
   const [body, setBody] = React.useState(history);
+  const [isGenerating, setIsGenerating] = React.useState(false);
+  const [generationError, setGenerationError] = React.useState<string | null>(
+    null,
+  );
   const relayAgents = useRelayAgentsQuery({ enabled: open }).data ?? [];
   const ownerPubkeys = React.useMemo(
     () =>
@@ -95,10 +102,34 @@ export function AgentHandoffDialog({
     },
   });
 
+  async function generateDraft(source = history) {
+    setIsGenerating(true);
+    setGenerationError(null);
+    try {
+      const markdown = await generateManagedAgentHandoff(
+        agent.pubkey,
+        channelId,
+      );
+      const draft = buildHandoffDraft(agent.name, markdown);
+      setBody(draft.history);
+      setTitle((current) => current.trim() || draft.title);
+      setSummary((current) => current.trim() || draft.summary);
+    } catch (error) {
+      setGenerationError(
+        error instanceof Error
+          ? error.message
+          : "Unable to generate handoff draft.",
+      );
+      setBody(source);
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
   function openSend() {
     setMode("send");
-    setBody(history);
     setOpen(true);
+    void generateDraft(history);
   }
 
   function openReceived() {
@@ -241,6 +272,32 @@ export function AgentHandoffDialog({
                   value={body}
                 />
               </label>
+              <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <span>
+                  {isGenerating
+                    ? "正在根据 Agent A 当前可见会话整理交接草稿…"
+                    : "草稿已根据当前可见会话整理，你可以在发送前修改。"}
+                </span>
+                <Button
+                  className="h-7 gap-1.5 px-2 text-xs"
+                  disabled={isGenerating}
+                  onClick={() => void generateDraft(history)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RefreshCw
+                    className={cn(
+                      "h-3.5 w-3.5",
+                      isGenerating && "animate-spin",
+                    )}
+                  />
+                  重新生成
+                </Button>
+              </div>
+              {generationError ? (
+                <p className="text-sm text-destructive">{generationError}</p>
+              ) : null}
               {send.error ? (
                 <p className="text-sm text-destructive">
                   {formatHandoffError(send.error)}
@@ -344,4 +401,15 @@ function formatHandoffError(error: unknown) {
   return message.includes("unknown event kind")
     ? "当前 relay 尚未支持 Agent handoff（kind 44201），需要先更新 relay 服务。"
     : message;
+}
+
+function buildHandoffDraft(agentName: string, source: string) {
+  const cleaned = source.trim();
+  const title = `${agentName} 工作交接`;
+  const summary = cleaned
+    ? "已由 Agent A 根据当前 ACP 会话生成，请在发送前确认。"
+    : "当前没有可见 transcript，请补充已完成事项和下一步。";
+  const history =
+    cleaned || `# ${title}\n\n暂无可用的 Agent A 总结，请手动补充交接内容。\n`;
+  return { title, summary, history };
 }

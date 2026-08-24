@@ -142,6 +142,7 @@ export function ManagedAgentSessionPanel({
         <SessionHeader
           agent={agent}
           history={formatHandoffHistory(displayTranscript)}
+          channelId={channelId}
           connectionState={connectionState}
           eventCount={displayEvents.length}
           hasObserver={hasObserver}
@@ -176,6 +177,7 @@ export function ManagedAgentSessionPanel({
 function SessionHeader({
   agent,
   history,
+  channelId,
   connectionState,
   eventCount,
   hasObserver,
@@ -183,6 +185,7 @@ function SessionHeader({
 }: {
   agent: Pick<ManagedAgent, "pubkey" | "name">;
   history: string;
+  channelId: string | null;
   connectionState: ConnectionState;
   eventCount: number;
   hasObserver: boolean;
@@ -209,7 +212,11 @@ function SessionHeader({
         <Badge className="w-fit font-mono" variant="outline">
           {eventCount} event{eventCount === 1 ? "" : "s"}
         </Badge>
-        <AgentHandoffDialog agent={agent} history={history} />
+        <AgentHandoffDialog
+          agent={agent}
+          history={history}
+          channelId={channelId}
+        />
       </div>
     </div>
   );
@@ -220,7 +227,10 @@ function formatHandoffHistory(transcript: TranscriptItem[]) {
     return "## Handoff\n\nNo transcript is available yet. Add the current status and next actions here.\n";
   }
   return transcript
-    .map((item, index) => `## ${index + 1}. ${item.type}\n\n${JSON.stringify(item, null, 2)}`)
+    .map(
+      (item, index) =>
+        `## ${index + 1}. ${item.type}\n\n${JSON.stringify(item, null, 2)}`,
+    )
     .join("\n\n");
 }
 

@@ -233,6 +233,8 @@ pub struct AcpClient {
     /// signed Buzz delivery, so the shared Codex process never needs an
     /// identity-specific private key.
     turn_final_answer: String,
+    /// Visible assistant text accumulated during the current prompt turn.
+    turn_output_text: String,
     /// True only while `session/load` history notifications are being drained.
     session_load_in_progress: bool,
     /// Set when that replay contains Buzz's standing-context marker.
@@ -591,6 +593,7 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             turn_final_answer: String::new(),
+            turn_output_text: String::new(),
             session_load_in_progress: false,
             session_load_saw_buzz_standing_context: false,
             standard_usage: StandardUsageTracker::default(),
@@ -945,6 +948,7 @@ impl AcpClient {
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
         self.turn_final_answer.clear();
+        self.turn_output_text.clear();
         let params = build_prompt_content_params(session_id, content);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1944,6 +1948,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.turn_output_text.push_str(text);
                 }
                 if let Some(text) = codex_final_answer_text(update) {
                     self.turn_final_answer.push_str(text);
@@ -2052,6 +2057,12 @@ impl AcpClient {
                 false
             }
         }
+    }
+
+    /// Take the visible assistant text emitted during the most recent prompt.
+    pub fn take_turn_output_text(&mut self) -> Option<String> {
+        let text = std::mem::take(&mut self.turn_output_text);
+        (!text.trim().is_empty()).then_some(text)
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by

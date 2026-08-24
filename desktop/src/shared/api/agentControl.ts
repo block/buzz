@@ -1,4 +1,8 @@
 import { sendAgentObserverControl } from "@/shared/api/observerRelay";
+import {
+  ensureRelayObserverSubscription,
+  subscribeControlResults,
+} from "@/features/agents/observerRelayStore";
 import type { CancelManagedAgentTurnResult } from "@/shared/api/types";
 
 export async function cancelManagedAgentTurn(
@@ -28,4 +32,52 @@ export async function switchManagedAgentModel(
     channelId,
     modelId,
   });
+}
+
+/** Ask an idle Agent ACP session to summarize itself as Markdown. */
+export async function generateManagedAgentHandoff(
+  pubkey: string,
+  channelId: string | null,
+): Promise<string> {
+  await ensureRelayObserverSubscription();
+  const requestId = crypto.randomUUID();
+  const result = new Promise<string>((resolve, reject) => {
+    let unsubscribe: (() => void) | null = null;
+    const timeout = window.setTimeout(() => {
+      unsubscribe?.();
+      reject(new Error("Agent handoff summary timed out."));
+    }, 180_000);
+    unsubscribe = subscribeControlResults(pubkey, (frame) => {
+      if (frame.type !== "generate_handoff" || frame.requestId !== requestId) {
+        return;
+      }
+      window.clearTimeout(timeout);
+      unsubscribe?.();
+      if (frame.status === "ok" && frame.markdown?.trim()) {
+        resolve(frame.markdown);
+      } else if (frame.status === "busy") {
+        reject(
+          new Error(
+            "Agent A is currently working. Try again after its turn finishes.",
+          ),
+        );
+      } else if (frame.status === "no_session") {
+        reject(
+          new Error("Agent A has no active ACP session for this channel."),
+        );
+      } else {
+        reject(new Error("Agent A could not generate a handoff summary."));
+      }
+    });
+  });
+  try {
+    await sendAgentObserverControl(pubkey, {
+      type: "generate_handoff",
+      requestId,
+      channelId,
+    });
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+  return result;
 }
