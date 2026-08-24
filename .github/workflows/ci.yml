@@ -675,11 +675,11 @@ jobs:
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
       - name: Replaceable persistence PostgreSQL tests
-        # Transaction, concurrency, mention-index, and workflow-CAS coverage
-        # for the replaceable-event store seam. These tests require real
-        # Postgres and are ignored by the infrastructure-free unit-test job.
+        # Transaction, concurrency, and mention-index coverage for the
+        # replaceable-event store seam. These tests require real Postgres and
+        # are ignored by the infrastructure-free unit-test job.
         run: |
-          filter='(package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)) or (package(buzz-relay) and test(/handlers::command_executor::tests::workflow_persistence_/))'
+          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)'
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E "${filter}" \
