@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
@@ -158,7 +159,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final history = await session.fetchHistory(
         NostrFilters.messages(channelId),
       );
-      history.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      history.sort(compareChannelTimelineEventsChronologically);
       return history;
     }
   }
@@ -383,10 +384,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ) {
     if (current.any((e) => e.id == incoming.id)) return current;
     final updated = [...current, incoming];
-    updated.sort((a, b) {
-      final createdAt = a.createdAt.compareTo(b.createdAt);
-      return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
-    });
+    updated.sort(compareChannelTimelineEventsChronologically);
     return updated;
   }
 
@@ -452,7 +450,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     return [
       ...events,
       ..._deepLinkEvents.values.where((event) => ids.add(event.id)),
-    ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    ]..sort(compareChannelTimelineEventsChronologically);
   }
 
   Future<bool> fetchOlder() async {
@@ -501,7 +499,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
     state = state.whenData((events) {
       final merged = [...deduped, ...events];
-      merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      merged.sort(compareChannelTimelineEventsChronologically);
       _lastKnownMessages = merged;
       return merged;
     });

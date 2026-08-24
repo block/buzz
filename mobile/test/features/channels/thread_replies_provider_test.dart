@@ -65,6 +65,16 @@ void main() {
     return (container, fakeSession, subscription);
   }
 
+  test('thread replies keep desktop same-second id order', () {
+    expect(
+      mergeThreadEvents(
+        [_reply('z', 1000)],
+        [_reply('a', 1000), _reply('m', 1000)],
+      ).map((event) => event.id),
+      ['a', 'm', 'z'],
+    );
+  });
+
   test('does not refetch on the disconnect edge', () async {
     final (container, fakeSession, _) = makeHarness([_reply('r1', 1000)]);
     addTearDown(container.dispose);

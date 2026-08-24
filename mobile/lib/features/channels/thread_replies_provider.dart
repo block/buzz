@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
 
 class ThreadRepliesArgs {
@@ -155,8 +156,5 @@ List<NostrEvent> _mergeReplies(
   for (final event in [...first, ...second]) {
     byId[event.id] = event;
   }
-  return byId.values.toList()..sort((a, b) {
-    final createdAt = a.createdAt.compareTo(b.createdAt);
-    return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
-  });
+  return byId.values.toList()..sort(compareThreadRepliesChronologically);
 }
