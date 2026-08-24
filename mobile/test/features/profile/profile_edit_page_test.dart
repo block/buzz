@@ -542,13 +542,19 @@ void main() {
     await tester.pump(const Duration(milliseconds: 150));
     expect(
       tester.getCenter(find.byKey(const ValueKey('emoji-avatar-preview'))).dy,
-      closeTo(screenSize.height / 2 - avatarBackgroundPreviewShift, 0.01),
+      closeTo(screenSize.height / 2 - 140, 0.01),
     );
     expect(
       tester
           .getSize(find.byKey(const ValueKey('emoji-avatar-picker-content')))
           .height,
-      lessThan(expandedPickerHeight),
+      expandedPickerHeight,
+    );
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('emoji-background-editor'))),
+      tester.getCenter(
+        find.byKey(const ValueKey('emoji-background-editor-alignment')),
+      ),
     );
 
     await tester.tap(find.text('Animated'));

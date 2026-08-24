@@ -83,11 +83,16 @@ class _EmojiMode extends HookConsumerWidget {
                 child: Opacity(
                   opacity: transitionProgress,
                   child: activeSection == _EmojiEditorSection.background
-                      ? AvatarBackgroundGrid(
-                          key: const ValueKey('emoji-background-editor'),
-                          selectedColor: selectedColor,
-                          onColorSelected: onColorSelected,
-                          colorKeyPrefix: 'emoji-avatar-color',
+                      ? Center(
+                          key: const ValueKey(
+                            'emoji-background-editor-alignment',
+                          ),
+                          child: AvatarBackgroundGrid(
+                            key: const ValueKey('emoji-background-editor'),
+                            selectedColor: selectedColor,
+                            onColorSelected: onColorSelected,
+                            colorKeyPrefix: 'emoji-avatar-color',
+                          ),
                         )
                       : Column(
                           key: const ValueKey('emoji-glyph-editor'),

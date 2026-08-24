@@ -329,9 +329,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         );
         final requestedShift = mode != ProfileAvatarMode.emoji
             ? 0.0
-            : emojiSection.value == _EmojiEditorSection.emoji
-            ? _emojiPickerPreviewShift
-            : avatarBackgroundPreviewShift;
+            : _emojiPickerPreviewShift;
         final previewShift = min(requestedShift, maximumShift);
         final previewTop = basePreviewTop - previewShift;
         final returningToEmoji =
