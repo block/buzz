@@ -11,7 +11,6 @@ struct Fixture {
     owner_keys: Keys,
     agent_keys: Keys,
     conditions: String,
-    now: u64,
 }
 
 impl Fixture {
@@ -27,8 +26,7 @@ impl Fixture {
         let target_path = dir.path().join(TARGET_FILE_NAME);
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();
-        let now = 2_000_000_000;
-        let conditions = format!("created_at>{}&created_at<{}", now - 10, now + 3_600);
+        let conditions = "kind=9&created_at>1&created_at<4294967295".to_string();
         let fixture = Self {
             _dir: dir,
             request_path,
@@ -36,20 +34,16 @@ impl Fixture {
             owner_keys,
             agent_keys,
             conditions,
-            now,
         };
         fixture.write_request(None);
         fixture
     }
 
-    fn request(&self, result_path: &Path) -> OwnerAttestationRequest {
+    fn request(&self) -> OwnerAttestationRequest {
         let agent_pubkey = self.agent_keys.public_key().to_hex();
-        let mut compressed = vec![0x03];
-        compressed.extend_from_slice(&hex::decode(&agent_pubkey).expect("agent hex"));
         OwnerAttestationRequest {
             schema: REQUEST_SCHEMA.to_string(),
             agent_pubkey: agent_pubkey.clone(),
-            agent_public_fingerprint_sha256: Sha256Hash::hash(&compressed).to_string(),
             conditions: self.conditions.clone(),
             signing_preimage: format!("nostr:agent-auth:{agent_pubkey}:{}", self.conditions),
             signing_hash_algorithm: "SHA256".to_string(),
@@ -60,14 +54,13 @@ impl Fixture {
                 self.conditions.clone(),
                 "OWNER_SIGNATURE_HEX".to_string(),
             ],
-            result_path: result_path.display().to_string(),
             private_key_in_request: false,
             signed: false,
         }
     }
 
     fn write_request(&self, request: Option<OwnerAttestationRequest>) {
-        let request = request.unwrap_or_else(|| self.request(&self.target_path));
+        let request = request.unwrap_or_else(|| self.request());
         let bytes = serde_json::to_vec_pretty(&request).expect("request JSON");
         std::fs::write(&self.request_path, bytes).expect("write request");
         std::fs::set_permissions(&self.request_path, std::fs::Permissions::from_mode(0o644))
@@ -75,20 +68,15 @@ impl Fixture {
     }
 
     fn preview(&self) -> OwnerAttestationPreview {
-        inspect_request(&self.request_path, &self.owner_keys.public_key(), self.now)
-            .expect("inspect request")
+        inspect_request(&self.request_path, &self.owner_keys.public_key()).expect("inspect request")
     }
 
-    fn sign(
-        &self,
-        preview: &OwnerAttestationPreview,
-    ) -> Result<OwnerAttestationWriteReceipt, String> {
+    fn sign(&self, preview: &OwnerAttestationPreview) -> Result<(), String> {
         sign_request(
             &self.request_path,
             &preview.request_sha256,
             &preview.owner_pubkey,
             &self.owner_keys,
-            self.now,
         )
     }
 }
@@ -100,19 +88,12 @@ fn nonempty_conditions_sign_and_verify_with_atomic_owner_only_custody() {
     let request_meta_before = std::fs::metadata(&fixture.request_path).expect("request metadata");
     let preview = fixture.preview();
 
-    let receipt = fixture.sign(&preview).expect("sign request");
-
-    assert!(receipt.written);
-    assert_eq!(
-        receipt.owner_pubkey,
-        fixture.owner_keys.public_key().to_hex()
-    );
+    fixture.sign(&preview).expect("sign request");
     assert_ne!(
         fixture.owner_keys.public_key(),
         fixture.agent_keys.public_key()
     );
     assert_eq!(preview.conditions, fixture.conditions);
-    assert_eq!(preview.validity_seconds, 3_610);
     assert_eq!(
         std::fs::read(&fixture.request_path).unwrap(),
         request_before
@@ -175,12 +156,8 @@ fn symlink_target_is_rejected_without_following_it() {
     std::fs::write(&outside, b"outside-preserved").unwrap();
     symlink(&outside, &fixture.target_path).unwrap();
 
-    let error = inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now,
-    )
-    .expect_err("symlink target must fail");
+    let error = inspect_request(&fixture.request_path, &fixture.owner_keys.public_key())
+        .expect_err("symlink target must fail");
 
     assert!(error.contains("already exists or is a symlink"));
     assert_eq!(std::fs::read(&outside).unwrap(), b"outside-preserved");
@@ -204,8 +181,7 @@ fn request_symlink_mode_and_link_count_are_rejected_without_output() {
     symlink(&real_request, &symlink_fixture.request_path).unwrap();
     assert!(inspect_request(
         &symlink_fixture.request_path,
-        &symlink_fixture.owner_keys.public_key(),
-        symlink_fixture.now
+        &symlink_fixture.owner_keys.public_key()
     )
     .unwrap_err()
     .contains("symlink"));
@@ -219,8 +195,7 @@ fn request_symlink_mode_and_link_count_are_rejected_without_output() {
     .unwrap();
     assert!(inspect_request(
         &mode_fixture.request_path,
-        &mode_fixture.owner_keys.public_key(),
-        mode_fixture.now
+        &mode_fixture.owner_keys.public_key()
     )
     .unwrap_err()
     .contains("0644"));
@@ -235,8 +210,7 @@ fn request_symlink_mode_and_link_count_are_rejected_without_output() {
     std::fs::hard_link(&link_fixture.request_path, &second_link).unwrap();
     assert!(inspect_request(
         &link_fixture.request_path,
-        &link_fixture.owner_keys.public_key(),
-        link_fixture.now
+        &link_fixture.owner_keys.public_key()
     )
     .unwrap_err()
     .contains("exactly one hard link"));
@@ -244,155 +218,64 @@ fn request_symlink_mode_and_link_count_are_rejected_without_output() {
 }
 
 #[test]
-fn invalid_conditions_owner_and_path_fail_without_output() {
+fn invalid_conditions_and_owner_fail_without_output() {
     let fixture = Fixture::new();
-    let mut request = fixture.request(&fixture.target_path);
+    let mut request = fixture.request();
     request.conditions.clear();
     request.signing_preimage = format!("nostr:agent-auth:{}:", request.agent_pubkey);
     request.result_tag_shape[2].clear();
     fixture.write_request(Some(request));
-    assert!(inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now
-    )
-    .unwrap_err()
-    .contains("non-empty"));
+    assert!(
+        inspect_request(&fixture.request_path, &fixture.owner_keys.public_key())
+            .unwrap_err()
+            .contains("non-empty")
+    );
     assert!(!fixture.target_path.exists());
 
-    let mut request = fixture.request(&fixture.target_path);
+    let mut request = fixture.request();
     request.agent_pubkey = fixture.owner_keys.public_key().to_hex();
-    let mut compressed = vec![AGENT_FINGERPRINT_PREFIX];
-    compressed.extend_from_slice(&hex::decode(&request.agent_pubkey).unwrap());
-    request.agent_public_fingerprint_sha256 = Sha256Hash::hash(&compressed).to_string();
     request.signing_preimage = format!(
         "nostr:agent-auth:{}:{}",
         request.agent_pubkey, request.conditions
     );
     fixture.write_request(Some(request));
-    assert!(inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now
-    )
-    .unwrap_err()
-    .contains("must differ"));
-    assert!(!fixture.target_path.exists());
-
-    let outside = fixture
-        .target_path
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(TARGET_FILE_NAME);
-    fixture.write_request(Some(fixture.request(&outside)));
-    assert!(inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now
-    )
-    .unwrap_err()
-    .contains("exact BUZZ_AUTH_TAG sibling"));
-    assert!(!fixture.target_path.exists());
-    assert!(!outside.exists());
-}
-
-#[test]
-fn fingerprint_accepts_only_normative_0x03_representation() {
-    let fixture = Fixture::new();
-    fixture.preview();
-
-    let mut request = fixture.request(&fixture.target_path);
-    let mut counter_parity = vec![0x02];
-    counter_parity.extend_from_slice(&hex::decode(&request.agent_pubkey).unwrap());
-    request.agent_public_fingerprint_sha256 = Sha256Hash::hash(&counter_parity).to_string();
-    fixture.write_request(Some(request));
-
-    let error = inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now,
-    )
-    .expect_err("counter-parity fingerprint must fail");
-
-    assert!(error.contains("normative 0x03-prefixed"));
+    assert!(
+        inspect_request(&fixture.request_path, &fixture.owner_keys.public_key())
+            .unwrap_err()
+            .contains("must differ")
+    );
     assert!(!fixture.target_path.exists());
 }
 
 #[test]
-fn stale_preview_and_noncurrent_validity_fail_without_output() {
+fn stale_preview_fails_without_output() {
     let fixture = Fixture::new();
     let preview = fixture.preview();
-    let mut request = fixture.request(&fixture.target_path);
+    let mut request = fixture.request();
     request.result_tag_shape[1] = "OWNER_PUBLIC_KEY_HEX_CHANGED".to_string();
     fixture.write_request(Some(request));
     let error = fixture.sign(&preview).expect_err("stale preview must fail");
     assert!(error.contains("changed after inspection") || error.contains("result_tag_shape"));
     assert!(!fixture.target_path.exists());
-
-    let mut request = fixture.request(&fixture.target_path);
-    request.conditions = "created_at>1&created_at<2".to_string();
-    request.signing_preimage = format!(
-        "nostr:agent-auth:{}:{}",
-        request.agent_pubkey, request.conditions
-    );
-    request.result_tag_shape[2] = request.conditions.clone();
-    fixture.write_request(Some(request));
-    assert!(inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now
-    )
-    .unwrap_err()
-    .contains("not current"));
-    assert!(!fixture.target_path.exists());
 }
 
 #[test]
-fn validity_over_ninety_days_is_rejected_without_output() {
+fn existing_request_shape_is_accepted_and_derives_sibling_target() {
     let fixture = Fixture::new();
-    let mut request = fixture.request(&fixture.target_path);
-    request.conditions = format!(
-        "created_at>{}&created_at<{}",
-        fixture.now - 10,
-        fixture.now + MAX_VALIDITY_SECONDS + 10
-    );
-    request.signing_preimage = format!(
-        "nostr:agent-auth:{}:{}",
-        request.agent_pubkey, request.conditions
-    );
-    request.result_tag_shape[2] = request.conditions.clone();
-    fixture.write_request(Some(request));
-
-    let error = inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now,
-    )
-    .expect_err("overlong validity must fail");
-
-    assert!(error.contains("at most"));
-    assert!(!fixture.target_path.exists());
-}
-
-#[test]
-fn request_requires_explicit_fingerprint_and_result_path() {
-    let fixture = Fixture::new();
-    let incomplete = serde_json::json!({
+    let existing = serde_json::json!({
         "schema": REQUEST_SCHEMA,
         "agent_pubkey": fixture.agent_keys.public_key().to_hex(),
         "conditions": fixture.conditions.clone(),
-        "signing_preimage": "not-reached",
+        "signing_preimage": format!("nostr:agent-auth:{}:{}", fixture.agent_keys.public_key().to_hex(), fixture.conditions),
         "signing_hash_algorithm": "SHA256",
         "signature_algorithm": "BIP340_Schnorr_secp256k1",
-        "result_tag_shape": ["auth", "OWNER_PUBLIC_KEY_HEX", "not-reached", "OWNER_SIGNATURE_HEX"],
+        "result_tag_shape": ["auth", "OWNER_PUBLIC_KEY_HEX", fixture.conditions, "OWNER_SIGNATURE_HEX"],
         "private_key_in_request": false,
         "signed": false
     });
     std::fs::write(
         &fixture.request_path,
-        serde_json::to_vec_pretty(&incomplete).unwrap(),
+        serde_json::to_vec_pretty(&existing).unwrap(),
     )
     .unwrap();
     std::fs::set_permissions(
@@ -401,14 +284,12 @@ fn request_requires_explicit_fingerprint_and_result_path() {
     )
     .unwrap();
 
-    let error = inspect_request(
-        &fixture.request_path,
-        &fixture.owner_keys.public_key(),
-        fixture.now,
-    )
-    .expect_err("implicit custody bindings must fail");
-
-    assert!(error.contains("agent_public_fingerprint_sha256"));
+    let preview = inspect_request(&fixture.request_path, &fixture.owner_keys.public_key())
+        .expect("existing request must be accepted");
+    assert_eq!(
+        preview.result_path,
+        fixture.target_path.display().to_string()
+    );
     assert!(!fixture.target_path.exists());
 }
 

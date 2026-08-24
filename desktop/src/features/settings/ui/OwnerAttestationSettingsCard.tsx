@@ -22,27 +22,10 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 type OwnerAttestationPreview = {
   requestPath: string;
   requestSha256: string;
-  schema: string;
   agentPubkey: string;
-  agentPublicFingerprintSha256: string;
   ownerPubkey: string;
   conditions: string;
-  signingPreimage: string;
-  signingHashAlgorithm: string;
-  signatureAlgorithm: string;
-  resultTagShape: [string, string, string, string];
   resultPath: string;
-  validFrom: number;
-  expiresAt: number;
-  validitySeconds: number;
-};
-
-type OwnerAttestationWriteReceipt = {
-  requestPath: string;
-  requestSha256: string;
-  ownerPubkey: string;
-  resultPath: string;
-  written: boolean;
 };
 
 function publicValue(value: string) {
@@ -53,15 +36,9 @@ function publicValue(value: string) {
   );
 }
 
-function formatUnixTime(value: number) {
-  return new Date(value * 1_000).toLocaleString();
-}
-
 export function OwnerAttestationSettingsCard() {
   const [preview, setPreview] = useState<OwnerAttestationPreview | null>(null);
-  const [receipt, setReceipt] = useState<OwnerAttestationWriteReceipt | null>(
-    null,
-  );
+  const [completedPath, setCompletedPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -69,7 +46,7 @@ export function OwnerAttestationSettingsCard() {
   async function chooseRequest() {
     setBusy(true);
     setError(null);
-    setReceipt(null);
+    setCompletedPath(null);
     try {
       const selected = await invokeTauri<OwnerAttestationPreview | null>(
         "select_owner_attestation_request",
@@ -92,15 +69,12 @@ export function OwnerAttestationSettingsCard() {
     setBusy(true);
     setError(null);
     try {
-      const result = await invokeTauri<OwnerAttestationWriteReceipt>(
-        "sign_owner_attestation_request",
-        {
-          requestPath: preview.requestPath,
-          expectedRequestSha256: preview.requestSha256,
-          expectedOwnerPubkey: preview.ownerPubkey,
-        },
-      );
-      setReceipt(result);
+      await invokeTauri<void>("sign_owner_attestation_request", {
+        requestPath: preview.requestPath,
+        expectedRequestSha256: preview.requestSha256,
+        expectedOwnerPubkey: preview.ownerPubkey,
+      });
+      setCompletedPath(preview.resultPath);
       setPreview(null);
       setConfirmOpen(false);
     } catch (cause) {
@@ -119,13 +93,13 @@ export function OwnerAttestationSettingsCard() {
     <section className="min-w-0" data-testid="settings-owner-attestation">
       <SettingsSectionHeader
         title="Owner attestation"
-        description="Inspect one existing, bounded NIP-OA request and write its protected auth tag without creating or publishing an agent."
+        description="Authorize one existing agent key with the exact conditions in a local request."
       />
 
       <SettingsOptionGroupList>
         <SettingsOptionGroup
           title="Request"
-          description="Buzz accepts only an owner-controlled 0644 request inside a 0700 custody directory. The authorized result must be its exact BUZZ_AUTH_TAG sibling."
+          description="Buzz accepts an owner-controlled 0644 request inside a 0700 custody directory and writes BUZZ_AUTH_TAG beside it."
         >
           <SettingsOptionRow>
             <div className="min-w-0 space-y-1">
@@ -155,8 +129,8 @@ export function OwnerAttestationSettingsCard() {
 
         {preview ? (
           <SettingsOptionGroup
-            title="Byte-exact preview"
-            description="These public values are re-read and re-bound to the current Desktop owner identity immediately before the protected write."
+            title="Review authorization"
+            description="Buzz re-reads these public values immediately before signing."
           >
             <SettingsOptionRow className="items-start">
               <div className="min-w-0 flex-1 space-y-4">
@@ -165,12 +139,6 @@ export function OwnerAttestationSettingsCard() {
                     Agent public key
                   </p>
                   {publicValue(preview.agentPubkey)}
-                </div>
-                <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">
-                    Agent fingerprint SHA256 (0x03 + x-only key)
-                  </p>
-                  {publicValue(preview.agentPublicFingerprintSha256)}
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-medium text-muted-foreground">
@@ -186,47 +154,6 @@ export function OwnerAttestationSettingsCard() {
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-medium text-muted-foreground">
-                    Signing preimage
-                  </p>
-                  {publicValue(preview.signingPreimage)}
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <p className="mb-1 text-xs font-medium text-muted-foreground">
-                      Valid from
-                    </p>
-                    <p>{formatUnixTime(preview.validFrom)}</p>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium text-muted-foreground">
-                      Expires
-                    </p>
-                    <p>{formatUnixTime(preview.expiresAt)}</p>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium text-muted-foreground">
-                      Validity
-                    </p>
-                    <p>{preview.validitySeconds.toLocaleString()} seconds</p>
-                  </div>
-                  <div>
-                    <p className="mb-1 text-xs font-medium text-muted-foreground">
-                      Algorithms
-                    </p>
-                    <p>
-                      {preview.signingHashAlgorithm} /{" "}
-                      {preview.signatureAlgorithm}
-                    </p>
-                  </div>
-                </div>
-                <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">
-                    Protected tag shape
-                  </p>
-                  {publicValue(JSON.stringify(preview.resultTagShape))}
-                </div>
-                <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">
                     Authorized result path
                   </p>
                   {publicValue(preview.resultPath)}
@@ -234,26 +161,21 @@ export function OwnerAttestationSettingsCard() {
               </div>
             </SettingsOptionRow>
             <SettingsOptionRow>
-              <div className="min-w-0 space-y-1">
-                <p className="font-medium">No external effects</p>
-                <p
-                  className="text-xs text-muted-foreground"
-                  data-settings-subcopy
-                >
-                  This operation does not create an agent, publish to a relay,
-                  use the clipboard, contact Infisical or GitHub, mint a JWT or
-                  token, or access VM112. The owner private key and signature
-                  stay inside Desktop.
-                </p>
-              </div>
+              <p
+                className="text-xs text-muted-foreground"
+                data-settings-subcopy
+              >
+                The owner private key stays inside Desktop. Nothing is published
+                and no agent is created.
+              </p>
               <Button disabled={busy} onClick={() => setConfirmOpen(true)}>
-                Sign and write protected tag
+                Review and sign
               </Button>
             </SettingsOptionRow>
           </SettingsOptionGroup>
         ) : null}
 
-        {receipt?.written ? (
+        {completedPath ? (
           <SettingsOptionGroup title="Completed">
             <SettingsOptionRow>
               <div className="min-w-0 space-y-1">
@@ -264,7 +186,7 @@ export function OwnerAttestationSettingsCard() {
                 >
                   The signature and tag value were not returned to the UI.
                 </p>
-                {publicValue(receipt.resultPath)}
+                {publicValue(completedPath)}
               </div>
             </SettingsOptionRow>
           </SettingsOptionGroup>
@@ -288,10 +210,9 @@ export function OwnerAttestationSettingsCard() {
               Sign this exact owner attestation?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Buzz will re-read the request, verify its byte hash, current
-              validity, owner identity, file custody, and authorized target,
-              then create BUZZ_AUTH_TAG exactly once with mode 0600. An existing
-              file or symlink is never replaced.
+              Buzz will re-read the request, verify its byte hash, current owner
+              identity and file custody, then create BUZZ_AUTH_TAG exactly once
+              with mode 0600. An existing file or symlink is never replaced.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

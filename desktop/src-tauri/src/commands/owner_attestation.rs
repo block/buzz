@@ -3,7 +3,6 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use nostr::{
@@ -26,23 +25,17 @@ const REQUEST_SCHEMA: &str = "buzz.nip-oa-owner-attestation-request.v1";
 const REQUEST_FILE_NAME: &str = "OWNER_ATTESTATION_REQUEST.json";
 const TARGET_FILE_NAME: &str = "BUZZ_AUTH_TAG";
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
-const MAX_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
-// Request-v1 custody fingerprints use exactly SHA256(0x03 || x-only-pubkey).
-// Accepting both SEC1 parity bytes would make the public binding non-unique.
-const AGENT_FINGERPRINT_PREFIX: u8 = 0x03;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct OwnerAttestationRequest {
     schema: String,
     agent_pubkey: String,
-    agent_public_fingerprint_sha256: String,
     conditions: String,
     signing_preimage: String,
     signing_hash_algorithm: String,
     signature_algorithm: String,
     result_tag_shape: [String; 4],
-    result_path: String,
     private_key_in_request: bool,
     signed: bool,
 }
@@ -52,29 +45,10 @@ struct OwnerAttestationRequest {
 pub struct OwnerAttestationPreview {
     request_path: String,
     request_sha256: String,
-    schema: String,
     agent_pubkey: String,
-    agent_public_fingerprint_sha256: String,
     owner_pubkey: String,
     conditions: String,
-    signing_preimage: String,
-    signing_hash_algorithm: String,
-    signature_algorithm: String,
-    result_tag_shape: [String; 4],
     result_path: String,
-    valid_from: u64,
-    expires_at: u64,
-    validity_seconds: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OwnerAttestationWriteReceipt {
-    request_path: String,
-    request_sha256: String,
-    owner_pubkey: String,
-    result_path: String,
-    written: bool,
 }
 
 #[cfg(unix)]
@@ -136,8 +110,6 @@ struct ValidatedRequest {
     request_identity: FileIdentity,
     parent_identity: FileIdentity,
     agent_pubkey: PublicKey,
-    valid_from: u64,
-    expires_at: u64,
 }
 
 #[cfg(unix)]
@@ -189,8 +161,7 @@ pub async fn select_owner_attestation_request(
         .to_path_buf();
 
     let owner_pubkey = app_handle.state::<AppState>().signing_keys()?.public_key();
-    let now = unix_time_now()?;
-    tokio::task::spawn_blocking(move || inspect_request(&request_path, &owner_pubkey, now))
+    tokio::task::spawn_blocking(move || inspect_request(&request_path, &owner_pubkey))
         .await
         .map_err(|error| format!("request inspection task failed: {error}"))?
         .map(Some)
@@ -204,7 +175,7 @@ pub async fn sign_owner_attestation_request(
     expected_request_sha256: String,
     expected_owner_pubkey: String,
     app_handle: AppHandle,
-) -> Result<OwnerAttestationWriteReceipt, String> {
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
         let _identity_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
@@ -214,25 +185,16 @@ pub async fn sign_owner_attestation_request(
             &expected_request_sha256,
             &expected_owner_pubkey,
             &owner_keys,
-            unix_time_now()?,
         )
     })
     .await
     .map_err(|error| format!("owner attestation task failed: {error}"))?
 }
 
-fn unix_time_now() -> Result<u64, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("system clock is before Unix epoch: {error}"))
-        .map(|duration| duration.as_secs())
-}
-
 #[cfg(not(unix))]
 fn inspect_request(
     _request_path: &Path,
     _owner_pubkey: &PublicKey,
-    _now: u64,
 ) -> Result<OwnerAttestationPreview, String> {
     Err("owner attestation requires Unix owner and mode enforcement".to_string())
 }
@@ -241,33 +203,19 @@ fn inspect_request(
 fn inspect_request(
     request_path: &Path,
     owner_pubkey: &PublicKey,
-    now: u64,
 ) -> Result<OwnerAttestationPreview, String> {
-    let validated = load_and_validate_request(request_path, now)?;
+    let validated = load_and_validate_request(request_path)?;
     if *owner_pubkey == validated.agent_pubkey {
         return Err("owner and agent pubkeys must differ".to_string());
     }
 
-    let validity_seconds = validated
-        .expires_at
-        .checked_sub(validated.valid_from)
-        .ok_or_else(|| "attestation validity bounds are reversed".to_string())?;
     Ok(OwnerAttestationPreview {
         request_path: validated.request_path.display().to_string(),
         request_sha256: validated.request_sha256,
-        schema: validated.request.schema,
         agent_pubkey: validated.request.agent_pubkey,
-        agent_public_fingerprint_sha256: validated.request.agent_public_fingerprint_sha256,
         owner_pubkey: owner_pubkey.to_hex(),
         conditions: validated.request.conditions,
-        signing_preimage: validated.request.signing_preimage,
-        signing_hash_algorithm: validated.request.signing_hash_algorithm,
-        signature_algorithm: validated.request.signature_algorithm,
-        result_tag_shape: validated.request.result_tag_shape,
         result_path: validated.target_path.display().to_string(),
-        valid_from: validated.valid_from,
-        expires_at: validated.expires_at,
-        validity_seconds,
     })
 }
 
@@ -277,8 +225,7 @@ fn sign_request(
     _expected_request_sha256: &str,
     _expected_owner_pubkey: &str,
     _owner_keys: &Keys,
-    _now: u64,
-) -> Result<OwnerAttestationWriteReceipt, String> {
+) -> Result<(), String> {
     Err("owner attestation requires Unix owner and mode enforcement".to_string())
 }
 
@@ -288,10 +235,9 @@ fn sign_request(
     expected_request_sha256: &str,
     expected_owner_pubkey: &str,
     owner_keys: &Keys,
-    now: u64,
-) -> Result<OwnerAttestationWriteReceipt, String> {
+) -> Result<(), String> {
     let custody = open_pinned_directory(request_path)?;
-    let first = load_and_validate_request_in(&custody, request_path, now)?;
+    let first = load_and_validate_request_in(&custody, request_path)?;
     if first.request_sha256 != expected_request_sha256 {
         return Err("request bytes changed after inspection; select it again".to_string());
     }
@@ -320,8 +266,8 @@ fn sign_request(
 
     // Re-open and re-validate immediately before the only external effect.
     // Exact bytes, inode metadata, parent directory identity, owner identity,
-    // validity, and target absence must all remain bound to the preview.
-    let second = load_and_validate_request_in(&custody, request_path, now)?;
+    // target absence must all remain bound to the preview.
+    let second = load_and_validate_request_in(&custody, request_path)?;
     if second.request_sha256 != first.request_sha256
         || second.request_identity != first.request_identity
         || second.parent_identity != first.parent_identity
@@ -336,20 +282,13 @@ fn sign_request(
     }
 
     atomic_create_secret(&custody, auth_tag.as_bytes())?;
-
-    Ok(OwnerAttestationWriteReceipt {
-        request_path: second.request_path.display().to_string(),
-        request_sha256: second.request_sha256,
-        owner_pubkey: owner_pubkey.to_hex(),
-        result_path: second.target_path.display().to_string(),
-        written: true,
-    })
+    Ok(())
 }
 
 #[cfg(unix)]
-fn load_and_validate_request(request_path: &Path, now: u64) -> Result<ValidatedRequest, String> {
+fn load_and_validate_request(request_path: &Path) -> Result<ValidatedRequest, String> {
     let custody = open_pinned_directory(request_path)?;
-    load_and_validate_request_in(&custody, request_path, now)
+    load_and_validate_request_in(&custody, request_path)
 }
 
 #[cfg(unix)]
@@ -437,7 +376,6 @@ fn verify_current_path_binding(custody: &PinnedDirectory) -> Result<(), String> 
 fn load_and_validate_request_in(
     custody: &PinnedDirectory,
     request_path: &Path,
-    now: u64,
 ) -> Result<ValidatedRequest, String> {
     validate_normal_absolute_path(request_path, REQUEST_FILE_NAME)?;
     if request_path.parent() != Some(custody.path.as_path()) {
@@ -516,11 +454,6 @@ fn load_and_validate_request_in(
     }
     let agent_pubkey = PublicKey::from_hex(&request.agent_pubkey)
         .map_err(|error| format!("invalid agent_pubkey: {error}"))?;
-    validate_agent_fingerprint(
-        &request.agent_pubkey,
-        &request.agent_public_fingerprint_sha256,
-    )?;
-
     let expected_preimage = format!(
         "nostr:agent-auth:{}:{}",
         request.agent_pubkey, request.conditions
@@ -540,12 +473,7 @@ fn load_and_validate_request_in(
         return Err("result_tag_shape does not byte-exactly bind conditions".into());
     }
 
-    let (valid_from, expires_at) = validate_validity(&request.conditions, now)?;
-    let target_path = PathBuf::from(&request.result_path);
-    validate_normal_absolute_path(&target_path, TARGET_FILE_NAME)?;
-    if target_path.parent() != Some(custody.path.as_path()) {
-        return Err("result_path must be the exact BUZZ_AUTH_TAG sibling of the request".into());
-    }
+    let target_path = custody.path.join(TARGET_FILE_NAME);
     ensure_target_absent(custody)?;
 
     Ok(ValidatedRequest {
@@ -556,8 +484,6 @@ fn load_and_validate_request_in(
         request_identity,
         parent_identity: custody.identity,
         agent_pubkey,
-        valid_from,
-        expires_at,
     })
 }
 
@@ -590,83 +516,6 @@ fn ensure_target_absent(custody: &PinnedDirectory) -> Result<(), String> {
         Err(Errno::NOENT) => Ok(()),
         Err(error) => Err(format!("inspect BUZZ_AUTH_TAG target: {error}")),
     }
-}
-
-fn validate_agent_fingerprint(agent_pubkey: &str, fingerprint: &str) -> Result<(), String> {
-    if fingerprint.len() != 64 || !is_lowercase_hex(fingerprint) {
-        return Err("agent_public_fingerprint_sha256 must be 64 lowercase hex characters".into());
-    }
-    let xonly = hex::decode(agent_pubkey)
-        .map_err(|error| format!("decode agent_pubkey for fingerprint: {error}"))?;
-    let mut normative = Vec::with_capacity(33);
-    normative.push(AGENT_FINGERPRINT_PREFIX);
-    normative.extend_from_slice(&xonly);
-    let normative_fingerprint = Sha256Hash::hash(&normative).to_string();
-    if fingerprint != normative_fingerprint {
-        return Err(
-            "agent public fingerprint must bind the normative 0x03-prefixed compressed key".into(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_validity(conditions: &str, now: u64) -> Result<(u64, u64), String> {
-    let mut valid_from = None;
-    let mut expires_at = None;
-    for clause in conditions.split('&') {
-        if let Some(value) = clause.strip_prefix("created_at>") {
-            if valid_from.is_some() {
-                return Err("conditions contain duplicate created_at> bounds".into());
-            }
-            valid_from = Some(parse_canonical_u32(value, "created_at>")?);
-        } else if let Some(value) = clause.strip_prefix("created_at<") {
-            if expires_at.is_some() {
-                return Err("conditions contain duplicate created_at< bounds".into());
-            }
-            expires_at = Some(parse_canonical_u32(value, "created_at<")?);
-        } else if let Some(value) = clause.strip_prefix("kind=") {
-            let kind = parse_canonical_u32(value, "kind")?;
-            if kind > 65_535 {
-                return Err("kind condition is out of range".into());
-            }
-        } else {
-            return Err("conditions contain an unsupported or empty clause".into());
-        }
-    }
-    let valid_from =
-        valid_from.ok_or_else(|| "conditions require one created_at> bound".to_string())?;
-    let expires_at =
-        expires_at.ok_or_else(|| "conditions require one created_at< bound".to_string())?;
-    let validity = expires_at
-        .checked_sub(valid_from)
-        .ok_or_else(|| "attestation validity bounds are reversed".to_string())?;
-    if validity == 0 || validity > MAX_VALIDITY_SECONDS {
-        return Err(format!(
-            "attestation validity must be positive and at most {MAX_VALIDITY_SECONDS} seconds"
-        ));
-    }
-    if now <= valid_from || now >= expires_at {
-        return Err("attestation validity window is not current".into());
-    }
-    Ok((valid_from, expires_at))
-}
-
-fn parse_canonical_u32(value: &str, label: &str) -> Result<u64, String> {
-    if value.is_empty()
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || (value.len() > 1 && value.starts_with('0'))
-    {
-        return Err(format!(
-            "{label} must use canonical unsigned decimal encoding"
-        ));
-    }
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|error| format!("{label} is out of range: {error}"))?;
-    if parsed > u32::MAX as u64 {
-        return Err(format!("{label} is out of range"));
-    }
-    Ok(parsed)
 }
 
 fn is_lowercase_hex(value: &str) -> bool {
@@ -864,16 +713,15 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
         Ok(())
     })();
 
-    if operation.is_err() && state == TempLinkState::Preparing {
-        if let Err(cleanup_error) = ops.unlink_temp(custody, &temp_name) {
-            let operation_error = operation
-                .as_ref()
-                .expect_err("operation is known to be an error");
-            return Err(format!(
-                "{operation_error}; pre-commit temporary-file cleanup failed: {cleanup_error}; STOP and do not retry"
-            ));
+    if state == TempLinkState::Preparing {
+        if let Err(operation_error) = &operation {
+            if let Err(cleanup_error) = ops.unlink_temp(custody, &temp_name) {
+                return Err(format!(
+                    "{operation_error}; pre-commit temporary-file cleanup failed: {cleanup_error}; STOP and do not retry"
+                ));
+            }
+            state = TempLinkState::NotCreated;
         }
-        state = TempLinkState::NotCreated;
     }
 
     debug_assert!(matches!(
