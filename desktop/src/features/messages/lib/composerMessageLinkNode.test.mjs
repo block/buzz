@@ -19,6 +19,7 @@ const CHANNEL_MESSAGE_ID = "a".repeat(64);
 const CHANNEL_MESSAGE_HREF = `buzz://channel/${CHANNEL_ID}/${CHANNEL_MESSAGE_ID}`;
 const OWNER = "a".repeat(64);
 const REPO_HREF = `buzz://repo?owner=${OWNER}&d=buzz-world`;
+const PROJECT_HREF = `buzz://project?owner=${OWNER}&d=buzz-world`;
 const ISSUE_ID = "b".repeat(64);
 const ISSUE_HREF = `buzz://issue?id=${ISSUE_ID}&owner=${OWNER}&d=buzz-world`;
 const PR_ID = "c".repeat(64);
@@ -274,6 +275,11 @@ test("composer node renders channel and entity chip presentations", () => {
   assert.equal(repo[1]["data-buzz-link-kind"], "repo");
   assert.match(repo[1].class, /inline-chip-icon-repo/);
   assert.equal(renderedChipLabel(repo), "buzz-world");
+
+  const project = render(PROJECT_HREF);
+  assert.equal(project[1]["data-buzz-link-kind"], "project");
+  assert.match(project[1].class, /inline-chip-icon-project/);
+  assert.equal(renderedChipLabel(project), "buzz-world");
 
   const issue = render(ISSUE_HREF);
   assert.equal(issue[1]["data-buzz-link-kind"], "issue");
