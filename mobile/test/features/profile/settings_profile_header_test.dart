@@ -124,6 +124,13 @@ void main() {
           .map((image) => image.url),
       containsAll([posterUrl, animationUrl]),
     );
+    expect(
+      tester
+          .widgetList<MediaImage>(find.byType(MediaImage, skipOffstage: false))
+          .singleWhere((image) => image.url == animationUrl)
+          .boundDecodeToLayout,
+      isFalse,
+    );
 
     animationResponse.complete(http.Response.bytes(_transparentPng, 200));
     await tester.runAsync(
