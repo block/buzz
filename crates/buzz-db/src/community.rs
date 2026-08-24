@@ -325,10 +325,13 @@ impl Db {
 
         // Serialize on the owner pubkey so concurrent creates to the same
         // owner cannot both pass the ownership count check.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(relay_members::owner_count_advisory_lock_key(&owner_pubkey))
-            .execute(&mut *tx)
-            .await?;
+        crate::observability::observe_advisory_lock(
+            crate::observability::LockType::Membership,
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(relay_members::owner_count_advisory_lock_key(&owner_pubkey))
+                .execute(&mut *tx),
+        )
+        .await?;
 
         let row = sqlx::query(
             r#"

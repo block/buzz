@@ -50,6 +50,7 @@ pub mod git_repo;
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+mod observability;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
@@ -712,7 +713,7 @@ impl Db {
         };
         let aurora_identity = self.reader_aurora_identity.clone();
         tokio::spawn(async move {
-            match read_pool.acquire().await {
+            match observability::acquire(&read_pool, observability::PoolRole::Reader).await {
                 Ok(mut conn) => {
                     tracing::info!("read replica reachable at boot");
                     match replica_fence::reader_supports_aurora_identity(&mut conn).await {
@@ -854,7 +855,7 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn = match read_pool.acquire().await {
+        let conn = match observability::acquire(read_pool, observability::PoolRole::Reader).await {
             Ok(conn) => conn,
             Err(sqlx::Error::PoolTimedOut) => {
                 tracing::warn!("reader pool acquire timed out; routing to writer");
@@ -1030,7 +1031,8 @@ impl Db {
         &self,
         lock_key: i64,
     ) -> Result<Option<UsageMetricsLeader>> {
-        let mut connection = self.pool.acquire().await?;
+        let mut connection =
+            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_key)
             .fetch_one(&mut *connection)
@@ -1177,7 +1179,11 @@ impl Db {
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
     /// The transaction holds an owned pool handle, not a borrow.
     pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        self.pool.begin().await.map_err(Into::into)
+        let connection =
+            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
+        sqlx::Transaction::begin(connection, None)
+            .await
+            .map_err(Into::into)
     }
 
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
@@ -4349,14 +4355,21 @@ impl Db {
             channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
         );
 
-        let mut tx = self.pool.begin().await?;
+        let (mut tx, mut transaction_timer) = observability::begin_transaction(
+            &self.pool,
+            observability::TransactionOperation::ReplaceAddressableEvent,
+        )
+        .await?;
 
         // Serialize all writers for the same (kind, pubkey, channel_id) tuple.
         // Advisory lock is transaction-scoped — released on commit/rollback.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
+        observability::observe_advisory_lock(
+            observability::LockType::Replacement,
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx),
+        )
+        .await?;
 
         // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
         // historical data where prior bugs may have left multiple live rows.
@@ -4384,6 +4397,7 @@ impl Db {
             if dominated {
                 tx.rollback().await?;
                 let received_at = chrono::Utc::now();
+                transaction_timer.mark_success();
                 return Ok((
                     StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
                     false,
@@ -4435,6 +4449,7 @@ impl Db {
             // ON CONFLICT fired — the event ID already exists. Rollback the
             // soft-delete so we don't lose the previous replaceable event.
             tx.rollback().await?;
+            transaction_timer.mark_success();
             return Ok((
                 StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
                 false,
@@ -4447,6 +4462,7 @@ impl Db {
         crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
 
         tx.commit().await?;
+        transaction_timer.mark_success();
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
@@ -4532,16 +4548,23 @@ impl Db {
             None,
         );
 
-        let mut tx = self.pool.begin().await?;
+        let (mut tx, mut transaction_timer) = observability::begin_transaction(
+            &self.pool,
+            observability::TransactionOperation::PublishNip43MembershipLocked,
+        )
+        .await?;
 
         // Acquire the per-community snapshot lock BEFORE reading members.
         // This serializes the entire read-build-write cycle: a concurrent
         // publication will block here until our transaction commits, then
         // read the updated membership state.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
+        observability::observe_advisory_lock(
+            observability::LockType::Membership,
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx),
+        )
+        .await?;
 
         // Read current members inside the locked transaction.
         let rows = sqlx::query(
@@ -4618,6 +4641,7 @@ impl Db {
         let was_inserted = insert_result.rows_affected() > 0;
         if !was_inserted {
             tx.rollback().await?;
+            transaction_timer.mark_success();
             return Ok((
                 StoredEvent::with_received_at(event, received_at, None, false),
                 false,
@@ -4626,6 +4650,8 @@ impl Db {
         }
 
         tx.commit().await?;
+        transaction_timer.mark_success();
+        drop(transaction_timer);
 
         if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
             tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
