@@ -70,7 +70,7 @@ function addUsage(target, usage) {
   if (Number.isFinite(cost) && cost >= 0) target.cost += cost;
 }
 
-export class PiAcpRpcSpike {
+export class PiAcpAdapter {
   constructor({ input, output, errorOutput, env = process.env }) {
     this.input = input;
     this.output = output;
@@ -183,7 +183,7 @@ export class PiAcpRpcSpike {
           },
           mcpCapabilities: { http: false, sse: false },
         },
-        agentInfo: { name: "pi-acp-rpc-spike", version: "0.0.1" },
+        agentInfo: { name: "pi-acp", version: "0.1.0" },
         _meta: {
           steering: { supported: true },
           pilot: { productionReady: false },
