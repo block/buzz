@@ -220,7 +220,7 @@ pub(crate) fn validate_harness_definition_pub(def: &HarnessDefinition) -> Result
 /// tier-1 runtimes — no hand-maintained copy.  Adding a preset to
 /// `PRESET_HARNESSES` automatically reserves its ID without a separate edit.
 fn builtin_ids() -> impl Iterator<Item = &'static str> {
-    const TIER1: &[&str] = &["goose", "claude", "codex", "buzz-agent"];
+    const TIER1: &[&str] = &["goose", "claude", "codex", "pi", "buzz-agent"];
     let tier2 = crate::managed_agents::discovery::preset_harness_ids();
     TIER1.iter().copied().chain(tier2.iter().copied())
 }

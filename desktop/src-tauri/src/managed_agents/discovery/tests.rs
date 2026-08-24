@@ -5,8 +5,9 @@ use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, is_login_shell_path_uninit, is_safe_nvm_tag,
-    managed_agent_avatar_url, normalize_agent_args, parse_semver_tag, probe_codex_acp_version,
-    record_agent_command, refresh_login_shell_path, try_record_agent_command,
+    known_acp_runtime_exact, managed_agent_avatar_url, normalize_agent_args, parse_semver_tag,
+    probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
+    try_record_agent_command,
     BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
@@ -65,6 +66,18 @@ fn normalizes_claude_and_codex_args_to_empty() {
     );
     assert_eq!(
         normalize_agent_args("codex-acp", vec!["acp".into()]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn pi_pilot_runtime_uses_managed_adapter_without_legacy_acp_args() {
+    let runtime = known_acp_runtime_exact("pi").expect("Pi pilot runtime should exist");
+    assert_eq!(runtime.commands, &["pi-acp"]);
+    assert_eq!(runtime.underlying_cli, Some("pi"));
+    assert!(runtime.adapter_install_commands.is_empty());
+    assert_eq!(
+        normalize_agent_args("pi-acp", vec!["acp".into()]),
         Vec::<String>::new()
     );
 }

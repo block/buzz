@@ -7,6 +7,7 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { createBuzzTools } from "./buzz-tools.mjs";
+import { EventBudget } from "./event-budget.mjs";
 import { attachJsonlReader, writeJsonl } from "./jsonl.mjs";
 
 function option(name) {
@@ -24,24 +25,7 @@ const limits = {
   tools: positiveInteger("PI_ACP_MAX_TOOLS", 3),
   tokens: positiveInteger("PI_ACP_MAX_PROCESSED_TOKENS", 75_000),
 };
-const budget = {
-  turns: 0,
-  tools: 0,
-  tokens: 0,
-  thresholdReached: false,
-  checkpointTurnStarted: false,
-  forcedAbort: false,
-};
-function resetEventBudget() {
-  Object.assign(budget, {
-    turns: 0,
-    tools: 0,
-    tokens: 0,
-    thresholdReached: false,
-    checkpointTurnStarted: false,
-    forcedAbort: false,
-  });
-}
+const budget = new EventBudget(limits);
 let session;
 let streaming = false;
 let disposed = false;
@@ -50,17 +34,7 @@ let buzzContext = null;
 const budgetExtension = {
   name: "buzz-event-budget",
   factory(pi) {
-    pi.on("tool_call", async () => {
-      if (budget.thresholdReached || budget.tools >= limits.tools) {
-        budget.thresholdReached = true;
-        return {
-          block: true,
-          reason: `Buzz event tool budget exhausted (${budget.tools}/${limits.tools}); publish a concise budget checkpoint and stop.`,
-        };
-      }
-      budget.tools += 1;
-      return undefined;
-    });
+    pi.on("tool_call", async () => budget.onToolCall());
   },
 };
 
@@ -99,42 +73,12 @@ const ready = (async () => {
       streaming = false;
       buzzContext = null;
     }
-    if (event.type === "turn_start" && budget.thresholdReached) {
-      if (!budget.checkpointTurnStarted) budget.checkpointTurnStarted = true;
-      else if (!budget.forcedAbort) {
-        budget.forcedAbort = true;
-        void session.abort();
-      }
+    if (event.type === "turn_start" && budget.onTurnStart() === "abort") {
+      void session.abort();
     }
     if (event.type === "turn_end") {
-      budget.turns += 1;
-      const usage = event.message?.usage;
-      if (usage) {
-        budget.tokens +=
-          (usage.input || 0) +
-          (usage.output || 0) +
-          (usage.cacheRead || 0) +
-          (usage.cacheWrite || 0);
-      }
-      for (const result of event.toolResults || []) {
-        const nested = result?.usage;
-        if (nested) {
-          budget.tokens +=
-            (nested.input || 0) +
-            (nested.output || 0) +
-            (nested.cacheRead || 0) +
-            (nested.cacheWrite || 0);
-        }
-      }
-      if (
-        !budget.thresholdReached &&
-        (budget.turns >= limits.turns || budget.tokens >= limits.tokens)
-      ) {
-        budget.thresholdReached = true;
-        void session.steer(
-          `[AUTOMATED BUDGET GUARD] Event budget reached: turns ${budget.turns}/${limits.turns}, tools ${budget.tools}/${limits.tools}, processed tokens ${budget.tokens}/${limits.tokens}. Do not call more tools. Produce one concise [BUDGET CHECKPOINT] with completed work, exact blocker, and next action, then stop.`,
-        );
-      }
+      const outcome = budget.onTurnEnd(event);
+      if (outcome.checkpoint) void session.steer(outcome.message);
     }
   });
 })();
@@ -161,7 +105,7 @@ async function handle(command) {
           isStreaming: streaming,
           sessionId: session.sessionId,
           autoCompactionEnabled: session.autoCompactionEnabled,
-          budget: { ...budget, limits },
+          budget: budget.snapshot(),
         });
         break;
       case "prompt":
@@ -169,7 +113,7 @@ async function handle(command) {
           response(command, false, undefined, "agent is already streaming");
           break;
         }
-        resetEventBudget();
+        budget.reset();
         buzzContext = command.buzzContext;
         response(command, true);
         void session.prompt(command.message).catch((error) => {
