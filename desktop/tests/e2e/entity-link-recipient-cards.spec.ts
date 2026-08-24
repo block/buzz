@@ -662,6 +662,10 @@ test("deleted reply links identify deletion and fall back to their thread root",
 test("deleted top-level message links identify deletion and fall back to channel navigation", async ({
   page,
 }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-accent-color", "#c0a2f1");
+  });
   const missingMessageId = "d".repeat(64);
   const channelId = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
   const link = `buzz://message?channel=${channelId}&id=${missingMessageId}`;
@@ -685,6 +689,33 @@ test("deleted top-level message links identify deletion and fall back to channel
   );
   await expect(deletedLink).toHaveClass(/buzz-link-deleted/);
   await expect(deletedLink).not.toHaveClass(/buzz-link-unavailable/);
+  const unavailableColors = await linkMessage.evaluate((message) => {
+    const probe = document.createElement("span");
+    probe.className = "mention-chip buzz-link-unavailable";
+    message.querySelector(".message-markdown")?.append(probe);
+    const styles = getComputedStyle(probe);
+    const colors = {
+      backgroundColor: styles.backgroundColor,
+      color: styles.color,
+    };
+    probe.remove();
+    return colors;
+  });
+  await expect
+    .poll(() =>
+      deletedLink.evaluate((element) => {
+        const styles = getComputedStyle(element);
+        return {
+          backgroundColor: styles.backgroundColor,
+          color: styles.color,
+        };
+      }),
+    )
+    .toEqual(unavailableColors);
+  await waitForAnimations(page);
+  await linkMessage.screenshot({
+    path: `${SHOTS}/deleted-message-link-after.png`,
+  });
   await deletedLink.hover();
   await expect(page.getByRole("tooltip")).toHaveText("Message deleted");
 

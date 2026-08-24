@@ -260,8 +260,14 @@
    caret into their decorated range and swallows the trailing space after an
    @mention. Composer Buzz links are atom nodes, but their labels may still
    fragment between characters; only the icon and leading label fragment stay
-   together. */
+   together. The line-height keeps each inline decoration box tall enough to
+   paint both block-padding edges without clipping. */
 .rich-text-composer .tiptap .mention-chip {
   display: inline;
   min-height: 0;
+  line-height: calc(
+    1em +
+    var(--inline-chip-padding-block-start) +
+    var(--inline-chip-padding-block-end)
+  );
 }
