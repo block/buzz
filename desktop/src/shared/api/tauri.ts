@@ -43,6 +43,7 @@ import type {
 
 export * from "@/shared/api/tauriChannels";
 export { sendChannelMessage } from "@/shared/api/tauriMessages";
+export { getEventById, getEventsByIds } from "@/shared/api/tauriEvents";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -463,18 +464,6 @@ export async function searchMessages(
     hits: response.hits.map(fromRawSearchHit),
     found: response.found,
   };
-}
-
-export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
-  return JSON.parse(eventJson) as RelayEvent;
-}
-
-export async function getEventsByIds(
-  eventIds: string[],
-): Promise<RelayEvent[]> {
-  if (eventIds.length === 0) return [];
-  return invokeTauri<RelayEvent[]>("get_events", { eventIds });
 }
 
 type RawThreadCursor = {
