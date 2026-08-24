@@ -3278,12 +3278,14 @@ fn conversation_context_delta(
         ConversationContext::Thread {
             messages,
             total,
+            root_present,
             truncated,
         } => {
             let messages = filter(messages);
             (!messages.is_empty()).then_some(ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             })
         }
@@ -3753,6 +3755,7 @@ fn parse_thread_response(json: serde_json::Value) -> Option<ConversationContext>
     Some(ConversationContext::Thread {
         messages,
         total,
+        root_present: json.get("root").and_then(json_to_context_message).is_some(),
         truncated,
     })
 }
@@ -3931,6 +3934,7 @@ fn parse_nostr_thread_response_with_meta(
         context: ConversationContext::Thread {
             messages,
             total,
+            root_present,
             truncated,
         },
         root_present,
@@ -5109,11 +5113,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2); // root + 1 reply
                 assert_eq!(total, 2); // 1 reply + 1 root
                 assert!(!truncated);
+                assert!(root_present);
                 assert_eq!(messages[0].content, "root message");
                 assert_eq!(messages[1].content, "first reply");
             }
@@ -5146,11 +5152,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 11); // 10 replies + 1 root
                 assert!(truncated);
+                assert!(root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -5321,11 +5329,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 3); // root + 2 displayed replies
                 assert_eq!(total, 4); // root + displayed replies + sentinel
                 assert!(truncated);
+                assert!(root_present);
                 assert_eq!(messages[0].content, "root");
                 assert_eq!(messages[1].content, "middle reply");
                 assert_eq!(messages[2].content, "newest agent reply");
@@ -5362,11 +5372,50 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 2);
                 assert!(!truncated);
+                assert!(root_present);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_marks_missing_root_incomplete() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let json = json!([
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "replypub1",
+                "content": "first reply",
+                "created_at": 2000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "replypub2",
+                "content": "second reply",
+                "created_at": 3000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 12, &agent.public_key())
+            .expect("reply context should still be available");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 2);
+                assert!(!truncated);
+                assert!(!root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -5483,6 +5532,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5533,11 +5583,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 6);
+                assert!(!root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -5586,6 +5638,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5638,6 +5691,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5699,6 +5753,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(total, 4);
@@ -5772,6 +5827,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5910,6 +5966,7 @@ mod tests {
                 content: "follow up".into(),
             }],
             total: 1,
+            root_present: true,
             truncated: false,
         };
 
@@ -6579,6 +6636,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 context_message("new", "new context"),
             ],
             total: 3,
+            root_present: true,
             truncated: false,
         };
 
@@ -6588,12 +6646,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].event_id, "new");
                 assert_eq!(total, 3);
                 assert!(!truncated);
+                assert!(root_present);
             }
             _ => panic!("expected thread context"),
         }
