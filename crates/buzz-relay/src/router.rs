@@ -73,6 +73,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
         .route(
+            "/workflows/owner-commands/pending",
+            post(api::workflows::pending_owner_commands),
+        )
+        .route(
+            "/workflows/owner-commands/{command_id}/complete",
+            post(api::workflows::complete_owner_command),
+        )
+        .route(
             "/workflows/agent-deliveries/claim",
             post(api::workflows::claim_agent_delivery),
         )
@@ -83,6 +91,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/workflows/agent-deliveries/{delivery_id}/finish",
             post(api::workflows::finish_agent_delivery),
+        )
+        .route(
+            "/workflows/{workflow_id}/owner-target",
+            get(api::workflows::workflow_owner_target),
         )
         .route(
             "/workflows/{workflow_id}/runs",

@@ -44,6 +44,8 @@ pub mod tenant;
 pub mod verification;
 /// Durable workflow-delivery lease bounds shared by clients and the relay.
 pub mod workflow_delivery;
+/// Workflow management command wire types and validation.
+pub mod workflow_owner_command;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

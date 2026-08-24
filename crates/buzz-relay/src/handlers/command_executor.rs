@@ -68,6 +68,9 @@ pub async fn handle_command(
         KIND_DM_HIDE => handle_dm_hide(tenant, state, &event, &auth).await,
         KIND_WORKFLOW_DEF => handle_workflow_def(tenant, state, &event, &auth).await,
         KIND_WORKFLOW_TRIGGER => handle_workflow_trigger(tenant, state, &event, &auth).await,
+        KIND_WORKFLOW_OWNER_COMMAND => {
+            handle_workflow_owner_command(tenant, state, &event, &auth).await
+        }
         KIND_APPROVAL_GRANT => handle_approval_grant(tenant, state, &event, &auth).await,
         KIND_APPROVAL_DENY => handle_approval_deny(tenant, state, &event, &auth).await,
         _ => Err(IngestError::Rejected(format!(
@@ -792,26 +795,17 @@ async fn handle_workflow_def(
         }
     };
 
-    // Preserve the existing webhook secret across updates. A new secret is
-    // returned only when the workflow first gains a webhook trigger.
-    let webhook_secret = if matches!(def.trigger, buzz_workflow::TriggerDef::Webhook) {
-        let existing_secret = existing_workflow
+    // Apply the shared secret projection before hashing. This synchronous path
+    // can securely return a newly generated webhook secret to its caller.
+    let webhook_secret = webhook_secret::prepare_definition(
+        &mut definition_json,
+        existing_workflow
             .as_ref()
-            .and_then(|workflow| webhook_secret::extract_secret(&workflow.definition));
-        let secret = existing_secret.unwrap_or_else(webhook_secret::generate_webhook_secret);
-        webhook_secret::inject_secret(&mut definition_json, &secret);
-        if existing_workflow
-            .as_ref()
-            .and_then(|workflow| webhook_secret::extract_secret(&workflow.definition))
-            .is_none()
-        {
-            Some(secret)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+            .map(|workflow| &workflow.definition),
+        matches!(def.trigger, buzz_workflow::TriggerDef::Webhook),
+        true,
+    )
+    .map_err(|error| IngestError::Internal(format!("error: prepare webhook secret: {error}")))?;
 
     // Compute hash AFTER secret injection
     let definition_json_final = serde_json::to_string(&definition_json)
@@ -819,7 +813,7 @@ async fn handle_workflow_def(
     let hash = compute_definition_hash(&definition_json_final);
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let mut tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -830,7 +824,8 @@ async fn handle_workflow_def(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 4. Execute: upsert by the NIP-33 d-tag UUID. A retry updates the same
+    // 4. Execute in the same locked transaction that persists the NIP-33
+    // definition. A retry updates the same
     // row instead of creating another enabled workflow that would fan out on
     // every matching event. The workflow's community is the request's
     // server-bound tenant — never re-derived from the (client-supplied) channel
@@ -850,15 +845,17 @@ async fn handle_workflow_def(
 
     state
         .db
-        .upsert_workflow(
+        .persist_workflow_definition_in_transaction(
+            &mut tx,
             community_id,
             workflow_id,
-            Some(channel_id),
+            channel_id,
             &self_bytes,
+            event,
+            buzz_db::workflow::WorkflowDefinitionEventPersistence::AlreadyStored,
             &workflow_name,
             &definition_json_final,
             &hash,
-            event.id.as_bytes(),
             def.enabled,
         )
         .await
@@ -869,16 +866,15 @@ async fn handle_workflow_def(
             other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
         })?;
 
-    // Drop the trigger-path cache entry so the new/updated definition fires on
-    // the next matching event instead of after the cache TTL.
-    state
-        .workflow_engine
-        .invalidate_channel_workflows(community_id, channel_id);
-
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
+    // Commit the definition event and executable workflow projection together.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+
+    // Drop the trigger-path cache only after both representations commit.
+    state
+        .workflow_engine
+        .invalidate_channel_workflows(community_id, channel_id);
 
     // 5. Return response
     let mut resp = serde_json::json!({
@@ -892,6 +888,131 @@ async fn handle_workflow_def(
         event_id: event.id.to_hex(),
         accepted: true,
         message: format!("response:{}", resp),
+    })
+}
+
+async fn handle_workflow_owner_command(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+) -> Result<IngestResult, IngestError> {
+    use buzz_core::workflow_owner_command::{parse_owner_command, WorkflowOwnerOperation};
+    use buzz_db::workflow::WorkflowOwnerCommandAdmission;
+
+    let command = parse_owner_command(event)
+        .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+    if auth.pubkey() != &event.pubkey {
+        return Err(IngestError::AuthFailed(
+            "workflow owner command author mismatch".into(),
+        ));
+    }
+    let operation = match command.operation {
+        WorkflowOwnerOperation::Update => "update",
+        WorkflowOwnerOperation::Enable => "enable",
+        WorkflowOwnerOperation::Disable => "disable",
+        WorkflowOwnerOperation::Retire => "retire",
+    };
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), command.workflow_id)
+        .await
+        .map_err(|_| IngestError::Rejected("invalid: workflow not found".into()))?;
+    let channel_id = workflow
+        .channel_id
+        .ok_or_else(|| IngestError::Rejected("invalid: workflow is not channel-scoped".into()))?;
+    // The workflow lookup supplies only the channel binding needed to persist and
+    // publish the command event. Immutable owner, coordinate author, and revision
+    // authority are rechecked under the workflow row lock during admission.
+    let control_receipt = (operation != "update")
+        .then(|| {
+            let resulting_revision = command.expected_revision.to_hex();
+            crate::api::workflows::build_owner_command_receipt(
+                state,
+                crate::api::workflows::OwnerCommandReceiptInput {
+                    command_id: command.command_id,
+                    owner_pubkey: event.pubkey.as_bytes(),
+                    agent_pubkey: &command.agent_pubkey,
+                    workflow_id: command.workflow_id,
+                    expected_revision: command.expected_revision.as_bytes(),
+                    status: "applied",
+                    resulting_revision: Some(&resulting_revision),
+                    reason: None,
+                },
+            )
+        })
+        .transpose()
+        .map_err(|error| {
+            IngestError::Internal(format!("error: sign owner command receipt: {error}"))
+        })?;
+    let mut tx = match persist_command_event(state, tenant, event, Some(channel_id)).await? {
+        PersistResult::Duplicate => {
+            return Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: "duplicate: already processed".into(),
+            });
+        }
+        PersistResult::Inserted(tx) => tx,
+    };
+    let admission = state
+        .db
+        .admit_workflow_owner_command(
+            &mut tx,
+            tenant.community(),
+            command.command_id,
+            event.id.as_bytes(),
+            event.pubkey.as_bytes(),
+            command.agent_pubkey.as_bytes(),
+            command.workflow_id,
+            command.expected_revision.as_bytes(),
+            operation,
+            command.yaml_definition.as_deref(),
+            control_receipt.as_ref(),
+        )
+        .await
+        .map_err(|error| match error {
+            DbError::AccessDenied(_) => IngestError::Rejected(
+                "forbidden: command author is not the immutable agent owner".into(),
+            ),
+            DbError::InvalidData(_) => {
+                IngestError::Rejected("conflict: workflow revision changed".into())
+            }
+            other => IngestError::Internal(format!("error: owner command admission: {other}")),
+        })?;
+    tx.commit()
+        .await
+        .map_err(|error| IngestError::Internal(format!("error: commit command: {error}")))?;
+    state
+        .workflow_engine
+        .invalidate_channel_workflows(tenant.community(), channel_id);
+    if let Some(receipt) = control_receipt.as_ref() {
+        crate::api::workflows::publish_internal_event(state, tenant, receipt, Some(channel_id))
+            .await;
+    }
+    let status = match admission {
+        WorkflowOwnerCommandAdmission::PendingAgent => "pending_agent",
+        WorkflowOwnerCommandAdmission::Applied => "applied",
+        WorkflowOwnerCommandAdmission::Duplicate => "duplicate",
+    };
+    Ok(IngestResult {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message: format!(
+            "response:{}",
+            serde_json::json!({
+                "command_id": command.command_id,
+                "target": format!(
+                    "{}:{}:{}",
+                    KIND_WORKFLOW_DEF,
+                    command.agent_pubkey.to_hex(),
+                    command.workflow_id
+                ),
+                "revision": command.expected_revision.to_hex(),
+                "operation": operation,
+                "status": status,
+            })
+        ),
     })
 }
 

@@ -657,8 +657,8 @@ async fn main() -> anyhow::Result<()> {
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
 
-    // Durable managed-agent delivery reaper. Expired leases become retryable by
-    // the claim query; exhausted or TTL-expired rows become terminal here and
+    // Durable managed-agent delivery reaper. Expired leases become terminal failed
+    // rows and are never reassigned; TTL-expired rows are terminalized here and
     // emit one owner-visible channel signal from the rows returned by the
     // guarded UPDATE.
     {

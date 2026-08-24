@@ -13,9 +13,11 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use buzz_core::TenantContext;
+use buzz_core::kind::{KIND_WORKFLOW_DEF, KIND_WORKFLOW_OWNER_RECEIPT};
+use buzz_core::{StoredEvent, TenantContext};
 
 use crate::{
     api::{api_error, bridge, internal_error},
@@ -108,6 +110,51 @@ async fn authorize_workflow_read(
     }
 
     Ok(tenant)
+}
+
+/// `GET /workflows/{workflow_id}/owner-target` — minimal owner-management coordinate.
+pub async fn workflow_owner_target(
+    State(state): State<Arc<AppState>>,
+    Path(workflow_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflows/{workflow_id}/owner-target");
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow not found"))?;
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path);
+    let (owner, event_id) =
+        bridge::verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+    bridge::enforce_http_admission(&state, &tenant, &owner).await?;
+    bridge::check_nip98_replay(&state, &tenant, event_id).await?;
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    super::relay_members::enforce_relay_membership(
+        &state,
+        tenant.community(),
+        &owner.to_bytes(),
+        auth_tag,
+    )
+    .await?;
+    let target = state
+        .db
+        .get_workflow_owner_target(tenant.community(), workflow_id, owner.as_bytes())
+        .await
+        .map_err(|error| match error {
+            buzz_db::error::DbError::NotFound(_) => {
+                api_error(StatusCode::NOT_FOUND, "workflow not found")
+            }
+            other => internal_error(&format!("resolve workflow owner target: {other}")),
+        })?;
+    Ok(Json(serde_json::json!({
+        "agent_pubkey": hex::encode(target.agent_pubkey),
+        "expected_revision": hex::encode(target.expected_revision),
+    })))
 }
 
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
@@ -278,6 +325,356 @@ async fn authorize_delivery_write(
     )
     .await?;
     Ok((tenant, pubkey))
+}
+
+/// List pending owner update commands for the authenticated target agent.
+pub async fn pending_owner_commands(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = "/workflows/owner-commands/pending";
+    let (tenant, agent) = authorize_delivery_write(&state, &headers, path, &body).await?;
+    let commands = state
+        .db
+        .list_pending_workflow_owner_commands(tenant.community(), agent.as_bytes(), 100)
+        .await
+        .map_err(|error| internal_error(&format!("list workflow owner commands: {error}")))?;
+    Ok(Json(serde_json::json!({
+        "commands": commands.iter().map(|command| serde_json::json!({
+            "command_id": command.command_id,
+            "event_id": hex::encode(&command.event_id),
+            "owner_pubkey": hex::encode(&command.owner_pubkey),
+            "agent_pubkey": hex::encode(&command.agent_pubkey),
+            "workflow_id": command.workflow_id,
+            "expected_revision": hex::encode(&command.expected_revision),
+            "proposed_yaml": command.proposed_yaml,
+            "channel_id": command.channel_id,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// Agent-authenticated terminal intent for one owner command.
+#[derive(Debug, Deserialize)]
+pub struct CompleteOwnerCommandRequest {
+    replacement_event: Option<nostr::Event>,
+    rejection_reason: Option<String>,
+}
+
+pub(crate) struct OwnerCommandReceiptInput<'a> {
+    pub command_id: Uuid,
+    pub owner_pubkey: &'a [u8],
+    pub agent_pubkey: &'a nostr::PublicKey,
+    pub workflow_id: Uuid,
+    pub expected_revision: &'a [u8],
+    pub status: &'a str,
+    pub resulting_revision: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
+pub(crate) fn build_owner_command_receipt(
+    state: &AppState,
+    input: OwnerCommandReceiptInput<'_>,
+) -> Result<nostr::Event, String> {
+    let OwnerCommandReceiptInput {
+        command_id,
+        owner_pubkey,
+        agent_pubkey,
+        workflow_id,
+        expected_revision,
+        status,
+        resulting_revision,
+        reason,
+    } = input;
+    nostr::EventBuilder::new(
+        nostr::Kind::Custom(KIND_WORKFLOW_OWNER_RECEIPT as u16),
+        serde_json::json!({
+            "status": status,
+            "resulting_revision": resulting_revision,
+            "reason": reason,
+        })
+        .to_string(),
+    )
+    .tags([
+        nostr::Tag::parse(["d", &command_id.to_string()]).map_err(|e| e.to_string())?,
+        nostr::Tag::parse(["p", &hex::encode(owner_pubkey)]).map_err(|e| e.to_string())?,
+        nostr::Tag::parse(["p", &agent_pubkey.to_hex()]).map_err(|e| e.to_string())?,
+        nostr::Tag::parse([
+            "a",
+            &format!(
+                "{KIND_WORKFLOW_DEF}:{}:{workflow_id}",
+                agent_pubkey.to_hex()
+            ),
+        ])
+        .map_err(|e| e.to_string())?,
+        nostr::Tag::parse(["revision", &hex::encode(expected_revision)])
+            .map_err(|e| e.to_string())?,
+        nostr::Tag::parse(["status", status]).map_err(|e| e.to_string())?,
+    ])
+    .custom_created_at(nostr::Timestamp::from(0))
+    .sign_with_keys(&state.relay_keypair)
+    .map_err(|e| e.to_string())
+}
+
+fn prepare_managed_definition(
+    name: String,
+    enabled: bool,
+    definition_json: &str,
+    existing: &serde_json::Value,
+    is_webhook: bool,
+) -> Result<(String, String, Vec<u8>, bool), String> {
+    let mut definition: serde_json::Value = serde_json::from_str(definition_json)
+        .map_err(|error| format!("replacement JSON: {error}"))?;
+    crate::webhook_secret::prepare_definition(&mut definition, Some(existing), is_webhook, false)
+        .map_err(str::to_string)?;
+    let json =
+        serde_json::to_string(&definition).map_err(|error| format!("replacement JSON: {error}"))?;
+    let hash = Sha256::digest(json.as_bytes()).to_vec();
+    Ok((name, json, hash, enabled))
+}
+
+/// Complete one pending owner update after agent-side verification/signing.
+pub async fn complete_owner_command(
+    State(state): State<Arc<AppState>>,
+    Path(command_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflows/owner-commands/{command_id}/complete");
+    let (tenant, agent) = authorize_delivery_write(&state, &headers, &path, &body).await?;
+    let request = match serde_json::from_slice::<CompleteOwnerCommandRequest>(&body) {
+        Ok(request)
+            if request.replacement_event.is_some() != request.rejection_reason.is_some() =>
+        {
+            request
+        }
+        Ok(_) => CompleteOwnerCommandRequest {
+            replacement_event: None,
+            rejection_reason: Some("invalid_completion_shape".into()),
+        },
+        Err(_) => CompleteOwnerCommandRequest {
+            replacement_event: None,
+            rejection_reason: Some("invalid_completion_json".into()),
+        },
+    };
+
+    let pending = state
+        .db
+        .get_workflow_owner_command(tenant.community(), command_id, agent.as_bytes())
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::NotFound(_) => api_error(
+                StatusCode::NOT_FOUND,
+                "owner command was not found for this agent",
+            ),
+            other => internal_error(&format!("read owner command: {other}")),
+        })?;
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), pending.workflow_id)
+        .await
+        .map_err(|error| internal_error(&format!("read owner command workflow: {error}")))?;
+    let channel_id = workflow
+        .channel_id
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, "workflow is not channel-scoped"))?;
+
+    let mut replacement_event = request.replacement_event;
+    let mut rejection_reason = request.rejection_reason;
+    let mut definition = None;
+    if let Some(event) = replacement_event.as_ref() {
+        let bindings_match = event.verify().is_ok()
+            && event.kind.as_u16() as u32 == KIND_WORKFLOW_DEF
+            && event.pubkey == agent
+            && event.content == pending.proposed_yaml
+            && event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+                .filter_map(|tag| tag.content())
+                .collect::<Vec<_>>()
+                == [pending.workflow_id.to_string()]
+            && event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+                .filter_map(|tag| tag.content())
+                .collect::<Vec<_>>()
+                == [channel_id.to_string()]
+            && event
+                .tags
+                .iter()
+                .filter(|tag| {
+                    tag.as_slice().first().map(String::as_str) == Some("expected-revision")
+                })
+                .filter_map(|tag| tag.content())
+                .collect::<Vec<_>>()
+                == [hex::encode(&pending.expected_revision)]
+            && event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("command"))
+                .filter_map(|tag| tag.content())
+                .collect::<Vec<_>>()
+                == [command_id.to_string()];
+        if !bindings_match {
+            replacement_event = None;
+            rejection_reason = Some("replacement_binding_mismatch".into());
+        } else {
+            match buzz_workflow::WorkflowEngine::parse_yaml(&event.content) {
+                Ok((def, json)) => {
+                    let authority_ok = if def.requires_elevated_authority() {
+                        let role = state
+                            .db
+                            .get_member_role(tenant.community(), channel_id, agent.as_bytes())
+                            .await
+                            .map_err(|error| {
+                                internal_error(&format!("replacement authority lookup: {error}"))
+                            })?;
+                        matches!(role.as_deref(), Some("owner") | Some("admin"))
+                    } else {
+                        true
+                    };
+                    if authority_ok {
+                        match prepare_managed_definition(
+                            def.name.clone(),
+                            def.enabled,
+                            &json,
+                            &workflow.definition,
+                            matches!(def.trigger, buzz_workflow::TriggerDef::Webhook),
+                        ) {
+                            Ok(prepared) => definition = Some(prepared),
+                            Err(reason) => {
+                                replacement_event = None;
+                                rejection_reason = Some(reason);
+                            }
+                        }
+                    } else {
+                        replacement_event = None;
+                        rejection_reason = Some("insufficient_workflow_authority".into());
+                    }
+                }
+                Err(_) => {
+                    replacement_event = None;
+                    rejection_reason = Some("invalid_workflow_yaml".into());
+                }
+            }
+        }
+    }
+
+    let status = if replacement_event.is_some() {
+        "applied"
+    } else {
+        "rejected"
+    };
+    let resulting_revision = replacement_event.as_ref().map(|event| event.id.to_hex());
+    let receipt = build_owner_command_receipt(
+        &state,
+        OwnerCommandReceiptInput {
+            command_id,
+            owner_pubkey: &pending.owner_pubkey,
+            agent_pubkey: &agent,
+            workflow_id: pending.workflow_id,
+            expected_revision: &pending.expected_revision,
+            status,
+            resulting_revision: resulting_revision.as_deref(),
+            reason: rejection_reason.as_deref(),
+        },
+    )
+    .map_err(|error| internal_error(&format!("sign owner command receipt: {error}")))?;
+    let conflict_receipt = |reason| {
+        build_owner_command_receipt(
+            &state,
+            OwnerCommandReceiptInput {
+                command_id,
+                owner_pubkey: &pending.owner_pubkey,
+                agent_pubkey: &agent,
+                workflow_id: pending.workflow_id,
+                expected_revision: &pending.expected_revision,
+                status: "rejected",
+                resulting_revision: None,
+                reason: Some(reason),
+            },
+        )
+        .map_err(|error| internal_error(&format!("sign owner command conflict receipt: {error}")))
+    };
+    let coordinate_conflict_receipt = conflict_receipt("workflow_coordinate_changed")?;
+    let revision_conflict_receipt = conflict_receipt("workflow_revision_changed")?;
+    let result = state
+        .db
+        .complete_workflow_owner_command(
+            tenant.community(),
+            command_id,
+            agent.as_bytes(),
+            replacement_event.as_ref(),
+            definition.as_ref().map(|value| value.0.as_str()),
+            definition.as_ref().map(|value| value.1.as_str()),
+            definition.as_ref().map(|value| value.2.as_slice()),
+            definition.as_ref().map(|value| value.3),
+            rejection_reason.as_deref(),
+            &receipt,
+            &coordinate_conflict_receipt,
+            &revision_conflict_receipt,
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::AccessDenied(_) => api_error(
+                StatusCode::FORBIDDEN,
+                "owner command targets a different agent",
+            ),
+            buzz_db::DbError::InvalidData(_) => {
+                api_error(StatusCode::CONFLICT, "owner command completion conflict")
+            }
+            other => internal_error(&format!("complete owner command: {other}")),
+        })?;
+
+    if result.transitioned {
+        if let Some(event) = replacement_event.as_ref() {
+            state
+                .workflow_engine
+                .invalidate_channel_workflows(tenant.community(), channel_id);
+            publish_internal_event(&state, &tenant, event, Some(channel_id)).await;
+        }
+        let published_receipt = if result.receipt_event_id == receipt.id.as_bytes() {
+            &receipt
+        } else if result.receipt_event_id == coordinate_conflict_receipt.id.as_bytes() {
+            &coordinate_conflict_receipt
+        } else {
+            &revision_conflict_receipt
+        };
+        publish_internal_event(&state, &tenant, published_receipt, Some(channel_id)).await;
+    }
+    Ok(Json(serde_json::json!({
+        "status": result.status,
+        "resulting_revision": result.resulting_revision.as_deref().map(hex::encode),
+        "reason": result.terminal_reason,
+        "receipt_event_id": hex::encode(result.receipt_event_id),
+        "transitioned": result.transitioned,
+    })))
+}
+
+pub(crate) async fn publish_internal_event(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) {
+    let topic = channel_id
+        .map(buzz_pubsub::EventTopic::Channel)
+        .unwrap_or(buzz_pubsub::EventTopic::Global);
+    state.mark_local_event(tenant.community(), &event.id);
+    if state
+        .pubsub
+        .publish_event(tenant, topic, event)
+        .await
+        .is_err()
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+    }
+    let stored = StoredEvent::new(event.clone(), channel_id);
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
+        .await;
 }
 
 /// Claim the oldest due workflow delivery for the authenticated managed agent.
@@ -492,6 +889,41 @@ mod tests {
             request_path("/workflows/id/runs", None),
             "/workflows/id/runs"
         );
+    }
+
+    #[test]
+    fn managed_webhook_update_preserves_existing_secret() {
+        let existing = serde_json::json!({
+            "name": "existing",
+            "_webhook_secret": "keep-me",
+        });
+        let (_, json, hash, _) = prepare_managed_definition(
+            "replacement".into(),
+            true,
+            r#"{"name":"replacement"}"#,
+            &existing,
+            true,
+        )
+        .unwrap();
+        let prepared: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(prepared["_webhook_secret"], "keep-me");
+        assert_eq!(hash, Sha256::digest(json.as_bytes()).to_vec());
+    }
+
+    #[test]
+    fn managed_transition_to_webhook_rejects_undisclosable_secret() {
+        let existing = serde_json::json!({"name": "existing"});
+        assert_eq!(
+            prepare_managed_definition(
+                "replacement".into(),
+                true,
+                r#"{"name":"replacement"}"#,
+                &existing,
+                true,
+            ),
+            Err("webhook_secret_unavailable".into())
+        );
+        assert!(existing.get("_webhook_secret").is_none());
     }
 
     #[test]

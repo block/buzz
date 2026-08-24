@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_OWNER_COMMAND, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1638,6 +1638,55 @@ pub fn build_workflow_delete(
     workflow_id: Uuid,
 ) -> Result<EventBuilder, SdkError> {
     build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())
+}
+
+/// Build a managed-workflow owner command (kind 46021).
+///
+/// The human owner signs this command. `agent_pubkey` is the immutable agent
+/// author of the workflow, and `expected_revision` is the exact kind:30620
+/// event being managed. Only `update` accepts `yaml_definition`.
+pub fn build_workflow_owner_command(
+    command_id: Uuid,
+    agent_pubkey: &str,
+    workflow_id: Uuid,
+    expected_revision: &str,
+    operation: crate::WorkflowOwnerOperation,
+    yaml_definition: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let agent = check_pubkey_hex(agent_pubkey, "agent pubkey")?;
+    let revision = check_hex_exact(expected_revision, 64, "expected revision")?;
+    match (operation, yaml_definition) {
+        (buzz_core::workflow_owner_command::WorkflowOwnerOperation::Update, Some(yaml))
+            if !yaml.trim().is_empty() =>
+        {
+            check_content(yaml, 64 * 1024)?
+        }
+        (buzz_core::workflow_owner_command::WorkflowOwnerOperation::Update, _) => {
+            return Err(SdkError::InvalidInput(
+                "update requires yaml_definition".into(),
+            ));
+        }
+        (_, None) => {}
+        (_, Some(_)) => {
+            return Err(SdkError::InvalidInput(
+                "only update may include yaml_definition".into(),
+            ));
+        }
+    }
+    let body = buzz_core::workflow_owner_command::WorkflowOwnerCommandBody {
+        operation,
+        yaml_definition: yaml_definition.map(str::to_owned),
+    };
+    let content = serde_json::to_string(&body)
+        .map_err(|error| SdkError::InvalidInput(format!("invalid owner command: {error}")))?;
+    let coordinate = format!("{KIND_WORKFLOW_DEF}:{agent}:{workflow_id}");
+    let tags = vec![
+        tag(&["d", &command_id.to_string()])?,
+        tag(&["a", &coordinate])?,
+        tag(&["revision", &revision])?,
+        tag(&["p", &agent])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_OWNER_COMMAND as u16), content).tags(tags))
 }
 
 /// Build a workflow trigger event (kind 46020).
@@ -4004,6 +4053,50 @@ mod tests {
     #[test]
     fn workflow_delete_rejects_bad_pubkey() {
         let err = build_workflow_delete("bad", uuid()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn workflow_owner_command_matches_core_wire_contract() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate().public_key();
+        let workflow = uuid();
+        let command_id = uuid();
+        let revision = "a".repeat(64);
+        let event = build_workflow_owner_command(
+            command_id,
+            &agent.to_hex(),
+            workflow,
+            &revision,
+            buzz_core::workflow_owner_command::WorkflowOwnerOperation::Disable,
+            None,
+        )
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+        let parsed = buzz_core::workflow_owner_command::parse_owner_command(&event).unwrap();
+        assert_eq!(parsed.command_id, command_id);
+        assert_eq!(parsed.agent_pubkey, agent);
+        assert_eq!(parsed.workflow_id, workflow);
+        assert_eq!(
+            parsed.operation,
+            buzz_core::workflow_owner_command::WorkflowOwnerOperation::Disable
+        );
+    }
+
+    #[test]
+    fn workflow_owner_command_enforces_update_body_shape() {
+        let agent = "a".repeat(64);
+        let revision = "b".repeat(64);
+        let err = build_workflow_owner_command(
+            uuid(),
+            &agent,
+            uuid(),
+            &revision,
+            buzz_core::workflow_owner_command::WorkflowOwnerOperation::Update,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 

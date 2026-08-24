@@ -3882,6 +3882,69 @@ impl Db {
         .await
     }
 
+    /// Insert or update a workflow within a caller-owned transaction.
+    #[datastore_span(name = "upsert_workflow_in_transaction", system = "postgresql")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_workflow_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        id: Uuid,
+        channel_id: Option<Uuid>,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+        definition_event_id: &[u8],
+        enabled: bool,
+    ) -> Result<()> {
+        workflow::upsert_workflow_in_transaction(
+            tx,
+            community_id,
+            id,
+            channel_id,
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+            definition_event_id,
+            enabled,
+        )
+        .await
+    }
+
+    /// Persist a signed workflow definition and executable projection in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_workflow_definition_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        event: &nostr::Event,
+        event_persistence: workflow::WorkflowDefinitionEventPersistence<'_>,
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+        enabled: bool,
+    ) -> Result<()> {
+        workflow::persist_workflow_definition_in_transaction(
+            tx,
+            community_id,
+            workflow_id,
+            channel_id,
+            owner_pubkey,
+            event,
+            event_persistence,
+            name,
+            definition_json,
+            definition_hash,
+            enabled,
+        )
+        .await
+    }
+
     /// Fetch a single workflow by ID, scoped to its community.
     #[datastore_span(name = "get_workflow", system = "postgresql")]
     pub async fn get_workflow(
@@ -4003,6 +4066,18 @@ impl Db {
         .await
     }
 
+    /// Resolve the minimal owner-management coordinate for an immutable owner.
+    #[datastore_span(name = "get_workflow_owner_target", system = "postgresql")]
+    pub async fn get_workflow_owner_target(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<workflow::WorkflowOwnerTarget> {
+        workflow::get_workflow_owner_target(&self.pool, community_id, workflow_id, owner_pubkey)
+            .await
+    }
+
     /// Update a workflow's status.
     #[datastore_span(name = "update_workflow_status", system = "postgresql")]
     pub async fn update_workflow_status(
@@ -4071,6 +4146,103 @@ impl Db {
         name: &str,
     ) -> Result<Option<workflow::WorkflowRecord>> {
         workflow::find_by_owner_and_name(&self.pool, community_id, owner_pubkey, name).await
+    }
+
+    /// List pending owner update commands addressed to one managed agent.
+    #[datastore_span(name = "list_pending_workflow_owner_commands", system = "postgresql")]
+    pub async fn list_pending_workflow_owner_commands(
+        &self,
+        community_id: CommunityId,
+        agent_pubkey: &[u8],
+        limit: i64,
+    ) -> Result<Vec<workflow::PendingWorkflowOwnerCommand>> {
+        workflow::list_pending_workflow_owner_commands(
+            &self.pool,
+            community_id,
+            agent_pubkey,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch one owner command for its authenticated target agent.
+    #[datastore_span(name = "get_workflow_owner_command", system = "postgresql")]
+    pub async fn get_workflow_owner_command(
+        &self,
+        community_id: CommunityId,
+        command_id: Uuid,
+        agent_pubkey: &[u8],
+    ) -> Result<workflow::PendingWorkflowOwnerCommand> {
+        workflow::get_workflow_owner_command(&self.pool, community_id, command_id, agent_pubkey)
+            .await
+    }
+
+    /// Verify and record one owner-authored workflow command in the caller transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admit_workflow_owner_command(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        command_id: Uuid,
+        event_id: &[u8],
+        owner_pubkey: &[u8],
+        agent_pubkey: &[u8],
+        workflow_id: Uuid,
+        expected_revision: &[u8],
+        operation: &str,
+        proposed_yaml: Option<&str>,
+        receipt_event: Option<&nostr::Event>,
+    ) -> Result<workflow::WorkflowOwnerCommandAdmission> {
+        workflow::admit_workflow_owner_command(
+            tx,
+            community_id,
+            command_id,
+            event_id,
+            owner_pubkey,
+            agent_pubkey,
+            workflow_id,
+            expected_revision,
+            operation,
+            proposed_yaml,
+            receipt_event,
+        )
+        .await
+    }
+
+    /// Atomically complete one pending owner-authored workflow update.
+    #[datastore_span(name = "complete_workflow_owner_command", system = "postgresql")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_workflow_owner_command(
+        &self,
+        community_id: CommunityId,
+        command_id: Uuid,
+        agent_pubkey: &[u8],
+        replacement_event: Option<&nostr::Event>,
+        definition_name: Option<&str>,
+        definition_json: Option<&str>,
+        definition_hash: Option<&[u8]>,
+        definition_enabled: Option<bool>,
+        rejection_reason: Option<&str>,
+        receipt_event: &nostr::Event,
+        coordinate_conflict_receipt: &nostr::Event,
+        revision_conflict_receipt: &nostr::Event,
+    ) -> Result<workflow::WorkflowOwnerCommandResult> {
+        workflow::complete_workflow_owner_command(
+            &self.pool,
+            community_id,
+            command_id,
+            agent_pubkey,
+            replacement_event,
+            definition_name,
+            definition_json,
+            definition_hash,
+            definition_enabled,
+            rejection_reason,
+            receipt_event,
+            coordinate_conflict_receipt,
+            revision_conflict_receipt,
+        )
+        .await
     }
 
     /// Create a new workflow run.

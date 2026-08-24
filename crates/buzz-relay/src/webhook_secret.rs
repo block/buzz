@@ -68,6 +68,32 @@ pub fn strip_secret(def: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Apply webhook-secret projection semantics before hashing and persistence.
+///
+/// Existing webhook workflows retain their secret. Callers that can securely
+/// return a newly minted secret may set `allow_generate`; background owner
+/// command completion must not mint an undiscoverable credential.
+pub fn prepare_definition(
+    definition: &mut serde_json::Value,
+    existing: Option<&serde_json::Value>,
+    is_webhook: bool,
+    allow_generate: bool,
+) -> Result<Option<String>, &'static str> {
+    if !is_webhook {
+        return Ok(None);
+    }
+    if let Some(secret) = existing.and_then(extract_secret) {
+        inject_secret(definition, &secret);
+        return Ok(None);
+    }
+    if !allow_generate {
+        return Err("webhook_secret_unavailable");
+    }
+    let secret = generate_webhook_secret();
+    inject_secret(definition, &secret);
+    Ok(Some(secret))
+}
+
 /// Compare `provided` against `stored` in constant time.
 ///
 /// Returns `true` only when the two strings are identical.  The XOR-fold
@@ -137,6 +163,39 @@ mod tests {
         assert!(stripped.get("_webhook_secret").is_none());
         assert_eq!(stripped.get("a").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(stripped.get("b").and_then(|v| v.as_i64()), Some(2));
+    }
+
+    #[test]
+    fn prepare_definition_preserves_existing_secret() {
+        let existing = serde_json::json!({"_webhook_secret": "keep-me"});
+        let mut replacement = serde_json::json!({"name": "replacement"});
+        assert_eq!(
+            prepare_definition(&mut replacement, Some(&existing), true, false),
+            Ok(None)
+        );
+        assert_eq!(extract_secret(&replacement).as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn prepare_definition_rejects_undeliverable_new_secret() {
+        let mut replacement = serde_json::json!({"name": "replacement"});
+        assert_eq!(
+            prepare_definition(&mut replacement, None, true, false),
+            Err("webhook_secret_unavailable")
+        );
+        assert!(extract_secret(&replacement).is_none());
+    }
+
+    #[test]
+    fn prepare_definition_generates_when_caller_can_return_secret() {
+        let mut replacement = serde_json::json!({"name": "replacement"});
+        let generated = prepare_definition(&mut replacement, None, true, true)
+            .unwrap()
+            .expect("new secret");
+        assert_eq!(
+            extract_secret(&replacement).as_deref(),
+            Some(generated.as_str())
+        );
     }
 
     #[test]

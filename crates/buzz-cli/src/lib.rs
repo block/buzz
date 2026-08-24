@@ -895,6 +895,14 @@ pub enum UsersCmd {
     },
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum WorkflowManageOperation {
+    Update,
+    Enable,
+    Disable,
+    Retire,
+}
+
 #[derive(Subcommand)]
 pub enum WorkflowsCmd {
     /// List workflows in a channel
@@ -929,6 +937,18 @@ pub enum WorkflowsCmd {
         /// Updated workflow YAML definition
         #[arg(long)]
         yaml: String,
+    },
+    /// Manage a workflow created by an agent you own
+    Manage {
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Lifecycle operation to request
+        #[arg(long, value_enum)]
+        operation: WorkflowManageOperation,
+        /// Replacement workflow YAML; required only for update
+        #[arg(long)]
+        yaml: Option<String>,
     },
     /// Delete a workflow
     Delete {
@@ -2323,7 +2343,9 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "workflows"),
-            vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
+            vec![
+                "approve", "create", "delete", "get", "list", "manage", "runs", "trigger", "update"
+            ]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
@@ -2420,7 +2442,7 @@ mod tests {
             ("social", 7),
             ("upload", 1),
             ("users", 5),
-            ("workflows", 8),
+            ("workflows", 9),
         ];
 
         let cmd = Cli::command();

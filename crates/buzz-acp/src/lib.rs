@@ -23,6 +23,7 @@ use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_AGENT_WAKE, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_WORKFLOW_DEF,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -312,6 +313,139 @@ struct ClaimedWorkflowDelivery {
     claim_expires_at: chrono::DateTime<chrono::Utc>,
     execution_trace: serde_json::Value,
     trigger_context: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct PendingWorkflowOwnerCommand {
+    command_id: Uuid,
+    event_id: String,
+    owner_pubkey: String,
+    agent_pubkey: String,
+    workflow_id: Uuid,
+    channel_id: Uuid,
+    expected_revision: String,
+    proposed_yaml: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct PendingWorkflowOwnerCompletion {
+    replacement_event: Option<nostr::Event>,
+    rejection_reason: Option<String>,
+}
+
+async fn list_pending_workflow_owner_commands(
+    rest_client: &relay::RestClient,
+) -> Vec<PendingWorkflowOwnerCommand> {
+    rest_client
+        .post_json("/workflows/owner-commands/pending", &serde_json::json!({}))
+        .await
+        .ok()
+        .and_then(|response| serde_json::from_value(response.get("commands")?.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn one_exact_tag(event: &nostr::Event, name: &str, expected: &str) -> bool {
+    let values = exact_tags(event, name);
+    values.len() == 1 && values[0].as_slice().len() == 2 && values[0].as_slice()[1] == expected
+}
+
+async fn prepare_workflow_owner_completion(
+    command: &PendingWorkflowOwnerCommand,
+    rest_client: &relay::RestClient,
+    immutable_owner: &str,
+) -> PendingWorkflowOwnerCompletion {
+    let reject = |reason: &str| PendingWorkflowOwnerCompletion {
+        replacement_event: None,
+        rejection_reason: Some(reason.to_owned()),
+    };
+    let Ok(command_event_id) = nostr::EventId::from_hex(&command.event_id) else {
+        return reject("invalid_command_event_id");
+    };
+    let Some(command_event) = query_exact_event(command_event_id, rest_client).await else {
+        return reject("command_event_unavailable");
+    };
+    let Ok(parsed) = buzz_core::workflow_owner_command::parse_owner_command(&command_event) else {
+        return reject("invalid_command_event");
+    };
+    let agent = rest_client.keys.public_key();
+    let owner_matches = nostr::PublicKey::from_hex(immutable_owner)
+        .is_ok_and(|owner| owner == command_event.pubkey);
+    if !owner_matches
+        || command.owner_pubkey != command_event.pubkey.to_hex()
+        || command.agent_pubkey != agent.to_hex()
+        || parsed.command_id != command.command_id
+        || parsed.agent_pubkey != agent
+        || parsed.recipient != agent
+        || parsed.workflow_id != command.workflow_id
+        || parsed.expected_revision.to_hex() != command.expected_revision
+        || parsed.yaml_definition.as_deref() != Some(command.proposed_yaml.as_str())
+    {
+        return reject("command_binding_mismatch");
+    }
+    let Ok(revision) = nostr::EventId::from_hex(&command.expected_revision) else {
+        return reject("invalid_expected_revision");
+    };
+    let Some(definition) = query_exact_event(revision, rest_client).await else {
+        return reject("stale_workflow_revision");
+    };
+    if definition.kind.as_u16() as u32 != KIND_WORKFLOW_DEF
+        || definition.pubkey != agent
+        || !one_exact_tag(&definition, "d", &command.workflow_id.to_string())
+        || !one_exact_tag(&definition, "h", &command.channel_id.to_string())
+    {
+        return reject("workflow_binding_mismatch");
+    }
+    if buzz_workflow::WorkflowEngine::parse_yaml(&command.proposed_yaml).is_err() {
+        return reject("invalid_workflow_yaml");
+    }
+    let tags = [
+        nostr::Tag::parse(["d", &command.workflow_id.to_string()]),
+        nostr::Tag::parse(["h", &command.channel_id.to_string()]),
+        nostr::Tag::parse(["expected-revision", &command.expected_revision]),
+        nostr::Tag::parse(["command", &command.command_id.to_string()]),
+    ];
+    let Ok(tags) = tags.into_iter().collect::<Result<Vec<_>, _>>() else {
+        return reject("invalid_replacement_binding");
+    };
+    let Ok(event) = nostr::EventBuilder::new(
+        nostr::Kind::Custom(KIND_WORKFLOW_DEF as u16),
+        command.proposed_yaml.clone(),
+    )
+    .tags(tags)
+    .sign_with_keys(&rest_client.keys) else {
+        return reject("replacement_signing_failed");
+    };
+    PendingWorkflowOwnerCompletion {
+        replacement_event: Some(event),
+        rejection_reason: None,
+    }
+}
+
+async fn reconcile_workflow_owner_completions(
+    rest_client: &relay::RestClient,
+    pending: &mut HashMap<Uuid, PendingWorkflowOwnerCompletion>,
+) {
+    let attempts = pending
+        .iter()
+        .map(|(command_id, completion)| (*command_id, completion.clone()))
+        .collect::<Vec<_>>();
+    for (command_id, completion) in attempts {
+        let path = format!("/workflows/owner-commands/{command_id}/complete");
+        match rest_client
+            .post_json(
+                &path,
+                &serde_json::to_value(&completion).unwrap_or_default(),
+            )
+            .await
+        {
+            Ok(_) => {
+                pending.remove(&command_id);
+            }
+            Err(error) => {
+                tracing::warn!(%command_id, %error, "workflow owner command completion pending reconciliation");
+            }
+        }
+    }
 }
 
 async fn claim_workflow_delivery(
@@ -3340,6 +3474,10 @@ async fn tokio_main() -> Result<()> {
     // turning successful work into a future redelivery.
     let mut pending_workflow_finalizations: HashMap<Uuid, PendingWorkflowFinalization> =
         HashMap::new();
+    // Signed owner-command terminal intents survive lost HTTP responses and are
+    // replayed verbatim until the relay returns the stored terminal result.
+    let mut pending_workflow_owner_completions: HashMap<Uuid, PendingWorkflowOwnerCompletion> =
+        HashMap::new();
     // Native steers retain durable delivery ownership on the queued event until
     // the agent acknowledges success. Results that race ahead of that ack are
     // retained so success can finish against the exact fenced turn outcome.
@@ -3643,6 +3781,27 @@ async fn tokio_main() -> Result<()> {
                 // Remaining branches don't touch pool — evaluated when pool is idle.
                 _ = workflow_delivery_poll.tick() => {
                     let _ = result_rx;
+                    reconcile_workflow_owner_completions(
+                        &ctx.rest_client,
+                        &mut pending_workflow_owner_completions,
+                    ).await;
+                    if let Some(immutable_owner) = owner_cache.get() {
+                        for command in list_pending_workflow_owner_commands(&ctx.rest_client).await {
+                            if pending_workflow_owner_completions.contains_key(&command.command_id) {
+                                continue;
+                            }
+                            let completion = prepare_workflow_owner_completion(
+                                &command,
+                                &ctx.rest_client,
+                                immutable_owner,
+                            ).await;
+                            pending_workflow_owner_completions.insert(command.command_id, completion);
+                        }
+                    }
+                    reconcile_workflow_owner_completions(
+                        &ctx.rest_client,
+                        &mut pending_workflow_owner_completions,
+                    ).await;
                     if let Some(delivery) = claim_workflow_delivery(
                         &ctx.rest_client,
                         None,

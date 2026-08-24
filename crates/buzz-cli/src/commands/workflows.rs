@@ -148,6 +148,64 @@ pub async fn cmd_update_workflow(
     Ok(())
 }
 
+fn validate_manage_args(
+    operation: crate::WorkflowManageOperation,
+    yaml: Option<&str>,
+) -> Result<buzz_core::workflow_owner_command::WorkflowOwnerOperation, CliError> {
+    use buzz_core::workflow_owner_command::WorkflowOwnerOperation;
+
+    match (operation, yaml) {
+        (crate::WorkflowManageOperation::Update, Some(_)) => Ok(WorkflowOwnerOperation::Update),
+        (crate::WorkflowManageOperation::Update, None) => Err(CliError::Usage(
+            "--yaml is required when --operation update".into(),
+        )),
+        (crate::WorkflowManageOperation::Enable, None) => Ok(WorkflowOwnerOperation::Enable),
+        (crate::WorkflowManageOperation::Disable, None) => Ok(WorkflowOwnerOperation::Disable),
+        (crate::WorkflowManageOperation::Retire, None) => Ok(WorkflowOwnerOperation::Retire),
+        (_, Some(_)) => Err(CliError::Usage(
+            "--yaml is only valid when --operation update".into(),
+        )),
+    }
+}
+
+/// Request management of a workflow created by an agent owned by this signer.
+pub async fn cmd_manage_workflow(
+    client: &BuzzClient,
+    workflow_id: &str,
+    operation: crate::WorkflowManageOperation,
+    yaml: Option<&str>,
+) -> Result<(), CliError> {
+    let wf_uuid = parse_uuid(workflow_id)?;
+    let operation = validate_manage_args(operation, yaml)?;
+    let yaml_definition = yaml.map(read_or_stdin).transpose()?;
+    let target = client
+        .get_authed(&format!("/workflows/{workflow_id}/owner-target"))
+        .await?;
+    let target: serde_json::Value = serde_json::from_str(&target)
+        .map_err(|error| CliError::Other(format!("invalid workflow owner target: {error}")))?;
+    let agent_pubkey = target
+        .get("agent_pubkey")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| CliError::Other("workflow owner target is missing its agent".into()))?;
+    let expected_revision = target
+        .get("expected_revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| CliError::Other("workflow owner target is missing its revision".into()))?;
+    let builder = buzz_sdk::build_workflow_owner_command(
+        uuid::Uuid::new_v4(),
+        agent_pubkey,
+        wf_uuid,
+        expected_revision,
+        operation,
+        yaml_definition.as_deref(),
+    )
+    .map_err(sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 /// Delete a workflow — sign and submit a kind:5 deletion event.
 pub async fn cmd_delete_workflow(client: &BuzzClient, workflow_id: &str) -> Result<(), CliError> {
     let wf_uuid = parse_uuid(workflow_id)?;
@@ -237,6 +295,11 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             workflow,
             yaml,
         } => cmd_update_workflow(client, &channel, &workflow, &yaml).await,
+        WorkflowsCmd::Manage {
+            workflow,
+            operation,
+            yaml,
+        } => cmd_manage_workflow(client, &workflow, operation, yaml.as_deref()).await,
         WorkflowsCmd::Delete { workflow } => cmd_delete_workflow(client, &workflow).await,
         WorkflowsCmd::Trigger { workflow, inputs } => {
             cmd_trigger_workflow(client, &workflow, inputs.as_deref()).await
@@ -252,5 +315,49 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             // approved is already a bool — no parse_bool_flag needed
             cmd_approve_step(client, &token, approved, note.as_deref()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod manage_tests {
+    use super::*;
+
+    #[test]
+    fn update_requires_yaml_before_network_submission() {
+        let error = validate_manage_args(crate::WorkflowManageOperation::Update, None).unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn non_update_rejects_yaml_before_network_submission() {
+        let error = validate_manage_args(
+            crate::WorkflowManageOperation::Disable,
+            Some("name: ignored"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn supported_manage_shapes_map_to_wire_operations() {
+        use buzz_core::workflow_owner_command::WorkflowOwnerOperation;
+
+        assert_eq!(
+            validate_manage_args(crate::WorkflowManageOperation::Update, Some("name: test"))
+                .unwrap(),
+            WorkflowOwnerOperation::Update
+        );
+        assert_eq!(
+            validate_manage_args(crate::WorkflowManageOperation::Enable, None).unwrap(),
+            WorkflowOwnerOperation::Enable
+        );
+        assert_eq!(
+            validate_manage_args(crate::WorkflowManageOperation::Disable, None).unwrap(),
+            WorkflowOwnerOperation::Disable
+        );
+        assert_eq!(
+            validate_manage_args(crate::WorkflowManageOperation::Retire, None).unwrap(),
+            WorkflowOwnerOperation::Retire
+        );
     }
 }
