@@ -53,6 +53,70 @@ void runProfileEditMotionAndAccessibilityTests() {
     );
   });
 
+  testWidgets(
+    'keeps the multiline text editor usable with large text and the keyboard',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(320, 568);
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      addTearDown(tester.view.reset);
+      final notifier = _FakeProfileNotifier();
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [profileProvider.overrideWith(() => notifier)],
+          child: const ProfileEditPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final descriptionRow = find.byKey(
+        const ValueKey('profile-description-row'),
+      );
+      await tester.ensureVisible(descriptionRow);
+      await tester.pumpAndSettle();
+      await tester.tap(descriptionRow);
+      await tester.pumpAndSettle();
+
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+
+      expect(
+        MediaQuery.textScalerOf(
+          tester.element(find.byKey(const ValueKey('profile-field-input'))),
+        ).scale(10),
+        20,
+      );
+      expect(
+        MediaQuery.viewInsetsOf(
+          tester.element(find.byKey(const ValueKey('profile-field-input'))),
+        ).bottom,
+        300,
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const ValueKey('profile-field-scroll-view')),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('profile-field-input')),
+        'Making collaboration feel effortless.',
+      );
+      await tester.pump();
+      final save = find.byKey(const ValueKey('profile-field-save'));
+      await tester.ensureVisible(save);
+      await tester.pumpAndSettle();
+      expect(save.hitTestable(), findsOneWidget);
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+      expect(notifier.savedDescriptions, [
+        'Making collaboration feel effortless.',
+      ]);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets('photo preparation errors are accessibility live regions', (
     tester,
   ) async {

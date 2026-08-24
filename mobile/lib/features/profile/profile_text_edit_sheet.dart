@@ -106,52 +106,55 @@ class ProfileTextEditSheet extends HookWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           BuzzSheetHeader(title: title, trailing: closeButton),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                Grid.gutter,
-                Grid.xxs,
-                Grid.gutter,
-                MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    key: const ValueKey('profile-field-input'),
-                    controller: controller,
-                    autofocus: true,
-                    enabled: !isSaving.value,
-                    minLines: multiline ? 4 : 1,
-                    maxLines: multiline ? 6 : 1,
-                    textCapitalization: TextCapitalization.sentences,
-                    textInputAction: multiline
-                        ? TextInputAction.newline
-                        : TextInputAction.done,
-                    onSubmitted: multiline ? null : (_) => unawaited(save()),
-                    decoration: InputDecoration(hintText: hintText),
-                  ),
-                  if (error.value != null) ...[
-                    const SizedBox(height: Grid.xxs),
-                    Semantics(
-                      liveRegion: true,
-                      child: Text(
-                        error.value!,
-                        style: context.textTheme.bodySmall?.copyWith(
-                          color: context.colors.error,
+          Flexible(
+            child: SafeArea(
+              top: false,
+              child: SingleChildScrollView(
+                key: const ValueKey('profile-field-scroll-view'),
+                padding: EdgeInsets.fromLTRB(
+                  Grid.gutter,
+                  Grid.xxs,
+                  Grid.gutter,
+                  MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      key: const ValueKey('profile-field-input'),
+                      controller: controller,
+                      autofocus: true,
+                      enabled: !isSaving.value,
+                      minLines: multiline ? 4 : 1,
+                      maxLines: multiline ? 6 : 1,
+                      textCapitalization: TextCapitalization.sentences,
+                      textInputAction: multiline
+                          ? TextInputAction.newline
+                          : TextInputAction.done,
+                      onSubmitted: multiline ? null : (_) => unawaited(save()),
+                      decoration: InputDecoration(hintText: hintText),
+                    ),
+                    if (error.value != null) ...[
+                      const SizedBox(height: Grid.xxs),
+                      Semantics(
+                        liveRegion: true,
+                        child: Text(
+                          error.value!,
+                          style: context.textTheme.bodySmall?.copyWith(
+                            color: context.colors.error,
+                          ),
                         ),
                       ),
+                    ],
+                    const SizedBox(height: Grid.xs),
+                    FilledButton(
+                      key: const ValueKey('profile-field-save'),
+                      onPressed: hasChanges && !isSaving.value ? save : null,
+                      child: Text(isSaving.value ? 'Saving…' : 'Save'),
                     ),
                   ],
-                  const SizedBox(height: Grid.xs),
-                  FilledButton(
-                    key: const ValueKey('profile-field-save'),
-                    onPressed: hasChanges && !isSaving.value ? save : null,
-                    child: Text(isSaving.value ? 'Saving…' : 'Save'),
-                  ),
-                ],
+                ),
               ),
             ),
           ),
