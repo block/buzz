@@ -28,6 +28,32 @@
 #[cfg(target_os = "macos")]
 use tauri::Manager;
 
+/// Match the opaque native window backing to the active web theme.
+///
+/// A sliver of the NSWindow backing can be visible at the top and bottom edge
+/// while WebKit and the native frame are composited. Keeping that backing
+/// opaque preserves the fast compositor path; matching its color prevents the
+/// sliver from appearing as a light or dark line against the web surface.
+#[tauri::command]
+pub fn set_window_backing_color(
+    #[allow(unused_variables)] red: u8,
+    #[allow(unused_variables)] green: u8,
+    #[allow(unused_variables)] blue: u8,
+    #[allow(unused_variables)] app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let window = app_handle
+            .get_webview_window("main")
+            .ok_or_else(|| "main window not found".to_string())?;
+        window
+            .set_background_color(Some(tauri::window::Color(red, green, blue, 255)))
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 /// Apply or clear macOS window vibrancy for the main window.
 ///
 /// `material` accepts the common `NSVisualEffectMaterial` names

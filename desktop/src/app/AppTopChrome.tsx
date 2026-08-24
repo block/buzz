@@ -61,7 +61,6 @@ export function AppTopChrome({
 }: AppTopChromeProps) {
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
-  const sidebar = useOptionalSidebar();
   // On macOS the traffic-light buttons overlay the chrome (see
   // `trafficLightPosition` in `tauri.conf.json`), so the nav row clears their
   // x-position. When the community rail is present it already occupies the far
@@ -131,21 +130,7 @@ export function AppTopChrome({
         } as React.CSSProperties
       }
     >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-y-0 right-0 bg-background"
-        data-buzz-content-backdrop
-        data-testid="app-top-chrome-content-background"
-        style={{
-          left: sidebar?.state === "expanded" ? "var(--sidebar-width)" : "0px",
-        }}
-      />
-      <div
-        className={cn(
-          "relative z-10 flex items-center gap-0.5",
-          navRowAlignmentClass,
-        )}
-      >
+      <div className={cn("flex items-center gap-0.5", navRowAlignmentClass)}>
         <TopChromeSidebarTrigger />
         <Button
           aria-label="Go back"
@@ -171,10 +156,7 @@ export function AppTopChrome({
         </Button>
       </div>
       <div
-        className={cn(
-          "relative z-10 flex min-w-0 flex-1 items-center",
-          navRowAlignmentClass,
-        )}
+        className={cn("flex min-w-0 flex-1 items-center", navRowAlignmentClass)}
         data-tauri-drag-region
         id="app-top-chrome-content"
       />

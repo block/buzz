@@ -221,10 +221,9 @@
  * lives in Tailwind's `utilities` layer, and unlayered declarations win over
  * any layered ones, so this reliably overrides it without an `!important`.
  *
- * The gradient is painted once on the full app surface. Sidebar chrome stays
- * transparent so the sidebar and rail reveal the same continuous ramp. Main
- * content gutters use the content background so the gradient cannot read as a
- * rectangular window-edge band. Keeping one non-fixed background avoids
+ * The gradient is painted once on the full app surface. Child chrome canvases
+ * stay transparent so the sidebar, rail, top chrome, inset margin, and Settings
+ * all reveal the same continuous ramp. Keeping one non-fixed background avoids
  * WKWebView's stale fixed-background raster when the app changes appearance
  * without a page reload. The portaled mobile sidebar is the sole separate
  * paint because it lives outside the app surface.
@@ -314,11 +313,6 @@
   background-color: hsl(var(--background));
 }
 
-:root[data-buzz-sidebar].dark [data-buzz-content-backdrop] {
-  --background: var(--buzz-content-dark);
-  background-color: hsl(var(--background));
-}
-
 :root[data-buzz-sidebar] .buzz-huddle-app-surface {
   background-color: transparent;
   background-image: none;
@@ -397,6 +391,7 @@
 /* All in-shell chrome reveals the single gradient painted above. */
 :root[data-buzz-sidebar] .group\/sidebar-wrapper,
 :root[data-buzz-sidebar] [data-testid="app-sidebar"],
+:root[data-buzz-sidebar] [data-buzz-glass-inset],
 :root[data-buzz-sidebar] [data-buzz-glass-footer-wrap],
 :root[data-buzz-sidebar]
   .group\/sidebar-wrapper
@@ -845,6 +840,7 @@
 :root[data-glass-background] .group\/sidebar-wrapper,
 :root[data-glass-background] [data-testid="app-sidebar"],
 :root[data-glass-background] [data-testid="settings-sidebar"],
+:root[data-glass-background] [data-buzz-glass-inset],
 :root[data-glass-background] [data-buzz-glass-footer-wrap],
 :root[data-glass-background]
   .group\/sidebar-wrapper
@@ -870,6 +866,7 @@
 :root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-testid="sidebar-pinned-header"],
+:root[data-glass-background] [data-buzz-glass-inset],
 :root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-buzz-glass-footer-wrap],

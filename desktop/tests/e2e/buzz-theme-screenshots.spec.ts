@@ -268,29 +268,6 @@ async function expectBuzzContentShadow(page: Page, mode: "light" | "dark") {
   }
 }
 
-async function expectContentEdgeBackdrops(page: Page, mode: "light" | "dark") {
-  const expectedColor =
-    mode === "light" ? "rgb(255, 255, 255)" : "rgb(26, 26, 26)";
-  const topBackdrop = page.getByTestId("app-top-chrome-content-background");
-  const contentBackdrop = page.locator(
-    "[data-buzz-shadow-viewport][data-buzz-content-backdrop]",
-  );
-
-  await expect(topBackdrop).toHaveCSS("background-color", expectedColor);
-  await expect(contentBackdrop).toHaveCSS("background-color", expectedColor);
-
-  const sidebarBox = await page.getByTestId("app-sidebar").boundingBox();
-  const topBackdropBox = await topBackdrop.boundingBox();
-  expect(sidebarBox).not.toBeNull();
-  expect(topBackdropBox).not.toBeNull();
-  if (!sidebarBox || !topBackdropBox) {
-    throw new Error("App chrome edge geometry is missing");
-  }
-  expect(
-    Math.abs(topBackdropBox.x - (sidebarBox.x + sidebarBox.width)),
-  ).toBeLessThanOrEqual(0.5);
-}
-
 async function expectBuzzGradientPaint(
   page: Page,
   mode: "light" | "dark",
@@ -415,7 +392,6 @@ test("buzz light sidebar gradient", async ({ page }) => {
   await expectBuzzGradientPaint(page, "light");
   await expectBuzzSidebarPalette(page, "light");
   await expectBuzzContentShadow(page, "light");
-  await expectContentEdgeBackdrops(page, "light");
   await expectIconlessSectionTitleAligned(page, "stream-list");
   await expectIconlessSectionTitleAligned(page, "dm-list");
   await waitForAnimations(page);
@@ -431,7 +407,6 @@ test("buzz dark sidebar gradient", async ({ page }) => {
   await expectBuzzGradientPaint(page, "dark");
   await expectBuzzSidebarPalette(page, "dark");
   await expectBuzzContentShadow(page, "dark");
-  await expectContentEdgeBackdrops(page, "dark");
   await expectIconlessSectionTitleAligned(page, "stream-list");
   await expectIconlessSectionTitleAligned(page, "dm-list");
   await expect(page.locator("[data-buzz-content-surface]")).toHaveCSS(
@@ -443,6 +418,37 @@ test("buzz dark sidebar gradient", async ({ page }) => {
     .getByTestId("app-sidebar")
     .screenshot({ path: `${SHOTS}/02-buzz-dark-sidebar.png` });
 });
+
+for (const { theme, color } of [
+  { theme: "buzz", color: { red: 246, green: 246, blue: 246 } },
+  { theme: "buzz-dark", color: { red: 23, green: 26, blue: 29 } },
+] as const) {
+  test(`macOS window backing follows ${theme}`, async ({ page }) => {
+    await seedTheme(page, theme);
+    await page.addInitScript(() => {
+      (window as typeof window & { isTauri?: boolean }).isTauri = true;
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "MacIntel",
+      });
+    });
+    await installMockBridge(page);
+    await openChannel(page);
+
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).find(
+            (entry) => entry.command === "set_window_backing_color",
+          ),
+        ),
+      )
+      .toMatchObject({
+        command: "set_window_backing_color",
+        payload: color,
+      });
+  });
+}
 
 test("custom section icon and name align with channel columns", async ({
   page,
@@ -1234,10 +1240,6 @@ test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
   }
   expect(Math.abs(selectedLabelBox.width - unselectedLabelBox.width)).toBe(0);
   await expectBuzzSettingsPalette(page, "light");
-  await expect(page.getByTestId("settings-view")).toHaveCSS(
-    "background-color",
-    "rgb(255, 255, 255)",
-  );
   const activeRow = page.getByTestId("settings-nav-appearance");
   await expect(activeRow).toHaveAttribute("data-active", "true");
   await waitForAnimations(page);
@@ -1254,10 +1256,6 @@ test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
   await expect(sidebar).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("settings-nav-appearance").click();
   await expectBuzzSettingsPalette(page, "dark");
-  await expect(page.getByTestId("settings-view")).toHaveCSS(
-    "background-color",
-    "rgb(26, 26, 26)",
-  );
   await expect(page.getByTestId("settings-content-surface")).toHaveCSS(
     "background-color",
     "rgb(26, 26, 26)",
