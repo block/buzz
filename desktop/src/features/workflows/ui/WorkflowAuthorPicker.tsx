@@ -17,6 +17,7 @@ import {
   enrichAuthorCandidates,
   filterAuthorCandidatePage,
   mergeAuthorCandidateSources,
+  nextWorkflowAuthorIndex,
   parseDirectAuthorInput,
   type WorkflowAuthorCandidate,
 } from "./workflowAuthorCandidates";
@@ -132,14 +133,9 @@ export function WorkflowAuthorPicker({
     directoryQuery.isError;
 
   function moveActive(delta: number) {
-    if (visibleCandidates.length === 0) return;
-    setActiveIndex((current) => {
-      const startingIndex = current ?? -1;
-      return (
-        (startingIndex + delta + visibleCandidates.length) %
-        visibleCandidates.length
-      );
-    });
+    setActiveIndex((current) =>
+      nextWorkflowAuthorIndex(current, delta, visibleCandidates.length),
+    );
   }
 
   return (

@@ -6,6 +6,7 @@ import {
   enrichAuthorCandidates,
   filterAuthorCandidatePage,
   mergeAuthorCandidateSources,
+  nextWorkflowAuthorIndex,
   normalizeAuthorPubkey,
   parseDirectAuthorInput,
 } from "./workflowAuthorCandidates.ts";
@@ -50,6 +51,14 @@ test("merges valid candidates with stable first-wins source priority", () => {
     ],
   );
   assert.equal(merged[1].isAgent, true);
+});
+
+test("wraps author grid movement without producing negative indices", () => {
+  assert.equal(nextWorkflowAuthorIndex(null, -2, 2), 1);
+  assert.equal(nextWorkflowAuthorIndex(null, -3, 3), 2);
+  assert.equal(nextWorkflowAuthorIndex(1, -2, 2), 1);
+  assert.equal(nextWorkflowAuthorIndex(null, 2, 2), 1);
+  assert.equal(nextWorkflowAuthorIndex(null, 1, 0), null);
 });
 
 test("bounds filtered candidates while pinning direct input", () => {

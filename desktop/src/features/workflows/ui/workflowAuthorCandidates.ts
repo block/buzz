@@ -61,6 +61,16 @@ export function mergeAuthorCandidateSources(
   return merged;
 }
 
+export function nextWorkflowAuthorIndex(
+  current: number | null,
+  delta: number,
+  length: number,
+): number | null {
+  if (length === 0) return null;
+  const startingIndex = current ?? -1;
+  return (((startingIndex + delta) % length) + length) % length;
+}
+
 export function filterAuthorCandidatePage(
   candidates: readonly WorkflowAuthorCandidate[],
   query: string,
