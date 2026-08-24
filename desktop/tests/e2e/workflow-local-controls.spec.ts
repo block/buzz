@@ -428,7 +428,7 @@ test("Escape closes a filter picker before its inspector", async ({ page }) => {
 
     const dialog = page.getByRole("dialog", { name: "Create workflow" });
     const inspector = dialog.getByTestId("workflow-node-inspector");
-    await dialog.getByRole("button", { name: "Author pubkey" }).click();
+    await dialog.getByText("Author", { exact: true }).locator("..").click();
 
     const picker = dialog.getByTestId("workflow-author-picker");
     const search = dialog.getByRole("combobox", {
@@ -458,7 +458,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await dialog.getByRole("button", { name: /^Trigger:/ }).click();
   await openTriggerInspector(dialog);
 
-  await dialog.getByRole("button", { name: "Author pubkey" }).click();
+  await dialog.getByText("Author", { exact: true }).locator("..").click();
   const authorResults = dialog.getByTestId("workflow-author-picker-results");
   await expect
     .poll(() =>
@@ -508,7 +508,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
-  await dialog.getByRole("button", { name: "Author pubkey" }).click();
+  await dialog.getByText("Author", { exact: true }).locator("..").click();
   const correctedAuthorSearch = dialog.getByRole("combobox", {
     name: "Search authors or paste a public key",
   });
@@ -522,7 +522,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
     .getByRole("button", { name: "is not", exact: true })
     .click();
 
-  await dialog.getByRole("button", { name: "Message event ID" }).click();
+  await dialog.getByText("Message", { exact: true }).locator("..").click();
   const messageSearch = dialog.getByRole("combobox", {
     name: "Search messages or paste a message ID",
   });
@@ -546,11 +546,11 @@ test("round-trips manual author and reaction message IDs through save and reopen
 
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
-  await reopened.getByRole("button", { name: "Author pubkey" }).click();
+  await reopened.getByText("Author", { exact: true }).locator("..").click();
   await expect(
     reopened.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
   ).toHaveAttribute("aria-selected", "true");
-  await reopened.getByRole("button", { name: "Message event ID" }).click();
+  await reopened.getByText("Message", { exact: true }).locator("..").click();
   await expect(
     reopened.getByRole("option", {
       name: new RegExp(messageId.slice(0, 12)),
@@ -584,9 +584,10 @@ test("toggles selected author and message filters while preserving sibling condi
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
   const authorField = dialog
-    .getByRole("button", { name: "Author pubkey" })
+    .getByText("Author", { exact: true })
+    .locator("..")
     .locator("..");
-  await authorField.getByRole("button", { name: "Author pubkey" }).click();
+  await authorField.getByText("Author", { exact: true }).locator("..").click();
   const authorOption = dialog.getByRole("option", {
     name: new RegExp(author.slice(0, 8)),
   });
@@ -614,9 +615,13 @@ test("toggles selected author and message filters while preserving sibling condi
   await expect(authorSearch).toHaveValue(replacementAuthor);
 
   const messageField = dialog
-    .getByRole("button", { name: "Message event ID" })
+    .getByText("Message", { exact: true })
+    .locator("..")
     .locator("..");
-  await messageField.getByRole("button", { name: "Message event ID" }).click();
+  await messageField
+    .getByText("Message", { exact: true })
+    .locator("..")
+    .click();
   const messageSearch = dialog.getByRole("combobox", {
     name: "Search messages or paste a message ID",
   });
