@@ -4,7 +4,6 @@ import {
   useChannelLinks,
   type ChannelSuggestion,
 } from "@/features/messages/lib/useChannelLinks";
-import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
@@ -38,10 +37,6 @@ import {
   useKeepMentionedAgentsPinned,
 } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import {
-  hasMentionClipboardHtml,
-  normalizeMentionClipboardHtml,
-} from "@/features/messages/lib/normalizeMentionClipboard";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
@@ -51,7 +46,6 @@ import {
 import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
-import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
@@ -68,6 +62,7 @@ import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
 import { useComposerMentionPicker } from "./useComposerMentionPicker";
 import { useAutoPinMentionedAgents } from "./useAutoPinMentionedAgents";
 import { useComposerContentState } from "./useComposerContentState";
+import { useComposerPasteHandler } from "./useComposerPasteHandler";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
@@ -748,74 +743,12 @@ function MessageComposerImpl({
       onCancelEdit,
     ],
   );
-  // ── Media paste + ⌘K link shortcut via Tiptap editorProps ──────────
-  const uploadFileRef = React.useRef(media.uploadFile);
-  uploadFileRef.current = media.uploadFile;
-  React.useEffect(() => {
-    if (!richText.editor) return;
-    richText.editor.setOptions({
-      editorProps: {
-        ...richText.editor.options.editorProps,
-        handlePaste: (_view, event) => {
-          // --- File paste ---
-          // Any actual file (image, video, document, …) pastes as an
-          // attachment. String/text items have kind "string", so plain-text
-          // and code-block paste fall through to the handlers below.
-          const items = Array.from(event.clipboardData?.items ?? []);
-          const mediaItem = items.find((item) => item.kind === "file");
-          if (mediaItem) {
-            const file = mediaItem.getAsFile();
-            if (file) {
-              void uploadFileRef.current(file);
-            }
-            return true;
-          }
-          // --- Buzz code-block paste ---
-          // The code block copy button writes a small Buzz marker alongside
-          // plain text. Use it to paste back as a literal code block so Markdown
-          // parsing cannot reshape indentation, fence markers, or headings.
-          const codeBlockText = getBuzzCodeBlockClipboardText(
-            event.clipboardData,
-          );
-          if (codeBlockText !== null) {
-            event.preventDefault();
-            richText.editor
-              ?.chain()
-              .focus()
-              .insertContent([
-                {
-                  type: "codeBlock",
-                  content:
-                    codeBlockText.length > 0
-                      ? [{ type: "text", text: codeBlockText }]
-                      : [],
-                },
-                { type: "paragraph" },
-              ])
-              .run();
-            scrollComposerToBottom();
-            return true;
-          }
-          // Restore Buzz snapshots before normal styled-HTML normalization.
-          if (handleAgentSnapshotPaste(event, media.setPendingImeta))
-            return true;
-          // Strip mention/channel wrappers that Tiptap would misread as bold.
-          const html = event.clipboardData?.getData("text/html");
-          if (html && hasMentionClipboardHtml(html)) {
-            const cleanHtml = normalizeMentionClipboardHtml(html);
-            event.preventDefault();
-            _view.pasteHTML(cleanHtml);
-            return true;
-          }
-          const plainText = event.clipboardData?.getData("text/plain") ?? "";
-          if (plainText.includes("\n")) {
-            scrollComposerToBottom();
-          }
-          return false;
-        },
-      },
-    });
-  }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
+  useComposerPasteHandler({
+    editor: richText.editor,
+    scrollToBottom: scrollComposerToBottom,
+    setPendingImeta: media.setPendingImeta,
+    uploadFile: media.uploadFile,
+  });
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled =
     composerDisabled ||

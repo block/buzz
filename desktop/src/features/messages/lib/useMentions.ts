@@ -37,6 +37,8 @@ import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { channelMemberPubkeySet } from "@/shared/lib/rosterDerivations";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
+import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
+import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
@@ -49,10 +51,7 @@ import {
   type MentionPickerMode,
   useMentionSelection,
 } from "./useMentionSelection";
-import {
-  pickDefaultAgentCandidate,
-  rankMentionCandidates,
-} from "./mentionRanking";
+import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   appendUniqueName,
@@ -64,8 +63,8 @@ import {
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
-const MENTION_DEBOUNCE_MS = 120;
-const MENTION_SUGGESTION_LIMIT = 50;
+const MENTION_DEBOUNCE_MS = 120,
+  MENTION_SUGGESTION_LIMIT = 50;
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
   recentMentionPubkeys?: readonly string[];
@@ -176,20 +175,9 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const activeAgentPubkeys = React.useMemo(
-    () =>
-      new Set([
-        ...(managedAgentsQuery.data ?? [])
-          .filter(
-            (agent) =>
-              agent.status === "running" || agent.status === "deployed",
-          )
-          .map((agent) => normalizePubkey(agent.pubkey)),
-        ...(relayAgentsQuery.data ?? [])
-          .filter((agent) => agent.status !== "offline")
-          .map((agent) => normalizePubkey(agent.pubkey)),
-      ]),
-    [managedAgentsQuery.data, relayAgentsQuery.data],
+  const activeAgentPubkeys = useActiveAgentPubkeys(
+    managedAgentsQuery.data,
+    relayAgentsQuery.data,
   );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
@@ -561,33 +549,16 @@ export function useMentions(
     ownerProfilesQuery.data?.profiles,
     profiles,
   ]);
-  const getDefaultAgentSuggestion =
-    React.useCallback((): MentionSuggestion | null => {
-      const bestCandidate = pickDefaultAgentCandidate(
-        mentionCandidates,
-        activePersonaIds,
-        options?.recentMentionPubkeys,
-      );
-      if (!bestCandidate) return null;
-      return mapMentionCandidateToSuggestion({
-        agentProvenanceReady: agentDirectoriesReady,
-        candidate: bestCandidate,
-        label: mentionCandidateLabel(bestCandidate),
-        channelType: options?.channelType,
-        currentPubkey,
-        ownerProfiles: ownerProfilesQuery.data?.profiles,
-        profiles,
-      });
-    }, [
-      activePersonaIds,
-      agentDirectoriesReady,
-      currentPubkey,
-      mentionCandidates,
-      options?.channelType,
-      options?.recentMentionPubkeys,
-      ownerProfilesQuery.data?.profiles,
-      profiles,
-    ]);
+  const getDefaultAgentSuggestion = useDefaultAgentSuggestion({
+    activePersonaIds,
+    agentProvenanceReady: agentDirectoriesReady,
+    candidates: mentionCandidates,
+    channelType: options?.channelType,
+    currentPubkey,
+    ownerProfiles: ownerProfilesQuery.data?.profiles,
+    profiles,
+    recentMentionPubkeys: options?.recentMentionPubkeys,
+  });
   const fetchMoreSuggestions = React.useCallback(() => {
     if (userSearchQuery.hasNextPage && !userSearchQuery.isFetchingNextPage) {
       void userSearchQuery.fetchNextPage();
