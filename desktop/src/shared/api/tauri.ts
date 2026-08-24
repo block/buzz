@@ -470,6 +470,13 @@ export async function getEventById(eventId: string): Promise<RelayEvent> {
   return JSON.parse(eventJson) as RelayEvent;
 }
 
+export async function getEventsByIds(
+  eventIds: string[],
+): Promise<RelayEvent[]> {
+  if (eventIds.length === 0) return [];
+  return invokeTauri<RelayEvent[]>("get_events", { eventIds });
+}
+
 type RawThreadCursor = {
   created_at: number;
   event_id: string;

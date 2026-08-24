@@ -13585,6 +13585,15 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetEvent>[0],
           activeConfig,
         );
+      case "get_events":
+        return Promise.all(
+          (payload as { eventIds: string[] }).eventIds.map(
+            async (eventId) =>
+              JSON.parse(
+                await handleGetEvent({ eventId }, activeConfig),
+              ) as RelayEvent,
+          ),
+        );
       case "sign_event":
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
           content: (payload as { content: string }).content,

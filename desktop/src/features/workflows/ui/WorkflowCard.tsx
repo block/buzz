@@ -28,12 +28,16 @@ import {
   getWorkflowTriggerType,
 } from "./workflowDefinition";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
-import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation";
+import type { WorkflowCardAuthorPresentation } from "./useWorkflowListAuthorPresentations";
+import type { WorkflowMessagePresentation } from "./useWorkflowListMessagePresentations";
+import { workflowTriggerDescription } from "./workflowTriggerDescription";
 
 type WorkflowCardProps = {
   workflow: Workflow;
+  authorPresentation?: WorkflowCardAuthorPresentation;
   channelName?: string;
   isTogglingEnabled?: boolean;
+  messagePresentation?: WorkflowMessagePresentation;
   onView: (workflow: Workflow) => void;
   onTrigger: (workflowId: string) => void;
   onToggleEnabled: (workflow: Workflow) => void;
@@ -191,8 +195,10 @@ function ActionTileStack({
 
 export function WorkflowCard({
   workflow,
+  authorPresentation,
   channelName,
   isTogglingEnabled = false,
+  messagePresentation,
   onView,
   onTrigger,
   onToggleEnabled,
@@ -204,13 +210,14 @@ export function WorkflowCard({
     React.useState(0);
   const isEnabled = getWorkflowEnabled(workflow.definition);
   const configuredTrigger = getWorkflowTriggerConfig(workflow.definition);
-  const triggerPresentation = useWorkflowTriggerPresentation(
-    configuredTrigger ?? { on: "message_posted" },
-    workflow.channelId,
-  );
   const cardLabel = getWorkflowCardLabel(workflow.definition, {
     triggerDescription: configuredTrigger
-      ? triggerPresentation.description
+      ? workflowTriggerDescription(configuredTrigger, {
+          authorLabel: authorPresentation?.label ?? undefined,
+          authorLoading: authorPresentation?.loading,
+          messageLabel: messagePresentation?.messageLabel ?? undefined,
+          messageLoading: messagePresentation?.messageLoading,
+        })
       : undefined,
   });
   const triggerType = getWorkflowTriggerType(workflow.definition);
