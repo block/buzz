@@ -1,5 +1,7 @@
 part of '../animated_avatar_capture.dart';
 
+enum _AnimatedReviewSection { person, color, poster }
+
 class _RepositionablePreviewSemantics extends StatelessWidget {
   const _RepositionablePreviewSemantics({
     required this.offset,

@@ -35,8 +35,6 @@ const _outputSize = 256;
 const _mobileDefaultPersonScale = 1.15;
 const _animatedReviewRailHeight = 88.0;
 
-enum _AnimatedReviewSection { person, color, poster }
-
 /// Records and prepares a short camera animation for a profile avatar.
 class AnimatedAvatarCapture extends HookConsumerWidget {
   /// Creates an animated-avatar capture and review surface.
