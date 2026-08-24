@@ -1161,6 +1161,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-object-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "rust-s3",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [

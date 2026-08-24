@@ -1,0 +1,21 @@
+[package]
+name = "buzz-object-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-neutral object storage seam shared by Buzz media and Git-on-object-storage"
+
+[dependencies]
+async-trait = "0.1"
+axum = { workspace = true }
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
