@@ -19,18 +19,21 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/shared/ui/dialog";
 
 type AgentHandoffDialogProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name">;
   history: string;
   initialMode?: "send" | "received";
+  trigger?: React.ReactNode;
 };
 
 export function AgentHandoffDialog({
   agent,
   history,
   initialMode = "send",
+  trigger,
 }: AgentHandoffDialogProps) {
   const [open, setOpen] = React.useState(false);
   const [mode, setMode] = React.useState<"send" | "received">(initialMode);
@@ -95,34 +98,40 @@ export function AgentHandoffDialog({
   return (
     <>
       <div className="flex items-center gap-1">
-        <Button
-          aria-label={
-            initialMode === "received"
-              ? "View agent handoff history"
-              : "Send agent handoff"
-          }
-          className="h-8 gap-1.5 px-2 text-xs"
-          onClick={openDialog}
-          size="sm"
-          variant="outline"
-        >
-          {initialMode === "received" ? (
-            <BookOpen className="h-3.5 w-3.5" />
-          ) : (
-            <Send className="h-3.5 w-3.5" />
-          )}
-          {initialMode === "received" ? "History" : "Handoff"}
-        </Button>
-        <Button
-          aria-label="View received agent handoffs"
-          className="h-8 w-8 p-0"
-          onClick={openReceived}
-          size="sm"
-          title="View received handoffs"
-          variant="ghost"
-        >
-          <BookOpen className="h-4 w-4" />
-        </Button>
+        {trigger ? (
+          <DialogTrigger asChild>{trigger}</DialogTrigger>
+        ) : (
+          <>
+            <Button
+              aria-label={
+                initialMode === "received"
+                  ? "View agent handoff history"
+                  : "Send agent handoff"
+              }
+              className="h-8 gap-1.5 px-2 text-xs"
+              onClick={openDialog}
+              size="sm"
+              variant="outline"
+            >
+              {initialMode === "received" ? (
+                <BookOpen className="h-3.5 w-3.5" />
+              ) : (
+                <Send className="h-3.5 w-3.5" />
+              )}
+              {initialMode === "received" ? "History" : "Handoff"}
+            </Button>
+            <Button
+              aria-label="View received agent handoffs"
+              className="h-8 w-8 p-0"
+              onClick={openReceived}
+              size="sm"
+              title="View received handoffs"
+              variant="ghost"
+            >
+              <BookOpen className="h-4 w-4" />
+            </Button>
+          </>
+        )}
       </div>
 
       <Dialog onOpenChange={setOpen} open={open}>
