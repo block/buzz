@@ -19,7 +19,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/shared/ui/dialog";
 
 type AgentHandoffDialogProps = {
@@ -99,7 +98,10 @@ export function AgentHandoffDialog({
     <>
       <div className="flex items-center gap-1">
         {trigger ? (
-          <DialogTrigger asChild>{trigger}</DialogTrigger>
+          React.cloneElement(
+            trigger as React.ReactElement<{ onSelect?: () => void }>,
+            { onSelect: openDialog },
+          )
         ) : (
           <>
             <Button
