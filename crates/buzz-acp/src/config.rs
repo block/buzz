@@ -503,6 +503,13 @@ pub struct CliArgs {
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
+
+    /// Path to the durable session-binding store (SQLite). When unset, session
+    /// bindings and processed-event dedupe are in-memory only and do not survive
+    /// restarts. The store holds IDs and timestamps only — never prompts, keys,
+    /// or message content.
+    #[arg(long = "session-store", env = "BUZZ_ACP_SESSION_STORE")]
+    pub session_store_path: Option<PathBuf>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -590,6 +597,9 @@ pub struct Config {
     /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
     /// Only meaningful when `lazy_pool` is true.
     pub idle_pool_sleep_secs: u64,
+    /// Path to the durable session-binding store. `None` keeps bindings and
+    /// processed-event dedupe in memory only.
+    pub session_store_path: Option<PathBuf>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1140,6 +1150,7 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
+            session_store_path: args.session_store_path,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1164,7 +1175,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{} session_store={}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1187,6 +1198,10 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            self.session_store_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "disabled".into()),
         )
     }
 }
@@ -1513,6 +1528,7 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2247,6 +2263,35 @@ channels = "ALL"
             "300",
         ]);
         assert_eq!(configured.idle_pool_sleep, 300);
+    }
+
+    #[test]
+    fn session_store_defaults_none_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(default.session_store_path.is_none());
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--session-store",
+            "/tmp/acp-sessions.db",
+        ]);
+        assert_eq!(
+            configured.session_store_path.as_deref(),
+            Some(std::path::Path::new("/tmp/acp-sessions.db"))
+        );
+    }
+
+    #[test]
+    fn test_summary_includes_session_store_disabled_by_default() {
+        let config = test_config(SubscribeMode::Mentions);
+        let s = config.summary();
+        assert!(
+            s.contains("session_store=disabled"),
+            "summary should include session_store=disabled, got: {s}"
+        );
     }
 
     #[test]

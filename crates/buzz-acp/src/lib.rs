@@ -9,6 +9,8 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+/// Durable session-binding + processed-event store (IDs and timestamps only).
+pub mod session_store;
 mod setup_mode;
 mod usage;
 
@@ -43,6 +45,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use session_store::skip_if_already_processed;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -1958,6 +1961,30 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    let session_store: Option<std::sync::Arc<dyn session_store::SessionStore>> =
+        if let Some(path) = config.session_store_path.as_ref() {
+            match session_store::sqlite::SqliteSessionStore::open(
+                path,
+                session_store::StoreScope::new(
+                    config.keys.public_key().to_hex(),
+                    &config.relay_url,
+                    config::normalize_agent_command_identity(&config.agent_command),
+                ),
+            ) {
+                Ok(store) => Some(std::sync::Arc::new(store)),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        path = %path.display(),
+                        "failed to open session store; continuing without durable bindings"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
@@ -2221,6 +2248,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        session_store: session_store.clone(),
     });
 
     if !config.memory_enabled {
@@ -2715,6 +2743,18 @@ async fn tokio_main() -> Result<()> {
                                     } else {
                                         0
                                     };
+                                    if let Some(store) = session_store.as_ref() {
+                                        if let Err(error) = store
+                                            .remove_binding(&session_store::ContextKey::Channel(ch))
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                %error,
+                                                %ch,
+                                                "session store remove_binding failed on membership removal"
+                                            );
+                                        }
+                                    }
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -2842,6 +2882,18 @@ async fn tokio_main() -> Result<()> {
                                             );
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            if let Some(store) = session_store.as_ref() {
+                                                if let Err(error) = store
+                                                    .remove_binding(&session_store::ContextKey::Channel(buzz_event.channel_id))
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        %error,
+                                                        channel_id = %buzz_event.channel_id,
+                                                        "session store remove_binding failed on !rotate"
+                                                    );
+                                                }
+                                            }
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -2917,6 +2969,9 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            if skip_if_already_processed(session_store.as_deref(), &event_id_hex).await {
+                                continue;
+                            }
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
@@ -6795,6 +6850,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -7019,6 +7075,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_store_path: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -8709,5 +8766,27 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod session_store_dedupe_tests {
+    use super::session_store::{skip_if_already_processed, InMemorySessionStore, SessionStore};
+
+    #[tokio::test]
+    async fn processed_event_is_skipped_unmarked_passes() {
+        let store = InMemorySessionStore::new();
+        let channel_id = uuid::Uuid::new_v4();
+        assert!(
+            !skip_if_already_processed(None, "evt-1").await,
+            "no store means never skip"
+        );
+        assert!(!skip_if_already_processed(Some(&store), "evt-1").await);
+        store
+            .mark_events_processed(channel_id, &["evt-1".to_string()])
+            .await
+            .unwrap();
+        assert!(skip_if_already_processed(Some(&store), "evt-1").await);
+        assert!(!skip_if_already_processed(Some(&store), "evt-2").await);
     }
 }
