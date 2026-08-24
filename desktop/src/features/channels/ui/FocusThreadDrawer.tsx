@@ -9,6 +9,15 @@ import { getThreadViewMode } from "@/features/channels/lib/threadViewModePrefere
 import { cn } from "@/shared/lib/cn";
 
 type FocusThreadDrawerProps = {
+  /**
+   * Names the surface inside the drawer for assistive technology.
+   *
+   * Parameterised rather than hardcoded because the channel agent work viewer
+   * shares this drawer: the motion, scrim, Escape ownership and focus
+   * capture/restore below are one behaviour, and duplicating them per surface is
+   * how they drift apart.
+   */
+  ariaLabel?: string;
   channelName: string;
   children: React.ReactNode;
   onClose: () => void;
@@ -137,6 +146,7 @@ const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
  * isolated.
  */
 export function FocusThreadDrawer({
+  ariaLabel = "Thread",
   channelName,
   children,
   onClose,
@@ -220,7 +230,7 @@ export function FocusThreadDrawer({
           // see the token for why a `border-l` cannot.
           "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left",
         )}
-        aria-label="Thread"
+        aria-label={ariaLabel}
         data-testid="focus-thread-drawer"
         ref={drawerRef}
         role="complementary"

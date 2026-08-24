@@ -28,6 +28,7 @@ import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
+import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
@@ -67,6 +68,19 @@ type AgentSessionThreadPanelProps = {
   channel: Channel | null;
   channelId?: string | null;
   canInterruptTurn: boolean;
+  /** Constrains the reading column when presented as the focus drawer. */
+  columnMaxWidthPx?: number;
+  /** Panel-owned control rendered ahead of the title (the layout toggle). */
+  headerLeading?: React.ReactNode;
+  /**
+   * True when the panel is the focus-mode drawer's occupant.
+   *
+   * The drawer owns the panel's dismissal affordances, so this also turns on
+   * Escape (the drawer is modal over the channel), drops the header back arrow
+   * (the scrim sliver is the way back) and suppresses the panel's own slide-in
+   * so it does not compound with the drawer's.
+   */
+  isFocusMode?: boolean;
   layout?: "standalone" | "split";
   isSinglePanelView?: boolean;
   profiles?: UserProfileLookup;
@@ -83,11 +97,31 @@ type AgentSessionThreadPanelProps = {
   transparentChrome?: boolean;
 };
 
+/**
+ * Scroll region of the agent work viewer.
+ *
+ * Named so the shared view-mode switch can read the top-visible transcript row
+ * out of it, the same way it reads the thread body.
+ */
+export const AGENT_SESSION_BODY_TEST_ID = "agent-session-transcript-body";
+
+/**
+ * Centers the transcript column when a `columnMaxWidthPx` is supplied.
+ *
+ * Matches the thread panel's focus-mode column so the two drawers present one
+ * reading measure. The panel's own `px-3` body gutter already handles the split
+ * pane, so the wider inline padding only applies to the constrained column.
+ */
+const AGENT_SESSION_COLUMN_CLASS = "mx-auto w-full px-7";
+
 export function AgentSessionThreadPanel({
   agent,
   canInterruptTurn,
   channel,
   channelId = null,
+  columnMaxWidthPx,
+  headerLeading,
+  isFocusMode = false,
   layout = "standalone",
   isSinglePanelView = false,
   profiles,
@@ -98,6 +132,7 @@ export function AgentSessionThreadPanel({
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
+  const hasConstrainedColumn = columnMaxWidthPx != null;
   const sessionChannelId = channelId ?? channel?.id ?? null;
   // Unified working signal, scoped to this panel's channel (or all channels
   // when the panel is unscoped) — observer turns primary, typing fallback.
@@ -106,7 +141,9 @@ export function AgentSessionThreadPanel({
     sessionChannelId,
   );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
-  useEscapeKey(onClose, isOverlay || isSinglePanelView);
+  // Focus mode is modal over the channel, so it owns Escape the same way the
+  // narrow and overlay presentations do. The split pane leaves Escape alone.
+  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -416,7 +453,11 @@ export function AgentSessionThreadPanel({
         align="start"
         backButtonAriaLabel="Back from activity"
         backButtonTestId="agent-session-back"
-        onBack={onBack}
+        leading={headerLeading}
+        // The focus drawer's scrim sliver is its way back to the channel, so the
+        // header arrow would be a second, competing exit. Mirrors the thread
+        // panel's focus-mode header.
+        onBack={isFocusMode ? undefined : onBack}
       >
         <ProfileAvatar
           avatarUrl={agentProfile?.avatarUrl ?? null}
@@ -458,6 +499,9 @@ export function AgentSessionThreadPanel({
 
   return (
     <AuxiliaryPanel
+      // The focus drawer animates itself; a second slide here would compound
+      // into a double entrance.
+      enterMotion={!isFocusMode}
       isSinglePanelView={isSinglePanelView}
       layout={layout}
       onClose={onClose}
@@ -476,12 +520,20 @@ export function AgentSessionThreadPanel({
     >
       <AuxiliaryPanelBody
         ref={scrollRef}
+        data-testid={AGENT_SESSION_BODY_TEST_ID}
         onScroll={onScroll}
         className="overflow-y-auto px-3 pb-4"
         panelPadding
+        tabIndex={-1}
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
-        <div ref={contentRef}>
+        <div
+          className={cn(hasConstrainedColumn && AGENT_SESSION_COLUMN_CLASS)}
+          ref={contentRef}
+          style={
+            hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+          }
+        >
           <ManagedAgentSessionPanel
             agent={agent}
             channelId={sessionChannelId}

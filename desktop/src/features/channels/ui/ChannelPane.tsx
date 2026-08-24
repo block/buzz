@@ -31,10 +31,10 @@ import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
 import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
+import { AGENT_SESSION_SURFACE_KEY } from "@/features/channels/lib/focusDrawerSurface";
 import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
-import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
-import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
+import { useFocusDrawerSurfaces } from "@/features/channels/ui/useFocusDrawerSurfaces";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
@@ -453,21 +453,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
-  const useFocusThreadDrawer =
-    threadViewMode === "focus" &&
-    useSplitAuxiliaryPane &&
-    (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
-  const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
-    useFocusThreadDrawer,
-    onCloseThread,
-  );
-  const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
-    useThreadViewModeSwitch({
-      activeThreadHeadId: threadHeadMessage?.id ?? null,
-      externalScrollTargetId: threadScrollTargetId,
-      onExternalTargetResolved: onThreadScrollTargetResolved,
-      onModeChange: markExitComplete,
-    });
   const selectedAgent = React.useMemo(
     () =>
       agentSessionSelection.resolveSelectedAgentSession({
@@ -478,12 +463,37 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
+  const hasAgentSessionPanel = Boolean(activeChannel && selectedAgent);
+  const {
+    channelIsCovered,
+    changeAgentViewMode,
+    changeThreadViewMode,
+    focusDrawerSurface,
+    layoutScrollTargetId,
+    markExitComplete,
+    resolveScrollTarget,
+  } = useFocusDrawerSurfaces({
+    channelManagementOpen: channelManagementOpen && Boolean(activeChannel),
+    hasAgentSession: hasAgentSessionPanel,
+    hasThread: Boolean(threadHeadMessage) || shouldShowThreadSkeleton,
+    isFocusPreferred: threadViewMode === "focus",
+    onCloseAgentSession,
+    onCloseThread,
+    onThreadScrollTargetResolved,
+    threadHeadId: threadHeadMessage?.id ?? null,
+    threadScrollTargetId,
+    useSplitAuxiliaryPane,
+  });
+  const useFocusThreadDrawer = focusDrawerSurface === "thread";
+  const useFocusAgentDrawer = focusDrawerSurface === "agent-session";
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||
       Boolean(threadHeadMessage) ||
       shouldShowThreadSkeleton ||
-      Boolean(activeChannel && selectedAgent) ||
+      // A surface presented as the focus drawer overlays the channel instead of
+      // splitting the row, so it must not reserve split width.
+      (hasAgentSessionPanel && !useFocusAgentDrawer) ||
       Boolean(profilePanelPubkey));
   const wrapAux = (
     panel: React.ReactNode,
@@ -516,12 +526,40 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
     );
+  const wrapAgentSessionPanel = (panel: React.ReactNode) =>
+    useFocusAgentDrawer ? (
+      <FocusThreadDrawer
+        ariaLabel="Agent activity"
+        channelName={activeChannel?.name ?? "channel"}
+        key={AGENT_SESSION_SURFACE_KEY}
+        onClose={onCloseAgentSession}
+      >
+        {panel}
+      </FocusThreadDrawer>
+    ) : (
+      wrapAux(panel, "agent-session-thread-panel", {
+        key: AGENT_SESSION_SURFACE_KEY,
+      })
+    );
   const threadHeaderLeading = useSplitAuxiliaryPane ? (
     <ThreadViewModeToggle onChange={changeThreadViewMode} />
   ) : undefined;
   const threadLayoutProps = getThreadPanelLayout({
     headerLeading: threadHeaderLeading,
     isFocusDrawer: useFocusThreadDrawer,
+    isSinglePanelView,
+    useSplitAuxiliaryPane,
+  });
+  // Same preference, same control: the viewer's toggle writes the shared
+  // `threadViewMode`, so choosing a layout here chooses it for threads too.
+  const agentSessionLayoutProps = getThreadPanelLayout({
+    headerLeading: useSplitAuxiliaryPane ? (
+      <ThreadViewModeToggle
+        onChange={changeAgentViewMode}
+        surfaceLabel="activity"
+      />
+    ) : undefined,
+    isFocusDrawer: useFocusAgentDrawer,
     isSinglePanelView,
     useSplitAuxiliaryPane,
   });
@@ -898,18 +936,21 @@ export const ChannelPane = React.memo(function ChannelPane({
                       : null
                 }
                 channelId={effectiveAgentSessionChannelId}
+                columnMaxWidthPx={agentSessionLayoutProps.columnMaxWidthPx}
+                headerLeading={agentSessionLayoutProps.headerLeading}
+                isFocusMode={agentSessionLayoutProps.isFocusMode}
                 isSinglePanelView={
-                  useSplitAuxiliaryPane ? false : isSinglePanelView
+                  agentSessionLayoutProps.isSinglePanelView ?? false
                 }
-                layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                transparentChrome={useSplitAuxiliaryPane}
+                layout={agentSessionLayoutProps.layout}
+                transparentChrome={agentSessionLayoutProps.transparentChrome}
                 profiles={profiles}
                 onBack={onBackFromAgentSession}
                 onClose={onCloseAgentSession}
                 widthPx={threadPanelWidthPx}
               />
             );
-            return wrapAux(panel, "agent-session-thread-panel");
+            return wrapAgentSessionPanel(panel);
           })()
         ) : profilePanelPubkey ? (
           (() => {
