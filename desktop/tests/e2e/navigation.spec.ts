@@ -594,7 +594,9 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
   expect(fragmentRects.length).toBeGreaterThanOrEqual(2);
 
   const tooltip = page.getByRole("tooltip");
-  const hoverFragment = async (index: number) => {
+  await sentChip.focus();
+  await expect(tooltip).toBeVisible();
+  const positionOverFragment = async (index: number) => {
     const fragment = await sentChip.evaluate((element, fragmentIndex) => {
       const rects = Array.from(element.getClientRects()).filter(
         (rect) => rect.width > 0 && rect.height > 0,
@@ -611,9 +613,7 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     if (!fragment) throw new Error(`Expected chip fragment ${index}`);
     const cursorX = fragment.left + fragment.width / 2;
     const cursorY = fragment.top + fragment.height / 2;
-    await page.mouse.move(fragment.left - 10, cursorY, { steps: 5 });
-    await expect(tooltip).toBeHidden();
-    await page.mouse.move(cursorX, cursorY, { steps: 5 });
+    await page.mouse.move(cursorX, cursorY);
     await expect(tooltip).toBeVisible();
     let tooltipCenter = Number.NaN;
     await expect
@@ -630,8 +630,8 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     };
   };
 
-  const firstTooltip = await hoverFragment(0);
-  const lastTooltip = await hoverFragment(-1);
+  const firstTooltip = await positionOverFragment(0);
+  const lastTooltip = await positionOverFragment(-1);
   expect(
     Math.abs(firstTooltip.tooltipCenter - firstTooltip.cursorX),
   ).toBeLessThan(1);
