@@ -192,6 +192,7 @@ async fn check_nip98_replay_with_guard(
 /// pass and the relay would proceed against the wrong tenant's auth context),
 /// and (b) reject every legitimate request whose community host isn't the
 /// single configured one. Substituting `tenant.host()` closes both directions.
+#[cfg(test)]
 pub(crate) fn nip98_expected_url(
     config_relay_url: &str,
     tenant: &TenantContext,
@@ -202,6 +203,39 @@ pub(crate) fn nip98_expected_url(
     } else {
         "http"
     };
+    format!("{scheme}://{}{path}", tenant.host())
+}
+
+/// Construct the NIP-98 URL using the protocol seen by the client.
+///
+/// A relay may be reachable directly over HTTP and through an HTTPS reverse
+/// proxy at the same time. `RELAY_URL` supplies the fallback for direct/internal
+/// callers; `X-Forwarded-Proto` lets a trusted proxy preserve the public scheme.
+pub(crate) fn nip98_expected_url_for_headers(
+    config_relay_url: &str,
+    tenant: &TenantContext,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+) -> String {
+    let configured_host = crate::tenant::relay_url_authority(config_relay_url);
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or_else(|| {
+            // Direct LAN aliases do not carry proxy headers. Only the
+            // deployment's canonical public host inherits the configured TLS
+            // posture; an explicit alias is a direct HTTP/WS connection.
+            if tenant.host() == configured_host
+                && config_relay_url.trim_start().starts_with("wss://")
+            {
+                "https"
+            } else {
+                "http"
+            }
+        });
     format!("{scheme}://{}{path}", tenant.host())
 }
 
@@ -228,6 +262,14 @@ pub(crate) fn nip42_expected_relay_url(config_relay_url: &str, tenant: &TenantCo
     } else {
         "ws"
     };
+    nip42_expected_relay_url_for_scheme(scheme, tenant)
+}
+
+/// Construct the NIP-42 URL using the protocol seen by the client.
+pub(crate) fn nip42_expected_relay_url_for_scheme(
+    scheme: &str,
+    tenant: &TenantContext,
+) -> String {
     format!("{scheme}://{}", tenant.host())
 }
 
@@ -636,7 +678,7 @@ pub async fn submit_event(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
+    let url = nip98_expected_url_for_headers(&state.config.relay_url, &tenant, "/events", &headers);
     let (pubkey, event_id_bytes) = verify_bridge_auth(
         &headers,
         "POST",
@@ -907,7 +949,7 @@ pub async fn query_events(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
+    let url = nip98_expected_url_for_headers(&state.config.relay_url, &tenant, "/query", &headers);
     let (pubkey, event_id_bytes) = verify_bridge_auth(
         &headers,
         "POST",
@@ -1350,7 +1392,7 @@ pub async fn count_events(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
+    let url = nip98_expected_url_for_headers(&state.config.relay_url, &tenant, "/count", &headers);
     let (pubkey, event_id_bytes) = verify_bridge_auth(
         &headers,
         "POST",
@@ -2092,7 +2134,12 @@ async fn authorize_moderation_read(
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     };
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let url = nip98_expected_url_for_headers(
+        &state.config.relay_url,
+        &tenant,
+        &path_with_query,
+        headers,
+    );
     let (pubkey, event_id_bytes) =
         verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;

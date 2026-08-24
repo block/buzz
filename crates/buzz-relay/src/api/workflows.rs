@@ -61,7 +61,12 @@ async fn authorize_workflow_read(
         })?;
 
     let path_with_query = request_path(path, raw_query);
-    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let url = bridge::nip98_expected_url_for_headers(
+        &state.config.relay_url,
+        &tenant,
+        &path_with_query,
+        headers,
+    );
     let (pubkey, event_id_bytes) =
         bridge::verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     bridge::enforce_http_admission(state, &tenant, &pubkey).await?;

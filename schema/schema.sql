@@ -67,6 +67,21 @@ CREATE TABLE communities (
 
 CREATE UNIQUE INDEX idx_communities_host ON communities (lower(host));
 
+-- Explicit alternate connection hosts for the same community. Request host
+-- binding checks this table after the primary community host, preserving
+-- fail-closed behavior for unknown hosts while allowing LAN/public aliases.
+CREATE TABLE community_host_aliases (
+    host         VARCHAR(255) PRIMARY KEY,
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_community_host_aliases_host
+    ON community_host_aliases (lower(host));
+
+CREATE INDEX idx_community_host_aliases_community
+    ON community_host_aliases (community_id);
+
 -- ── Channels ──────────────────────────────────────────────────────────────────
 -- Conformance: "Channels and channel membership". `community_id` immutable.
 -- Channel UUIDs stay valid wire identifiers, but they are NOT globally unique:

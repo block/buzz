@@ -1265,12 +1265,21 @@ impl Db {
     ) -> Result<Option<CommunityRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
+            SELECT c.id, c.host
+            FROM communities c
+            WHERE lower(c.host) = lower($1)
+              AND c.archived_at IS NULL
+              AND c.deleted_at IS NULL
+              AND c.deletion_state = 'active'
+            UNION ALL
+            SELECT c.id, $1 AS host
+            FROM community_host_aliases a
+            JOIN communities c ON c.id = a.community_id
+            WHERE lower(a.host) = lower($1)
+              AND c.archived_at IS NULL
+              AND c.deleted_at IS NULL
+              AND c.deletion_state = 'active'
+            LIMIT 1
             "#,
         )
         .bind(normalized_host)
@@ -1310,7 +1319,19 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
-        let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
+        let row = sqlx::query(
+            r#"
+            SELECT c.id, c.host
+            FROM communities c
+            WHERE lower(c.host) = lower($1)
+            UNION ALL
+            SELECT c.id, $1 AS host
+            FROM community_host_aliases a
+            JOIN communities c ON c.id = a.community_id
+            WHERE lower(a.host) = lower($1)
+            LIMIT 1
+            "#,
+        )
             .bind(normalized_host)
             .fetch_optional(&self.pool)
             .await?;

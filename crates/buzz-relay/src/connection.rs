@@ -65,6 +65,8 @@ pub struct ConnectionState {
     /// host at row zero (before any frame is read) and never overridable by
     /// client-supplied input. Every handler reads tenant scope from here.
     pub tenant: TenantContext,
+    /// WebSocket scheme presented by the client (`ws` or `wss`).
+    pub relay_scheme: String,
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
     /// Current NIP-42 authentication state.
@@ -128,6 +130,7 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    relay_scheme: String,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -142,7 +145,17 @@ pub async fn handle_connection(
         community_id,
         control,
         move || async move { check_state.db.is_community_active(community_id).await },
-        move |control| handle_active_connection(socket, run_state, addr, tenant, conn_id, control),
+        move |control| {
+            handle_active_connection(
+                socket,
+                run_state,
+                addr,
+                tenant,
+                relay_scheme,
+                conn_id,
+                control,
+            )
+        },
     )
     .await;
 }
@@ -152,6 +165,7 @@ async fn handle_active_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    relay_scheme: String,
     conn_id: Uuid,
     control: CommunityConnectionControl,
 ) {
@@ -183,6 +197,7 @@ async fn handle_active_connection(
     let conn = Arc::new(ConnectionState {
         conn_id,
         tenant,
+        relay_scheme,
         remote_addr: addr,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),

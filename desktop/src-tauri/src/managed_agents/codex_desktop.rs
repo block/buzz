@@ -28,6 +28,7 @@ $config=Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-J
 try {
   Start-Process `
     -FilePath ([string]$config.executable) `
+    -WorkingDirectory ([string]$config.working_directory) `
     -ArgumentList @('-c','features.code_mode_host=true','app-server','--listen',([string]$config.url)) `
     -WindowStyle Hidden `
     -RedirectStandardOutput ([string]$config.stdout_log) `
@@ -649,8 +650,13 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
         fs::write(&stderr_log, [])
             .map_err(|error| format!("failed to reset {}: {error}", stderr_log.display()))?;
         let launcher_config_path = base_dir.join("codex-shared-runtime-launcher.json");
+        let working_directory = executable
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         let launcher_config = serde_json::to_vec_pretty(&serde_json::json!({
             "executable": executable,
+            "working_directory": working_directory,
             "url": url,
             "stdout_log": stdout_log,
             "stderr_log": stderr_log,
@@ -1212,6 +1218,7 @@ mod tests {
     fn windows_shared_runtime_launch_is_hidden_and_logged() {
         assert!(WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT.contains("ShowWindow"));
         assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-WindowStyle Hidden"));
+        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-WorkingDirectory"));
         assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-RedirectStandardOutput"));
         assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-RedirectStandardError"));
     }

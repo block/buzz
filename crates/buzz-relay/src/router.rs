@@ -332,7 +332,18 @@ async fn nip11_or_ws_handler(
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    let relay_scheme = headers
+                        .get("x-forwarded-proto")
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.split(',').next())
+                        .map(str::trim)
+                        .filter(|value| matches!(*value, "http" | "https"))
+                        .map(|value| if value == "https" { "wss" } else { "ws" })
+                        .unwrap_or("ws")
+                        .to_string();
+                    handle_connection(socket, state, addr, tenant, relay_scheme)
+                })
                 .into_response()
         }
         Err(_) => {
