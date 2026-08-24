@@ -496,7 +496,9 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
   const pulsedPubkeys = [];
   const mentions = {
     cancelMentionAutocomplete: () => {},
-    getDraftMentionRefs: () => [],
+    getDraftMentionRefs: () => [
+      { displayName: "Agent Ada", pubkey: "agent-pubkey", isAgent: true },
+    ],
     getMentionDisplayName: () => "Agent Ada",
     registerMentionPubkey: () => {},
     isInlineMentionSelection: () => false,
@@ -508,7 +510,10 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
     mentionStartIndex: 0,
   };
   const richText = {
-    getPlainTextAndCursor: () => ({ text: "", cursor: 0 }),
+    getPlainTextAndCursor: () => ({
+      text: "@Agent Ada keep this authored text",
+      cursor: 35,
+    }),
   };
   const { result, rerender } = renderHook(
     ({ pubkeys }) =>
@@ -528,6 +533,7 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
   );
 
   act(() => result.current.removeAddressedAgent("AGENT-PUBKEY"));
+  assert.deepEqual(appliedEdits, []);
   rerender({ pubkeys: [] });
   act(() => {
     result.current.selectMentionSuggestion({

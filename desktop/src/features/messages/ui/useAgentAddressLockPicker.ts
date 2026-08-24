@@ -153,6 +153,15 @@ export function useAgentAddressLockPicker({
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
       if (!audienceScope || !normalized) return;
+      unpinnedAgentPubkeysRef.current.add(normalized);
+      audience.removePubkey(normalized);
+    },
+    [audience.removePubkey, audienceScope],
+  );
+  const removeAddressedAgentMentions = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      if (!audienceScope || !normalized) return;
       const { text } = richText.getPlainTextAndCursor();
       const matchingDisplayNames = mentions
         .getDraftMentionRefs(text)
@@ -161,14 +170,13 @@ export function useAgentAddressLockPicker({
       for (const edit of buildMentionRemovalEdits(text, matchingDisplayNames)) {
         applyAutocompleteEdit(edit);
       }
-      unpinnedAgentPubkeysRef.current.add(normalized);
-      audience.removePubkey(normalized);
+      removeAddressedAgent(normalized);
     },
     [
       applyAutocompleteEdit,
-      audience.removePubkey,
       audienceScope,
       mentions.getDraftMentionRefs,
+      removeAddressedAgent,
       richText.getPlainTextAndCursor,
     ],
   );
@@ -178,7 +186,7 @@ export function useAgentAddressLockPicker({
       if (!audienceScope || !pubkey || !suggestion.isAgent) return;
 
       if (lockedAgentPubkeys.has(pubkey)) {
-        removeAddressedAgent(pubkey);
+        removeAddressedAgentMentions(pubkey);
         setAnnouncement(
           `Stopped automatically mentioning ${suggestion.displayName}`,
         );
@@ -232,7 +240,7 @@ export function useAgentAddressLockPicker({
       mentions.openMentionPicker,
       mentions.registerMentionPubkey,
       onPulseAddressLock,
-      removeAddressedAgent,
+      removeAddressedAgentMentions,
       richText.getPlainTextAndCursor,
       trackMentionAddressedAgent,
     ],
