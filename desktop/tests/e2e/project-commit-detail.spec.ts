@@ -20,15 +20,16 @@ async function enableProjectsFeature(page: import("@playwright/test").Page) {
 
 async function openCreateProjectDialog(page: import("@playwright/test").Page) {
   await page.getByTestId("projects-section-projects").click();
-  await page.getByTestId("projects-overview-create-project").click();
+  await page.getByTestId("projects-add-project").click();
+  await page.getByTestId("project-browser-create").click();
 }
 
 async function addProjectToSidebar(
   page: import("@playwright/test").Page,
   dtag: string,
 ) {
-  await page.getByTestId("sidebar-projects-section-label").hover();
-  await page.getByTestId("sidebar-projects-create").click();
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-add-project").click();
   const browser = page.getByTestId("project-browser-dialog");
   await browser.getByRole("searchbox", { name: "Search projects" }).fill(dtag);
   await browser.getByTestId(`project-browser-result-${dtag}`).click();
@@ -524,6 +525,60 @@ test("unsupported relays cannot create a channel-first project", async ({
         .map((event) => event.kind) ?? [],
   );
   expect(acceptedKinds).toEqual([]);
+});
+
+test("creating a private unlisted project opens for its owner", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await openCreateProjectDialog(page);
+  await page.getByTestId("create-project-name").fill("private-notes");
+  await expect(page.getByTestId("create-project-template")).toHaveText(
+    "Project home",
+  );
+  await expect(page.getByTestId("create-project-team")).toHaveText("None");
+  await expect(page.getByTestId("create-project-agent")).toHaveText("None");
+
+  const channelVisibility = page.getByTestId(
+    "create-project-channel-permissions",
+  );
+  await channelVisibility.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect(channelVisibility).toHaveText("Private");
+
+  const projectListing = page.getByTestId("create-project-listing");
+  await projectListing.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect(projectListing).toHaveText("Unlisted");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
+  await expect(page.getByTestId("project-breadcrumb-project")).toHaveText(
+    "private-notes",
+  );
+  await expect(page.getByTestId("sidebar-project-private-notes")).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/06-private-unlisted-project-home.png`,
+  });
+
+  await page.getByTestId("open-projects-view").click();
+  const projectCard = page.getByTestId("project-card-private-notes");
+  await expect(projectCard).toBeVisible();
+  await expect(
+    projectCard.getByTestId("project-unlisted-indicator"),
+  ).toBeVisible();
+  await expect(projectCard).not.toContainText("Unlisted");
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/07-private-unlisted-project-overview.png`,
+  });
 });
 
 test("project creation can retry after its repository publication fails", async ({

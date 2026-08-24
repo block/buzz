@@ -62,7 +62,6 @@ type ProjectsOverviewContextPanelProps = {
   onAddRepository: () => void;
   onChatWithAgent: (items: ProjectSelectionItem[]) => void;
   onCreateIssue: () => void;
-  onCreateProject: () => void;
   onCreatePullRequest: () => void;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   profiles?: UserProfileLookup;
@@ -79,7 +78,6 @@ function OverviewCreateButton({
   onAddChannel,
   onAddRepository,
   onCreateIssue,
-  onCreateProject,
   onCreatePullRequest,
 }: {
   action: Exclude<OverviewContextAction, null>;
@@ -87,7 +85,6 @@ function OverviewCreateButton({
   onAddChannel: () => void;
   onAddRepository: () => void;
   onCreateIssue: () => void;
-  onCreateProject: () => void;
   onCreatePullRequest: () => void;
 }) {
   const actionHandler =
@@ -95,11 +92,9 @@ function OverviewCreateButton({
       ? onCreateIssue
       : action.kind === "pullRequest"
         ? onCreatePullRequest
-        : action.kind === "project"
-          ? onCreateProject
-          : action.kind === "channel"
-            ? onAddChannel
-            : onAddRepository;
+        : action.kind === "channel"
+          ? onAddChannel
+          : onAddRepository;
   const requiresProject =
     action.kind === "channel" || action.kind === "repository";
   return (
@@ -205,7 +200,6 @@ export function ProjectsOverviewContextPanel({
   onAddRepository,
   onChatWithAgent,
   onCreateIssue,
-  onCreateProject,
   onCreatePullRequest,
   onSelectSection,
   profiles,
@@ -275,7 +269,6 @@ export function ProjectsOverviewContextPanel({
                 onAddChannel={onAddChannel}
                 onAddRepository={onAddRepository}
                 onCreateIssue={onCreateIssue}
-                onCreateProject={onCreateProject}
                 onCreatePullRequest={onCreatePullRequest}
               />
             ) : null}

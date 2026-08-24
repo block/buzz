@@ -93,6 +93,7 @@ function readCreatedProject(
     projectEvents: [projectEvent],
     repositoryEvents: repositoryEvent ? [repositoryEvent] : [],
     relayOrigin: getCachedRelayOrigin(),
+    viewerPubkey: projectEvent.pubkey,
   });
   if (!project) {
     throw new Error("The project was created but could not be read.");

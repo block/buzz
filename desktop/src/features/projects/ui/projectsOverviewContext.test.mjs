@@ -87,7 +87,7 @@ test("activity pod shows workspace details without a create action", () => {
   );
 });
 
-test("projects pod keeps create-project and drops task/review totals", () => {
+test("projects pod leaves creation to the persistent toolbar action", () => {
   const context = projectsOverviewContext({
     filter: "projects",
     issues: [],
@@ -96,7 +96,7 @@ test("projects pod keeps create-project and drops task/review totals", () => {
   });
 
   assert.equal(context.title, "Projects");
-  assert.equal(context.action?.kind, "project");
+  assert.equal(context.action, null);
   assert.deepEqual(
     context.stats.map((stat) => stat.label),
     ["Projects", "Repositories", "Channels"],

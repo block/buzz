@@ -32,7 +32,7 @@ export type OverviewContextStatIcon =
   | "merged";
 
 export type OverviewContextAction = {
-  kind: "channel" | "issue" | "project" | "pullRequest" | "repository";
+  kind: "channel" | "issue" | "pullRequest" | "repository";
   label: string;
   testId: string;
 } | null;
@@ -106,14 +106,6 @@ function resolvedReviewActivity(
     merged: 0,
     open: summaryPrCount,
     total: summaryPrCount,
-  };
-}
-
-function createProjectAction(): OverviewContextAction {
-  return {
-    kind: "project",
-    label: "Create project",
-    testId: "projects-overview-create-project",
   };
 }
 
@@ -410,7 +402,7 @@ export function projectsOverviewContext(
   }
 
   return {
-    action: createProjectAction(),
+    action: null,
     detailsTitle: "Details",
     people,
     stats: [

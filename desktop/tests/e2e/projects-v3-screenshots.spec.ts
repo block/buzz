@@ -149,17 +149,42 @@ test("submitted project context stays compact and expandable", async ({
   });
 });
 
-test("sidebar project add flow browses before creating", async ({ page }) => {
+test("projects header add flow browses before creating", async ({ page }) => {
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("sidebar-project-buzz")).toHaveCount(0);
-  await page.getByTestId("sidebar-projects-section-label").hover();
-  await page.getByTestId("sidebar-projects-create").click();
+  await page.getByTestId("open-projects-view").click();
+  await expect(page.getByTestId("sidebar-projects-create")).toHaveCount(0);
+  await page.setViewportSize({ width: 640, height: 800 });
+  const tabs = page.getByTestId("projects-page-tabs");
+  const search = page.getByTestId("projects-activity-search");
+  const addProject = page.getByTestId("projects-add-project");
+  const [tabsBox, searchBox, addProjectBox] = await Promise.all([
+    tabs.boundingBox(),
+    search.boundingBox(),
+    addProject.boundingBox(),
+  ]);
+  expect(tabsBox).toBeTruthy();
+  expect(searchBox).toBeTruthy();
+  expect(addProjectBox).toBeTruthy();
+  expect((searchBox?.x ?? 0) + (searchBox?.width ?? 0)).toBeLessThan(
+    addProjectBox?.x ?? 0,
+  );
+  expect(
+    (addProjectBox?.x ?? 0) + (addProjectBox?.width ?? 0),
+  ).toBeLessThanOrEqual((tabsBox?.x ?? 0) + (tabsBox?.width ?? 0));
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/10-projects-add-control-narrow.png`,
+  });
+  await page.getByTestId("projects-add-project").click();
 
   const browser = page.getByTestId("project-browser-dialog");
   await expect(browser).toBeVisible();
-  const search = browser.getByRole("searchbox", { name: "Search projects" });
-  await search.fill("new workspace");
+  const projectSearch = browser.getByRole("searchbox", {
+    name: "Search projects",
+  });
+  await projectSearch.fill("new workspace");
   await browser.getByTestId("project-browser-create").click();
 
   await expect(page.getByTestId("create-project-dialog")).toBeVisible();
@@ -178,12 +203,13 @@ test("sidebar project add flow browses before creating", async ({ page }) => {
   await page.getByRole("button", { name: "Back to projects" }).click();
   await expect(browser).toBeVisible();
 
-  await search.fill("buzz");
+  await projectSearch.fill("buzz");
   await browser.getByTestId("project-browser-result-buzz").click();
   await expect(browser).toBeHidden();
   await expect(
     page.getByRole("navigation", { name: "Project breadcrumb" }),
   ).toContainText("buzz");
+  await page.setViewportSize({ width: 1280, height: 720 });
   const addedProject = page.getByTestId("sidebar-project-buzz");
   await expect(addedProject).toBeVisible();
   await addedProject.click({ button: "right" });

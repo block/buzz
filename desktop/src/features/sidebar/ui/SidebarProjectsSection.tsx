@@ -10,7 +10,6 @@ import {
   Link2,
   ListMinus,
   Lock,
-  Plus,
   Trash2,
 } from "lucide-react";
 import * as React from "react";
@@ -26,15 +25,10 @@ import {
 import { listProjectChildChannels } from "@/features/projects/lib/projectRelatedChannels";
 import { isProjectOwnedByCurrentUser } from "@/features/projects/lib/projectsViewHelpers";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
-import {
-  addProjectToSidebar,
-  removeProjectFromSidebar,
-} from "@/features/projects/lib/projectSidebarMembership";
+import { removeProjectFromSidebar } from "@/features/projects/lib/projectSidebarMembership";
 import { useProjectSidebarMembership } from "@/features/projects/lib/useProjectSidebarMembership";
 import { projectMatchesRouteId } from "@/features/projects/projectRoutes";
-import { ProjectBrowserDialog } from "@/features/projects/ui/ProjectBrowserDialog";
 import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
-import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { FeatureGate } from "@/shared/features";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
@@ -105,7 +99,7 @@ import {
 } from "@/features/sidebar/ui/listSidebarProjects";
 
 const SECTION_LABEL_BUTTON_CLASS =
-  "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
+  "group/section-label flex w-fit max-w-[calc(100%-1.75rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
   "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100 group-data-[section-actions-open=true]/sidebar-section:opacity-100";
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
@@ -136,7 +130,6 @@ function SidebarProjectsSectionContent() {
   const relayOrigin = getCachedRelayOrigin();
   const [collapsed, setCollapsed] = React.useState(false);
   const [actionsOpen, setActionsOpen] = React.useState(false);
-  const [browserOpen, setBrowserOpen] = React.useState(false);
   const [projectToDelete, setProjectToDelete] = React.useState<Project | null>(
     null,
   );
@@ -154,7 +147,6 @@ function SidebarProjectsSectionContent() {
     relayOrigin,
     currentPubkey,
   );
-  const createProjectMutation = useCreateProjectMutation();
   const deleteProjectMutation = useDeleteProjectMutation();
   const isPending = projectsQuery.isPending || identityQuery.isPending;
   React.useEffect(() => {
@@ -202,9 +194,6 @@ function SidebarProjectsSectionContent() {
       writeSidebarProjectExpansion(next, relayOrigin, currentPubkey);
       return next;
     });
-  };
-  const handleAdd = (project: Project) => {
-    addProjectToSidebar(project.projectAddress, relayOrigin, currentPubkey);
   };
   const handleRemove = (project: Project) => {
     removeProjectFromSidebar(
@@ -283,7 +272,6 @@ function SidebarProjectsSectionContent() {
         <SidebarProjectsHeaderActions
           filter={filter}
           onBrowseAll={() => void goProjects()}
-          onCreate={() => setBrowserOpen(true)}
           onFilterChange={handleFilterChange}
           onOpenChange={setActionsOpen}
           onSortChange={handleSortChange}
@@ -367,28 +355,6 @@ function SidebarProjectsSectionContent() {
           )}
         </SidebarGroupContent>
       ) : null}
-      <ProjectBrowserDialog
-        isCreating={createProjectMutation.isPending}
-        onCreate={async (input) => {
-          const result = await createProjectMutation.mutateAsync(input);
-          if (result.compatibilityWarning) {
-            toast.warning("Created as a standalone project", {
-              description: result.compatibilityWarning,
-            });
-          } else {
-            toast.success(`Project "${result.project.name}" created.`);
-          }
-          await goProject(result.project.id);
-        }}
-        onOpenChange={setBrowserOpen}
-        onSelectProject={(project) => {
-          handleAdd(project);
-          void goProject(project.id);
-        }}
-        open={browserOpen}
-        projects={projectsQuery.data ?? []}
-        selectedProjectAddresses={addedProjectAddressSet}
-      />
       <AlertDialog
         onOpenChange={(open) => {
           if (!open) setProjectToDelete(null);
@@ -449,7 +415,6 @@ function SidebarProjectsSectionContent() {
 function SidebarProjectsHeaderActions({
   filter,
   onBrowseAll,
-  onCreate,
   onFilterChange,
   onOpenChange,
   onSortChange,
@@ -457,7 +422,6 @@ function SidebarProjectsHeaderActions({
 }: {
   filter: SidebarProjectsFilter;
   onBrowseAll: () => void;
-  onCreate: () => void;
   onFilterChange: (filter: SidebarProjectsFilter) => void;
   onOpenChange: (open: boolean) => void;
   onSortChange: (sort: SidebarProjectsSort) => void;
@@ -467,23 +431,6 @@ function SidebarProjectsHeaderActions({
 
   return (
     <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
-      <button
-        aria-label="Add project"
-        className={cn(
-          SECTION_ICON_BUTTON_CLASS,
-          SECTION_ACTION_VISIBILITY_CLASS,
-        )}
-        data-testid="sidebar-projects-create"
-        onClick={(event) => {
-          event.stopPropagation();
-          onCreate();
-        }}
-        onPointerDown={(event) => event.stopPropagation()}
-        title="Add project"
-        type="button"
-      >
-        <Plus className="h-4 w-4" />
-      </button>
       <DropdownMenu onOpenChange={onOpenChange}>
         <DropdownMenuTrigger asChild>
           <button

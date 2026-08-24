@@ -1,6 +1,7 @@
 import {
   CircleAlert,
   CircleDot,
+  EyeOff,
   FolderGit2,
   Folders,
   GitCommit,
@@ -233,6 +234,24 @@ export function ProjectActivityBar({
 function StatusPill({ status }: { status: string }) {
   if (status === "active") {
     return null;
+  }
+
+  if (status === "unlisted") {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            aria-label="Unlisted project"
+            className="inline-flex size-5 shrink-0 items-center justify-center text-muted-foreground/55"
+            data-testid="project-unlisted-indicator"
+            role="img"
+          >
+            <EyeOff className="size-3.5" />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>Hidden from the shared project list</TooltipContent>
+      </Tooltip>
+    );
   }
 
   return (

@@ -1,3 +1,4 @@
+import { Plus } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -17,7 +18,10 @@ import {
   useProjectsWorkItemsQuery,
 } from "@/features/projects/hooks";
 import { useRepositoryActivitySummariesQuery } from "@/features/projects/repositoryActivityHooks";
-import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
+import {
+  type CreateProjectInput,
+  useCreateProjectMutation,
+} from "@/features/projects/useCreateProject";
 import { isExplicitProject } from "@/features/projects/projectModels";
 import { projectsWithWorkItemRepositories } from "@/features/projects/projectWorkItems";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
@@ -25,6 +29,8 @@ import { buildProjectSelectionAgentContext } from "@/features/projects/lib/proje
 import { buildProjectsActivityDigest } from "@/features/projects/lib/projectsActivityDigest";
 import { matchesProjectsSearch } from "@/features/projects/lib/projectsSearch";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
+import { addProjectToSidebar } from "@/features/projects/lib/projectSidebarMembership";
+import { useProjectSidebarMembership } from "@/features/projects/lib/useProjectSidebarMembership";
 import {
   useMemberChannelIds,
   useRepositoryUnavailableReasonFor,
@@ -48,11 +54,11 @@ import {
   projectsSectionTitle,
 } from "@/features/projects/ui/projectsSectionMeta";
 import { EmptyState } from "@/features/projects/ui/ProjectCards";
+import { ProjectBrowserDialog } from "@/features/projects/ui/ProjectBrowserDialog";
 import {
   ProjectsOverviewProjectItems,
   ProjectsOverviewRepositoryItems,
 } from "@/features/projects/ui/ProjectsOverviewItems";
-import { CreateProjectDialog } from "@/features/projects/ui/CreateProjectDialog";
 import { CreateProjectIssueDialog } from "@/features/projects/ui/CreateProjectIssueDialog";
 import { CreatePullRequestDialog } from "@/features/projects/ui/CreatePullRequestDialog";
 import { ProjectAgentChatPanel } from "@/features/projects/ui/ProjectAgentChatPanel";
@@ -177,7 +183,7 @@ export function ProjectsView() {
     repoSnapshotsQuery.data?.unavailable,
     memberChannelIds,
   );
-  const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
+  const [projectBrowserOpen, setProjectBrowserOpen] = React.useState(false);
   const [createChannelOpen, setCreateChannelOpen] = React.useState(false);
   const [createRepositoryOpen, setCreateRepositoryOpen] = React.useState(false);
   const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
@@ -244,6 +250,28 @@ export function ProjectsView() {
   );
   const deleteProjectMutation = useDeleteProjectMutation();
   const currentPubkey = identityQuery.data?.pubkey;
+  const addedProjectAddresses = useProjectSidebarMembership(
+    relayOrigin,
+    currentPubkey,
+  );
+  const addedProjectAddressSet = React.useMemo(
+    () => new Set(addedProjectAddresses),
+    [addedProjectAddresses],
+  );
+  const handleCreateProject = React.useCallback(
+    async (input: CreateProjectInput) => {
+      const result = await createProjectMutation.mutateAsync(input);
+      if (result.compatibilityWarning) {
+        toast.warning("Created as a standalone project", {
+          description: result.compatibilityWarning,
+        });
+      } else {
+        toast.success(`Project "${result.project.name}" created.`);
+      }
+      await goProject(result.project.id);
+    },
+    [createProjectMutation, goProject],
+  );
   const managedAgentPubkeys = React.useMemo(
     () =>
       new Set(
@@ -565,10 +593,6 @@ export function ProjectsView() {
     );
   }
 
-  if (projectReadModels.length === 0) {
-    return <EmptyState />;
-  }
-
   const projectItems = (
     <ProjectsOverviewProjectItems
       currentPubkey={currentPubkey}
@@ -651,7 +675,6 @@ export function ProjectsView() {
     onChatWithAgent: (items: ProjectSelectionItem[]) =>
       setSelectionAgentContext(buildProjectSelectionAgentContext(items)),
     onCreateIssue: () => setCreateIssueOpen(true),
-    onCreateProject: () => setCreateProjectOpen(true),
     onCreatePullRequest: () => setCreatePullRequestOpen(true),
     profiles,
     projectReadModels,
@@ -740,21 +763,21 @@ export function ProjectsView() {
             overviewDetached ? "projects-overview-content-pod" : undefined
           }
         >
-          <CreateProjectDialog
+          <ProjectBrowserDialog
             isCreating={createProjectMutation.isPending}
-            onCreate={async (input) => {
-              const result = await createProjectMutation.mutateAsync(input);
-              if (result.compatibilityWarning) {
-                toast.warning("Created as a standalone project", {
-                  description: result.compatibilityWarning,
-                });
-              } else {
-                toast.success(`Project "${result.project.name}" created.`);
-              }
-              await goProject(result.project.id);
+            onCreate={handleCreateProject}
+            onOpenChange={setProjectBrowserOpen}
+            onSelectProject={(project) => {
+              addProjectToSidebar(
+                project.projectAddress,
+                relayOrigin,
+                currentPubkey,
+              );
+              void goProject(project.id);
             }}
-            onOpenChange={setCreateProjectOpen}
-            open={createProjectOpen}
+            open={projectBrowserOpen}
+            projects={projectReadModels}
+            selectedProjectAddresses={addedProjectAddressSet}
           />
           {createPullRequestOpen ? (
             <CreatePullRequestDialog
@@ -821,13 +844,27 @@ export function ProjectsView() {
                         onSortChange={handleSortChange}
                         sort={sort}
                       />
+                      <Button
+                        className="ml-auto h-8 shrink-0 gap-1.5 px-3"
+                        data-testid="projects-add-project"
+                        onClick={() => setProjectBrowserOpen(true)}
+                        size="sm"
+                        title="Add project"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Plus className="h-4 w-4" />
+                        Add project
+                      </Button>
                     </div>
                     <div
                       className={
                         filter === "all" ? "mx-auto w-full max-w-6xl" : "w-full"
                       }
                     >
-                      {filter === "all" ? (
+                      {projectReadModels.length === 0 ? (
+                        <EmptyState />
+                      ) : filter === "all" ? (
                         <ProjectsOverviewPanel>
                           <ProjectsActivityIntro digest={activityDigest} />
                           <section className="space-y-3">

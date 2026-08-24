@@ -68,8 +68,8 @@ async function addProjectToSidebar(
   page: import("@playwright/test").Page,
   dtag: string,
 ) {
-  await page.getByTestId("sidebar-projects-section-label").hover();
-  await page.getByTestId("sidebar-projects-create").click();
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-add-project").click();
   const browser = page.getByTestId("project-browser-dialog");
   await browser.getByRole("searchbox", { name: "Search projects" }).fill(dtag);
   await browser.getByTestId(`project-browser-result-${dtag}`).click();
@@ -1771,6 +1771,14 @@ test("project overview presents collapsible context beside grouped activity", as
     .getByTestId("projects-activity-search")
     .boundingBox();
   const tabMenuBox = await page.getByTestId("projects-page-tabs").boundingBox();
+  const tabMenuPaddingRight = await page
+    .getByTestId("projects-page-tabs")
+    .evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).paddingRight),
+    );
+  const addProjectBox = await page
+    .getByTestId("projects-add-project")
+    .boundingBox();
   const firstTabBox = await page
     .getByTestId("projects-section-all")
     .boundingBox();
@@ -1784,12 +1792,21 @@ test("project overview presents collapsible context beside grouped activity", as
   const contentPodBox = await overviewContentPod.boundingBox();
   expect(searchBox).toBeTruthy();
   expect(tabMenuBox).toBeTruthy();
+  expect(addProjectBox).toBeTruthy();
   expect(firstTabBox).toBeTruthy();
   expect(introBox).toBeTruthy();
   expect(feedBox).toBeTruthy();
   expect(contentPodBox).toBeTruthy();
   expect(searchBox?.x ?? 0).toBeLessThan(firstTabBox?.x ?? 0);
   expect(Math.abs((searchBox?.y ?? 0) - (firstTabBox?.y ?? 0))).toBeLessThan(8);
+  expect(addProjectBox?.x ?? 0).toBeGreaterThan(firstTabBox?.x ?? 0);
+  expect(
+    Math.abs(
+      (addProjectBox?.x ?? 0) +
+        (addProjectBox?.width ?? 0) -
+        ((tabMenuBox?.x ?? 0) + (tabMenuBox?.width ?? 0) - tabMenuPaddingRight),
+    ),
+  ).toBeLessThan(2);
   expect(tabMenuBox?.y ?? 0).toBeLessThan(introBox?.y ?? 0);
   expect(introBox?.y ?? 0).toBeLessThan(feedBox?.y ?? 0);
   expect(feedBox?.width ?? 0).toBeGreaterThan(600);
@@ -1892,7 +1909,8 @@ test("project overview presents collapsible context beside grouped activity", as
   );
   await expect(
     page.getByTestId("projects-overview-create-project"),
-  ).toBeVisible();
+  ).toHaveCount(0);
+  await expect(page.getByTestId("projects-add-project")).toBeVisible();
   await expect(page.getByTestId("projects-overview-people")).toBeVisible();
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
   await page.getByTestId("projects-section-repositories").click();
@@ -1937,7 +1955,8 @@ test("project overview presents collapsible context beside grouped activity", as
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
 
   await page.getByTestId("projects-section-projects").click();
-  await page.getByTestId("projects-overview-create-project").click();
+  await page.getByTestId("projects-add-project").click();
+  await page.getByTestId("project-browser-create").click();
   await expect(page.getByTestId("create-project-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("create-project-dialog")).toBeHidden();
