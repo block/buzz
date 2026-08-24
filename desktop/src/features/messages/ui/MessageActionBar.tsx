@@ -425,7 +425,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
-  const quickReactionEmojis = useQuickReactionEmojis(4, customEmoji);
+  const quickReactionEmojis = useQuickReactionEmojis(3, customEmoji);
   const quickReactionItems = React.useMemo(
     () =>
       quickReactionEmojis
