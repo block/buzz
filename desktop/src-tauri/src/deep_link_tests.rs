@@ -2,9 +2,11 @@ use url::Url;
 
 use super::{
     parse_add_community_deep_link, parse_channel_deep_link, parse_entity_deep_link,
-    parse_join_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link,
-    PendingCommunityDeepLink, PendingCommunityDeepLinks, PendingEntityDeepLinks,
-    PendingNavigationDeepLink, PendingNavigationDeepLinks, ENTITY_LINK_TABS,
+    parse_import_claim_deep_link, parse_join_deep_link, parse_join_slack_deep_link,
+    parse_message_deep_link, parse_nostr_bind_deep_link, PendingCommunityDeepLink,
+    PendingCommunityDeepLinks, PendingEntityDeepLinks, PendingImportClaimDeepLink,
+    PendingImportClaimDeepLinks, PendingNavigationDeepLink, PendingNavigationDeepLinks,
+    ENTITY_LINK_TABS,
 };
 
 fn entity_link_golden() -> serde_json::Value {
@@ -92,6 +94,7 @@ fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDee
         code: code.map(str::to_owned),
         policy_receipt: None,
         name: None,
+        service: None,
     }
 }
 
@@ -573,4 +576,165 @@ fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
     let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2000-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
     let payload = parse_nostr_bind_deep_link(&url).unwrap();
     assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
+}
+
+#[test]
+fn parse_join_slack_extracts_relay_and_service() {
+    let url = Url::parse(
+        "buzz://join-slack?relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+    )
+    .unwrap();
+    let p = parse_join_slack_deep_link(&url).unwrap();
+    assert_eq!(p.relay_url, "wss://relay.example");
+    assert_eq!(p.service, "https://mig.example");
+}
+
+#[test]
+fn parse_join_slack_rejects_missing_relay_or_bad_service() {
+    // missing relay
+    assert!(parse_join_slack_deep_link(
+        &Url::parse("buzz://join-slack?service=https%3A%2F%2Fmig.example").unwrap()
+    )
+    .is_err());
+    // missing service
+    assert!(parse_join_slack_deep_link(
+        &Url::parse("buzz://join-slack?relay=wss%3A%2F%2Frelay.example").unwrap()
+    )
+    .is_err());
+    // non-http service
+    assert!(parse_join_slack_deep_link(
+        &Url::parse("buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=file%3A%2F%2Fx")
+            .unwrap()
+    )
+    .is_err());
+    // Remote services must use TLS; local development may use loopback HTTP.
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=http%3A%2F%2Fmig.example"
+        )
+        .unwrap()
+    )
+    .is_err());
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=ws%3A%2F%2Flocalhost%3A3000&service=http%3A%2F%2Flocalhost%3A8787"
+        )
+        .unwrap()
+    )
+    .is_ok());
+    // The service is an origin; appending endpoints to a path prefix is unsafe.
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example%2Fprefix"
+        )
+        .unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn parse_import_claim_email_channel() {
+    let url = Url::parse(
+            "buzz://import-claim?subject=slack:U060&token=v1.aa.bb.cc.dd&service=https%3A%2F%2Fmig.example",
+        )
+        .unwrap();
+    let p = parse_import_claim_deep_link(&url).unwrap();
+    assert_eq!(p.subject, "slack:U060");
+    assert_eq!(p.token.as_deref(), Some("v1.aa.bb.cc.dd"));
+    assert_eq!(p.service.as_deref(), Some("https://mig.example"));
+    assert_eq!(p.via, None);
+    assert_eq!(p.relay_url, None);
+}
+
+#[test]
+fn parse_import_claim_oidc_channel() {
+    let url = Url::parse(
+            "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+        )
+        .unwrap();
+    let p = parse_import_claim_deep_link(&url).unwrap();
+    assert_eq!(p.subject, "slack:U060");
+    assert_eq!(p.via.as_deref(), Some("oidc"));
+    assert_eq!(p.token, None);
+    assert_eq!(p.service.as_deref(), Some("https://mig.example"));
+    assert_eq!(p.relay_url.as_deref(), Some("wss://relay.example"));
+    assert_eq!(p.code.as_deref(), Some("abc123"));
+}
+
+#[test]
+fn parse_import_claim_rejects_incomplete_and_malformed() {
+    // Neither channel identifiable (subject only).
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060").unwrap()
+    )
+    .is_err());
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060&via=oidc").unwrap()
+    )
+    .is_err());
+    // OIDC with relay + service but no finalize code.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse(
+            "buzz://import-claim?subject=slack:U060&via=oidc&relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example"
+        )
+        .unwrap()
+    )
+    .is_err());
+    // token without service.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060&token=t").unwrap()
+    )
+    .is_err());
+    // Malformed subject (no source).
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=U060&via=oidc").unwrap()
+    )
+    .is_err());
+    // Non-http service.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060&token=t&service=file%3A%2F%2Fx")
+            .unwrap()
+    )
+    .is_err());
+    // A query or fragment would make the app append /oidc/start or
+    // /email/complete at the wrong location.
+    for service in [
+        "https%3A%2F%2Fmig.example%3Fnext%3Devil",
+        "https%3A%2F%2Fmig.example%23fragment",
+        "https%3A%2F%2Fmig.example%2Fprefix",
+        "http%3A%2F%2Fmig.example",
+    ] {
+        assert!(parse_import_claim_deep_link(
+            &Url::parse(&format!(
+                "buzz://import-claim?subject=slack:U060&token=t&service={service}"
+            ))
+            .unwrap()
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn pending_import_claims_dedupe_and_acknowledge() {
+    let queue = PendingImportClaimDeepLinks::default();
+    let payload = parse_import_claim_deep_link(
+            &Url::parse(
+                "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    queue.enqueue(PendingImportClaimDeepLink {
+        request_id: "first".into(),
+        payload: payload.clone(),
+    });
+    queue.enqueue(PendingImportClaimDeepLink {
+        request_id: "duplicate".into(),
+        payload,
+    });
+
+    assert_eq!(queue.first().unwrap().request_id, "first");
+    assert!(!queue.acknowledge("wrong"));
+    assert!(queue.acknowledge("first"));
+    assert!(queue.first().is_none());
 }

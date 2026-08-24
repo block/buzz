@@ -56,6 +56,7 @@
 //! the fence closed for their duration; see `migrations/0021`.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -186,6 +187,17 @@ impl ResolveOutcome {
 #[derive(Debug, Default)]
 pub struct ReplicaFence {
     inner: Mutex<FenceInner>,
+    /// Number of backfill (floor-exempt) inserts currently in flight.
+    ///
+    /// A backfill commit writes a row far below the armed floor, which no
+    /// retained entry's bucket argument can account for — so while any
+    /// backfill is in flight, and for any probe sample taken before the last
+    /// backfill finished, recording a fence entry is refused (see
+    /// [`Self::backfill_begin`]).
+    backfill_inflight: AtomicI64,
+    /// Unix micros when the most recent backfill insert finished, or `0`
+    /// before the first backfill.
+    backfill_watermark_micros: AtomicI64,
 }
 
 impl ReplicaFence {
@@ -198,6 +210,52 @@ impl ReplicaFence {
     pub fn close(&self) {
         let mut inner = self.inner.lock().expect("fence lock poisoned");
         inner.ring.clear();
+    }
+
+    /// Mark a backfill (floor-exempt) insert as starting: closes the fence
+    /// and blocks new records until [`Self::backfill_end`] moves the
+    /// watermark.
+    ///
+    /// Backfilled rows carry `created_at` far below the armed floor, so no
+    /// retained entry's bucket argument bounds them: the backfill can commit
+    /// *after* every retained token while its rows fall under every retained
+    /// fence wall. Clearing the ring revokes those proofs, and refusing to
+    /// record from any sample taken while a backfill is in flight — or taken
+    /// before the last backfill finished — restores the proof: only a sample
+    /// whose token commit provably follows the backfill commit can reopen
+    /// the fence, and by then the commit is bucket (a).
+    pub fn backfill_begin(&self) {
+        self.backfill_inflight.fetch_add(1, Ordering::SeqCst);
+        self.close();
+    }
+
+    /// Mark a backfill insert as finished (whether it committed or failed).
+    pub fn backfill_end(&self) {
+        self.backfill_watermark_micros
+            .store(Utc::now().timestamp_micros(), Ordering::SeqCst);
+        self.backfill_inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Scope a backfill insert: [`Self::backfill_begin`] now,
+    /// [`Self::backfill_end`] when the returned guard drops.
+    ///
+    /// Prefer this over the raw pair: an ingest future can be dropped
+    /// mid-insert (an HTTP client disconnecting cancels the request future),
+    /// and a missed `backfill_end` leaks the in-flight count, leaving the
+    /// fence permanently closed for the rest of the process's life.
+    pub fn backfill(&self) -> BackfillGuard<'_> {
+        self.backfill_begin();
+        BackfillGuard(self)
+    }
+
+    /// Whether a probe sample whose `S` was captured at `sampled_at` may
+    /// record a fence entry.
+    fn sample_admissible(&self, sampled_at: DateTime<Utc>) -> bool {
+        if self.backfill_inflight.load(Ordering::SeqCst) > 0 {
+            return false;
+        }
+        let watermark = self.backfill_watermark_micros.load(Ordering::SeqCst);
+        watermark == 0 || sampled_at.timestamp_micros() > watermark
     }
 
     /// Record one probe sample. Epoch changes (re-seed) clear the ring and
@@ -309,6 +367,17 @@ impl ReplicaFence {
     }
 }
 
+/// RAII scope for one backfill (floor-exempt) insert — see
+/// [`ReplicaFence::backfill`]. Ends the backfill on drop, including when the
+/// enclosing future is cancelled instead of completing.
+pub struct BackfillGuard<'a>(&'a ReplicaFence);
+
+impl Drop for BackfillGuard<'_> {
+    fn drop(&mut self) {
+        self.0.backfill_end();
+    }
+}
+
 /// Catalog-level verification that the commit-time floor guard (migration
 /// 0021) is present and correctly shaped on the `events` parent AND every
 /// partition: right function, `DEFERRABLE INITIALLY DEFERRED`, row-level,
@@ -367,7 +436,7 @@ pub async fn verify_floor_guard_catalog<'e>(
 /// pool; this proves the semantics the fence proof cites, inside one
 /// rolled-back transaction:
 ///
-/// 1. the pool's session GUC equals [`CREATED_AT_FLOOR_SECS`] (arming);
+/// 1. the pool's session GUC equals the configured `floor_secs` (arming);
 /// 2. an old channel-bearing INSERT raises `check_violation` (23514);
 /// 3. a fresh channel-bearing INSERT commits;
 /// 4. rewriting a fresh row's `created_at` below the floor raises;
@@ -378,7 +447,7 @@ pub async fn verify_floor_guard_catalog<'e>(
 /// statement so each adversary is observable under a savepoint; deferral to
 /// COMMIT is separately pinned by the held-transaction fixture.
 #[datastore_span(name = "replica_fence_verify_behavior", system = "postgresql")]
-pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
+pub async fn verify_floor_guard_behavior(pool: &PgPool, floor_secs: i64) -> crate::Result<()> {
     use crate::error::DbError;
 
     let expect_violation = |res: Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
@@ -406,9 +475,9 @@ pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
                 "buzz.created_at_floor GUC not set on this pool: {e}"
             ))
         })?;
-    if armed != CREATED_AT_FLOOR_SECS.to_string() {
+    if armed != floor_secs.to_string() {
         return Err(DbError::InvalidData(format!(
-            "buzz.created_at_floor is '{armed}', expected '{CREATED_AT_FLOOR_SECS}': \
+            "buzz.created_at_floor is '{armed}', expected '{floor_secs}': \
              pool is not armed"
         )));
     }
@@ -440,7 +509,7 @@ pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
         .bind(vec![0u8; 64])
         .bind(ch)
     };
-    let old_age = CREATED_AT_FLOOR_SECS + 60;
+    let old_age = floor_secs + 60;
 
     // 2. Old channel-bearing insert must raise.
     sqlx::query("SAVEPOINT floor_probe")
@@ -635,17 +704,32 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
 
 /// The fence wall proved by one handshake:
 /// `min(oldest_xact_start, S) - floor - clock_margin`.
-fn fence_wall(sample_s: DateTime<Utc>, oldest_xact_start: Option<DateTime<Utc>>) -> DateTime<Utc> {
+///
+/// `floor_secs` is the commit-time floor armed on the writer pool
+/// ([`crate::DbConfig::created_at_floor_secs`], default
+/// [`CREATED_AT_FLOOR_SECS`]) — the wall must subtract the same value the
+/// guard enforces, so it is threaded through rather than read from the
+/// constant.
+fn fence_wall(
+    sample_s: DateTime<Utc>,
+    oldest_xact_start: Option<DateTime<Utc>>,
+    floor_secs: i64,
+) -> DateTime<Utc> {
     let lower = match oldest_xact_start {
         Some(oldest) => oldest.min(sample_s),
         None => sample_s,
     };
     lower
-        - chrono::Duration::seconds(CREATED_AT_FLOOR_SECS)
+        - chrono::Duration::seconds(floor_secs)
         - chrono::Duration::seconds(FENCE_CLOCK_MARGIN_SECS)
 }
 
 /// Run one full handshake and record the resulting `(token, fence_wall)`.
+///
+/// `Ok(None)` means the sample was refused because a backfill (floor-exempt)
+/// insert was in flight, or finished after the sample's `S` was captured —
+/// the handshake's bucket argument cannot bound the backfilled rows, so
+/// nothing is recorded; the next interval samples fresh.
 ///
 /// On a same-epoch token regression (the writer was restored from a backup
 /// that kept its epoch), the retained ring has already been cleared by
@@ -653,15 +737,25 @@ fn fence_wall(sample_s: DateTime<Utc>, oldest_xact_start: Option<DateTime<Utc>>)
 /// writer and records the rotated token, so a reader still serving the
 /// pre-rewind timeline (whose old, higher token would otherwise satisfy
 /// `token >= M`) fails the epoch check instead of proving stale coverage.
-pub async fn probe_once(writer: &PgPool, fence: &ReplicaFence) -> Result<TokenEntry, ProbeError> {
+pub async fn probe_once(
+    writer: &PgPool,
+    fence: &ReplicaFence,
+    floor_secs: i64,
+) -> Result<Option<TokenEntry>, ProbeError> {
     let sample = sample_writer(writer).await?;
-    let wall = fence_wall(sample.sampled_at, sample.oldest_xact_start);
-    match fence.record(sample.token, sample.epoch, sample.committed_at, wall) {
-        RecordOutcome::Recorded => Ok(TokenEntry {
+    // A sample taken during (or before the end of) a backfill insert cannot
+    // prove coverage of the backfilled rows — skip; the next interval
+    // samples fresh.
+    if !fence.sample_admissible(sample.sampled_at) {
+        return Ok(None);
+    }
+    let wall = fence_wall(sample.sampled_at, sample.oldest_xact_start, floor_secs);
+    let entry = match fence.record(sample.token, sample.epoch, sample.committed_at, wall) {
+        RecordOutcome::Recorded => TokenEntry {
             token: sample.token,
             committed_at: sample.committed_at,
             fence_wall: wall,
-        }),
+        },
         RecordOutcome::TokenRegression => {
             tracing::warn!(
                 token = sample.token,
@@ -683,13 +777,23 @@ pub async fn probe_once(writer: &PgPool, fence: &ReplicaFence) -> Result<TokenEn
             // A fresh epoch always clears and records; regression is
             // impossible against an empty ring.
             fence.record(token, epoch, committed_at, wall);
-            Ok(TokenEntry {
+            TokenEntry {
                 token,
                 committed_at,
                 fence_wall: wall,
-            })
+            }
         }
+    };
+    // Re-check after recording: a backfill that began (and possibly
+    // finished) between the pre-check and `record` may have committed after
+    // this sample's token while its rows fall below the wall. Either its
+    // `backfill_begin` cleared the ring after our record landed, or the
+    // in-flight count / watermark now betrays it — close and refuse.
+    if !fence.sample_admissible(sample.sampled_at) {
+        fence.close();
+        return Ok(None);
     }
+    Ok(Some(entry))
 }
 
 /// The Aurora **PostgreSQL** instance-identity function. Named once so the
@@ -773,13 +877,18 @@ pub struct HeartbeatObservation {
 
 /// Background probe loop: commit a heartbeat token every `PROBE_INTERVAL`;
 /// close the fence on any error. Runs for the life of the process.
-pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
+pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>, floor_secs: i64) {
     let mut interval = tokio::time::interval(PROBE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        match probe_once(&writer, &fence).await {
-            Ok(_) => {}
+        match probe_once(&writer, &fence, floor_secs).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                // Sample refused inside a backfill window: the fence stays
+                // closed; the next interval samples fresh.
+                tracing::debug!("replica fence: sample refused during backfill window");
+            }
             Err(e) => {
                 fence.close();
                 tracing::warn!(error = %e, "replica fence probe failed; fence closed");
@@ -850,6 +959,44 @@ mod tests {
         fence.close();
         assert!(fence.verified_through().is_none(), "close() must close");
         assert!(!fence.covers(ts - chrono::Duration::days(365)));
+    }
+
+    #[test]
+    fn backfill_blocks_stale_samples_from_advancing() {
+        let fence = ReplicaFence::new();
+
+        // No backfill yet: any sample is admissible.
+        let before = Utc::now();
+        assert!(fence.sample_admissible(before));
+
+        // In-flight backfill: nothing is admissible and the fence closes.
+        fence.record(1, Uuid::new_v4(), Instant::now(), before);
+        assert!(fence.verified_through().is_some(), "entry retained");
+        fence.backfill_begin();
+        assert!(fence.verified_through().is_none(), "backfill closes fence");
+        assert!(!fence.sample_admissible(Utc::now()));
+
+        // Finished: samples taken at/before the watermark stay refused;
+        // fresh samples are admissible again.
+        fence.backfill_end();
+        assert!(!fence.sample_admissible(before));
+        let after = Utc::now() + chrono::Duration::seconds(1);
+        assert!(fence.sample_admissible(after));
+    }
+
+    #[test]
+    fn dropping_the_backfill_guard_reopens_admissibility() {
+        // A cancelled insert drops the guard without running any explicit
+        // end call; the in-flight count must still return to zero, or the
+        // fence never advances again.
+        let fence = ReplicaFence::new();
+        let before = Utc::now();
+        {
+            let _guard = fence.backfill();
+            assert!(!fence.sample_admissible(Utc::now()));
+        }
+        assert!(!fence.sample_admissible(before), "watermark still applies");
+        assert!(fence.sample_admissible(Utc::now() + chrono::Duration::seconds(1)));
     }
 
     #[test]
@@ -1104,8 +1251,14 @@ mod tests {
         let (admin, pool, name) = scratch_db().await;
         let fence = ReplicaFence::new();
 
-        let first = probe_once(&pool, &fence).await.expect("first probe");
-        let second = probe_once(&pool, &fence).await.expect("second probe");
+        let first = probe_once(&pool, &fence, CREATED_AT_FLOOR_SECS)
+            .await
+            .expect("first probe")
+            .expect("no backfill in flight");
+        let second = probe_once(&pool, &fence, CREATED_AT_FLOOR_SECS)
+            .await
+            .expect("second probe")
+            .expect("no backfill in flight");
         assert!(second.token > first.token, "tokens strictly increase");
         assert!(
             second.fence_wall >= first.fence_wall
@@ -1159,7 +1312,10 @@ mod tests {
         let (admin, pool, name) = scratch_db().await;
         let fence = ReplicaFence::new();
 
-        let before = probe_once(&pool, &fence).await.expect("probe");
+        let before = probe_once(&pool, &fence, CREATED_AT_FLOOR_SECS)
+            .await
+            .expect("probe")
+            .expect("no backfill in flight");
         let mut conn = pool.acquire().await.expect("conn");
         let old_epoch = observe_heartbeat(&mut conn, false)
             .await
@@ -1173,7 +1329,10 @@ mod tests {
             .await
             .expect("rewind token");
 
-        let after = probe_once(&pool, &fence).await.expect("recovery probe");
+        let after = probe_once(&pool, &fence, CREATED_AT_FLOOR_SECS)
+            .await
+            .expect("recovery probe")
+            .expect("no backfill in flight");
         // The pre-rewind observation must no longer prove anything.
         assert_eq!(
             fence.resolve(before.token, old_epoch),

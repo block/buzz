@@ -105,7 +105,7 @@ pub fn reset_rate_limit_gate() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // The gate is a process-wide static shared by every test in this binary,
