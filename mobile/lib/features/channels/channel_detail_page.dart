@@ -134,30 +134,74 @@ Future<bool> _preloadMembers(
 Future<void Function()> _subscribeToDmIdentityUpdates(
   WidgetRef ref,
   List<String> participantPubkeys, {
+  required ValueChanged<bool> onReadyChanged,
+  required ValueChanged<Set<String>> onAgentPubkeysChanged,
   required VoidCallback onFailure,
 }) async {
   final session = ref.read(relaySessionProvider.notifier);
-  return session.subscribe(
+  var subscriptionStatus = RelaySubscriptionStatus.retrying;
+  var directLookupComplete = false;
+  final agentPubkeys = <String>{};
+
+  void publishAgentPubkeys() {
+    onAgentPubkeysChanged(Set.unmodifiable(agentPubkeys));
+  }
+
+  void handleEvent(NostrEvent event) {
+    if (event.kind == 0) {
+      try {
+        ref.read(userCacheProvider.notifier).cacheProfileEvent(event);
+      } catch (error) {
+        debugPrint('[DmIdentity] invalid live profile: $error');
+        onFailure();
+      }
+    } else if (event.kind == 10100) {
+      agentPubkeys.add(event.pubkey.toLowerCase());
+      publishAgentPubkeys();
+      ref.invalidate(agentDirectoryProvider);
+      ref.invalidate(agentOwnersProvider);
+    }
+  }
+
+  final unsubscribe = await session.subscribeWithStatus(
     NostrFilter(
       kinds: const [0, 10100],
       authors: participantPubkeys,
       limit: 100,
     ).copyWithSince(DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5),
-    (event) {
-      if (event.kind == 0) {
-        try {
-          ref.read(userCacheProvider.notifier).cacheProfileEvent(event);
-        } catch (error) {
-          debugPrint('[DmIdentity] invalid live profile: $error');
-          onFailure();
-        }
-      } else if (event.kind == 10100) {
-        ref.invalidate(agentDirectoryProvider);
-        ref.invalidate(agentOwnersProvider);
+    handleEvent,
+    onClosed: (_) => onFailure(),
+    onStatusChanged: (status) {
+      subscriptionStatus = status;
+      if (status == RelaySubscriptionStatus.retrying) {
+        onReadyChanged(false);
+      } else if (directLookupComplete) {
+        onReadyChanged(true);
       }
     },
-    onClosed: (_) => onFailure(),
   );
+
+  try {
+    final profiles = await session.fetchHistory(
+      NostrFilter(
+        kinds: const [10100],
+        authors: participantPubkeys,
+        limit: participantPubkeys.length,
+      ),
+    );
+    for (final profile in profiles) {
+      if (profile.kind == 10100) {
+        agentPubkeys.add(profile.pubkey.toLowerCase());
+      }
+    }
+    publishAgentPubkeys();
+    directLookupComplete = true;
+    onReadyChanged(subscriptionStatus == RelaySubscriptionStatus.ready);
+    return unsubscribe;
+  } catch (_) {
+    unsubscribe();
+    rethrow;
+  }
 }
 
 int? _channelReadTimestamp({
@@ -346,14 +390,6 @@ class ChannelDetailPage extends HookConsumerWidget {
     final channelBotPubkeysState = ref.watch(
       channelBotPubkeysProvider(resolvedChannel.id),
     );
-    final agentPubkeys = agentPubkeysWithChannelBots(
-      knownAgentPubkeys: agentPubkeysWithProfileOwners(
-        knownAgentPubkeys: ref.watch(knownAgentPubkeysProvider),
-        profileOwnedAgentPubkeys: profileOwnedAgentPubkeys,
-      ),
-      channelBotPubkeys:
-          channelBotPubkeysState.asData?.value ?? const <String>{},
-    );
     final identitySubscriptionPubkeys = isOneToOneDm
         ? (resolvedChannel.participantPubkeys
               .map((pubkey) => pubkey.trim().toLowerCase())
@@ -368,8 +404,25 @@ class ChannelDetailPage extends HookConsumerWidget {
       resolvedChannel.id,
       identitySubscriptionKey,
     ]);
+    final directlyResolvedAgentPubkeys = useValueNotifier(<String>{}, [
+      sessionStatus,
+      resolvedChannel.id,
+      identitySubscriptionKey,
+    ]);
     final isIdentitySubscriptionReady = useValueListenable(
       identitySubscriptionReady,
+    );
+    final directAgentPubkeys = useValueListenable(directlyResolvedAgentPubkeys);
+    final agentPubkeys = agentPubkeysWithChannelBots(
+      knownAgentPubkeys: agentPubkeysWithProfileOwners(
+        knownAgentPubkeys: {
+          ...ref.watch(knownAgentPubkeysProvider),
+          ...directAgentPubkeys,
+        },
+        profileOwnedAgentPubkeys: profileOwnedAgentPubkeys,
+      ),
+      channelBotPubkeys:
+          channelBotPubkeysState.asData?.value ?? const <String>{},
     );
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
@@ -389,13 +442,20 @@ class ChannelDetailPage extends HookConsumerWidget {
           final cleanup = await _subscribeToDmIdentityUpdates(
             ref,
             identitySubscriptionPubkeys,
+            onReadyChanged: (isReady) {
+              if (!disposed && !subscriptionFailed) {
+                identitySubscriptionReady.value = isReady;
+              }
+            },
+            onAgentPubkeysChanged: (pubkeys) {
+              if (!disposed) directlyResolvedAgentPubkeys.value = pubkeys;
+            },
             onFailure: markFailed,
           );
           if (disposed) {
             cleanup();
           } else {
             unsubscribe = cleanup;
-            if (!subscriptionFailed) identitySubscriptionReady.value = true;
           }
         } catch (error) {
           if (!disposed) {
