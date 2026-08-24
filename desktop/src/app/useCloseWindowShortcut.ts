@@ -33,19 +33,37 @@ export function isCloseWindowShortcut(
   );
 }
 
+type CloseWindowShortcutOptions = {
+  onCloseActiveSelection?: () => void;
+  shouldCloseWindow?: () => boolean;
+};
+
 /**
  * Restores the standard macOS Cmd+W behavior without reclaiming the native
  * menu accelerator. Buzz Term handles the chord first in capture phase while
- * it owns input; otherwise this bubble-phase listener closes the current
- * window. The main window's Rust close handler turns that into hide-to-tray.
+ * it owns input; otherwise this bubble-phase listener either delegates to the
+ * active route's close-selection behavior or closes the current window. The
+ * main window's Rust close handler turns that into hide-to-tray.
  */
-export function useCloseWindowShortcut() {
+export function useCloseWindowShortcut({
+  onCloseActiveSelection,
+  shouldCloseWindow = () => true,
+}: CloseWindowShortcutOptions = {}) {
+  const onCloseActiveSelectionRef = React.useRef(onCloseActiveSelection);
+  const shouldCloseWindowRef = React.useRef(shouldCloseWindow);
+  onCloseActiveSelectionRef.current = onCloseActiveSelection;
+  shouldCloseWindowRef.current = shouldCloseWindow;
+
   React.useEffect(() => {
     if (!isTauri()) return;
 
     function handleKeyDown(event: KeyboardEvent) {
       if (!isCloseWindowShortcut(event, isMacPlatform())) return;
       event.preventDefault();
+      if (!shouldCloseWindowRef.current()) {
+        onCloseActiveSelectionRef.current?.();
+        return;
+      }
       void getCurrentWindow().close();
     }
 

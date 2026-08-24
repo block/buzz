@@ -21,6 +21,7 @@ import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
+import { shouldCmdWCloseWindowForRoute } from "@/app/closeWindowRouteBehavior";
 import { useCloseWindowShortcut } from "@/app/useCloseWindowShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
@@ -770,7 +771,13 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
 
 export function App() {
   useReloadShortcut();
-  useCloseWindowShortcut();
+  useCloseWindowShortcut({
+    shouldCloseWindow: () =>
+      shouldCmdWCloseWindowForRoute(router.state.location),
+    onCloseActiveSelection: () => {
+      void router.navigate({ to: "/", replace: true });
+    },
+  });
   useInitialRenderReady();
   const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
   const [queryClient] = useState(createBuzzQueryClient);
