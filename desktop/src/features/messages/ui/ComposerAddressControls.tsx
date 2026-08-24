@@ -214,15 +214,25 @@ export function ComposerMentionButton({
                       className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                       data-testid={`composer-address-lock-remove-${agent.pubkey}`}
                       disabled={disabled}
-                      exit={{ opacity: 0, scale: 0.8 }}
+                      exit={
+                        shouldReduceMotion
+                          ? { opacity: 0 }
+                          : { opacity: 0, scale: 0.8 }
+                      }
                       initial={
                         newlyAddedAgentPubkeys.has(agent.pubkey)
-                          ? { opacity: 0, scale: 0.8 }
+                          ? shouldReduceMotion
+                            ? { opacity: 0 }
+                            : { opacity: 0, scale: 0.8 }
                           : false
                       }
-                      layout
+                      layout={!shouldReduceMotion}
                       onClick={() => onRemove(agent.pubkey)}
-                      transition={addressEntryTransition}
+                      transition={
+                        shouldReduceMotion
+                          ? { duration: 0 }
+                          : addressEntryTransition
+                      }
                       type="button"
                     >
                       <AddressedAgentAvatar

@@ -576,6 +576,30 @@ test("channel automatic mentions carry into threads and stay synchronized", asyn
   await expect(channelAutomaticMention).toHaveCount(0);
 });
 
+test("reduced motion removes addressed agents without spatial animation", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await input.press("Tab");
+  const removeButton = composer.getByTestId(
+    `composer-address-lock-remove-${AGENT_A}`,
+  );
+  await expect(removeButton).toBeVisible();
+  await expect(removeButton).toHaveAttribute("style", /opacity: 1/);
+  await expect(removeButton).toHaveCSS("transform", "none");
+
+  await removeButton.click();
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(removeButton).toHaveCount(0);
+});
+
 for (const theme of ["buzz", "buzz-dark"]) {
   test(`captures the mention-button placement in ${theme}`, async ({
     page,
