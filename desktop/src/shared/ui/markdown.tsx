@@ -43,6 +43,7 @@ import {
   markdownPropsAreEqual,
 } from "./markdownUtils";
 import { ImageMosaic } from "./markdown/ImageMosaic";
+import { ImageGalleryStatus } from "./markdown/ImageGalleryStatus";
 import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls";
 import {
   CODE_BLOCK_CLASS,
@@ -859,7 +860,7 @@ function ImageZoomOverlay({
                 custom={galleryDirection}
                 exit="exit"
                 initial="enter"
-                key={currentItem.resolvedSrc}
+                key={`${currentIndex}:${currentItem.resolvedSrc}`}
                 src={currentItem.resolvedSrc}
                 transition={{
                   duration: prefersReducedMotion
@@ -952,6 +953,7 @@ function ImageZoomOverlay({
             updateZoom={updateZoom}
             zoom={zoom}
           />
+          <ImageGalleryStatus {...{ currentIndex, itemCount: items.length }} />
         </div>
       </div>
       {menu && canActOnCurrentImage ? (
@@ -1000,7 +1002,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   useSmoothCorners(inlineImageRef);
   useSmoothCorners(thumbnailImageRef);
-
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
     src: string;
@@ -1078,7 +1079,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
 
     return () => observer.disconnect();
   }, []);
-
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
@@ -1089,7 +1089,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     e.nativeEvent.stopImmediatePropagation();
     setMenu({ x: e.clientX, y: e.clientY });
   };
-
   const openLightbox = React.useCallback(
     (image: HTMLImageElement) => {
       if (!resolvedSrc || isInsideHiddenSpoiler(image)) {
@@ -1113,6 +1112,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
             {
               alt,
               dim,
+              trigger: triggerRef.current,
               resolvedSrc,
               src,
               thumbnailBox: sourceBox,

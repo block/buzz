@@ -10,6 +10,7 @@ import {
   type ImageLightboxCornerRadii,
   imageLightboxBoxFromRect,
   imageLightboxCornerRadiiFromElement,
+  imageLightboxSourceScopeForTrigger,
   visibleImageGalleryForTrigger,
 } from "./imageLightbox";
 
@@ -52,7 +53,7 @@ export function createLinkPreviewImageLightbox(
 
       const sourceBox = imageLightboxBoxFromRect(rect);
       const sourceCornerRadii = imageLightboxCornerRadiiFromElement(image);
-      const sourceScope = trigger.closest("[data-link-preview-list]");
+      const sourceScope = imageLightboxSourceScopeForTrigger(trigger);
       const dim =
         image.naturalWidth > 0 && image.naturalHeight > 0
           ? `${image.naturalWidth}x${image.naturalHeight}`
@@ -62,6 +63,7 @@ export function createLinkPreviewImageLightbox(
         {
           alt,
           dim,
+          trigger,
           resolvedSrc: src,
           src: undefined,
           thumbnailBox: sourceBox,
