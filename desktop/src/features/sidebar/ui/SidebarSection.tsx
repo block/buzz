@@ -79,7 +79,10 @@ function UnreadCountBadge({
       data-testid={`channel-unread-${channelName}`}
     >
       {formatUnreadCount(count)}
-      <span className="sr-only"> new comment{count === 1 ? "" : "s"}</span>
+      <span className="sr-only">
+        {" "}
+        unread notification{count === 1 ? "" : "s"}
+      </span>
     </span>
   );
 }
@@ -255,6 +258,7 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
+  unreadCount = 0,
   activeWorking,
   isMuted,
   dmParticipants,
@@ -354,7 +358,13 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasThreadUnread ? (
+      {!isActive && channel.channelType !== "dm" && unreadCount > 0 ? (
+        <UnreadCountBadge
+          channelName={channel.name}
+          className="ml-auto bg-notification text-notification-foreground"
+          count={unreadCount}
+        />
+      ) : hasThreadUnread ? (
         <UnreadDotBadge channelName={channel.name} className="ml-auto" />
       ) : null}
     </SidebarMenuButton>

@@ -644,12 +644,10 @@ class _RecentSearches extends StatelessWidget {
 class _ChannelsSection extends StatelessWidget {
   final List<Channel> channels;
   final VoidCallback onResultSelected;
-
   const _ChannelsSection({
     required this.channels,
     required this.onResultSelected,
   });
-
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -670,12 +668,14 @@ class _ChannelsSection extends StatelessWidget {
               key: ValueKey('search-channel-title-${channel.id}'),
               style: contentListTitleTextStyle,
             ),
-            subtitle: Text(
-              '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
-              style: contentListBodyTextStyle.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
+            subtitle: channel.isMember
+                ? Text(
+                    '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
+                    style: contentListBodyTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  )
+                : null,
             trailing: !channel.isMember && !channel.isDm
                 ? Container(
                     padding: const EdgeInsets.symmetric(
