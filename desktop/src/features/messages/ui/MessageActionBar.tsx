@@ -143,7 +143,7 @@ function MoreActionsMenu({
           {onEdit ? (
             <DropdownMenuItem
               data-testid={`edit-message-${message.id}`}
-              onClick={() => {
+              onSelect={() => {
                 editJustSelectedRef.current = true;
                 onEdit(message);
               }}

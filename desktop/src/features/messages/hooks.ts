@@ -683,11 +683,17 @@ export function useSendMessageMutation(
       }
 
       const queryKey = channelMessagesKey(effectiveChannel.id);
-      await queryClient.cancelQueries({ queryKey });
+      const windowKey = channelWindowKey(effectiveChannel.id);
+      // The rendered timeline is projected from the channel-window cache. Cancel
+      // both reads before snapshotting either cache so an older window response
+      // cannot replace the optimistic row between onMutate and onSuccess.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey }),
+        queryClient.cancelQueries({ queryKey: windowKey }),
+      ]);
 
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const windowKey = channelWindowKey(effectiveChannel.id);
       const previousWindow =
         queryClient.getQueryData<ChannelWindowStore>(windowKey);
       const optimisticMessage = createOptimisticMessage(

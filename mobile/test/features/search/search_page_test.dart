@@ -95,9 +95,10 @@ void main() {
     expect(appBar.gradient, isNull);
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
-    expect(appBar.bottomDividerOpacity, 0.06);
+    expect(appBar.bottomDividerOpacity, 0.07);
     expect(appBar.bottomHeight, 57);
     expect(appBar.leading, isNull);
+    expect(appBar.centerTitle, isFalse);
     expect(find.text('Search'), findsOneWidget);
     final promptText = find.descendant(
       of: find.byKey(const Key('search-field-container')),
