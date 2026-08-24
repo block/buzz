@@ -62,6 +62,84 @@ fn is_subcommand(name: &str) -> bool {
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Channels present in a discovery result but not yet subscribed.
+///
+/// Used by the periodic re-discovery sweep. Deliberately additive only: the
+/// kind:44101 member-removed path owns unsubscription (it drains queued events
+/// and invalidates sessions), and a transient partial discovery result must
+/// never evict live subscriptions. Deterministic order (ascending UUID) keeps
+/// logs stable across sweeps.
+fn missing_channel_ids(
+    discovered: &HashMap<Uuid, relay::ChannelInfo>,
+    subscribed: &HashSet<Uuid>,
+) -> Vec<Uuid> {
+    let mut missing: Vec<Uuid> = discovered
+        .keys()
+        .filter(|id| !subscribed.contains(id))
+        .copied()
+        .collect();
+    missing.sort_unstable();
+    missing
+}
+
+#[cfg(test)]
+mod channel_discovery_refresh_tests {
+    use super::*;
+
+    fn info() -> relay::ChannelInfo {
+        relay::ChannelInfo {
+            name: "ui".into(),
+            channel_type: "stream".into(),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn missing_channel_ids_reports_only_unsubscribed_channels() {
+        let joined: Uuid = "e8beeeff-0210-4aa3-8357-a3d50a003085".parse().unwrap();
+        let known: Uuid = "770c5d49-b99f-4c57-a4a2-8cfb84d8b6ba".parse().unwrap();
+
+        let mut discovered = HashMap::new();
+        discovered.insert(joined, info());
+        discovered.insert(known, info());
+
+        let mut subscribed = HashSet::new();
+        subscribed.insert(known);
+
+        assert_eq!(missing_channel_ids(&discovered, &subscribed), vec![joined]);
+    }
+
+    #[test]
+    fn missing_channel_ids_is_empty_when_fully_subscribed() {
+        let joined: Uuid = "e8beeeff-0210-4aa3-8357-a3d50a003085".parse().unwrap();
+
+        let mut discovered = HashMap::new();
+        discovered.insert(joined, info());
+
+        let mut subscribed = HashSet::new();
+        subscribed.insert(joined);
+
+        assert!(missing_channel_ids(&discovered, &subscribed).is_empty());
+    }
+
+    #[test]
+    fn missing_channel_ids_is_sorted_for_stable_logs() {
+        let a: Uuid = "997cd0eb-2fba-453d-9c18-ab897425a3c8".parse().unwrap();
+        let b: Uuid = "f27869c3-3097-417c-bd03-b16ca82fc0ed".parse().unwrap();
+
+        // Insert in reverse order; a bare key-set iteration would be
+        // nondeterministic across sweeps.
+        let mut discovered = HashMap::new();
+        discovered.insert(b, info());
+        discovered.insert(a, info());
+
+        assert_eq!(
+            missing_channel_ids(&discovered, &HashSet::new()),
+            vec![a, b]
+        );
+    }
+}
+
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -2260,6 +2338,24 @@ async fn tokio_main() -> Result<()> {
     } else {
         None
     };
+
+    // Periodic channel re-discovery: the live kind:44100 member-added
+    // notification is the primary subscribe trigger for channels joined after
+    // startup, but it only fires when the roster mutation goes through the
+    // relay. Rosters can also change while this harness is offline or via
+    // writers that bypass relay side effects entirely (e.g. an operator
+    // console writing the store directly). The sweep re-runs startup discovery
+    // and subscribes to anything new so a running agent converges regardless
+    // of who wrote the roster.
+    let mut channel_discovery_refresh = if config.channel_discovery_refresh_secs > 0 {
+        let interval = Duration::from_secs(config.channel_discovery_refresh_secs);
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + interval,
+            interval,
+        ))
+    } else {
+        None
+    };
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -3131,6 +3227,53 @@ async fn tokio_main() -> Result<()> {
                             if let Err(e) = relay.try_publish_event(event) {
                                 tracing::debug!("typing indicator dropped for {ch}: {e}");
                             }
+                        }
+                    }
+                    None
+                }
+                _ = async {
+                    match channel_discovery_refresh.as_mut() {
+                        Some(t) => t.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx;
+                    match relay.discover_channels().await {
+                        Ok(discovered) => {
+                            for ch in missing_channel_ids(&discovered, &subscribed_channel_ids) {
+                                // Same rule resolution as the live member-added
+                                // path, so --channels allowlists and config-mode
+                                // rules are honored identically.
+                                match config::resolve_dynamic_channel_filter(&config, ch, &rules)
+                                {
+                                    Some(filter) => {
+                                        if let Err(e) =
+                                            relay.subscribe_channel(ch, filter).await
+                                        {
+                                            tracing::warn!(
+                                                channel_id = %ch,
+                                                error = %e,
+                                                "discovery refresh: subscribe failed"
+                                            );
+                                        } else {
+                                            subscribed_channel_ids.insert(ch);
+                                            tracing::info!(
+                                                channel_id = %ch,
+                                                "discovery refresh: subscribed to new channel"
+                                            );
+                                        }
+                                    }
+                                    None => tracing::debug!(
+                                        channel_id = %ch,
+                                        "discovery refresh: no matching rules — skipping"
+                                    ),
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Transient discovery failures must never evict
+                            // existing subscriptions — this sweep only ever adds.
+                            tracing::warn!(error = %e, "channel discovery refresh failed");
                         }
                     }
                     None
@@ -6781,6 +6924,7 @@ mod build_mcp_servers_tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            channel_discovery_refresh_secs: 0,
             memory_enabled: false,
             model: None,
             effort_level: None,
@@ -7005,6 +7149,7 @@ mod error_outcome_emission_tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            channel_discovery_refresh_secs: 0,
             memory_enabled: false,
             model: None,
             effort_level: None,

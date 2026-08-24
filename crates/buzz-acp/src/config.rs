@@ -35,6 +35,19 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+/// Default interval (seconds) between periodic channel re-discovery sweeps.
+///
+/// The live kind:44100 member-added notification is the primary subscribe
+/// trigger for newly joined channels, but it only fires when the roster
+/// mutation goes through the relay. Rosters can also change while the harness
+/// is offline or via writers that bypass relay side effects entirely; the
+/// periodic sweep re-runs startup discovery so a running agent converges no
+/// matter who wrote the roster.
+///
+/// Override via `--channel-discovery-refresh-secs` /
+/// `BUZZ_ACP_CHANNEL_DISCOVERY_REFRESH_SECS`. 0 disables.
+pub(crate) const DEFAULT_CHANNEL_DISCOVERY_REFRESH_SECS: u64 = 90;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -387,6 +400,17 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_TYPING")]
     pub no_typing: bool,
 
+    /// Seconds between periodic channel re-discovery sweeps that subscribe to
+    /// channels the agent joined since startup (or joined via a writer that
+    /// emits no kind:44100 notification). 0 disables the sweep; live
+    /// member-added notifications remain active either way.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_CHANNEL_DISCOVERY_REFRESH_SECS",
+        default_value_t = DEFAULT_CHANNEL_DISCOVERY_REFRESH_SECS
+    )]
+    pub channel_discovery_refresh_secs: u64,
+
     /// Enable NIP-AE agent core memory injection.
     ///
     /// Memory injection is on by default. When enabled, the harness
@@ -547,6 +571,9 @@ pub struct Config {
     pub max_turns_per_session: u32,
     pub presence_enabled: bool,
     pub typing_enabled: bool,
+    /// Seconds between periodic channel re-discovery sweeps. 0 = disabled.
+    /// See [`DEFAULT_CHANNEL_DISCOVERY_REFRESH_SECS`].
+    pub channel_discovery_refresh_secs: u64,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the harness skips the per-session core engram fetch and renders no
     /// `[Agent Memory — core]` section. On by default; disabled via the
@@ -1123,6 +1150,7 @@ impl Config {
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
+            channel_discovery_refresh_secs: args.channel_discovery_refresh_secs,
             memory_enabled: args.memory && !args.no_memory,
             model,
             effort_level: args.effort_level,
@@ -1499,6 +1527,7 @@ mod tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            channel_discovery_refresh_secs: DEFAULT_CHANNEL_DISCOVERY_REFRESH_SECS,
             memory_enabled: true,
             model: None,
             effort_level: None,
