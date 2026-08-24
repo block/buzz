@@ -197,10 +197,7 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
 /// startup instead of falling back to an inherited credential.
 #[cfg(target_os = "macos")]
 fn load_keychain_private_key() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(service) = std::env::var("BUZZ_KEYCHAIN_SERVICE")
-        .ok()
-        .filter(|service| !service.is_empty())
-    else {
+    let Some(service) = keychain_service_from_env(std::env::var("BUZZ_KEYCHAIN_SERVICE"))? else {
         return Ok(());
     };
     std::env::remove_var("BUZZ_KEYCHAIN_SERVICE");
@@ -241,6 +238,22 @@ fn load_keychain_private_key() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+#[cfg(target_os = "macos")]
+fn keychain_service_from_env(
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, &'static str> {
+    match value {
+        Ok(service) if service.is_empty() => {
+            Err("buzz-dev-mcp: BUZZ_KEYCHAIN_SERVICE must not be empty")
+        }
+        Ok(service) => Ok(Some(service)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("buzz-dev-mcp: BUZZ_KEYCHAIN_SERVICE must be valid UTF-8")
+        }
+    }
+}
+
 /// Preserve a raw key while accepting the legacy `pubkey:private-key` value.
 #[cfg(target_os = "macos")]
 fn keychain_private_key_value(value: &str) -> &str {
@@ -257,7 +270,16 @@ fn load_keychain_private_key() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod keychain_tests {
-    use super::keychain_private_key_value;
+    use super::{keychain_private_key_value, keychain_service_from_env};
+
+    #[test]
+    fn rejects_empty_keychain_service() {
+        let error = keychain_service_from_env(Ok(String::new())).unwrap_err();
+        assert_eq!(
+            error,
+            "buzz-dev-mcp: BUZZ_KEYCHAIN_SERVICE must not be empty"
+        );
+    }
 
     #[test]
     fn preserves_raw_private_key() {
