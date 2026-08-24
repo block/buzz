@@ -10,6 +10,9 @@ void main() {
     theme: 'buzz',
     accent: '#3b82f6',
     followSystem: true,
+    glassBackground: true,
+    glassOpacity: 48,
+    prominentActiveTab: false,
   );
 
   test('confirmed absence seeds exact NIP-78 coordinate', () async {
@@ -301,6 +304,88 @@ void main() {
     },
   );
 
+  test(
+    're-merges desktop fields when remote advances during submission',
+    () async {
+      final firstSubmission = Completer<void>();
+      final session = _FakeSession();
+      final relay = _FakeSignedRelay(
+        eventId: 'a-mobile',
+        firstSubmissionGate: firstSubmission.future,
+        onBeforeAcknowledge: session.emit,
+      );
+      final acknowledgements = <CommunityThemePreference>[];
+      final manager = _manager(
+        session,
+        relay,
+        onPublished: acknowledgements.add,
+      );
+      await manager.initialize();
+      manager.publish(local);
+      final firstFlush = manager.flush();
+      await _waitUntil(() => relay.attempts == 1);
+
+      const desktop = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+        glassBackground: false,
+        glassOpacity: 80,
+        prominentActiveTab: true,
+      );
+      session.emit(
+        _event(
+          id: 'z-desktop',
+          createdAt: relay.startedCreatedAts.single,
+          content: jsonEncode(desktop.toJson()),
+        ),
+      );
+      firstSubmission.complete();
+      await firstFlush;
+
+      expect(acknowledgements, isEmpty);
+      expect(manager.pending, local);
+      await _waitUntil(() => relay.attempts == 2);
+
+      final recovered =
+          jsonDecode(relay.submissions[1].content) as Map<String, dynamic>;
+      expect(recovered['theme'], local.theme);
+      expect(recovered['accent'], local.accent);
+      expect(recovered['glassBackground'], false);
+      expect(recovered['glassOpacity'], 80);
+      expect(recovered['prominentActiveTab'], true);
+      expect(
+        relay.submittedEvents[1].createdAt,
+        greaterThan(relay.startedCreatedAts.first),
+      );
+      expect(acknowledgements, [local]);
+      expect(manager.pending, isNull);
+    },
+  );
+
+  test(
+    'matching self echo before acknowledgement does not republish',
+    () async {
+      final session = _FakeSession();
+      final relay = _FakeSignedRelay(onBeforeAcknowledge: session.emit);
+      final acknowledgements = <CommunityThemePreference>[];
+      final manager = _manager(
+        session,
+        relay,
+        onPublished: acknowledgements.add,
+      );
+      await manager.initialize();
+      manager.publish(local);
+
+      await manager.flush();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(relay.attempts, 1);
+      expect(acknowledgements, [local]);
+      expect(manager.pending, isNull);
+    },
+  );
+
   test('remote coordinate advances pending local publish timestamp', () async {
     final relay = _FakeSignedRelay();
     final session = _FakeSession();
@@ -350,38 +435,223 @@ void main() {
     },
   );
 
+  test('a delayed initialization result never overrides a held edit', () async {
+    // The gate holds the edit until initialize resolves, so a publish can no
+    // longer race ahead of hydration. When the delayed history arrives it is
+    // observed (not applied over the pending edit), the gate releases, and
+    // the held edit publishes above the observed coordinate.
+    const stale = CommunityThemePreference(
+      theme: 'dracula',
+      accent: '#ef4444',
+      followSystem: false,
+    );
+    final history = Completer<List<NostrEvent>>();
+    final session = _FakeSession(historyFuture: history.future);
+    final relay = _FakeSignedRelay(eventId: 'published-a');
+    final applied = <CommunityThemePreference>[];
+    final manager = _manager(
+      session,
+      relay,
+      onRemote: (remote) => applied.add(remote.preference),
+    );
+
+    final initializing = manager.initialize();
+    manager.publish(local);
+    await manager.flush();
+    // Held: initialize has not resolved, so the coordinate is unobserved.
+    expect(relay.submissions, isEmpty);
+    expect(manager.pending, local);
+
+    history.complete([
+      _event(
+        id: 'published-z',
+        createdAt: 100,
+        content: jsonEncode(stale.toJson()),
+      ),
+    ]);
+    await initializing;
+    await _waitUntil(() => relay.submissions.isNotEmpty);
+
+    // The delayed stale result was observed but never applied over the
+    // pending edit, and the released edit still publishes exactly once.
+    expect(applied, isEmpty);
+    expect(manager.pending, isNull);
+    expect(relay.submissions, hasLength(1));
+    expect(jsonDecode(relay.submissions.single.content)['theme'], 'buzz');
+  });
+
   test(
-    'published coordinate rejects delayed same-second initialization result',
+    'gated incomplete edit holds until hydration then merges remote glass',
     () async {
-      const stale = CommunityThemePreference(
+      // A desktop client already published glass settings the mobile parser
+      // omits. A mobile edit made before hydration must not strip them.
+      const desktop = CommunityThemePreference(
+        theme: 'buzz',
+        accent: '#3b82f6',
+        followSystem: true,
+        glassBackground: true,
+        glassOpacity: 80,
+        prominentActiveTab: true,
+      );
+      const incompleteEdit = CommunityThemePreference(
         theme: 'dracula',
         accent: '#ef4444',
         followSystem: false,
+        includesGlassBackground: false,
+        includesGlassOpacity: false,
+        includesProminentActiveTab: false,
       );
       final history = Completer<List<NostrEvent>>();
       final session = _FakeSession(historyFuture: history.future);
-      final relay = _FakeSignedRelay(eventId: 'published-a');
-      final applied = <CommunityThemePreference>[];
-      final manager = _manager(
-        session,
-        relay,
-        onRemote: (remote) => applied.add(remote.preference),
-      );
+      final relay = _FakeSignedRelay();
+      final manager = _manager(session, relay);
 
       final initializing = manager.initialize();
-      manager.publish(local);
+      // Edit lands before the coordinate is observed: publishing is held.
+      manager.publish(incompleteEdit);
       await manager.flush();
-      final createdAt = relay.submittedEvents.single.createdAt;
+      expect(relay.submissions, isEmpty);
+      expect(manager.pending, incompleteEdit);
+
+      // Hydration reveals the desktop record; the gate releases and the edit
+      // publishes with the desktop-only fields merged back in.
       history.complete([
         _event(
-          id: 'published-z',
-          createdAt: createdAt,
-          content: jsonEncode(stale.toJson()),
+          id: 'desktop',
+          createdAt: 100,
+          content: jsonEncode(desktop.toJson()),
         ),
       ]);
       await initializing;
+      await _waitUntil(() => relay.submissions.isNotEmpty);
 
-      expect(applied, isEmpty);
+      final published =
+          jsonDecode(relay.submissions.single.content) as Map<String, dynamic>;
+      expect(published['theme'], 'dracula');
+      expect(published['glassBackground'], true);
+      expect(published['glassOpacity'], 80);
+      expect(published['prominentActiveTab'], true);
+    },
+  );
+
+  test('confirmed absence releases a gated incomplete edit', () async {
+    const incompleteEdit = CommunityThemePreference(
+      theme: 'dracula',
+      accent: '#ef4444',
+      followSystem: false,
+      includesGlassBackground: false,
+      includesGlassOpacity: false,
+      includesProminentActiveTab: false,
+    );
+    final history = Completer<List<NostrEvent>>();
+    final session = _FakeSession(historyFuture: history.future);
+    final relay = _FakeSignedRelay();
+    final manager = _manager(session, relay);
+
+    final initializing = manager.initialize();
+    manager.publish(incompleteEdit);
+    await manager.flush();
+    expect(relay.submissions, isEmpty);
+
+    // No remote record exists; a confirmed absence is enough to release the
+    // gate, and with no desktop values to preserve the edit publishes as-is.
+    history.complete([]);
+    await initializing;
+    await _waitUntil(() => relay.submissions.isNotEmpty);
+
+    final published =
+        jsonDecode(relay.submissions.single.content) as Map<String, dynamic>;
+    expect(published['theme'], 'dracula');
+    expect(published.containsKey('glassBackground'), isFalse);
+    expect(published.containsKey('glassOpacity'), isFalse);
+    expect(published.containsKey('prominentActiveTab'), isFalse);
+  });
+
+  test(
+    'a full cache edit republishes the observed remote glass, not the cache',
+    () async {
+      // Regression: a mobile cache decoded from a desktop-authored record
+      // carries all three includes* flags, so it looks "complete". Mobile has
+      // no UI to author glass, so those fields are stale once another client
+      // changes them. The published coordinate must carry the current remote's
+      // glass, never the cache's.
+      const staleFullCacheEdit = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+        glassBackground: true,
+        glassOpacity: 80,
+        prominentActiveTab: true,
+      );
+      const currentRemote = CommunityThemePreference(
+        theme: 'buzz',
+        accent: '#3b82f6',
+        followSystem: true,
+        glassBackground: false,
+        glassOpacity: 40,
+        prominentActiveTab: false,
+      );
+      final session = _FakeSession(
+        history: [
+          _event(
+            id: 'current',
+            createdAt: 100,
+            content: jsonEncode(currentRemote.toJson()),
+          ),
+        ],
+      );
+      final relay = _FakeSignedRelay();
+      final manager = _manager(session, relay);
+
+      await manager.initialize();
+      manager.publish(staleFullCacheEdit);
+      await manager.flush();
+
+      final published =
+          jsonDecode(relay.submissions.single.content) as Map<String, dynamic>;
+      expect(published['theme'], 'dracula');
+      expect(published['accent'], '#ef4444');
+      expect(published['glassBackground'], false);
+      expect(published['glassOpacity'], 40);
+      expect(published['prominentActiveTab'], false);
+    },
+  );
+
+  test(
+    'a transient history failure does not strand a gated edit forever',
+    () async {
+      // Regression: the pre-hydration gate must not deadlock when the initial
+      // fetch fails (unavailable, not absent) while the live subscription stays
+      // quiet. A bounded history-retry releases the gate once the relay answers.
+      const incompleteEdit = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+        includesGlassBackground: false,
+        includesGlassOpacity: false,
+        includesProminentActiveTab: false,
+      );
+      // First fetch throws (unavailable); the retry succeeds with an absence.
+      final session = _FakeSession(fetchFailuresRemaining: 1);
+      final relay = _FakeSignedRelay();
+      final manager = _manager(session, relay);
+
+      final result = await manager.initialize();
+      expect(result.status, CommunityThemeRemoteStatus.unavailable);
+
+      manager.publish(incompleteEdit);
+      await manager.flush();
+      // Held: the coordinate has not been observed yet.
+      expect(relay.submissions, isEmpty);
+      expect(manager.pending, incompleteEdit);
+
+      // The scheduled recovery re-queries history, observes the absence, and
+      // releases the gate so the edit finally publishes.
+      await _waitUntil(() => relay.submissions.isNotEmpty);
+      expect(session.fetchCalls, greaterThanOrEqualTo(2));
+      final published =
+          jsonDecode(relay.submissions.single.content) as Map<String, dynamic>;
+      expect(published['theme'], 'dracula');
       expect(manager.pending, isNull);
     },
   );
@@ -428,13 +698,16 @@ class _FakeSession extends RelaySessionNotifier {
     List<NostrEvent> history = const [],
     this.historyFuture,
     this.error,
+    this.fetchFailuresRemaining = 0,
     this.onFetchHistory,
   }) : history = List.of(history);
   List<NostrEvent> history;
   final Future<List<NostrEvent>>? historyFuture;
   final Object? error;
+  int fetchFailuresRemaining;
   final void Function()? onFetchHistory;
   int subscribeCalls = 0;
+  int fetchCalls = 0;
   final List<void Function(NostrEvent)> _listeners = [];
   final List<void Function(String)> _closedCallbacks = [];
 
@@ -447,7 +720,12 @@ class _FakeSession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    fetchCalls++;
     if (error != null) throw error!;
+    if (fetchFailuresRemaining > 0) {
+      fetchFailuresRemaining--;
+      throw StateError('history unavailable');
+    }
     onFetchHistory?.call();
     if (historyFuture != null) return historyFuture!;
     return history;
@@ -508,11 +786,14 @@ class _FakeSignedRelay implements SignedEventRelay {
     this.failuresRemaining = 0,
     this.eventId = 'event',
     this.firstSubmissionGate,
+    this.onBeforeAcknowledge,
   });
   int failuresRemaining;
   final String eventId;
   final Future<void>? firstSubmissionGate;
+  final void Function(NostrEvent)? onBeforeAcknowledge;
   int attempts = 0;
+  final startedCreatedAts = <int>[];
   final submissions = <_Submission>[];
   final submittedEvents = <NostrEvent>[];
   @override
@@ -526,6 +807,7 @@ class _FakeSignedRelay implements SignedEventRelay {
     void Function(NostrEvent)? onSigned,
   }) async {
     attempts++;
+    startedCreatedAts.add(createdAt ?? 0);
     if (attempts == 1 && firstSubmissionGate != null) {
       await firstSubmissionGate;
     }
@@ -541,6 +823,7 @@ class _FakeSignedRelay implements SignedEventRelay {
     );
     onSigned?.call(event);
     submittedEvents.add(event);
+    onBeforeAcknowledge?.call(event);
     return event;
   }
 }

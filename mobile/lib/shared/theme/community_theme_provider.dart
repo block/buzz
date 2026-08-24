@@ -117,34 +117,16 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       final effective = effectiveTheme(theme, mode);
       if (effective != null) theme = effective.name;
     }
-    _save(
-      CommunityThemePreference(
-        theme: theme,
-        accent: state.accent,
-        followSystem: mode == ThemeMode.system,
-      ),
-    );
+    _save(state.copyWith(theme: theme, followSystem: mode == ThemeMode.system));
   }
 
   void setTheme(String? theme) {
-    _save(
-      CommunityThemePreference(
-        theme: theme ?? defaultSchemeName,
-        accent: state.accent,
-        followSystem: state.followSystem,
-      ),
-    );
+    _save(state.copyWith(theme: theme ?? defaultSchemeName));
   }
 
   void setAccent(int index) {
     if (index < 0 || index >= accentColors.length) return;
-    _save(
-      CommunityThemePreference(
-        theme: state.theme,
-        accent: accentColors[index].wireValue,
-        followSystem: state.followSystem,
-      ),
-    );
+    _save(state.copyWith(accent: accentColors[index].wireValue));
   }
 
   void _save(CommunityThemePreference preference) {

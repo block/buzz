@@ -7,6 +7,7 @@ import {
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_COMMUNITY_THEME } from "@/shared/constants/kinds";
 import {
+  DEFAULT_COMMUNITY_THEME,
   parseCommunityThemePreference,
   sameCommunityThemePreference,
   type CommunityThemePreference,
@@ -27,6 +28,7 @@ export type RemoteCommunityTheme = {
   preference: CommunityThemePreference;
   createdAt: number;
   eventId: string;
+  needsUpgrade: boolean;
 };
 
 export type RemoteCommunityThemeResult =
@@ -63,12 +65,24 @@ export function shouldSeedCommunityTheme(
 
 async function decryptAndParse(
   event: RelayEvent,
+  legacyFallback: () => CommunityThemePreference,
 ): Promise<RemoteCommunityTheme | null> {
   try {
     const plaintext = await nip44DecryptFromSelf(event.content);
-    const preference = parseCommunityThemePreference(JSON.parse(plaintext));
+    const parsed = JSON.parse(plaintext);
+    const preference = parseCommunityThemePreference(parsed, legacyFallback());
     return preference
-      ? { preference, createdAt: event.created_at, eventId: event.id }
+      ? {
+          preference,
+          createdAt: event.created_at,
+          eventId: event.id,
+          needsUpgrade:
+            typeof parsed === "object" &&
+            parsed !== null &&
+            (!Object.hasOwn(parsed, "glassBackground") ||
+              !Object.hasOwn(parsed, "glassOpacity") ||
+              !Object.hasOwn(parsed, "prominentActiveTab")),
+        }
       : null;
   } catch {
     return null;
@@ -89,13 +103,28 @@ export class CommunityThemeSyncManager {
   private publishRetryAttempt = 0;
   private readonly remoteProcessing = new Set<Promise<unknown>>();
   private readonly onPublished: (published: PublishedCommunityTheme) => void;
+  private readonly getLegacyFallback: () => CommunityThemePreference;
+  private publishGeneration = 0;
+  private publishRevision = 0;
+  private activeSubmittedPublish: PublishedCommunityTheme | null = null;
+  private replacementAfterCancel: {
+    preference: CommunityThemePreference;
+    publishRevision: number;
+  } | null = null;
 
   constructor(
     pubkey: string,
     onPublished: (published: PublishedCommunityTheme) => void = () => {},
+    legacyFallback:
+      | CommunityThemePreference
+      | (() => CommunityThemePreference) = DEFAULT_COMMUNITY_THEME,
   ) {
     this.pubkey = pubkey;
     this.onPublished = onPublished;
+    this.getLegacyFallback =
+      typeof legacyFallback === "function"
+        ? legacyFallback
+        : () => legacyFallback;
   }
 
   async fetchRemote(): Promise<RemoteCommunityThemeResult> {
@@ -108,7 +137,7 @@ export class CommunityThemeSyncManager {
       });
       if (events.length === 0) return { status: "absent" };
       if (events[0].pubkey !== this.pubkey) return { status: "invalid" };
-      const processing = decryptAndParse(events[0]);
+      const processing = decryptAndParse(events[0], this.getLegacyFallback);
       this.trackRemoteProcessing(processing);
       const remote = await processing;
       if (!remote) return { status: "invalid" };
@@ -130,6 +159,7 @@ export class CommunityThemeSyncManager {
 
   publish(preference: CommunityThemePreference): void {
     if (this.destroyed) return;
+    this.publishRevision += 1;
     this.pending = preference;
     this.publishRetryAttempt = 0;
     this.schedulePublish(DEBOUNCE_MS);
@@ -149,13 +179,27 @@ export class CommunityThemeSyncManager {
   private startPublish(): void {
     if (this.destroyed || this.publishInFlight || !this.pending) return;
     this.publishInFlight = true;
+    this.activeSubmittedPublish = null;
     const preference = this.pending;
-    void this.doPublish(preference).finally(() => {
+    const generation = this.publishGeneration;
+    const publishRevision = this.publishRevision;
+    void this.doPublish(preference, generation).finally(() => {
       this.publishInFlight = false;
+      this.activeSubmittedPublish = null;
+      const replacement = this.replacementAfterCancel;
+      this.replacementAfterCancel = null;
+      if (
+        replacement &&
+        this.pending === null &&
+        replacement.publishRevision === this.publishRevision
+      ) {
+        this.pending = replacement.preference;
+      }
       if (
         !this.destroyed &&
         this.pending &&
-        !sameCommunityThemePreference(this.pending, preference) &&
+        (this.publishRevision !== publishRevision ||
+          !sameCommunityThemePreference(this.pending, preference)) &&
         this.debounceTimer === null
       ) {
         this.schedulePublish(0);
@@ -188,19 +232,45 @@ export class CommunityThemeSyncManager {
     }
   }
 
-  cancelPendingPublish(): void {
+  cancelPendingPublish(
+    replacementAfterSubmit?: CommunityThemePreference,
+    acceptedRemote?: RemoteCommunityTheme,
+  ): boolean {
+    if (
+      this.activeSubmittedPublish &&
+      acceptedRemote &&
+      acceptedRemote.createdAt === this.activeSubmittedPublish.createdAt &&
+      acceptedRemote.eventId === this.activeSubmittedPublish.eventId
+    ) {
+      return false;
+    }
+    const submitted = this.activeSubmittedPublish !== null;
+    this.replacementAfterCancel =
+      submitted && replacementAfterSubmit
+        ? {
+            preference: replacementAfterSubmit,
+            publishRevision: this.publishRevision,
+          }
+        : null;
+    this.publishGeneration += 1;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
     this.pending = null;
+    return submitted;
   }
 
-  private async doPublish(preference: CommunityThemePreference): Promise<void> {
+  private async doPublish(
+    preference: CommunityThemePreference,
+    generation: number,
+  ): Promise<void> {
+    const wasCancelled = () =>
+      this.destroyed || generation !== this.publishGeneration;
     try {
       const lastPublished = this.lastPublished;
       if (
-        this.destroyed ||
+        wasCancelled() ||
         (lastPublished &&
           sameCommunityThemePreference(lastPublished.preference, preference))
       ) {
@@ -214,7 +284,7 @@ export class CommunityThemeSyncManager {
         return;
       }
       const ciphertext = await nip44EncryptToSelf(JSON.stringify(preference));
-      if (this.destroyed) return;
+      if (wasCancelled()) return;
       const event = await signRelayEvent({
         kind: KIND_COMMUNITY_THEME,
         content: ciphertext,
@@ -227,14 +297,19 @@ export class CommunityThemeSyncManager {
           ["t", D_TAG],
         ],
       });
-      if (this.destroyed) return;
+      if (wasCancelled()) return;
+      this.activeSubmittedPublish = {
+        preference,
+        createdAt: event.created_at,
+        eventId: event.id,
+      };
       await relayClient.publishEvent(
         event,
         "Timed out publishing community theme.",
         "Failed to publish community theme.",
       );
       await this.waitForDeliveredRemotes();
-      if (this.destroyed) return;
+      if (wasCancelled()) return;
       const published = {
         preference,
         createdAt: event.created_at,
@@ -272,7 +347,7 @@ export class CommunityThemeSyncManager {
     } catch (error) {
       console.warn("[communityThemeSync] publish failed:", error);
       if (
-        this.destroyed ||
+        wasCancelled() ||
         !this.pending ||
         !sameCommunityThemePreference(this.pending, preference)
       ) {
@@ -357,24 +432,26 @@ export class CommunityThemeSyncManager {
     onUpdate: (remote: RemoteCommunityTheme) => void,
   ): void {
     if (event.pubkey !== this.pubkey || this.destroyed) return;
-    const processing = decryptAndParse(event).then((remote) => {
-      if (this.destroyed) return;
-      if (!remote) {
-        this.observedInvalidLiveRemote = true;
-        return;
-      }
-      if (
-        isNewerCommunityThemeCoordinate(remote, {
-          createdAt: this.lastRemoteCreatedAt,
-          eventId: this.lastRemoteEventId,
-        })
-      ) {
-        this.lastRemoteCreatedAt = remote.createdAt;
-        this.lastRemoteEventId = remote.eventId;
-        this.latestRemote = remote;
-      }
-      onUpdate(remote);
-    });
+    const processing = decryptAndParse(event, this.getLegacyFallback).then(
+      (remote) => {
+        if (this.destroyed) return;
+        if (!remote) {
+          this.observedInvalidLiveRemote = true;
+          return;
+        }
+        if (
+          isNewerCommunityThemeCoordinate(remote, {
+            createdAt: this.lastRemoteCreatedAt,
+            eventId: this.lastRemoteEventId,
+          })
+        ) {
+          this.lastRemoteCreatedAt = remote.createdAt;
+          this.lastRemoteEventId = remote.eventId;
+          this.latestRemote = remote;
+        }
+        onUpdate(remote);
+      },
+    );
     this.trackRemoteProcessing(processing);
   }
 

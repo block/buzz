@@ -32,8 +32,6 @@ import { CommunityMembersSettingsCard } from "@/features/community-members/ui/Co
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import { cn } from "@/shared/lib/cn";
-import { useCommunities } from "@/features/communities/useCommunities";
-import { Badge } from "@/shared/ui/badge";
 import { isBuzzTheme, useTheme } from "@/shared/theme/ThemeProvider";
 import {
   LIGHT_THEMES,
@@ -52,7 +50,6 @@ import {
   useThemePreviewVars,
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
-import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
 import {
   AccentPickerContent,
   ConversationDisplaySettings,
@@ -430,13 +427,6 @@ function ThemeSettingsCard() {
     setFollowSystem,
   } = useTheme();
 
-  // Per-community scoping labels only earn their place when the user is
-  // actually in more than one community; with a single community there is
-  // nothing to disambiguate.
-  const { activeCommunity, communities } = useCommunities();
-  const showCommunityScope = communities.length > 1;
-  const communityLabel = appearanceCommunityLabel(activeCommunity?.name);
-
   // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
   // so the accent picker is hidden while a Buzz theme is active. `themeName` is
   // the effective theme, so this also covers System mode resolving to Buzz.
@@ -450,11 +440,10 @@ function ThemeSettingsCard() {
   // Determine the active mode from current state
   const activeMode: AppearanceMode = followSystem
     ? "system"
-    : isDark
-      ? "dark"
-      : "light";
+    : LIGHT_THEMES.has(selectedThemeName as SyntaxThemeName)
+      ? "light"
+      : "dark";
 
-  const [selectedMode, setSelectedMode] = useState<AppearanceMode>(activeMode);
   const [themeStyleExpanded, setThemeStyleExpanded] = useState(false);
 
   const getVars = (name: SyntaxThemeName) =>
@@ -478,7 +467,6 @@ function ThemeSettingsCard() {
   }, [pairedLight, darkOnly]);
 
   const handleModeSelect = (mode: AppearanceMode) => {
-    setSelectedMode(mode);
     if (mode === "system") {
       setFollowSystem(true);
       // If the current theme is unpaired, resolveSystemTheme can't switch it
@@ -516,7 +504,7 @@ function ThemeSettingsCard() {
 
   const handleSelectTheme = (name: SyntaxThemeName) => {
     setTheme(name);
-    if (selectedMode === "system") {
+    if (activeMode === "system") {
       setFollowSystem(true);
     } else {
       setFollowSystem(false);
@@ -529,7 +517,7 @@ function ThemeSettingsCard() {
     return selectedThemeName === lightName || selectedThemeName === darkName;
   };
   const selectedPairedTheme =
-    selectedMode === "system" ? pairedLight.find(isPairActive) : undefined;
+    activeMode === "system" ? pairedLight.find(isPairActive) : undefined;
   const selectedTheme = selectedThemeName as SyntaxThemeName;
   const selectedPairedDarkTheme = selectedPairedTheme
     ? getThemePair(selectedPairedTheme)
@@ -590,7 +578,7 @@ function ThemeSettingsCard() {
         ) : null}
         <div className="max-h-[430px] overflow-y-auto rounded-lg pt-2">
           <div className="flex flex-wrap gap-4 p-1">
-            {selectedMode === "system" &&
+            {activeMode === "system" &&
               pairedLight.map((lightName) => {
                 const darkName = getThemePair(lightName);
                 if (!darkName) return null;
@@ -605,7 +593,7 @@ function ThemeSettingsCard() {
                   />
                 );
               })}
-            {selectedMode === "light" &&
+            {activeMode === "light" &&
               allLightThemes.map((name) => (
                 <SingleThemeTile
                   isActive={selectedThemeName === name}
@@ -615,7 +603,7 @@ function ThemeSettingsCard() {
                   vars={getVars(name)}
                 />
               ))}
-            {selectedMode === "dark" &&
+            {activeMode === "dark" &&
               allDarkThemes.map((name) => (
                 <SingleThemeTile
                   isActive={selectedThemeName === name}
@@ -644,27 +632,8 @@ function ThemeSettingsCard() {
       <SettingsOptionGroupList>
         <SettingsOptionGroup
           data-testid="appearance-theme-card"
-          headerAction={
-            showCommunityScope && activeCommunity ? (
-              <Badge
-                className="max-w-56 font-medium normal-case tracking-normal"
-                data-testid="appearance-community-badge"
-                variant="outline"
-              >
-                <span className="truncate">{communityLabel}</span>
-              </Badge>
-            ) : null
-          }
-          title={
-            <>
-              Theme
-              {showCommunityScope ? (
-                <span className="ml-1 font-normal text-muted-foreground">
-                  (per community)
-                </span>
-              ) : null}
-            </>
-          }
+          description="Theme choices for this community sync across your devices."
+          title="Theme"
         >
           <SettingsOptionRow data-testid="appearance-color-mode-row">
             <div className="min-w-0">
@@ -687,13 +656,13 @@ function ThemeSettingsCard() {
                 Icon,
               }))}
               testId="appearance-color-mode-control"
-              value={selectedMode}
+              value={activeMode}
             />
           </SettingsOptionRow>
 
           <SettingsOptionRow data-testid="theme-style-row">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Theme style</p>
+              <p className="text-sm font-medium">Color style</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -702,7 +671,7 @@ function ThemeSettingsCard() {
               </p>
             </div>
             <button
-              aria-label={`Theme style, ${selectedThemeLabel}`}
+              aria-label={`Color style, ${selectedThemeLabel}`}
               aria-controls="theme-style-options"
               aria-expanded={themeStyleExpanded}
               className="flex h-auto min-w-0 items-center gap-2 rounded-md bg-transparent p-0 text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"

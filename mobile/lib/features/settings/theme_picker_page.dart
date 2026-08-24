@@ -73,7 +73,7 @@ class ThemePickerPage extends HookConsumerWidget {
     }, const []);
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Theme')),
+      appBar: const FrostedAppBar(title: Text('Color style')),
       body: Column(
         children: [
           SizedBox(height: frostedAppBarHeight(context)),
@@ -92,7 +92,7 @@ class ThemePickerPage extends HookConsumerWidget {
                     padding: const EdgeInsets.all(Grid.sm),
                     child: Center(
                       child: Text(
-                        'No themes found',
+                        'No color styles found',
                         style: context.textTheme.bodyMedium?.copyWith(
                           color: context.colors.onSurfaceVariant,
                         ),
@@ -165,7 +165,7 @@ class _SearchField extends StatelessWidget {
               child: TextField(
                 controller: controller,
                 decoration: InputDecoration(
-                  hintText: 'Search themes...',
+                  hintText: 'Search color styles...',
                   hintStyle: context.textTheme.bodyMedium?.copyWith(
                     color: context.colors.onSurfaceVariant,
                   ),

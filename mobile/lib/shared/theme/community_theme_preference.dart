@@ -8,10 +8,20 @@ import 'theme_catalog.dart';
 import 'theme_provider.dart' show effectiveTheme, schemeForAppearanceMode;
 
 const communityThemeDTag = 'community-theme';
+const defaultCommunityGlassBackground = false;
+const defaultCommunityGlassOpacity = 65;
+const minCommunityGlassOpacity = 30;
+const maxCommunityGlassOpacity = 90;
+const defaultCommunityProminentActiveTab = false;
 const defaultCommunityTheme = CommunityThemePreference(
   theme: 'buzz',
   accent: '#3b82f6',
   followSystem: true,
+  // A fresh community carries no desktop appearance opinion, so it must not
+  // serialize the desktop-only fields and overwrite a real desktop record.
+  includesGlassBackground: false,
+  includesGlassOpacity: false,
+  includesProminentActiveTab: false,
 );
 
 class CommunityThemePreference {
@@ -19,12 +29,26 @@ class CommunityThemePreference {
   final String theme;
   final String accent;
   final bool followSystem;
+  // These appearance values are synced even though mobile cannot render
+  // desktop glass. Keeping them in the model makes mobile a lossless client.
+  final bool glassBackground;
+  final int glassOpacity;
+  final bool prominentActiveTab;
+  final bool includesGlassBackground;
+  final bool includesGlassOpacity;
+  final bool includesProminentActiveTab;
 
   const CommunityThemePreference({
     this.version = 1,
     required this.theme,
     required this.accent,
     required this.followSystem,
+    this.glassBackground = defaultCommunityGlassBackground,
+    this.glassOpacity = defaultCommunityGlassOpacity,
+    this.prominentActiveTab = defaultCommunityProminentActiveTab,
+    this.includesGlassBackground = true,
+    this.includesGlassOpacity = true,
+    this.includesProminentActiveTab = true,
   });
 
   factory CommunityThemePreference.fromJson(Map<String, dynamic> json) {
@@ -36,10 +60,37 @@ class CommunityThemePreference {
         json['followSystem'] is! bool) {
       throw const FormatException('Invalid community theme preference');
     }
+    final includesGlassBackground = json.containsKey('glassBackground');
+    final includesGlassOpacity = json.containsKey('glassOpacity');
+    final includesProminentActiveTab = json.containsKey('prominentActiveTab');
+    final glassBackground = includesGlassBackground
+        ? json['glassBackground']
+        : defaultCommunityGlassBackground;
+    final glassOpacity = includesGlassOpacity
+        ? json['glassOpacity']
+        : defaultCommunityGlassOpacity;
+    final prominentActiveTab = includesProminentActiveTab
+        ? json['prominentActiveTab']
+        : defaultCommunityProminentActiveTab;
+    if (glassBackground is! bool ||
+        glassOpacity is! num ||
+        !glassOpacity.isFinite ||
+        glassOpacity != glassOpacity.round() ||
+        glassOpacity < minCommunityGlassOpacity ||
+        glassOpacity > maxCommunityGlassOpacity ||
+        prominentActiveTab is! bool) {
+      throw const FormatException('Invalid community theme preference');
+    }
     return CommunityThemePreference(
       theme: json['theme'] as String,
       accent: json['accent'] as String,
       followSystem: json['followSystem'] as bool,
+      glassBackground: glassBackground,
+      glassOpacity: glassOpacity.toInt(),
+      prominentActiveTab: prominentActiveTab,
+      includesGlassBackground: includesGlassBackground,
+      includesGlassOpacity: includesGlassOpacity,
+      includesProminentActiveTab: includesProminentActiveTab,
     );
   }
 
@@ -48,11 +99,67 @@ class CommunityThemePreference {
     'theme': theme,
     'accent': accent,
     'followSystem': followSystem,
+    if (includesGlassBackground) 'glassBackground': glassBackground,
+    if (includesGlassOpacity) 'glassOpacity': glassOpacity,
+    if (includesProminentActiveTab) 'prominentActiveTab': prominentActiveTab,
   };
+
+  CommunityThemePreference copyWith({
+    String? theme,
+    String? accent,
+    bool? followSystem,
+    bool? glassBackground,
+    int? glassOpacity,
+    bool? prominentActiveTab,
+  }) => CommunityThemePreference(
+    version: version,
+    theme: theme ?? this.theme,
+    accent: accent ?? this.accent,
+    followSystem: followSystem ?? this.followSystem,
+    glassBackground: glassBackground ?? this.glassBackground,
+    glassOpacity: glassOpacity ?? this.glassOpacity,
+    prominentActiveTab: prominentActiveTab ?? this.prominentActiveTab,
+    includesGlassBackground: glassBackground != null || includesGlassBackground,
+    includesGlassOpacity: glassOpacity != null || includesGlassOpacity,
+    includesProminentActiveTab:
+        prominentActiveTab != null || includesProminentActiveTab,
+  );
 
   ThemeMode get mode {
     if (followSystem) return ThemeMode.system;
     return findTheme(theme)?.isDark == true ? ThemeMode.dark : ThemeMode.light;
+  }
+
+  /// Whether this preference carries a full desktop appearance opinion. A
+  /// preference parsed from a legacy three-field payload, or a fresh/legacy
+  /// mobile origin, omits these fields and must not replace a desktop record.
+  bool get includesDesktopAppearance =>
+      includesGlassBackground &&
+      includesGlassOpacity &&
+      includesProminentActiveTab;
+
+  /// Adopt [source]'s desktop-only appearance in place of this preference's.
+  /// Mobile has no UI that authors glass or prominent-tab, so those fields are
+  /// never a local opinion — they are only ever a copy of what was hydrated.
+  /// A cached "full" preference therefore carries stale desktop fields once
+  /// another client changes them, so republishing a mobile edit must take the
+  /// desktop-only fields from the latest observed coordinate rather than trust
+  /// its own cache; otherwise it silently replays stale glass over the relay.
+  CommunityThemePreference mergeDesktopAppearanceFrom(
+    CommunityThemePreference source,
+  ) {
+    return CommunityThemePreference(
+      version: version,
+      theme: theme,
+      accent: accent,
+      followSystem: followSystem,
+      glassBackground: source.glassBackground,
+      glassOpacity: source.glassOpacity,
+      prominentActiveTab: source.prominentActiveTab,
+      includesGlassBackground: source.includesGlassBackground,
+      includesGlassOpacity: source.includesGlassOpacity,
+      includesProminentActiveTab: source.includesProminentActiveTab,
+    );
   }
 
   @override
@@ -60,10 +167,26 @@ class CommunityThemePreference {
       other is CommunityThemePreference &&
       theme == other.theme &&
       accent == other.accent &&
-      followSystem == other.followSystem;
+      followSystem == other.followSystem &&
+      glassBackground == other.glassBackground &&
+      glassOpacity == other.glassOpacity &&
+      prominentActiveTab == other.prominentActiveTab &&
+      includesGlassBackground == other.includesGlassBackground &&
+      includesGlassOpacity == other.includesGlassOpacity &&
+      includesProminentActiveTab == other.includesProminentActiveTab;
 
   @override
-  int get hashCode => Object.hash(theme, accent, followSystem);
+  int get hashCode => Object.hash(
+    theme,
+    accent,
+    followSystem,
+    glassBackground,
+    glassOpacity,
+    prominentActiveTab,
+    includesGlassBackground,
+    includesGlassOpacity,
+    includesProminentActiveTab,
+  );
 }
 
 class CommunityThemeStorage {
@@ -159,6 +282,11 @@ class CommunityThemeStorage {
       theme: resolvedTheme,
       accent: legacyAccentWireValue(legacyAccent),
       followSystem: mode == ThemeMode.system,
+      // The pre-per-community mobile theme has no desktop appearance opinion,
+      // so it must not publish desktop-only defaults over a real desktop record.
+      includesGlassBackground: false,
+      includesGlassOpacity: false,
+      includesProminentActiveTab: false,
     );
   }
 }
