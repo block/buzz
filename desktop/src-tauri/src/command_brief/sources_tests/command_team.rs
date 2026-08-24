@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn apple_all_day_free_calendar_evidence_remains_mission_context() {
+    let mut mission = calendar_record("mission", false, false, false);
+    mission["title"] = json!("Alongside FBE");
+    mission["is_all_day"] = json!("true");
+    mission["blocks_availability"] = json!("false");
+    let backend = FakeBackend::with_state(|state| {
+        state.apple_results[0] =
+            apple_response("calendar", "authorized", vec![mission], false, None);
+    });
+
+    let context = collector(backend, "Daily routine")
+        .freeze()
+        .expect("all-day Apple programme evidence");
+    let source = context
+        .ledger()
+        .iter()
+        .find(|source| source.source_id().contains("mission"))
+        .expect("mission context source");
+    let encoded_quote: String =
+        serde_json::from_str(source.quote()).expect("encoded calendar evidence JSON");
+    let quote: Value = serde_json::from_str(&encoded_quote).expect("calendar evidence JSON");
+
+    assert_eq!(quote["scheduleRole"], "mission_context", "{quote}");
+    assert_eq!(quote["blocks_availability"], "false");
+}
+
+#[test]
 fn fresh_collection_freezes_one_snapshot_and_all_local_source_kinds() {
     let backend = FakeBackend::fresh();
     let context = collector(backend, "Prepare today's command brief.")

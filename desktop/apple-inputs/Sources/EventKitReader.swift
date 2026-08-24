@@ -11,11 +11,37 @@ struct EventKitSourceRecord: Equatable {
 struct CalendarRecord: Equatable {
     let identifier, calendarIdentifier, title, recurrenceIdentifier: String
     let start, end: Date
-    let isRecurring, isDeleted, isStale: Bool
+    let isRecurring, isAllDay, blocksAvailability, isDeleted, isStale: Bool
+    init(
+        identifier: String,
+        calendarIdentifier: String,
+        title: String,
+        recurrenceIdentifier: String,
+        start: Date,
+        end: Date,
+        isRecurring: Bool,
+        isAllDay: Bool = false,
+        blocksAvailability: Bool = true,
+        isDeleted: Bool,
+        isStale: Bool
+    ) {
+        self.identifier = identifier
+        self.calendarIdentifier = calendarIdentifier
+        self.title = title
+        self.recurrenceIdentifier = recurrenceIdentifier
+        self.start = start
+        self.end = end
+        self.isRecurring = isRecurring
+        self.isAllDay = isAllDay
+        self.blocksAvailability = blocksAvailability
+        self.isDeleted = isDeleted
+        self.isStale = isStale
+    }
     func output() -> AppleInputRecord { .init(fields: [
         "identifier": identifier, "calendar_identifier": calendarIdentifier, "title": title,
         "start": ISO8601DateFormatter().string(from: start), "end": ISO8601DateFormatter().string(from: end),
-        "is_recurring": isRecurring.description, "recurrence_identifier": recurrenceIdentifier,
+        "is_recurring": isRecurring.description, "is_all_day": isAllDay.description,
+        "blocks_availability": blocksAvailability.description, "recurrence_identifier": recurrenceIdentifier,
         "is_deleted": isDeleted.description, "is_stale": isStale.description,
     ]) }
 }
@@ -117,6 +143,7 @@ final class EventKitReader: @unchecked Sendable {
                 .init(identifier: event.eventIdentifier, calendarIdentifier: event.calendar.calendarIdentifier,
                       title: String((event.title ?? "").prefix(512)), recurrenceIdentifier: event.calendarItemExternalIdentifier,
                       start: event.startDate, end: event.endDate, isRecurring: event.hasRecurrenceRules,
+                      isAllDay: event.isAllDay, blocksAvailability: event.availability != .free,
                       isDeleted: false, isStale: false)
             }
         }

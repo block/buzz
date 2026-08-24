@@ -178,11 +178,15 @@ fn apple_candidate(
                     "start",
                     "end",
                     "is_recurring",
+                    "is_all_day",
+                    "blocks_availability",
                     "recurrence_identifier",
                     "is_deleted",
                     "is_stale",
                 ],
             ) || bool_field(fields, "is_recurring").is_none()
+                || bool_field(fields, "is_all_day").is_none()
+                || bool_field(fields, "blocks_availability").is_none()
                 || bool_field(fields, "is_deleted").is_none()
                 || bool_field(fields, "is_stale").is_none()
                 || !calendar_record_in_window(request, fields)
@@ -284,7 +288,21 @@ fn apple_candidate(
         }
         _ => return None,
     };
-    let quote = serde_jcs::to_vec(fields)
+    let mut quote_fields = fields.clone();
+    if source == "calendar" {
+        let is_mission_context = bool_field(fields, "is_all_day") == Some(true)
+            && bool_field(fields, "blocks_availability") == Some(false);
+        quote_fields.insert(
+            "scheduleRole".to_string(),
+            if is_mission_context {
+                "mission_context"
+            } else {
+                "attendance_commitment"
+            }
+            .to_string(),
+        );
+    }
+    let quote = serde_jcs::to_vec(&quote_fields)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(CandidateSource {

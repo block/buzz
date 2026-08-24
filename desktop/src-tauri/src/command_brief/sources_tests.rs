@@ -520,6 +520,8 @@ fn calendar_record(id: &str, deleted: bool, stale: bool, recurring: bool) -> Val
         "start": "2026-07-25T06:30:00+10:00",
         "end": "2026-07-25T07:00:00+10:00",
         "is_recurring": recurring.to_string(),
+        "is_all_day": "false",
+        "blocks_availability": "true",
         "recurrence_identifier": if recurring { "series-1" } else { "" },
         "is_deleted": deleted.to_string(),
         "is_stale": stale.to_string()

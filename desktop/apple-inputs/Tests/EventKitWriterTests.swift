@@ -68,6 +68,52 @@ final class EventKitWriterTests: XCTestCase {
         XCTAssertEqual(store.events[0].title, "Sailing stations")
     }
 
+    func testAllDayProgrammeEntriesAreFreeWhileTimedEventsRemainBusy() {
+        let store = FixtureCalendarStore()
+
+        let result = EventKitWriter(store: store).reconcile(
+            projections: [
+                projection(id: "battle-rhythm:mission", title: "Alongside FBE", isAllDay: true),
+                projection(id: "battle-rhythm:brief", title: "Command brief"),
+            ],
+            coverageStart: .distantPast,
+            coverageEnd: .distantFuture
+        )
+
+        XCTAssertEqual(result.created, 2)
+        XCTAssertFalse(
+            store.events.filter { $0.externalID == "battle-rhythm:mission" }.first!.blocksAvailability
+        )
+        XCTAssertTrue(
+            store.events.filter { $0.externalID == "battle-rhythm:brief" }.first!.blocksAvailability
+        )
+    }
+
+    func testReconciliationCorrectsExistingBusyAllDayProgrammeEntryToFree() {
+        let store = FixtureCalendarStore()
+        store.calendarID = "calendar"
+        store.events = [
+            stored(
+                id: "managed",
+                externalID: "battle-rhythm:mission",
+                title: "Alongside FBE",
+                isAllDay: true,
+                blocksAvailability: true
+            ),
+        ]
+
+        let result = EventKitWriter(store: store).reconcile(
+            projections: [
+                projection(id: "battle-rhythm:mission", title: "Alongside FBE", isAllDay: true),
+            ],
+            coverageStart: .distantPast,
+            coverageEnd: .distantFuture
+        )
+
+        XCTAssertEqual(result.updated, 1)
+        XCTAssertFalse(store.events[0].blocksAvailability)
+    }
+
     func testPermissionDenialReturnsStatusWithoutMutatingInputOrStore() {
         let store = FixtureCalendarStore(permission: .denied)
         let input = [projection(id: "battle-rhythm:brief", title: "Brief")]
@@ -84,13 +130,17 @@ final class EventKitWriterTests: XCTestCase {
         XCTAssertEqual(input[0].title, "Brief")
     }
 
-    private func projection(id: String, title: String) -> CalendarProjection {
+    private func projection(
+        id: String,
+        title: String,
+        isAllDay: Bool = false
+    ) -> CalendarProjection {
         CalendarProjection(
             externalID: id,
             title: title,
             start: Date(timeIntervalSince1970: 1_800_000_000),
             end: Date(timeIntervalSince1970: 1_800_003_600),
-            isAllDay: false,
+            isAllDay: isAllDay,
             location: "Bridge",
             notes: "Command Adviser"
         )
@@ -99,7 +149,9 @@ final class EventKitWriterTests: XCTestCase {
     private func stored(
         id: String,
         externalID: String?,
-        title: String
+        title: String,
+        isAllDay: Bool = false,
+        blocksAvailability: Bool = true
     ) -> StoredCalendarEvent {
         StoredCalendarEvent(
             identifier: id,
@@ -107,7 +159,8 @@ final class EventKitWriterTests: XCTestCase {
             title: title,
             start: Date(timeIntervalSince1970: 1_800_000_000),
             end: Date(timeIntervalSince1970: 1_800_003_600),
-            isAllDay: false,
+            isAllDay: isAllDay,
+            blocksAvailability: blocksAvailability,
             location: "Bridge",
             notes: "Command Adviser"
         )
@@ -154,6 +207,7 @@ private final class FixtureCalendarStore: CalendarWritingStore {
             start: projection.start,
             end: projection.end,
             isAllDay: projection.isAllDay,
+            blocksAvailability: projection.blocksAvailability,
             location: projection.location,
             notes: projection.notes
         )
