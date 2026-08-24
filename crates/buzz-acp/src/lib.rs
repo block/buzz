@@ -273,7 +273,8 @@ async fn author_allowed(
     }
 }
 
-/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+/// Resolve whether `channel_id` is a DM for the inbound author gate — the
+/// fail-closed projection of [`classify_dm`].
 ///
 /// Resolution order:
 /// 1. Startup discovery metadata (`startup_info`) — covers channels known at
@@ -290,14 +291,74 @@ pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
+    classify_dm(channel_id, channel_info).await.gates_as_dm()
+}
+
+/// How one inbound event's channel resolved, from one metadata lookup.
+///
+/// Closed rather than a pair of booleans: the authorization gate has an answer
+/// for every state and native steering does not, so no pair of flags can say
+/// "no answer". Callers take a named projection instead of choosing a field.
+///
+/// Resolve once per event: `ChannelInfoResolver` does not cache the unresolved
+/// case, so a second call pays a second lazy REST fetch on the main loop, for
+/// exactly the channels that already failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DmClassification {
+    Dm,
+    NonDm,
+    /// Channel metadata did not resolve for this event.
+    Unresolved,
+}
+
+impl DmClassification {
+    /// Authorization reading — fails **closed**. An unresolved channel counts as
+    /// a DM so `respond_to` modes that admit non-owner authors cannot be
+    /// exercised inside a channel we failed to classify.
+    pub(crate) fn gates_as_dm(self) -> bool {
+        matches!(self, Self::Dm | Self::Unresolved)
+    }
+
+    /// Native-steer reading — declines rather than guesses. `None` means the
+    /// native path must not run for this event.
+    pub(crate) fn native_steer_scope(self) -> Option<NativeSteerScope> {
+        match self {
+            Self::Dm => Some(NativeSteerScope::Dm),
+            Self::NonDm => Some(NativeSteerScope::NonDm),
+            Self::Unresolved => None,
+        }
+    }
+}
+
+/// The DM reading native steering takes: resolved states only.
+///
+/// There is no conservative default — see `queue::resolve_reply_anchor` for why
+/// neither anchor rule is safe for a channel nobody could classify, and
+/// `queue::format_native_steer_prompt` for the anchoring this path does apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeSteerScope {
+    Dm,
+    NonDm,
+}
+
+/// Resolve `channel_id`'s type once, for the two projections that need it.
+///
+/// See [`DmClassification`] for why unresolved metadata still gates but carries
+/// no native scope, and [`is_dm_channel`] for the resolution order.
+pub(crate) async fn classify_dm(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> DmClassification {
     match channel_info.resolve(channel_id).await {
-        Some(info) => info.channel_type == "dm",
+        Some(info) if info.channel_type == "dm" => DmClassification::Dm,
+        Some(_) => DmClassification::NonDm,
         None => {
             tracing::warn!(
                 channel_id = %channel_id,
-                "channel type unresolved — treating as DM for author gate (fail closed)"
+                "channel type unresolved — treating as DM for author gate (fail \
+                 closed); native steering declines, event falls back to cancel+merge"
             );
-            true
+            DmClassification::Unresolved
         }
     }
 }
@@ -2865,18 +2926,18 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            //
+                            // DM hardening: resolve the channel type once, here,
+                            // for both the gate below and the native-steer fork.
+                            // See `DmClassification` for the two readings.
+                            let dm = classify_dm(buzz_event.channel_id, &ctx.channel_info).await;
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
-                                    is_dm,
+                                    dm.gates_as_dm(),
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -2886,7 +2947,7 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
-                                        is_dm,
+                                        is_dm = dm.gates_as_dm(),
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
@@ -2968,6 +3029,7 @@ async fn tokio_main() -> Result<()> {
                                             buzz_event.channel_id,
                                             event_for_steer,
                                             prompt_tag_for_steer,
+                                            dm,
                                             &steer_ack_tx,
                                         );
                                     if !native_attempted {
@@ -3608,6 +3670,22 @@ fn signal_in_flight_task(
     false
 }
 
+/// Build a native steer's prompt blocks from an already-resolved scope.
+///
+/// The decline on unresolved metadata happens in [`try_native_steer`], not here:
+/// [`NativeSteerScope`] has no unresolved state left to reject.
+fn native_steer_prompt_blocks(
+    channel_id: uuid::Uuid,
+    be: &queue::BatchEvent,
+    scope: NativeSteerScope,
+) -> Vec<String> {
+    vec![queue::format_native_steer_prompt(
+        channel_id,
+        be,
+        matches!(scope, NativeSteerScope::Dm),
+    )]
+}
+
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
@@ -3624,11 +3702,11 @@ fn signal_in_flight_task(
 /// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
 /// will issue it from the ack arm if the native attempt fails.
 ///
-/// Returns `false` if `pool.send_steer` failed (no in-flight task,
-/// `steer_tx` already full from a prior in-flight steer, or read loop
-/// torn down). The caller MUST fall through to
-/// `signal_in_flight_task(channel_id, ControlSignal::Steer)` so the
-/// event still reaches the agent via the universal path.
+/// Returns `false` if the channel is [`DmClassification::Unresolved`], or if
+/// `pool.send_steer` failed (no in-flight task, `steer_tx` already full from a
+/// prior in-flight steer, or read loop torn down). The caller MUST fall through
+/// to `signal_in_flight_task(channel_id, ControlSignal::Steer)` so the event
+/// still reaches the agent via the universal path.
 ///
 /// The withheld event is NOT released here on `false` because no withhold
 /// was established: `mark_native_steer_pending` only runs on `Ok(())`.
@@ -3638,34 +3716,32 @@ fn try_native_steer(
     channel_id: uuid::Uuid,
     event: nostr::Event,
     prompt_tag: String,
+    dm: DmClassification,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
-    // Build the steer body: framing strings come from
-    // `queue::native_steer_framing()` (Eva's drift-proof requirement —
-    // native and cancel+merge fallback share these so the agent gets the
-    // same orientation regardless of transport). The single event block
-    // is rendered by `queue::format_event_block`, the same function
-    // `queue::format_prompt` uses internally for `[Buzz event: …]`
-    // sections, so the rendering also cannot drift.
-    //
-    // Passing `None` for `channel_info` / `profile_lookup` is intentional:
-    // native steer is a *delta* into a live turn — the agent already saw
-    // channel context and the actor's profile in the original prompt,
-    // duplicating it here would defeat the point of non-cancelling
-    // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
+    // Decline before the prompt, the send and the withhold, so the event stays
+    // queued for the caller's cancel+merge fallback, which resolves the channel
+    // again at flush time. See `queue::resolve_reply_anchor` for why no anchor
+    // rule is safe without metadata.
+    let Some(scope) = dm.native_steer_scope() else {
+        tracing::debug!(
+            channel = %channel_id,
+            "channel metadata unresolved — declining native steer for cancel+merge"
+        );
+        return false;
+    };
+
     let event_id_hex = event.id.to_hex();
     let be = queue::BatchEvent {
         event,
-        prompt_tag: prompt_tag.clone(),
+        prompt_tag,
         received_at: std::time::Instant::now(),
     };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let prompt_blocks = native_steer_prompt_blocks(channel_id, &be, scope);
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
-        prompt_blocks: vec![body],
+        prompt_blocks,
         ack_tx,
     };
 
@@ -5603,6 +5679,250 @@ mod author_gate_tests {
         assert!(
             is_dm_channel(id, &resolver(startup)).await,
             "missing startup metadata must not be trusted as a stream"
+        );
+    }
+
+    /// The two readings part company only on unresolved metadata. A classifier
+    /// that failed closed on both would pass every `is_dm_channel` test above,
+    /// since those only ever observe the gate reading.
+    #[tokio::test]
+    async fn test_classify_dm_splits_only_when_metadata_is_unresolved() {
+        let dm_id = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
+        let startup = HashMap::from([
+            (
+                dm_id,
+                relay::ChannelInfo {
+                    name: "dm".into(),
+                    channel_type: "dm".into(),
+                    description: None,
+                },
+            ),
+            (
+                stream_id,
+                relay::ChannelInfo {
+                    name: "stream".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            ),
+        ]);
+        let resolver = resolver(startup);
+
+        let dm = classify_dm(dm_id, &resolver).await;
+        assert_eq!(dm, DmClassification::Dm);
+        assert!(
+            dm.gates_as_dm() && dm.native_steer_scope() == Some(NativeSteerScope::Dm),
+            "a resolved DM gates as a DM and carries the DM native scope"
+        );
+
+        let stream = classify_dm(stream_id, &resolver).await;
+        assert_eq!(stream, DmClassification::NonDm);
+        assert!(
+            !stream.gates_as_dm() && stream.native_steer_scope() == Some(NativeSteerScope::NonDm),
+            "a resolved stream gates open and steers with the channel scope"
+        );
+
+        let unresolved = classify_dm(Uuid::new_v4(), &resolver).await;
+        assert_eq!(unresolved, DmClassification::Unresolved);
+        assert!(
+            unresolved.gates_as_dm(),
+            "author gate fails closed: an unclassified channel must not admit non-owner authors"
+        );
+        assert_eq!(
+            unresolved.native_steer_scope(),
+            None,
+            "native steering must decline an unclassified channel, not map it to a resolved scope"
+        );
+    }
+
+    /// The composite, through the production seam: `DmClassification` in at
+    /// `try_native_steer`, rendered scope and anchor out on the wire. No arm
+    /// supplies the intermediate [`NativeSteerScope`] by hand, so a regression in
+    /// that translation — where the cross-thread defect lived — fails here.
+    ///
+    /// The resolved arms are the control for the unresolved one: they steer on
+    /// this fixture, so its `false` is a decline and not a pool that could never
+    /// have steered.
+    #[tokio::test]
+    async fn test_native_steer_scope_and_anchor_through_the_classification_seam() {
+        /// `(accepted, prompt_sent_on_the_wire, event_still_flushable, triggering_id)`
+        async fn attempt(
+            dm: DmClassification,
+            tags: Vec<nostr::Tag>,
+        ) -> (bool, Option<String>, bool, String) {
+            let ch = Uuid::new_v4();
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "@bot steer")
+                .tags(tags)
+                .sign_with_keys(&nostr::Keys::generate())
+                .unwrap();
+            let triggering_id = event.id.to_hex();
+
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            queue.push(QueuedEvent {
+                channel_id: ch,
+                event: event.clone(),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "@mention".into(),
+            });
+
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: Some(ch),
+                    turn_id: "test-turn-id".into(),
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: Some(steer_tx),
+                    successful_steer_deliveries: Default::default(),
+                },
+            );
+
+            let (ack_tx, _ack_rx) = mpsc::unbounded_channel();
+            let accepted = try_native_steer(
+                &mut pool,
+                &mut queue,
+                ch,
+                event,
+                "@mention".into(),
+                dm,
+                &ack_tx,
+            );
+            let sent = steer_rx
+                .try_recv()
+                .ok()
+                .map(|request| request.prompt_blocks.join("\n\n"));
+            (accepted, sent, queue.has_flushable_work(), triggering_id)
+        }
+
+        let root = "d".repeat(64);
+        let threaded = || vec![nostr::Tag::parse(["e", &root, "", "reply"]).expect("e tag")];
+
+        // Resolved DM: anchors to the message being answered, not the DM root.
+        let (accepted, sent, flushable, triggering_id) =
+            attempt(DmClassification::Dm, threaded()).await;
+        assert!(accepted, "a resolved DM steers natively on this fixture");
+        assert!(!flushable, "an accepted steer withholds the queued event");
+        let sent = sent.expect("resolved DM puts a request on the wire");
+        assert!(sent.contains("Scope: dm"), "{sent}");
+        assert!(
+            sent.contains(&format!("--reply-to {triggering_id}")),
+            "a DM reply anchors to the triggering event: {sent}"
+        );
+
+        // Resolved non-DM, same thread: anchors to the root so replies stay flat.
+        let (accepted, sent, flushable, _) = attempt(DmClassification::NonDm, threaded()).await;
+        assert!(
+            accepted,
+            "a resolved non-DM steers natively on this fixture"
+        );
+        assert!(!flushable, "an accepted steer withholds the queued event");
+        let sent = sent.expect("resolved non-DM puts a request on the wire");
+        assert!(
+            sent.contains("Scope: thread") && !sent.contains("Scope: dm"),
+            "{sent}"
+        );
+        assert!(
+            sent.contains(&format!("--reply-to {root}")),
+            "a threaded non-DM reply anchors to the thread root: {sent}"
+        );
+
+        // Unresolved: nothing goes out and the event stays queued for
+        // cancel+merge, which resolves again at flush time.
+        let (accepted, sent, flushable, _) =
+            attempt(DmClassification::Unresolved, threaded()).await;
+        assert!(
+            !accepted,
+            "unresolved metadata must decline the native steer"
+        );
+        assert!(
+            sent.is_none(),
+            "the decline must land before the steer is sent: {sent:?}"
+        );
+        assert!(
+            flushable,
+            "a declined event must stay queued for the cancel+merge fallback"
+        );
+    }
+
+    /// Both resolved states carry a native scope and they differ; `Unresolved`
+    /// carries none. Fails if `Unresolved` is ever mapped onto either.
+    #[test]
+    fn test_native_steer_scope_is_resolved_only() {
+        assert_eq!(
+            DmClassification::Dm.native_steer_scope(),
+            Some(NativeSteerScope::Dm)
+        );
+        assert_eq!(
+            DmClassification::NonDm.native_steer_scope(),
+            Some(NativeSteerScope::NonDm)
+        );
+        assert_eq!(DmClassification::Unresolved.native_steer_scope(), None);
+    }
+
+    /// Scope and anchor inside the formatter, given a scope. Supplies
+    /// [`NativeSteerScope`] by hand, so it cannot see the classification that
+    /// produced it — the seam test above carries that half.
+    #[test]
+    fn test_resolved_scopes_render_their_own_scope_and_anchor() {
+        let ch = Uuid::new_v4();
+        let root = "d".repeat(64);
+        let threaded = nostr::EventBuilder::new(nostr::Kind::Custom(9), "@bot steer")
+            .tags([nostr::Tag::parse(["e", &root, "", "reply"]).expect("e tag")])
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let triggering_id = threaded.id.to_hex();
+        let be = queue::BatchEvent {
+            event: threaded,
+            prompt_tag: "@mention".into(),
+            received_at: std::time::Instant::now(),
+        };
+
+        let dm = native_steer_prompt_blocks(ch, &be, NativeSteerScope::Dm).join("\n\n");
+        assert!(
+            dm.contains("Scope: dm"),
+            "resolved DM renders DM scope: {dm}"
+        );
+        assert!(
+            dm.contains(&format!("--reply-to {triggering_id}")),
+            "a DM reply anchors to the message being answered: {dm}"
+        );
+
+        // Same event, non-DM: a thread stays flat, anchored to its root, where
+        // the DM arm above anchored to the message being answered.
+        let threaded_channel =
+            native_steer_prompt_blocks(ch, &be, NativeSteerScope::NonDm).join("\n\n");
+        assert!(
+            threaded_channel.contains("Scope: thread") && !threaded_channel.contains("Scope: dm"),
+            "resolved non-DM in a thread renders thread scope: {threaded_channel}"
+        );
+        assert!(
+            threaded_channel.contains(&format!("--reply-to {root}")),
+            "a threaded channel reply anchors to the thread root: {threaded_channel}"
+        );
+
+        let top_level_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "@bot steer")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let top_level_id = top_level_event.id.to_hex();
+        let top_level_be = queue::BatchEvent {
+            event: top_level_event,
+            prompt_tag: "@mention".into(),
+            received_at: std::time::Instant::now(),
+        };
+        let channel =
+            native_steer_prompt_blocks(ch, &top_level_be, NativeSteerScope::NonDm).join("\n\n");
+        assert!(
+            channel.contains("Scope: channel") && !channel.contains("Scope: dm"),
+            "resolved non-DM at top level renders channel scope: {channel}"
+        );
+        assert!(
+            channel.contains(&format!("--reply-to {top_level_id}")),
+            "a top-level channel reply anchors to the triggering event: {channel}"
         );
     }
 

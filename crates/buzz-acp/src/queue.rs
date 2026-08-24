@@ -1095,11 +1095,13 @@ fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup
 /// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
 /// time, content, all tags (never stripped), and parsed structural fields.
 ///
-/// Reused by the goose-native steer path (lib.rs mode-gate) to render the
-/// single withheld event for delivery via `_goose/unstable/session/steer`,
-/// without paying for the batch-level context blocks the in-flight turn
-/// already has.
-pub(crate) fn format_event_block(
+/// Reused by [`format_native_steer_prompt`] to render the single withheld event.
+///
+/// Keep this private. Reachable from outside this module, it lets a caller
+/// assemble a steer body from the event alone, with no routing context — the
+/// defect [`format_native_steer_prompt`] exists to prevent. Widening it is how
+/// that defect comes back.
+fn format_event_block(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
     be: &BatchEvent,
@@ -1224,20 +1226,34 @@ fn turn_is_human_facing(
     thread_tags.mentioned_pubkeys.iter().any(|pk| !is_agent(pk))
 }
 
-/// Resolve the `--reply-to` anchor for a non-DM turn.
+/// Resolve the `--reply-to` anchor for a turn.
 ///
-/// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
-///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
-///   - top-level   → the triggering event id, which becomes the new thread root
+///   - DM in a thread → the triggering event, not the root: a DM thread's root
+///     is its opening message, not the message being answered
+///   - DM at top level → no anchor; there is no thread to stay in
+///   - human-facing ([`turn_is_human_facing`]) in a thread → the thread ROOT,
+///     keeping the reply flat at layer 1
+///   - human-facing top-level → the triggering event, which becomes the root
+///   - agent↔agent → `None`; deep nesting is intentional there
 ///
-/// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
-/// (intentional for agent coordination).
+/// `is_dm` must be definitive. Both branches are wrong for a channel nobody
+/// could classify, and the author gate's `is_dm_channel` is no help — it calls an
+/// *unresolved* channel a DM to fail closed. So the native path declines without
+/// metadata; the fallback retries at flush time and, failing that,
+/// `format_prompt`'s `unwrap_or(false)` hands this function a guess anyway.
 fn resolve_reply_anchor(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
     triggering_event_id: &str,
+    is_dm: bool,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> Option<String> {
+    if is_dm {
+        return thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| triggering_event_id.to_string());
+    }
     if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
         return None;
     }
@@ -1587,27 +1603,15 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         );
     }
 
-    // 2. Context hints (with a human-aware reply anchor).
-    //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
-    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
-    //   - top-level     → anchor to the triggering event (it becomes the root)
-    // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
-    };
+    // 2. Context hints (with a human-aware reply anchor — see
+    //    [`resolve_reply_anchor`] for the DM and agent↔agent rules).
+    let reply_anchor = resolve_reply_anchor(
+        &last_event.event.pubkey.to_hex(),
+        &thread_tags,
+        &last_event.event.id.to_hex(),
+        is_dm,
+        args.profile_lookup,
+    );
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,
@@ -1740,20 +1744,65 @@ impl MergeFraming {
     }
 }
 
-/// Framing strings for the goose-native steer path (lib.rs mode-gate),
-/// pulled from the same source-of-truth as the cancel+merge fallback
-/// (`MergeFraming::for_reason(Some(CancelReason::Steer))`).
+/// Framing strings for the native steer path, from the same source-of-truth as
+/// the cancel+merge fallback (`MergeFraming::for_reason(Some(CancelReason::Steer))`),
+/// so an agent gets the same "weave it in, don't abandon your work" orientation
+/// on either transport. Returns `(new_header_single, closing_note)`: no
+/// `prior_header` and no original-request section.
 ///
-/// Returns `(new_header_single, closing_note)`. Native-steer renders only
-/// the new-message header + the single event block + the closing note —
-/// no `prior_header`, no original-request section, because the in-flight
-/// goose turn already has all of that in context. The two paths share
-/// these strings so an agent receiving either transport gets the same
-/// "weave it in, don't abandon your work" orientation (Eva's drift-proof
-/// requirement: native and fallback must not diverge in UX).
-pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
+/// Framing parity is the claim here, not behavioural parity — anchoring differs
+/// by design, see [`resolve_reply_anchor`].
+///
+/// Keep this private, with [`format_event_block`]: the two together are the
+/// hand-assembled steer body that shipped without a reply destination.
+fn native_steer_framing() -> (&'static str, &'static str) {
     let framing = MergeFraming::for_reason(Some(CancelReason::Steer));
     (framing.new_header_single, framing.closing_note)
+}
+
+/// Format the complete prompt body for a native (non-cancelling) steer of a
+/// single withheld event.
+///
+/// A *delta* into a live turn: standing context, channel name and description,
+/// profile labels and conversation history are omitted, since the turn usually
+/// holds them and the hints tell the agent to fetch what it lacks. Routing
+/// context is exempt — a steer can arrive from a different thread, or scope, than
+/// the one the turn is working in.
+///
+/// No profile lookup: producing one is an async relay query, and this path runs
+/// synchronously on the main event loop. [`turn_is_human_facing`] therefore reads
+/// every identity as human, so every non-DM native steer is anchored, including
+/// the agent↔agent ones the cancel+merge fallback leaves free to nest —
+/// deliberate, since losing a human's reply destination is the worse failure.
+///
+/// `is_dm` must be definitive channel metadata, not the author gate's
+/// fail-closed classification — see [`resolve_reply_anchor`].
+pub(crate) fn format_native_steer_prompt(channel_id: Uuid, be: &BatchEvent, is_dm: bool) -> String {
+    let thread_tags = parse_thread_tags(&be.event);
+    let context = format_context_hints(
+        channel_id,
+        None, // channel_info: name and description are not re-rendered
+        &thread_tags,
+        is_dm,
+        // No conversation context attached, and none claimed as delivered: a
+        // steer can cross into a thread this turn has not seen.
+        false,
+        false,
+        resolve_reply_anchor(
+            &be.event.pubkey.to_hex(),
+            &thread_tags,
+            &be.event.id.to_hex(),
+            is_dm,
+            None,
+        )
+        .as_deref(),
+    );
+    let (header, closing) = native_steer_framing();
+    let event_block = format_event_block(channel_id, None, be, None);
+    format!(
+        "{context}\n\n{header}\n\n[Buzz event: {}]\n{event_block}\n\n{closing}",
+        be.prompt_tag
+    )
 }
 
 #[cfg(test)]
@@ -2248,6 +2297,249 @@ mod tests {
         assert!(prompt.contains("[What you were working on]"));
         assert!(prompt.contains("arrived while you were working"));
         assert!(!prompt.contains("supersedes"));
+    }
+
+    // ── Native steer prompt body ─────────────────────────────────────────────
+
+    /// A NIP-10 reply `e` tag rooting an event at `root`.
+    fn reply_e_tag(root: &str) -> Vec<Vec<String>> {
+        vec![vec![
+            "e".into(),
+            root.to_string(),
+            "".into(),
+            "reply".into(),
+        ]]
+    }
+
+    fn steer_batch_event(event: Event) -> BatchEvent {
+        BatchEvent {
+            event,
+            prompt_tag: "@mention".into(),
+            received_at: Instant::now(),
+        }
+    }
+
+    /// The regression this path exists to prevent: a native steer from thread B,
+    /// arriving while the turn works in thread A, must name thread B as the reply
+    /// destination — the same answer the cancel+merge fallback gives for the same
+    /// event (`test_steer_cross_thread_reply_targets_steering_message`). Before
+    /// the fix the native body was framing + event block only, carrying no
+    /// `[Context]` and no anchor, so thread A was the only live destination in
+    /// the agent's context.
+    #[test]
+    fn test_native_steer_cross_thread_matches_fallback_anchor() {
+        let ch = Uuid::new_v4();
+        let thread_a = "a".repeat(64);
+        let thread_b = "b".repeat(64);
+
+        let original =
+            make_event_with_tags("@bot keep working on thread A", reply_e_tag(&thread_a));
+        let steering = make_event_with_tags("@bot note from thread B", reply_e_tag(&thread_b));
+        let steering_id = steering.id.to_hex();
+
+        let native = format_native_steer_prompt(ch, &steer_batch_event(steering.clone()), false);
+        let fallback = format_prompt(
+            &FlushBatch {
+                channel_id: ch,
+                events: vec![steer_batch_event(steering)],
+                cancelled_events: vec![steer_batch_event(original)],
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            &FormatPromptArgs::default(),
+        )
+        .join("\n\n");
+
+        for (transport, prompt) in [("native", &native), ("fallback", &fallback)] {
+            assert!(
+                prompt.contains("[Context]"),
+                "{transport} must state routing context: {prompt}"
+            );
+            assert!(
+                prompt.contains(&format!("Thread root: {thread_b}")),
+                "{transport} must scope to the steering thread: {prompt}"
+            );
+            assert!(
+                prompt.contains(&format!("--reply-to {thread_b}")),
+                "{transport} must anchor to the steering thread root: {prompt}"
+            );
+            assert!(
+                !prompt.contains(&format!("--reply-to {thread_a}")),
+                "{transport} must not anchor to the turn's original thread: {prompt}"
+            );
+        }
+
+        // Native keeps its delta shape: shared steer framing and the event
+        // itself, without the fallback's original-request section.
+        assert!(native.contains("[New message — arrived while you were working]"));
+        assert!(native.contains("[Buzz event: @mention]"));
+        assert!(native.contains(&format!("Event ID: {steering_id}")));
+        assert!(native.contains("Continue your in-progress work"));
+        assert!(!native.contains("[What you were working on]"));
+    }
+
+    /// The anchor asymmetry from [`format_native_steer_prompt`], pinned. Same
+    /// batch as the parity test above; the only variable is the profile lookup.
+    #[test]
+    fn test_native_steer_anchors_the_agent_turn_the_fallback_leaves_free() {
+        let ch = Uuid::new_v4();
+        let thread_a = "a".repeat(64);
+        let thread_b = "b".repeat(64);
+
+        let original =
+            make_event_with_tags("@bot keep working on thread A", reply_e_tag(&thread_a));
+        let steering = make_event_with_tags("@bot note from thread B", reply_e_tag(&thread_b));
+        // Keyed on the steering event: `format_prompt` resolves the anchor from
+        // the batch's last event, not the cancelled one.
+        let agents_only = HashMap::from([(steering.pubkey.to_hex(), profile(true))]);
+
+        let native = format_native_steer_prompt(ch, &steer_batch_event(steering.clone()), false);
+        let fallback = format_prompt(
+            &FlushBatch {
+                channel_id: ch,
+                events: vec![steer_batch_event(steering)],
+                cancelled_events: vec![steer_batch_event(original)],
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            &FormatPromptArgs {
+                profile_lookup: Some(&agents_only),
+                ..FormatPromptArgs::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            native.contains(&format!("--reply-to {thread_b}")),
+            "native has no profile lookup, so it anchors every non-DM steer: {native}"
+        );
+        assert!(
+            !fallback.contains("--reply-to"),
+            "fallback sees an agent-only turn and leaves it free to nest: {fallback}"
+        );
+    }
+
+    /// A steer nested below its thread root must state both ancestry lines and
+    /// still anchor at the root. Fixtures with one `reply` tag make root and
+    /// parent the same id, so the `Parent:` line goes unrendered.
+    #[test]
+    fn test_native_steer_nested_reply_states_root_and_parent() {
+        let ch = Uuid::new_v4();
+        let root_b = "b".repeat(64);
+        let parent_c = "c".repeat(64);
+
+        let steering = make_event_with_tags(
+            "@bot note from below the root of thread B",
+            vec![
+                vec!["e".into(), root_b.clone(), String::new(), "root".into()],
+                vec!["e".into(), parent_c.clone(), String::new(), "reply".into()],
+            ],
+        );
+
+        let prompt = format_native_steer_prompt(ch, &steer_batch_event(steering), false);
+
+        assert!(
+            prompt.contains(&format!("Thread root: {root_b}")),
+            "{prompt}"
+        );
+        assert!(prompt.contains(&format!("Parent: {parent_c}")), "{prompt}");
+        assert!(prompt.contains(&format!("--reply-to {root_b}")), "{prompt}");
+        assert!(
+            !prompt.contains(&format!("--reply-to {parent_c}")),
+            "a nested steer stays flat at layer 1, anchored to the root: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_native_steer_top_level_opens_thread_at_steering_event() {
+        let ch = Uuid::new_v4();
+        let steering = make_event_with_tags("@bot new subject entirely", vec![]);
+        let steering_id = steering.id.to_hex();
+
+        let prompt = format_native_steer_prompt(ch, &steer_batch_event(steering), false);
+
+        assert!(prompt.contains("Scope: channel"), "{prompt}");
+        assert!(
+            prompt.contains("This is a new top-level message"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!("--reply-to {steering_id}")),
+            "{prompt}"
+        );
+    }
+
+    /// DM replies anchor to the steering event, not the DM's opening message —
+    /// the rule `format_prompt` already applies (`resolve_reply_anchor`).
+    #[test]
+    fn test_native_steer_dm_reply_anchors_to_steering_event() {
+        let ch = Uuid::new_v4();
+        let dm_root = "d".repeat(64);
+        let steering = make_event_with_tags("one more thing", reply_e_tag(&dm_root));
+        let steering_id = steering.id.to_hex();
+
+        let prompt = format_native_steer_prompt(ch, &steer_batch_event(steering), true);
+
+        assert!(prompt.contains("Scope: dm"), "{prompt}");
+        assert!(
+            prompt.contains(&format!("--reply-to {steering_id}")),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {dm_root}")),
+            "a DM reply anchors to the message being answered, not the DM root: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_native_steer_top_level_dm_forces_no_anchor() {
+        let ch = Uuid::new_v4();
+        let steering = make_event_with_tags("hey", vec![]);
+
+        let prompt = format_native_steer_prompt(ch, &steer_batch_event(steering), true);
+
+        assert!(prompt.contains("Scope: dm"), "{prompt}");
+        assert!(
+            !prompt.contains("--reply-to"),
+            "a top-level DM gets no forced anchor: {prompt}"
+        );
+    }
+
+    /// Routing context is in; the enrichment a full dispatch adds stays out —
+    /// pins the delta decision so native steer cannot grow into a full prompt.
+    #[test]
+    fn test_native_steer_omits_the_enrichment_a_full_dispatch_adds() {
+        let ch = Uuid::new_v4();
+        let steering = make_event_with_tags("@bot note", reply_e_tag(&"b".repeat(64)));
+
+        let prompt = format_native_steer_prompt(ch, &steer_batch_event(steering), false);
+
+        for absent in [
+            "[Base]",
+            "[Agent Instructions]",
+            "[Team Instructions]",
+            "[Agent Memory — core]",
+            "[Channel Canvas]",
+            "[Thread Context]",
+            "[Conversation Context]",
+        ] {
+            assert!(
+                !prompt.contains(absent),
+                "native steer must not repeat {absent}: {prompt}"
+            );
+        }
+        // Scope to the `[Context]` block: the event block renders its own
+        // unenriched `Channel:` line, so an unscoped assertion passes regardless.
+        let (context, _) = prompt
+            .split_once("\n\n[New message")
+            .expect("native steer body opens with [Context], then the steer header");
+        assert!(context.starts_with("[Context]"), "{context}");
+        assert!(
+            context.contains(&format!("Channel: {ch}")),
+            "channel must render as a bare UUID, unenriched: {context}"
+        );
+        assert!(
+            !context.contains("Description:"),
+            "channel description belongs to the original prompt, not the delta: {context}"
+        );
     }
 
     // ── Test 9b: requeue preserves events ────────────────────────────────────
@@ -3580,7 +3872,7 @@ mod tests {
     fn test_anchor_human_in_thread_uses_root() {
         // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3588,7 +3880,7 @@ mod tests {
     fn test_anchor_human_top_level_uses_triggering_event() {
         // Human top-level mention (no thread tags) → triggering event is root.
         let tags = thread_tags(None, &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
@@ -3596,14 +3888,14 @@ mod tests {
     fn test_anchor_agent_to_agent_in_thread_is_none() {
         // Agent pings agent inside a thread → no forced anchor (deep nesting ok).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
         assert_eq!(anchor, None);
     }
 
     #[test]
     fn test_anchor_agent_to_agent_top_level_is_none() {
         let tags = thread_tags(None, &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
         assert_eq!(anchor, None);
     }
 
@@ -3611,7 +3903,7 @@ mod tests {
     fn test_anchor_agent_sender_but_human_tagged_flattens() {
         // Agent-authored, but a human is tagged → human-facing → anchor to root.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3619,7 +3911,7 @@ mod tests {
     fn test_anchor_unknown_identity_treated_as_human() {
         // No profile lookup → fail open (treat as human so visibility is kept).
         let tags = thread_tags(Some(ROOT_ID), &[]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, false, None);
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3628,7 +3920,7 @@ mod tests {
         // Raw p-tag presence must NOT flatten when every tagged pubkey is an
         // agent — this is the regression Pinky flagged.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
         assert_eq!(anchor, None);
     }
 
