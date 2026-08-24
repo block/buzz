@@ -80,9 +80,10 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   _createChannel;
   final Future<void> Function(String channelId) _joinChannel;
   final String _relayHttpOrigin;
+  final bool Function() _isScopeCurrent;
 
   /// Creates recovery from channel-loading, creation, and join operations.
-  const MobileInviteJoinRecovery({
+  MobileInviteJoinRecovery({
     required Future<List<Channel>> Function() loadChannels,
     required Future<Channel> Function({
       required String channelId,
@@ -95,60 +96,75 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
     createChannel,
     required Future<void> Function(String channelId) joinChannel,
     required String relayHttpOrigin,
+    bool Function()? isScopeCurrent,
   }) : _loadChannels = loadChannels,
        _createChannel = createChannel,
        _joinChannel = joinChannel,
-       _relayHttpOrigin = relayHttpOrigin;
+       _relayHttpOrigin = relayHttpOrigin,
+       _isScopeCurrent = isScopeCurrent ?? _alwaysCurrent;
 
   /// Ensures memberships in the same public starter channels as desktop.
   ///
-  /// Each channel is best-effort: one unavailable starter must not prevent the
-  /// other from being joined or turn a successful invite claim into a failure.
+  /// All starter work is fenced to the community and identity that started it.
+  /// A partial setup remains recoverable, so a failed operation deliberately
+  /// propagates to the invite flow instead of being reported as success.
   @override
   Future<String?> ensureStarterChannels() async {
+    _ensureScopeCurrent();
     var channels = await _loadChannels();
+    _ensureScopeCurrent();
     String? welcomeEveryoneId;
 
     for (final starter in _starterChannels) {
-      try {
-        var channel = _findStarterChannel(channels, starter.slug);
-        if (channel == null) {
-          final channelId = desktopStarterChannelId(
-            relayHttpOrigin: _relayHttpOrigin,
-            slug: starter.slug,
-          );
-          try {
-            channel = await _createChannel(
-              channelId: channelId,
-              name: starter.slug,
-              channelType: 'stream',
-              visibility: 'open',
-              description: starter.description,
-            );
-          } catch (error) {
-            if (!_isDuplicateChannelError(error)) rethrow;
-            channels = await _loadChannels();
-            channel =
-                _findStarterChannel(channels, starter.slug) ??
-                channels
-                    .where((candidate) => candidate.id == channelId)
-                    .firstOrNull;
-            if (channel == null) rethrow;
-          }
-        }
-
-        if (!channel.isMember) await _joinChannel(channel.id);
-        if (starter.slug == 'welcome-everyone') {
-          welcomeEveryoneId = channel.id;
-        }
-      } catch (error) {
-        debugPrint(
-          '[InviteJoinRecovery] could not ensure #${starter.slug}: $error',
+      _ensureScopeCurrent();
+      var channel = _findStarterChannel(channels, starter.slug);
+      if (channel == null) {
+        final channelId = desktopStarterChannelId(
+          relayHttpOrigin: _relayHttpOrigin,
+          slug: starter.slug,
         );
+        try {
+          channel = await _createChannel(
+            channelId: channelId,
+            name: starter.slug,
+            channelType: 'stream',
+            visibility: 'open',
+            description: starter.description,
+          );
+          _ensureScopeCurrent();
+        } catch (error) {
+          if (!_isDuplicateChannelError(error)) rethrow;
+          _ensureScopeCurrent();
+          channels = await _loadChannels();
+          _ensureScopeCurrent();
+          channel =
+              _findStarterChannel(channels, starter.slug) ??
+              channels
+                  .where((candidate) => candidate.id == channelId)
+                  .firstOrNull;
+          if (channel == null) rethrow;
+        }
+      }
+
+      _ensureScopeCurrent();
+      if (!channel.isMember) {
+        await _joinChannel(channel.id);
+        _ensureScopeCurrent();
+      }
+      if (starter.slug == 'welcome-everyone') {
+        welcomeEveryoneId = channel.id;
       }
     }
 
     return welcomeEveryoneId;
+  }
+
+  static bool _alwaysCurrent() => true;
+
+  void _ensureScopeCurrent() {
+    if (!_isScopeCurrent()) {
+      throw StateError('Active community changed during invite recovery');
+    }
   }
 }
 
@@ -183,15 +199,35 @@ String desktopStarterChannelId({
 
 /// Builds invite recovery against the active app-level provider container.
 InviteJoinRecovery buildMobileInviteJoinRecovery(Ref ref) {
+  final expectedConfig = ref.read(relayConfigProvider);
+  final channelActions = ref.read(channelActionsProvider);
+
+  bool isScopeCurrent() {
+    final currentConfig = ref.read(relayConfigProvider);
+    return currentConfig.baseUrl == expectedConfig.baseUrl &&
+        currentConfig.nsec == expectedConfig.nsec;
+  }
+
+  void ensureScopeCurrent() {
+    if (!isScopeCurrent()) {
+      throw StateError('Active community changed during invite recovery');
+    }
+  }
+
   return MobileInviteJoinRecovery(
     loadChannels: () async {
+      ensureScopeCurrent();
       await ref.read(activeCommunityProvider.future);
-      final relayUrl = ref.read(relayConfigProvider).baseUrl;
+      ensureScopeCurrent();
       await ref
-          .read(_inviteRelayConnectedProvider(relayUrl).future)
+          .read(_inviteRelayConnectedProvider(expectedConfig.baseUrl).future)
           .timeout(const Duration(seconds: 15));
+      ensureScopeCurrent();
       await ref.read(channelsProvider.notifier).refresh();
-      return ref.read(channelsProvider.future);
+      ensureScopeCurrent();
+      final channels = await ref.read(channelsProvider.future);
+      ensureScopeCurrent();
+      return channels;
     },
     createChannel:
         ({
@@ -201,19 +237,17 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(Ref ref) {
           required visibility,
           description,
           ttlSeconds,
-        }) => ref
-            .read(channelActionsProvider)
-            .createChannel(
-              channelId: channelId,
-              name: name,
-              channelType: channelType,
-              visibility: visibility,
-              description: description,
-              ttlSeconds: ttlSeconds,
-            ),
-    joinChannel: (channelId) =>
-        ref.read(channelActionsProvider).joinChannel(channelId),
-    relayHttpOrigin: ref.read(relayConfigProvider).baseUrl,
+        }) => channelActions.createChannel(
+          channelId: channelId,
+          name: name,
+          channelType: channelType,
+          visibility: visibility,
+          description: description,
+          ttlSeconds: ttlSeconds,
+        ),
+    joinChannel: channelActions.joinChannel,
+    relayHttpOrigin: expectedConfig.baseUrl,
+    isScopeCurrent: isScopeCurrent,
   );
 }
 

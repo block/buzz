@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -320,7 +321,7 @@ void main() {
     },
   );
 
-  test('one unavailable starter does not block the other', () async {
+  test('starter setup surfaces an unavailable starter for recovery', () async {
     final joined = <String>[];
     final recovery = MobileInviteJoinRecovery(
       loadChannels: () async => [
@@ -339,24 +340,24 @@ void main() {
       relayHttpOrigin: 'https://relay.example.com',
     );
 
-    final focusChannelId = await recovery.ensureStarterChannels();
+    await expectLater(
+      recovery.ensureStarterChannels(),
+      throwsA(isA<Exception>()),
+    );
 
-    expect(joined, ['welcome-id']);
-    expect(focusChannelId, 'welcome-id');
+    expect(joined, isEmpty);
   });
 
   test(
-    'starter setup failure does not fail or repeat a claimed invite',
+    'starter setup recovery survives dismissal and container recreation',
     () async {
       final keys = nostr.Keys.generate();
       var generatedKeys = 0;
       var claimRequests = 0;
       final storage = CommunityStorage(secure: FakeSecureStorage());
-      final auth = _RecordingAuthNotifier();
-      final container = ProviderContainer(
+      final firstContainer = ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
-          authProvider.overrideWith(() => auth),
           inviteKeyGeneratorProvider.overrideWithValue(() {
             generatedKeys++;
             return keys;
@@ -379,9 +380,7 @@ void main() {
           ),
         ],
       );
-      addTearDown(container.dispose);
-
-      await container
+      await firstContainer
           .read(inviteJoinProvider.notifier)
           .prepare(
             const InviteDeepLink(
@@ -389,15 +388,92 @@ void main() {
               code: 'code',
             ),
           );
-      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      await firstContainer.read(inviteJoinProvider.notifier).confirmJoin();
 
-      final joined = container.read(inviteJoinProvider);
-      expect(joined.status, InviteJoinStatus.success);
-      expect(joined.errorMessage, isNull);
-      expect(joined.focusChannelId, isNull);
+      final failed = firstContainer.read(inviteJoinProvider);
+      expect(failed.status, InviteJoinStatus.error);
+      expect(failed.isStarterSetupRecovery, isTrue);
       expect(generatedKeys, 1);
       expect(claimRequests, 1);
-      expect(auth.authenticatedCommunities, hasLength(1));
+      expect((await storage.loadAll()).single.starterSetupIncomplete, isTrue);
+
+      firstContainer.dispose();
+
+      final secondContainer = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generatedKeys++;
+            return nostr.Keys.generate();
+          }),
+          inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              claimRequests++;
+              return http.Response('{}', 500);
+            }),
+          ),
+        ],
+      );
+      addTearDown(secondContainer.dispose);
+
+      await secondContainer
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(
+              relayUrl: 'wss://relay.example.com',
+              code: 'code',
+            ),
+          );
+
+      final recovered = secondContainer.read(inviteJoinProvider);
+      expect(recovered.status, InviteJoinStatus.success);
+      expect(recovered.focusChannelId, 'welcome-everyone-id');
+      expect((await storage.loadAll()).single.starterSetupIncomplete, isFalse);
+      expect(generatedKeys, 1);
+      expect(claimRequests, 1);
+    },
+  );
+
+  test(
+    'starter recovery makes no replacement-tenant submission after a scope switch',
+    () async {
+      var isScopeCurrent = true;
+      final firstJoinStarted = Completer<void>();
+      final releaseFirstJoin = Completer<void>();
+      final submitted = <String>[];
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async => [
+          _channel(id: 'general-id', name: 'general'),
+          _channel(id: 'welcome-id', name: 'welcome-everyone'),
+        ],
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => throw StateError('starters already exist'),
+        joinChannel: (channelId) async {
+          submitted.add(channelId);
+          if (channelId == 'general-id') {
+            firstJoinStarted.complete();
+            await releaseFirstJoin.future;
+          }
+        },
+        relayHttpOrigin: 'https://relay.example.com',
+        isScopeCurrent: () => isScopeCurrent,
+      );
+
+      final setup = recovery.ensureStarterChannels();
+      await firstJoinStarted.future;
+      isScopeCurrent = false;
+      releaseFirstJoin.complete();
+
+      await expectLater(setup, throwsA(isA<StateError>()));
+      expect(submitted, ['general-id']);
     },
   );
 

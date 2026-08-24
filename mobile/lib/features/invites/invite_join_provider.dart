@@ -23,9 +23,9 @@ typedef InviteKeyGenerator = nostr.Keys Function();
 
 const _unset = Object();
 
-/// Adds useful starter-channel memberships after an invite membership claim.
+/// Ensures starter-channel memberships after an invite membership claim.
 abstract interface class InviteJoinRecovery {
-  /// Best-effort ensures the public starters and returns the preferred focus.
+  /// Ensures the public starters and returns the preferred focus.
   Future<String?> ensureStarterChannels();
 }
 
@@ -51,6 +51,7 @@ class InviteJoinState {
   final String? communityName;
   final String? errorMessage;
   final bool requiresFreshInvite;
+  final bool isStarterSetupRecovery;
   final String? focusChannelId;
 
   const InviteJoinState({
@@ -60,6 +61,7 @@ class InviteJoinState {
     this.communityName,
     this.errorMessage,
     this.requiresFreshInvite = false,
+    this.isStarterSetupRecovery = false,
     this.focusChannelId,
   });
 
@@ -70,6 +72,7 @@ class InviteJoinState {
     String? communityName,
     Object? errorMessage = _unset,
     bool? requiresFreshInvite,
+    bool? isStarterSetupRecovery,
     Object? focusChannelId = _unset,
   }) => InviteJoinState(
     status: status ?? this.status,
@@ -80,6 +83,8 @@ class InviteJoinState {
         ? this.errorMessage
         : errorMessage as String?,
     requiresFreshInvite: requiresFreshInvite ?? this.requiresFreshInvite,
+    isStarterSetupRecovery:
+        isStarterSetupRecovery ?? this.isStarterSetupRecovery,
     focusChannelId: identical(focusChannelId, _unset)
         ? this.focusChannelId
         : focusChannelId as String?,
@@ -98,6 +103,17 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       await ref
           .read(communityListProvider.notifier)
           .switchCommunity(existing.id);
+      if (existing.starterSetupIncomplete) {
+        state = InviteJoinState(
+          status: InviteJoinStatus.claiming,
+          invite: invite,
+          host: _hostFromRelay(invite.relayUrl),
+          communityName: existing.name,
+          isStarterSetupRecovery: true,
+        );
+        await _finishStarterSetup(existing);
+        return;
+      }
       state = InviteJoinState(
         status: InviteJoinStatus.switchedExisting,
         invite: invite,
@@ -127,6 +143,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
     state = state.copyWith(
       status: InviteJoinStatus.claiming,
       errorMessage: null,
+      requiresFreshInvite: false,
     );
     try {
       final communities = await ref.read(communityListProvider.future);
@@ -135,9 +152,23 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         await ref
             .read(communityListProvider.notifier)
             .switchCommunity(existing.id);
+        if (existing.starterSetupIncomplete || state.isStarterSetupRecovery) {
+          await _finishStarterSetup(existing);
+        } else {
+          state = state.copyWith(
+            status: InviteJoinStatus.switchedExisting,
+            communityName: existing.name,
+            isStarterSetupRecovery: false,
+          );
+        }
+        return;
+      }
+
+      if (state.isStarterSetupRecovery) {
         state = state.copyWith(
-          status: InviteJoinStatus.switchedExisting,
-          communityName: existing.name,
+          status: InviteJoinStatus.error,
+          errorMessage:
+              'This community is no longer available. Re-open the invite link to try again.',
         );
         return;
       }
@@ -185,24 +216,12 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         pubkey: keys.public,
         nsec: keys.nsec,
         sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
+        starterSetupIncomplete: true,
       );
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
-      String? focusChannelId;
-      try {
-        focusChannelId = await ref
-            .read(inviteJoinRecoveryProvider)
-            .ensureStarterChannels();
-      } catch (_) {
-        // Starter channels are optional. A successful invite claim remains a
-        // success even when post-join setup is temporarily unavailable.
-      }
-      state = state.copyWith(
-        status: InviteJoinStatus.success,
-        communityName: community.name,
-        focusChannelId: focusChannelId,
-      );
+      await _finishStarterSetup(community);
     } catch (error) {
       final requiresFreshInvite = _requiresFreshInvite(error);
       state = state.copyWith(
@@ -211,6 +230,48 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         requiresFreshInvite: requiresFreshInvite,
       );
     }
+  }
+
+  Future<void> _finishStarterSetup(Community community) async {
+    try {
+      final focusChannelId = await ref
+          .read(inviteJoinRecoveryProvider)
+          .ensureStarterChannels();
+      await _saveStarterSetupState(community, incomplete: false);
+      state = state.copyWith(
+        status: InviteJoinStatus.success,
+        communityName: community.name,
+        isStarterSetupRecovery: false,
+        focusChannelId: focusChannelId,
+      );
+    } catch (error) {
+      Object visibleError = error;
+      try {
+        await _saveStarterSetupState(community, incomplete: true);
+      } catch (storageError) {
+        visibleError = storageError;
+      }
+      state = state.copyWith(
+        status: InviteJoinStatus.error,
+        errorMessage: _friendlyInviteError(visibleError),
+        requiresFreshInvite: false,
+        isStarterSetupRecovery: true,
+        focusChannelId: null,
+      );
+    }
+  }
+
+  Future<void> _saveStarterSetupState(
+    Community community, {
+    required bool incomplete,
+  }) {
+    return ref.read(communityTransitionProvider).runExclusive(() async {
+      final updated = community.copyWith(starterSetupIncomplete: incomplete);
+      await ref.read(communityStorageProvider).save(updated);
+      ref.invalidate(communityListProvider);
+      ref.invalidate(activeCommunityProvider);
+      ref.invalidate(authProvider);
+    });
   }
 
   void reset() {

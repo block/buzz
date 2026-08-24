@@ -228,6 +228,40 @@ void main() {
     expect(find.text('Join this Buzz community?'), findsOneWidget);
   });
 
+  testWidgets('opens retry setup after durable starter recovery fails', (
+    tester,
+  ) async {
+    const link = InviteDeepLink(
+      relayUrl: 'wss://relay.example.com',
+      code: 'invite-code',
+    );
+    final container = ProviderContainer(
+      overrides: [
+        pendingDeepLinkProvider.overrideWith(
+          () => _FakePendingDeepLinkNotifier(link),
+        ),
+        inviteJoinProvider.overrideWith(
+          _FailedStarterRecoveryInviteJoinNotifier.new,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Finish setting up'), findsOneWidget);
+    expect(find.text('Retry setup'), findsOneWidget);
+    expect(find.text('Starter setup failed'), findsOneWidget);
+  });
+
   testWidgets('waits for an invite modal before preparing the next invite', (
     tester,
   ) async {
@@ -486,6 +520,23 @@ class _SuccessfulInviteJoinNotifier extends InviteJoinNotifier {
     state = state.copyWith(
       status: InviteJoinStatus.success,
       focusChannelId: 'welcome-everyone-id',
+    );
+  }
+}
+
+class _FailedStarterRecoveryInviteJoinNotifier extends InviteJoinNotifier {
+  @override
+  InviteJoinState build() => const InviteJoinState();
+
+  @override
+  Future<void> prepare(InviteDeepLink invite) async {
+    state = InviteJoinState(
+      status: InviteJoinStatus.error,
+      invite: invite,
+      host: 'relay.example.com',
+      communityName: 'Relay',
+      errorMessage: 'Starter setup failed',
+      isStarterSetupRecovery: true,
     );
   }
 }

@@ -24,8 +24,20 @@ class InviteJoinSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(inviteJoinProvider);
     final isClaiming = state.status == InviteJoinStatus.claiming;
+    final isStarterSetupRecovery = state.isStarterSetupRecovery;
     final host = state.host ?? 'unknown host';
     final derivedName = state.communityName;
+    final primaryLabel = switch ((
+      isClaiming,
+      isStarterSetupRecovery,
+      state.status,
+    )) {
+      (true, true, _) => 'Finishing setup…',
+      (true, false, _) => 'Joining…',
+      (false, true, InviteJoinStatus.error) => 'Retry setup',
+      (false, true, _) => 'Finish setting up',
+      _ => 'Join',
+    };
 
     if (state.status == InviteJoinStatus.success) {
       return _InviteJoinSuccess(
@@ -36,7 +48,7 @@ class InviteJoinSheet extends ConsumerWidget {
     }
 
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(Grid.sm, 0, Grid.sm, Grid.sm),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -45,7 +57,9 @@ class InviteJoinSheet extends ConsumerWidget {
             Icon(LucideIcons.userPlus, size: 40, color: context.colors.primary),
             const SizedBox(height: Grid.sm),
             Text(
-              'Join this Buzz community?',
+              isStarterSetupRecovery
+                  ? 'Finish setting up'
+                  : 'Join this Buzz community?',
               style: context.textTheme.titleLarge,
             ),
             const SizedBox(height: Grid.xxs),
@@ -83,6 +97,15 @@ class InviteJoinSheet extends ConsumerWidget {
               ),
             ],
             const SizedBox(height: Grid.sm),
+            if (isStarterSetupRecovery) ...[
+              Text(
+                'Your membership is ready, but starter channels still need to be set up. You can safely retry without claiming the invite again.',
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: Grid.sm),
+            ],
             Text(
               'This phone is the only copy of this identity. If you lose it before pairing or backing up, you’ll lose access as this member.',
               style: context.textTheme.bodyMedium?.copyWith(
@@ -124,11 +147,13 @@ class InviteJoinSheet extends ConsumerWidget {
                             height: 16,
                             child: BuzzLoadingIndicator(
                               size: 16,
-                              semanticLabel: 'Joining community',
+                              semanticLabel: isStarterSetupRecovery
+                                  ? 'Finishing setup'
+                                  : 'Joining community',
                             ),
                           )
                         : const Icon(LucideIcons.check),
-                    label: Text(isClaiming ? 'Joining…' : 'Join'),
+                    label: Text(primaryLabel),
                   ),
                 ),
               ],

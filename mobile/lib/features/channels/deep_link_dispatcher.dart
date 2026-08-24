@@ -131,8 +131,10 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         ref.read(pendingDeepLinkProvider.notifier).consume();
         consumed = true;
         if (!navigatorContext.mounted) return;
-        final status = ref.read(inviteJoinProvider).status;
-        if (status == InviteJoinStatus.confirming) {
+        final inviteState = ref.read(inviteJoinProvider);
+        final status = inviteState.status;
+        if (status == InviteJoinStatus.confirming ||
+            inviteState.isStarterSetupRecovery) {
           final shouldFocusStarter = await showInviteJoinSheet(
             navigatorContext,
             ref,
