@@ -78,6 +78,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final lifecycle = ref.watch(appLifecycleProvider);
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
+    final controllerDisposal = useRef<Future<void>>(Future<void>.value());
     final cameras = useState<List<CameraDescription>>(const []);
     final selectedLens = useState(CameraLensDirection.front);
     final cameraGeneration = useState(0);
@@ -94,6 +95,21 @@ class ImageAvatarCapture extends HookConsumerWidget {
     final isClosing = useState(false);
     final error = useState<String?>(null);
 
+    Future<void> releaseController(CameraController? active) {
+      if (active == null) return controllerDisposal.value;
+      final previousDisposal = controllerDisposal.value;
+      final release = () async {
+        try {
+          await previousDisposal;
+        } catch (_) {
+          // A failed release must not prevent a replacement camera session.
+        }
+        await active.dispose();
+      }();
+      controllerDisposal.value = release;
+      return release;
+    }
+
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
@@ -106,7 +122,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
       () => () {
         final active = controllerRef.value;
         controllerRef.value = null;
-        unawaited(active?.dispose() ?? Future<void>.value());
+        unawaited(releaseController(active));
       },
       const [],
     );
@@ -121,7 +137,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
         final active = controllerRef.value;
         controllerRef.value = null;
         controller.value = null;
-        unawaited(active?.dispose() ?? Future<void>.value());
+        unawaited(releaseController(active));
         return null;
       }
 
@@ -132,6 +148,8 @@ class ImageAvatarCapture extends HookConsumerWidget {
         CameraController? next;
         var installed = false;
         try {
+          await controllerDisposal.value;
+          if (disposed || generation != cameraGeneration.value) return;
           final available = await loadCameras();
           if (disposed || generation != cameraGeneration.value) return;
           cameras.value = available;
@@ -162,7 +180,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
           controller.value = next;
           installed = true;
           if (previous != null && previous != next) {
-            unawaited(previous.dispose());
+            unawaited(releaseController(previous));
           }
         } catch (_) {
           if (!installed) await next?.dispose();
@@ -217,7 +235,12 @@ class ImageAvatarCapture extends HookConsumerWidget {
           try {
             await active.resumePreview();
           } on CameraException {
-            // Reinitialization remains available if this backend cannot resume.
+            if (identical(controllerRef.value, active)) {
+              controllerRef.value = null;
+              controller.value = null;
+              await releaseController(active);
+              if (context.mounted) cameraGeneration.value++;
+            }
           }
         }
       } finally {
@@ -267,8 +290,8 @@ class ImageAvatarCapture extends HookConsumerWidget {
         if (!reduceMotion) await Future<void>.delayed(_cameraFlipHalfDuration);
         if (!context.mounted) return;
         await active.setDescription(matches.first);
-        await active.lockCaptureOrientation(DeviceOrientation.portraitUp);
         if (context.mounted) selectedLens.value = nextLens;
+        await active.lockCaptureOrientation(DeviceOrientation.portraitUp);
       } on CameraException {
         if (context.mounted) error.value = 'Could not switch cameras.';
       } finally {
@@ -321,8 +344,15 @@ class ImageAvatarCapture extends HookConsumerWidget {
         !isFlipping.value &&
         !isCapturing.value &&
         !isClosing.value;
+    final hasOppositeLens = cameras.value.any(
+      (camera) =>
+          camera.lensDirection ==
+          (selectedLens.value == CameraLensDirection.front
+              ? CameraLensDirection.back
+              : CameraLensDirection.front),
+    );
     final flipEnabled =
-        cameras.value.length > 1 &&
+        hasOppositeLens &&
         !isInitializing.value &&
         !isFlipping.value &&
         !isCapturing.value &&
@@ -758,68 +788,67 @@ class _ShutterButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final content = SizedBox(
+      key: const ValueKey('image-camera-shutter-morph'),
+      width: _shutterSize,
+      height: _shutterSize,
+      child: isIos
+          ? IosGlassNavigationButton(
+              icon: IosGlassNavigationIcon.shutter,
+              semanticLabel: 'Take photo',
+              onPressed: onTap,
+              width: _shutterSize,
+              height: _shutterSize,
+              controlSize: _shutterSize,
+              foregroundColor: context.colors.onSurface,
+              isBusy: busy,
+            )
+          : Material(
+              color: context.colors.surfaceContainerHighest,
+              shape: const CircleBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                key: const ValueKey('image-camera-shutter'),
+                onTap: onTap,
+                child: Center(
+                  child: AnimatedSwitcher(
+                    duration: reduceMotion
+                        ? Duration.zero
+                        : const Duration(milliseconds: 140),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeOutCubic,
+                    child: busy
+                        ? BuzzLoadingIndicator(
+                            key: const ValueKey('image-camera-capturing'),
+                            size: 24,
+                            color: context.colors.onSurface,
+                            semanticLabel: 'Taking photo',
+                          )
+                        : Container(
+                            key: const ValueKey('image-camera-shutter-icon'),
+                            width: _shutterCoreSize,
+                            height: _shutterCoreSize,
+                            decoration: BoxDecoration(
+                              color: context.colors.onSurface,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: context.colors.surface,
+                                width: 1.5,
+                              ),
+                            ),
+                          ),
+                  ),
+                ),
+              ),
+            ),
+    );
+    if (isIos) return content;
     return Semantics(
       label: 'Take photo',
       button: true,
       enabled: onTap != null,
-      child: ExcludeSemantics(
-        child: SizedBox(
-          key: const ValueKey('image-camera-shutter-morph'),
-          width: _shutterSize,
-          height: _shutterSize,
-          child: defaultTargetPlatform == TargetPlatform.iOS
-              ? IosGlassNavigationButton(
-                  icon: IosGlassNavigationIcon.shutter,
-                  semanticLabel: 'Take photo',
-                  onPressed: onTap,
-                  width: _shutterSize,
-                  height: _shutterSize,
-                  controlSize: _shutterSize,
-                  foregroundColor: context.colors.onSurface,
-                  isBusy: busy,
-                )
-              : Material(
-                  color: context.colors.surfaceContainerHighest,
-                  shape: const CircleBorder(),
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    key: const ValueKey('image-camera-shutter'),
-                    onTap: onTap,
-                    child: Center(
-                      child: AnimatedSwitcher(
-                        duration: reduceMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 140),
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeOutCubic,
-                        child: busy
-                            ? BuzzLoadingIndicator(
-                                key: const ValueKey('image-camera-capturing'),
-                                size: 24,
-                                color: context.colors.onSurface,
-                                semanticLabel: 'Taking photo',
-                              )
-                            : Container(
-                                key: const ValueKey(
-                                  'image-camera-shutter-icon',
-                                ),
-                                width: _shutterCoreSize,
-                                height: _shutterCoreSize,
-                                decoration: BoxDecoration(
-                                  color: context.colors.onSurface,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: context.colors.surface,
-                                    width: 1.5,
-                                  ),
-                                ),
-                              ),
-                      ),
-                    ),
-                  ),
-                ),
-        ),
-      ),
+      child: ExcludeSemantics(child: content),
     );
   }
 }

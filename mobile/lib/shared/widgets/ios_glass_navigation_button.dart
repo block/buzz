@@ -55,18 +55,43 @@ class IosGlassNavigationButton extends HookWidget {
 
   static const viewType = 'buzz/navigation_glass';
 
+  /// The SF Symbol-style glyph rendered by the native control.
   final IosGlassNavigationIcon icon;
+
+  /// Optional text rendered by the native control instead of [icon].
   final String? label;
+
+  /// Accessibility label exposed by the native view or Flutter fallback.
   final String semanticLabel;
+
+  /// Invoked when the enabled control is activated.
   final VoidCallback? onPressed;
+
+  /// Width of the platform-view hit target.
   final double width;
+
+  /// Height of the platform-view hit target.
   final double height;
+
+  /// Diameter of the visual glass control inside its hit target.
   final double controlSize;
+
+  /// Whether the native visual control fills the available width.
   final bool fillWidth;
+
+  /// Horizontal center for the visual control within its hit target.
   final double? buttonCenterX;
+
+  /// Optional foreground tint for the native control and Flutter fallback.
   final Color? foregroundColor;
+
+  /// Whether the native control presents its busy state.
   final bool isBusy;
+
+  /// Whether the native control exposes its selected state.
   final bool isSelected;
+
+  /// When true, substitutes an accessible Flutter control for the native view.
   final ValueListenable<bool>? nativeViewSuppressed;
 
   @override

@@ -130,6 +130,8 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       isInitializing.value = true;
 
       Future<void> initialize() async {
+        CameraController? next;
+        var installed = false;
         try {
           final cameras = await availableCameras();
           if (disposed || cameras.isEmpty) return;
@@ -137,7 +139,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
             (camera) => camera.lensDirection == CameraLensDirection.front,
             orElse: () => cameras.first,
           );
-          final next = CameraController(
+          next = CameraController(
             selected,
             ResolutionPreset.medium,
             enableAudio: false,
@@ -153,7 +155,9 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           }
           controllerRef.value = next;
           controller.value = next;
+          installed = true;
         } catch (_) {
+          if (!installed) await next?.dispose();
           if (!disposed) error.value = 'Could not access the camera.';
         } finally {
           if (!disposed) isInitializing.value = false;

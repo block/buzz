@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../relay/media_image.dart';
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
 import 'progressive_animated_avatar.dart';
@@ -33,7 +34,7 @@ class PlayingAvatarImage extends StatelessWidget {
   /// A local poster shown when motion is disabled while remote media loads.
   final ImageProvider? loadingPosterImage;
 
-  /// Called after the persisted animation produces its first frame.
+  /// Called after persisted avatar media produces its first frame.
   final VoidCallback? onAnimationReady;
 
   /// Content shown while media is unavailable or still loading.
@@ -51,10 +52,31 @@ class PlayingAvatarImage extends StatelessWidget {
         child: ClipOval(
           child: SizedBox.square(
             dimension: radius * 2,
-            child: Image(
-              image: loadingPosterImage!,
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image(
+                  image: loadingPosterImage!,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                ),
+                Offstage(
+                  offstage: true,
+                  child: MediaImage(
+                    url: descriptor.posterUrl,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                    frameBuilder: (_, child, frame, wasSynchronouslyLoaded) {
+                      if (wasSynchronouslyLoaded || frame != null) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          onAnimationReady?.call();
+                        });
+                      }
+                      return child;
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
         ),

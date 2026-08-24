@@ -98,7 +98,7 @@ class AvatarEditorOptionButton extends StatelessWidget {
             isSelected: selected,
           ),
           const SizedBox(height: avatarEditorOptionLabelGap),
-          labelWidget(),
+          ExcludeSemantics(child: labelWidget()),
         ],
       );
     }
