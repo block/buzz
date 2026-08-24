@@ -91,7 +91,7 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
       await Promise.all(animations.map((animation) => animation.ready));
       for (const animation of animations) {
         animation.pause();
-        animation.currentTime = 100;
+        animation.currentTime = 120;
       }
 
       const buttonBox = button.getBoundingClientRect();
@@ -109,8 +109,6 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
         hitRail: hit === rail || rail.contains(hit),
         opacity: railStyle.opacity,
         sidebarOpacity: Number.parseFloat(sidebarStyle.opacity),
-        sidebarScale: sidebarStyle.scale,
-        sidebarTranslateX: Number.parseFloat(sidebarStyle.translate),
         visibility: railStyle.visibility,
         x: railBox.x,
         y: railBox.y,
@@ -120,7 +118,7 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
       return result;
     });
     expect(transition).not.toBeNull();
-    expect(transition?.durations).toEqual([200, 200, 200]);
+    expect(transition?.durations).toEqual([240]);
     expect(transition).toMatchObject({
       hitRail: true,
       opacity: "1",
@@ -130,18 +128,14 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
     });
     expect(transition?.sidebarOpacity).toBeGreaterThan(0);
     expect(transition?.sidebarOpacity).toBeLessThan(1);
-    expect(transition?.sidebarScale).not.toBe("none");
-    expect(transition?.sidebarScale).not.toBe("0.95");
-    expect(transition?.sidebarTranslateX).toBeGreaterThan(0);
-    expect(transition?.sidebarTranslateX).toBeLessThan(24);
 
     const shell = page.locator(
       '[data-state="collapsed"][data-collapsible="offcanvas"]',
     );
     await expect(shell).toHaveCount(1);
 
-    // Let the 200ms slide finish; visibility flips at the transition's end.
-    await page.waitForTimeout(250);
+    // Let the 240ms slide finish; visibility flips at the transition's end.
+    await page.waitForTimeout(290);
 
     // Second direct child = the sliding sidebar container (first is the gap).
     const offscreenSidebar = shell.locator("> div").nth(1);
