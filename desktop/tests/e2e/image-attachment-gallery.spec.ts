@@ -175,6 +175,68 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
     .first();
   await expectCornerRadiusPx(lightboxSurface, 16);
   await expectSmoothCorners(lightboxSurface);
+  await expect(page.getByRole("button", { name: "Zoom out" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Zoom in" })).toBeEnabled();
+
+  // Clicking the image zooms to the secondary level instead of dismissing the
+  // dialog, and the clicked image point remains under the cursor.
+  await waitForAnimations(page);
+  const lightboxImage = dialog.locator(`img[src*="${IMAGE_SHAS[0]}"]`);
+  const initialImageBox = await lightboxImage.boundingBox();
+  if (!initialImageBox) {
+    throw new Error("Expected lightbox image to have a layout box");
+  }
+  const clickPoint = {
+    x: initialImageBox.x + initialImageBox.width * 0.25,
+    y: initialImageBox.y + initialImageBox.height * 0.35,
+  };
+  await page.mouse.click(clickPoint.x, clickPoint.y);
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("175%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1.75",
+  );
+  await waitForAnimations(page);
+  const zoomedImageBox = await lightboxImage.boundingBox();
+  if (!zoomedImageBox) {
+    throw new Error("Expected zoomed lightbox image to have a layout box");
+  }
+  expect(zoomedImageBox.width).toBeCloseTo(initialImageBox.width * 1.75, 0);
+  expect(zoomedImageBox.height).toBeCloseTo(initialImageBox.height * 1.75, 0);
+  expect(
+    Math.abs(
+      zoomedImageBox.x + initialImageBox.width * 0.25 * 1.75 - clickPoint.x,
+    ),
+  ).toBeLessThan(2);
+  expect(
+    Math.abs(
+      zoomedImageBox.y + initialImageBox.height * 0.35 * 1.75 - clickPoint.y,
+    ),
+  ).toBeLessThan(2);
+
+  // A second image click toggles back to the centered 1× view.
+  await page.mouse.click(clickPoint.x, clickPoint.y);
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("100%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1",
+  );
+
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("115%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1.15",
+  );
+  await expect(
+    page.getByRole("slider", { name: "Image zoom" }),
+  ).toHaveAttribute("step", "0.15");
+  await page.getByRole("button", { name: "Zoom out" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("100%", { exact: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Image zoom" })).toHaveValue(
+    "1",
+  );
   await expect(
     page.getByRole("button", { name: "Previous image" }),
   ).toHaveCount(0);
