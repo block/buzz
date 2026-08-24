@@ -906,11 +906,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  /// Refreshes memberships, optionally including the open-channel directory.
-  ///
-  /// Invite starter recovery opts into [fetchDirectory] so it can converge on
-  /// starters created by another identity, rather than attempting duplicate
-  /// creation from a membership-only snapshot.
+  /// Refreshes memberships and, when [fetchDirectory], the open directory.
+  /// Invite starter recovery opts in to converge on another identity's
+  /// starters instead of attempting duplicate creation from memberships.
   Future<void> refresh({bool fetchDirectory = false}) async {
     final sessionState = ref.read(relaySessionProvider);
     // Don't attempt to fetch when the session isn't connected — fetchHistory
