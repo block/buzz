@@ -581,51 +581,57 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     const container = element.parentElement;
     if (container) container.style.width = "220px";
   });
-  const fragmentRects = await sentChip.evaluate((element) => {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    return Array.from(range.getClientRects(), (rect) => ({
+  const fragmentRects = await sentChip.evaluate((element) =>
+    Array.from(element.getClientRects(), (rect) => ({
       bottom: rect.bottom,
       height: rect.height,
       left: rect.left,
       right: rect.right,
       top: rect.top,
       width: rect.width,
-    })).filter((rect) => rect.width > 0 && rect.height > 0);
-  });
+    })).filter((rect) => rect.width > 0 && rect.height > 0),
+  );
   expect(fragmentRects.length).toBeGreaterThanOrEqual(2);
 
-  const hoverFragment = async (fragment: (typeof fragmentRects)[number]) => {
+  const tooltip = page.getByRole("tooltip");
+  const hoverFragment = async (index: number) => {
+    const fragment = await sentChip.evaluate((element, fragmentIndex) => {
+      const rects = Array.from(element.getClientRects()).filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      );
+      const rect = rects.at(fragmentIndex);
+      if (!rect) return null;
+      return {
+        height: rect.height,
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+      };
+    }, index);
+    if (!fragment) throw new Error(`Expected chip fragment ${index}`);
+    const cursorX = fragment.left + fragment.width / 2;
+    const cursorY = fragment.top + fragment.height / 2;
+    await page.mouse.move(fragment.left - 10, cursorY, { steps: 5 });
+    await expect(tooltip).toBeHidden();
+    await page.mouse.move(cursorX, cursorY, { steps: 5 });
+    await expect(tooltip).toBeVisible();
+    let tooltipCenter = Number.NaN;
     await expect
       .poll(async () => {
-        await page.getByTestId("chat-title").hover();
-        await sentChip.hover();
-        return page.getByRole("tooltip").count();
+        const tooltipBox = await tooltip.boundingBox();
+        if (!tooltipBox) return Number.POSITIVE_INFINITY;
+        tooltipCenter = tooltipBox.x + tooltipBox.width / 2;
+        return Math.abs(tooltipCenter - cursorX);
       })
-      .toBeGreaterThan(0);
-    await page.mouse.move(
-      fragment.left + fragment.width / 2,
-      fragment.top + fragment.height / 2,
-    );
-    await sentChip.dispatchEvent("pointermove", {
-      clientX: fragment.left + fragment.width / 2,
-      clientY: fragment.top + fragment.height / 2,
-      pointerType: "mouse",
-    });
-    const tooltip = page.getByRole("tooltip");
-    await expect(tooltip).toBeVisible();
-    const tooltipBox = await tooltip.boundingBox();
-    if (!tooltipBox) throw new Error("Expected repository tooltip bounds");
+      .toBeLessThan(1);
     return {
-      cursorX: fragment.left + fragment.width / 2,
-      tooltipCenter: tooltipBox.x + tooltipBox.width / 2,
+      cursorX,
+      tooltipCenter,
     };
   };
 
-  const firstTooltip = await hoverFragment(fragmentRects[0]);
-  const lastTooltip = await hoverFragment(
-    fragmentRects.at(-1) ?? fragmentRects[0],
-  );
+  const firstTooltip = await hoverFragment(0);
+  const lastTooltip = await hoverFragment(-1);
   expect(
     Math.abs(firstTooltip.tooltipCenter - firstTooltip.cursorX),
   ).toBeLessThan(1);
