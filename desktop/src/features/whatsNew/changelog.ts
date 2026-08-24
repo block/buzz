@@ -190,6 +190,13 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Fixed Windows desktop notifications never appearing — new messages now show a toast, and clicking it opens the conversation",
     ],
   },
+  {
+    version: "0.5.18-3",
+    date: "2026-08-24",
+    bullets: [
+      "Fixed Windows desktop notifications — new messages now show a native toast, clicking it opens the conversation, and Buzz is registered in Windows Notification Settings on launch",
+    ],
+  },
 ];
 
 /**

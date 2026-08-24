@@ -178,6 +178,11 @@ pub(crate) mod windows {
                         "buzz-desktop: failed to register AUMID for Windows notifications: {error}"
                     );
                 }
+                if let Err(error) = write_notification_settings_entry(&app_id) {
+                    eprintln!(
+                        "buzz-desktop: failed to pre-register Windows notification settings entry: {error}"
+                    );
+                }
                 if let Err(error) = ensure_start_menu_shortcut(&app, &app_id) {
                     eprintln!("buzz-desktop: failed to repair Start Menu shortcut AUMID: {error}");
                 }
@@ -257,6 +262,11 @@ pub(crate) mod windows {
                     "buzz-desktop: failed to register AUMID for Windows notifications: {error}"
                 );
             }
+            if let Err(error) = write_notification_settings_entry(app_id) {
+                eprintln!(
+                    "buzz-desktop: failed to pre-register Windows notification settings entry: {error}"
+                );
+            }
         });
     }
 
@@ -276,6 +286,66 @@ pub(crate) mod windows {
                 "buzz-desktop: SetCurrentProcessExplicitAppUserModelID failed: 0x{hresult:08X}"
             );
         }
+    }
+
+    fn write_notification_settings_entry(app_id: &str) -> Result<(), String> {
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
+            REG_DWORD, REG_OPTION_NON_VOLATILE,
+        };
+
+        let subkey = to_wide(&format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\{app_id}"
+        ));
+        let show_in_action_center_value = to_wide("ShowInActionCenter");
+        let show_in_action_center_data: u32 = 1;
+        let enabled_value = to_wide("Enabled");
+        let enabled_data: u32 = 1;
+
+        // SAFETY: every buffer passed below is a NUL-terminated UTF-16
+        // string that outlives the corresponding call, `hkey` is only used
+        // after a successful `RegCreateKeyExW`, and it is closed exactly
+        // once before returning.
+        unsafe {
+            let mut hkey: HKEY = std::ptr::null_mut();
+            let create_status = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                std::ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut hkey,
+                std::ptr::null_mut(),
+            );
+            if create_status != 0 {
+                return Err(format!(
+                    "RegCreateKeyExW failed with status {create_status}"
+                ));
+            }
+
+            let _ = RegSetValueExW(
+                hkey,
+                show_in_action_center_value.as_ptr(),
+                0,
+                REG_DWORD,
+                (&show_in_action_center_data as *const u32).cast::<u8>(),
+                std::mem::size_of::<u32>() as u32,
+            );
+            let _ = RegSetValueExW(
+                hkey,
+                enabled_value.as_ptr(),
+                0,
+                REG_DWORD,
+                (&enabled_data as *const u32).cast::<u8>(),
+                std::mem::size_of::<u32>() as u32,
+            );
+
+            RegCloseKey(hkey);
+        }
+
+        Ok(())
     }
 
     fn write_aumid_registry_entry(app: &tauri::AppHandle, app_id: &str) -> Result<(), String> {

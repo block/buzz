@@ -7,7 +7,7 @@ Everything upstream does, this does. This document covers only what is
 **different**, so you can decide whether to run this build, take a patch from
 it, or contribute.
 
-Current release: **`0.5.17-1`**, based on upstream `desktop-v0.5.17`.
+Current release: **`0.5.18-3`**, based on upstream `desktop-v0.5.18`.
 Windows installers are published under
 [Releases](https://github.com/ranjank2alpha/buzz/releases).
 
@@ -179,7 +179,8 @@ to `block/buzz`.
 - **Message multi-select and forwarding** — Ctrl/Cmd+click to select, then
   forward to another person or channel (`ForwardMessageDialog.tsx`,
   `MessageSelectionContext.tsx`).
-- Windows toast notifications via AUMID/Start-Menu-shortcut repair.
+- **Windows toast notifications** — native WinRT toasts via process-wide MTA,
+  AUMID/Start-Menu-shortcut repair, and pre-registration under Windows Notification Settings on launch.
 - Full release history in Settings → Updates, including upstream Buzz releases
   interleaved by date up to the version this build is based on.
 - "What's new" splash keyed on the whole version string.
