@@ -4,6 +4,7 @@ import { npubEncode } from "nostr-tools/nip19";
 
 import {
   enrichAuthorCandidates,
+  filterAuthorCandidatePage,
   mergeAuthorCandidateSources,
   normalizeAuthorPubkey,
   parseDirectAuthorInput,
@@ -49,6 +50,41 @@ test("merges valid candidates with stable first-wins source priority", () => {
     ],
   );
   assert.equal(merged[1].isAgent, true);
+});
+
+test("bounds filtered candidates while pinning direct input", () => {
+  const candidates = mergeAuthorCandidateSources([
+    Array.from({ length: 1_500 }, (_, index) => ({
+      pubkey: index.toString(16).padStart(64, "0"),
+      displayName: `Member ${index}`,
+    })),
+  ]);
+
+  const initialPage = filterAuthorCandidatePage(candidates, "", null, 50);
+  assert.equal(initialPage.length, 50);
+  assert.deepEqual(
+    initialPage.map(({ displayName }) => displayName),
+    Array.from({ length: 50 }, (_, index) => `Member ${index}`),
+  );
+
+  const filteredPage = filterAuthorCandidatePage(
+    candidates,
+    "Member 12",
+    null,
+    50,
+  );
+  assert.equal(filteredPage.length, 50);
+  assert.ok(
+    filteredPage.every(({ displayName }) => displayName.includes("Member 12")),
+  );
+
+  const direct = candidates[1_234].pubkey;
+  assert.deepEqual(
+    filterAuthorCandidatePage(candidates, direct, direct, 50).map(
+      ({ pubkey }) => pubkey,
+    ),
+    [direct],
+  );
 });
 
 test("profile enrichment updates matching presentation without reordering", () => {

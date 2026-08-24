@@ -15,6 +15,7 @@ import { Input } from "@/shared/ui/input";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   enrichAuthorCandidates,
+  filterAuthorCandidatePage,
   mergeAuthorCandidateSources,
   parseDirectAuthorInput,
   type WorkflowAuthorCandidate,
@@ -56,9 +57,9 @@ export function WorkflowAuthorPicker({
   const baseCandidates = React.useMemo(
     () =>
       mergeAuthorCandidateSources([
-        channelMembersQuery.data ?? [],
         normalizedValue ? [{ pubkey: normalizedValue }] : [],
         directPubkey ? [{ pubkey: directPubkey }] : [],
+        channelMembersQuery.data ?? [],
         relayMembersQuery.data ?? [],
         directoryResults,
       ]),
@@ -70,26 +71,25 @@ export function WorkflowAuthorPicker({
       relayMembersQuery.data,
     ],
   );
+  const candidatePage = React.useMemo(
+    () =>
+      filterAuthorCandidatePage(
+        baseCandidates,
+        deferredQuery,
+        directPubkey,
+        PAGE_SIZE,
+      ),
+    [baseCandidates, deferredQuery, directPubkey],
+  );
   const profileQuery = useUsersBatchQuery(
-    baseCandidates.map(({ pubkey }) => pubkey),
+    candidatePage.map(({ pubkey }) => pubkey),
   );
   const candidates = React.useMemo(
     () =>
-      enrichAuthorCandidates(baseCandidates, profileQuery.data?.profiles ?? {}),
-    [baseCandidates, profileQuery.data?.profiles],
+      enrichAuthorCandidates(candidatePage, profileQuery.data?.profiles ?? {}),
+    [candidatePage, profileQuery.data?.profiles],
   );
-  const visibleCandidates = React.useMemo(() => {
-    if (directPubkey) {
-      return candidates.filter(({ pubkey }) => pubkey === directPubkey);
-    }
-    if (!deferredQuery) return candidates;
-    const needle = deferredQuery.toLowerCase();
-    return candidates.filter((candidate) =>
-      [candidate.displayName, candidate.nip05Handle, candidate.pubkey].some(
-        (field) => field?.toLowerCase().includes(needle),
-      ),
-    );
-  }, [candidates, deferredQuery, directPubkey]);
+  const visibleCandidates = candidates;
   const listId = `${id}-list`;
 
   React.useEffect(() => {

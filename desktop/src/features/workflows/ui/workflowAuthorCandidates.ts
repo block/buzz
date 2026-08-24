@@ -61,6 +61,29 @@ export function mergeAuthorCandidateSources(
   return merged;
 }
 
+export function filterAuthorCandidatePage(
+  candidates: readonly WorkflowAuthorCandidate[],
+  query: string,
+  directPubkey: string | null,
+  limit: number,
+): WorkflowAuthorCandidate[] {
+  if (directPubkey) {
+    return candidates
+      .filter(({ pubkey }) => pubkey === directPubkey)
+      .slice(0, 1);
+  }
+  const needle = query.toLowerCase();
+  return candidates
+    .filter(
+      (candidate) =>
+        !needle ||
+        [candidate.displayName, candidate.nip05Handle, candidate.pubkey].some(
+          (field) => field?.toLowerCase().includes(needle),
+        ),
+    )
+    .slice(0, limit);
+}
+
 /**
  * Add fetched profile presentation to existing identities without changing
  * candidate membership or order. Missing profile fields preserve useful data
