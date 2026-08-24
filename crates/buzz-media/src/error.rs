@@ -18,6 +18,8 @@ pub enum MediaError {
     InvalidImage,
     #[error("media contains metadata or a non-canonical metadata channel")]
     MetadataForbidden,
+    #[error("invalid tag value for {0}")]
+    InvalidTag(&'static str),
     #[error("invalid signature")]
     InvalidSignature,
     #[error("invalid auth event kind")]
@@ -160,6 +162,7 @@ impl IntoResponse for MediaError {
             | Self::InvalidVideo
             | Self::InvalidImage
             | Self::MetadataForbidden => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            Self::InvalidTag(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::Io(_) | Self::StorageError(_) | Self::Internal => {
                 tracing::error!(error = %self, "media storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
@@ -201,6 +204,16 @@ mod tests {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE
             );
         }
+    }
+
+    #[test]
+    fn invalid_tag_maps_to_400() {
+        // A malformed `h` (channel) tag on the Blossom auth event is a caller
+        // mistake, not an auth failure — it must surface as 400, not 401/500.
+        assert_eq!(
+            MediaError::InvalidTag("h").into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
