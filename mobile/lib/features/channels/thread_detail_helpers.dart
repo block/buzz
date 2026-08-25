@@ -9,9 +9,23 @@ part of 'thread_detail_page.dart';
 bool threadTailCorrectionReachedEnd({
   required bool tailIsVisible,
   required double? extentAfter,
-}) =>
-    tailIsVisible ||
-    (extentAfter != null && extentAfter <= _threadTailScrollTolerance);
+}) => tailIsVisible || threadScrollPositionIsAtTail(extentAfter);
+
+/// Whether the thread scroll position is already at its max extent.
+///
+/// On iOS bouncing physics, `jumpTo(maxScrollExtent)` / `animateTo` at that
+/// offset restarts rubber-banding even when pixels do not change. Short
+/// threads on iPhone show that as a continuous header jank.
+@visibleForTesting
+bool threadScrollPositionIsAtTail(double? extentAfter) =>
+    extentAfter != null && extentAfter <= _threadTailScrollTolerance;
+
+bool _jumpThreadScrollPositionToTail(ScrollPosition position) {
+  if (!position.hasContentDimensions) return false;
+  if (threadScrollPositionIsAtTail(position.extentAfter)) return true;
+  position.jumpTo(position.maxScrollExtent);
+  return true;
+}
 
 int _threadTailIndex(int replyCount) => replyCount;
 
