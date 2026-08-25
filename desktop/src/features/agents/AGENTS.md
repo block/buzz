@@ -301,3 +301,7 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+GitHub Copilot CLI follows the existing catalog-owned capability model. Its
+provider submission classification only extends the pre-catalog fallback for
+CLI-login runtimes; no configuration rule changes.
