@@ -767,6 +767,14 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+
+    /// Declarative event-kind registry (Seam A), built once at startup via
+    /// `buzz_kinds::register_builtin`. The ingest write path resolves each
+    /// kind's base scope and channel scoping through this registry instead of
+    /// the former inline `required_scope_for_kind` match plus the
+    /// `is_global_only_kind` / `requires_h_channel_scope` boolean allowlists.
+    /// See `crates/buzz-kinds` and `handlers::ingest`.
+    pub kind_registry: Arc<buzz_kinds::KindRegistry>,
 }
 
 impl AppState {
@@ -854,6 +862,12 @@ impl AppState {
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
+
+        // Seam A: build the declarative kind registry once at startup.
+        let mut kind_registry = buzz_kinds::KindRegistry::new();
+        buzz_kinds::register_builtin(&mut kind_registry);
+        let kind_registry = Arc::new(kind_registry);
+
         let state = Self {
             config: Arc::new(config),
             db,
@@ -940,6 +954,7 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            kind_registry,
         };
         (
             state,

@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-core = { workspace = true }
+buzz-kinds = { workspace = true }
 buzz-conformance = { workspace = true }
 buzz-db = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
