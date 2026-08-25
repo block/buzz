@@ -9,7 +9,7 @@ use crate::builtin;
 use crate::config::{
     pricing_authority, Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
 };
-use crate::handoff::{ContextRecovery, HandoffOutcome};
+use crate::handoff::ContextRecovery;
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
@@ -166,12 +166,6 @@ pub struct RunCtx<'a> {
     /// context. The handoff gate reads this to compare against the token
     /// budget; falls back to the byte heuristic when `None`.
     pub last_request_input_tokens: &'a mut Option<u64>,
-    /// History byte size at the moment `last_request_input_tokens` was
-    /// measured. Paired with it so the gate can add a conservative token
-    /// estimate of history that has grown since (tool results, next prompt),
-    /// which the exact-but-stale token count would otherwise miss. Cleared and
-    /// preserved in lockstep with `last_request_input_tokens`.
-    pub last_request_history_bytes: &'a mut Option<usize>,
     /// Accumulated input tokens across all LLM rounds in this turn, for
     /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
     pub turn_input_tokens: &'a mut TurnIOState,
@@ -319,14 +313,6 @@ impl RunCtx<'_> {
         *self.turn_cache_write_tokens = CacheTotalState::Unseen;
         *self.turn_pricing_identity = None;
         *self.turn_total_state = TurnTotalState::Unseen;
-        // Per-turn handoff-attempt counter. Scoped here (not persisted in the
-        // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
-        // `session/prompt` turn rather than per session lifetime. A
-        // long-lived session legitimately needs unbounded handoffs across
-        // prompts; the cap only exists to stop runaway within a single turn.
-        // The session-cumulative `handoff_count` (used in log lines) is not
-        // reset: it reflects total compactions since session start.
-        let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -361,21 +347,12 @@ impl RunCtx<'_> {
             // its next request — the turn continues, it is not restarted. Drain
             // non-blocking; an empty queue is the common case.
             self.drain_steers();
-            match self.maybe_handoff(&mut handoff_attempts).await {
-                HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
-                // Context was just reset — the prior request's token count no
-                // longer describes the (now much smaller) history. Clear both
-                // the token count and its byte baseline so a stale over-
-                // threshold reading can't immediately re-fire the handoff
-                // before the next response reports fresh usage.
-                HandoffOutcome::Performed => {
-                    *self.last_request_input_tokens = None;
-                    *self.last_request_history_bytes = None;
-                }
-                HandoffOutcome::Skipped => {
-                    truncate_history(self.history, self.cfg.max_history_bytes)
-                }
-            }
+            // No proactive compaction mid-turn: the working set is what the
+            // model is using right now, and summarizing it away forces a
+            // re-read storm. Proactive compaction runs once at the end of the
+            // turn (`end_of_turn_handoff`, called by `run_prompt`); mid-turn
+            // overflow is caught reactively by the context-400 arm below.
+            truncate_history(self.history, self.cfg.max_history_bytes);
 
             let mut tools = self.mcp.tools();
             // Inject the built-in load_skill tool when skills are available.
@@ -461,13 +438,10 @@ impl RunCtx<'_> {
                             // many rounds can ever be refunded in one turn. An
                             // ordinary round is never refunded.
                             round = round.saturating_sub(1);
-                            // Same reset as the proactive path (see
-                            // `HandoffOutcome::Performed` above): the frozen
-                            // token reading describes history that no longer
-                            // exists. Clearing it is what lets the gate work
-                            // again on later rounds.
+                            // The frozen token reading describes history that
+                            // no longer exists; clearing it is what lets the
+                            // end-of-turn gate read fresh usage.
                             *self.last_request_input_tokens = None;
-                            *self.last_request_history_bytes = None;
                             continue;
                         }
                         ContextRecovery::Cancelled => return Ok(StopReason::Cancelled),
@@ -482,19 +456,11 @@ impl RunCtx<'_> {
                 }
                 Err(error) => return Err(error),
             };
-            // Record provider-reported input usage so the next loop iteration's
-            // handoff gate can compare it against the token budget. We capture
-            // it together with the history byte size AT THIS MOMENT — which is
-            // exactly the history that was just sent to `complete()` (the
-            // assistant response is appended below, after this point). Pairing
-            // them lets the gate add a conservative estimate for any history
-            // appended before the next request. Uses `context_pressure_bytes`
-            // (the same measure the gate's `current_bytes` uses) so the
-            // `grown` delta is coherent — an image contributes its visual-
-            // token equivalent here, not its base64 length. Preserve both when
-            // a response omits usage (`None`) rather than clobbering — a
-            // one-off missing field shouldn't blind the gate or zero the
-            // growth baseline.
+            // Record provider-reported input usage so the end-of-turn handoff
+            // gate can compare the turn's FINAL request against the token
+            // budget. Preserve the prior reading when a response omits usage
+            // (`None`) rather than clobbering — a one-off missing field
+            // shouldn't blind the gate.
             if response.input_tokens_overflowed {
                 // The Anthropic-style inclusive sum (input_tokens +
                 // cache_read_input_tokens + cache_creation_input_tokens)
@@ -507,12 +473,6 @@ impl RunCtx<'_> {
                 *self.turn_input_tokens = TurnIOState::Poisoned;
             } else if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
-                *self.last_request_history_bytes = Some(
-                    self.history
-                        .iter()
-                        .map(HistoryItem::context_pressure_bytes)
-                        .sum(),
-                );
                 // Accumulate per-turn input tokens for NIP-AM metric publishing.
                 // fold_round uses checked_add; overflow permanently poisons the
                 // turn accumulator (and, via merge_session, the session cumulative).

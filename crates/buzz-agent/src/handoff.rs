@@ -52,43 +52,51 @@ static HANDOFF_SYSTEM_PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock:
     )
 });
 
+/// Whether [`RunCtx::handoff`] re-appends the live user prompt after the reset.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reseat {
+    /// Mid-turn: the prompt is still being answered, so the fresh context must
+    /// end with it or the model has nothing to respond to.
+    LivePrompt,
+    /// End of turn: the prompt was already answered. Re-seating it would hand
+    /// the next turn a dangling user message that reads as a repeated request.
+    None,
+}
+
 impl RunCtx<'_> {
-    pub(crate) async fn maybe_handoff(&mut self, handoff_attempts: &mut usize) -> HandoffOutcome {
-        if !self.should_handoff() {
+    /// Proactive compaction, run once after a turn completes. Gates on the
+    /// provider's measured input usage for the turn's final request — and only
+    /// that (see [`Self::should_handoff`]) — and compacts so the NEXT turn
+    /// starts on a fresh context.
+    ///
+    /// Deliberately not run mid-turn: a turn's working set (file reads, tool
+    /// results) is exactly what the model is still using, and compacting it
+    /// forces a re-read storm that refills the window. Mid-turn overflow is
+    /// handled reactively by [`Self::recover_from_context_overflow`]. A turn
+    /// boundary is the cheapest place to lose the working set.
+    pub(crate) async fn end_of_turn_handoff(&mut self) -> HandoffOutcome {
+        if self.cfg.max_handoffs == 0 || !self.should_handoff() {
             return HandoffOutcome::Skipped;
         }
-        if *handoff_attempts >= self.cfg.max_handoffs {
-            let projected = self.projected_handoff_input_tokens();
-            let threshold = token_threshold(self.cfg.max_context_tokens);
-            tracing::warn!(
-                session_id = self.session_id,
-                reason = "preflight",
-                handoff_attempts = *handoff_attempts,
-                max_handoffs = self.cfg.max_handoffs,
-                projected_tokens = projected,
-                threshold_tokens = threshold,
-                "handoff cap reached; using truncation",
-            );
-            return HandoffOutcome::Skipped;
+        let outcome = self.handoff(None, Reseat::None).await;
+        if matches!(outcome, HandoffOutcome::Performed) {
+            // The measured usage describes history that no longer exists; a
+            // stale over-threshold reading must not re-fire the gate.
+            *self.last_request_input_tokens = None;
         }
-        // Consume one attempt slot before calling handoff(). This ensures
-        // that empty-summary, summarize-error, and cancellation outcomes all
-        // burn budget — not just successful compactions — so the cap cannot
-        // be bypassed by a flaky summarizer.
-        *handoff_attempts += 1;
-        self.handoff(None).await
+        outcome
     }
 
-    /// Handoff forced by a provider context-window rejection, bypassing both
-    /// gates in [`Self::maybe_handoff`].
+    /// Handoff forced by a provider context-window rejection, bypassing the
+    /// gate in [`Self::end_of_turn_handoff`].
     ///
-    /// The gates exist to *predict* overflow; a 400 naming a context-length
-    /// overflow is overflow already observed, so neither prediction applies.
-    /// `should_handoff()` reads a token count frozen at the last SUCCESSFUL
-    /// request (a failed request reports no usage), so it is under threshold by
-    /// construction — that frozen reading is the permanent stick. And
-    /// `max_handoffs` is a cost cap whose only alternative here is a request
-    /// that cannot succeed.
+    /// The gate exists to *predict* overflow; a 400 naming a context-length
+    /// overflow is overflow already observed, so the prediction does not
+    /// apply. `should_handoff()` reads a token count frozen at the last
+    /// SUCCESSFUL request (a failed request reports no usage), so it is under
+    /// threshold by construction — that frozen reading is the permanent stick.
+    /// And `max_handoffs` is a cost cap whose only alternative here is a
+    /// request that cannot succeed.
     ///
     /// `history_budget_bytes` is explicit rather than derived from
     /// `cfg.max_context_tokens`: that window is the quantity the provider just
@@ -97,7 +105,8 @@ impl RunCtx<'_> {
         tracing::warn!(
             "provider reported context overflow; forcing handoff (history budget {history_budget_bytes} bytes)"
         );
-        self.handoff(Some(history_budget_bytes)).await
+        self.handoff(Some(history_budget_bytes), Reseat::LivePrompt)
+            .await
     }
 
     /// The reactive context-recovery ladder, run after the provider rejected a
@@ -171,11 +180,20 @@ impl RunCtx<'_> {
         }
     }
 
-    /// The handoff mechanism itself: summarize, reset, re-seat the live prompt.
-    /// Holds no gate — callers decide whether a handoff is warranted.
-    async fn handoff(&mut self, history_budget_bytes: Option<usize>) -> HandoffOutcome {
+    /// The handoff mechanism itself: summarize, reset, and (per `reseat`)
+    /// re-seat the live prompt. Holds no gate — callers decide whether a
+    /// handoff is warranted.
+    async fn handoff(
+        &mut self,
+        history_budget_bytes: Option<usize>,
+        reseat: Reseat,
+    ) -> HandoffOutcome {
         let prompt = self.build_handoff_prompt(history_budget_bytes);
-        let tokens_before = self.projected_handoff_input_tokens();
+        // For the log line: the provider's measurement when we have one, else
+        // the byte-derived upper bound the byte fallback gates on.
+        let tokens_before = self
+            .last_request_input_tokens
+            .unwrap_or_else(|| estimate_history_tokens(self.history));
         let summary = tokio::select! {
             biased;
             _ = self.cancel.changed() => return HandoffOutcome::Cancelled,
@@ -197,10 +215,13 @@ impl RunCtx<'_> {
                 }
             },
         };
-        let current_prompt = self.history.iter().rev().find_map(|item| match item {
-            HistoryItem::User(s) => Some(s.clone()),
-            _ => None,
-        });
+        let current_prompt = match reseat {
+            Reseat::LivePrompt => self.history.iter().rev().find_map(|item| match item {
+                HistoryItem::User(s) => Some(s.clone()),
+                _ => None,
+            }),
+            Reseat::None => None,
+        };
         let prior = self.history.len();
         // Reset history first; the _PostCompact hook is meant to inject
         // state into the FRESH context, not the old one we're discarding.
@@ -241,11 +262,17 @@ impl RunCtx<'_> {
         HandoffOutcome::Performed
     }
 
+    /// Measured-usage gate: the provider's input-token count for the turn's
+    /// final request against 90% of the window. No growth estimate is added —
+    /// at end of turn the only history appended since that measurement is the
+    /// final assistant reply, and charging it at a byte-per-token would compact
+    /// an under-threshold turn just because its answer was long. Before any
+    /// usage is known (first request, or right after a reset) fall back to a
+    /// conservative byte cap so a single pre-usage turn can't blow the window.
     fn should_handoff(&self) -> bool {
         match *self.last_request_input_tokens {
-            Some(_) => {
-                self.projected_handoff_input_tokens()
-                    >= token_threshold(self.cfg.max_context_tokens)
+            Some(measured_tokens) => {
+                measured_tokens >= token_threshold(self.cfg.max_context_tokens)
             }
             None => {
                 let bytes: usize = self
@@ -259,42 +286,6 @@ impl RunCtx<'_> {
                         self.cfg.max_history_bytes,
                     )
             }
-        }
-    }
-
-    fn projected_handoff_input_tokens(&self) -> u64 {
-        let current_tokens = estimate_history_tokens(self.history);
-        match *self.last_request_input_tokens {
-            // Token-first: the provider told us exactly how many input tokens
-            // the PREVIOUS request used. But history has grown since that
-            // measurement — new assistant text, tool results, and the next
-            // user prompt are appended before the next `complete()`. The exact
-            // count alone would miss "previous request was under threshold, but
-            // newly appended content pushes the next one over" (the stale-usage
-            // cousin of the original stale-bytes bug). So we add a conservative
-            // token estimate of the bytes added since the measurement.
-            Some(measured_tokens) => {
-                let measured_bytes = self.last_request_history_bytes.unwrap_or(0);
-                let current_bytes: usize = self
-                    .history
-                    .iter()
-                    .map(HistoryItem::context_pressure_bytes)
-                    .sum();
-                let grown = current_bytes.saturating_sub(measured_bytes);
-                measured_tokens.saturating_add(estimate_tokens_from_bytes(grown))
-            }
-            // No usage yet (first request, or just after a handoff reset).
-            // Fall back to the byte heuristic, capped conservatively so a
-            // single pre-usage request can't blow the window. We map the token
-            // threshold to bytes using a deliberately LOW bytes/token ratio:
-            // a low ratio implies more tokens per byte, so the byte cap is
-            // small and the handoff fires early rather than late. Never raise
-            // the cap above the configured byte budget.
-            //
-            // Caveat: this can't shrink a single oversized current prompt,
-            // since a handoff re-adds the current prompt verbatim — that is a
-            // prompt-cap concern (MAX_PROMPT_BYTES), not this gate.
-            None => current_tokens,
         }
     }
 
@@ -473,8 +464,8 @@ pub(crate) fn clamp_bytes(s: &str, max_bytes: usize) -> String {
 /// every byte as a whole token is an unconditional UPPER bound on the true
 /// token count — it can never undercount, regardless of content density (even
 /// the densest real content sits at ~1.4 bytes/token). That over-estimate is
-/// exactly what a fail-early preflight gate wants: it hands off sooner rather
-/// than risk the next request exceeding the window.
+/// exactly what the pre-usage byte fallback and the summarizer prompt budget
+/// want: err toward handing off sooner rather than risk exceeding the window.
 const CONSERVATIVE_BYTES_PER_TOKEN: u64 = 1;
 
 fn estimate_history_tokens(history: &[HistoryItem]) -> u64 {

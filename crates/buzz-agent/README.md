@@ -153,10 +153,10 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `BUZZ_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
 | `BUZZ_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
-| `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `65536` | Desired per-call ceiling. Set this at or below the served model's output limit for each agent deployment. Proactive handoff is independently based on 90% of `BUZZ_AGENT_MAX_CONTEXT_TOKENS`. |
+| `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `65536` | Desired per-call ceiling. Set this at or below the served model's output limit for each agent deployment. Proactive handoff runs at the end of a turn whose final request used 90% or more of `BUZZ_AGENT_MAX_CONTEXT_TOKENS`. |
 | `BUZZ_AGENT_MAX_TOKEN_RECOVERIES` | `3` | Retries after a successful response is truncated at the output-token limit. `0` disables recovery; the finite value and `BUZZ_AGENT_MAX_ROUNDS` prevent infinite retries. |
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
-| `BUZZ_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
+| `BUZZ_AGENT_MAX_HANDOFFS` | `10` | `0` disables proactive (end-of-turn) context handoff; any positive value enables it. Reactive recovery from a provider context-window error is unaffected. |
 | `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `240` | Max seconds with no response bytes before abandoning an LLM call (per-read inactivity, not wall-clock). |
 | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |
