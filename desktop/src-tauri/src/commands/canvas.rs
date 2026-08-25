@@ -3,7 +3,6 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    managed_agents::persona_events::monotonic_created_at,
     relay::{query_relay, submit_event},
 };
 
@@ -61,15 +60,21 @@ pub async fn set_canvas(
     // millisecond race between this read and the write — that would need relay
     // enforcement — but the day-to-day protection and conflict UX are intact.
     //
-    // `head` is `None` when the channel has no canvas yet. The head's
-    // `created_at` doubles as the floor for writer discipline below: an
-    // accepted save signs `created_at = max(now, head + 1)` so it sorts
-    // strictly ahead of the head it read under `created_at DESC, id ASC`.
+    // `head` is `None` when the channel has no canvas yet. A matched head's
+    // `created_at` is the floor for writer discipline: an accepted save stamps
+    // `created_at = max(now, head + 1)` via the SDK's `canvas_write_created_at`
+    // — the one home for canvas timestamp discipline — so it sorts strictly
+    // ahead of the head it read under `created_at DESC, id ASC`. The no-head /
+    // unconditional-append case has no floor and keeps the default `now`.
     let head = current_canvas_head(&state, &channel_id).await?;
     let prior_head_created_at = check_canvas_precondition(expected_revision.as_deref(), head)?;
 
-    let builder = events::build_set_canvas(uuid, &content, expected_revision.as_deref())?
-        .custom_created_at(monotonic_created_at(prior_head_created_at));
+    let mut builder = events::build_set_canvas(uuid, &content, expected_revision.as_deref())?;
+    if let Some(floor) = prior_head_created_at {
+        builder = builder.custom_created_at(nostr::Timestamp::from(
+            buzz_sdk_pkg::canvas_write_created_at(floor as u64),
+        ));
+    }
     let result = submit_event(builder, &state).await?;
 
     Ok(serde_json::json!({

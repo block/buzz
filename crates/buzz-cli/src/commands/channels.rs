@@ -340,6 +340,9 @@ pub async fn cmd_get_canvas(
 /// Uses composite `(until, before_id)` pagination so a `limit` above one relay
 /// page returns the full requested window instead of a silently truncated one.
 /// The Clap layer bounds `limit` to 1–10000, so the request is never unbounded.
+///
+/// Ordering is `created_at DESC, id ASC`: revisions sharing a second break the
+/// tie by smallest event id, not by which write arrived last.
 pub async fn cmd_canvas_history(
     client: &BuzzClient,
     channel_id: &str,
@@ -870,7 +873,9 @@ pub async fn cmd_create_channel_from_template(
             .replace("{channel.name}", name)
             .replace("{template.name}", &template.name);
         let canvas_result: Result<(), CliError> = async {
-            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, None)
+            // Fresh channel: no head can exist yet, so assert the create with
+            // `Some("none")` to match the create-assertion convention.
+            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none"))
                 .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
             let event = client.sign_event(builder)?;
             client.submit_event(event).await?;
@@ -1211,8 +1216,23 @@ pub async fn cmd_set_canvas(
     let content = read_or_stdin(content)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, None)
-        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    // `set` is an unconditional replace — a moved head is not an error, so it
+    // never returns the restore path's conflict/exit-5. It does apply the same
+    // writer discipline: read the head and stamp `created_at = max(now, head + 1)`
+    // so the write sorts strictly ahead of a newer or future-dated head under
+    // `created_at DESC, id ASC` instead of reporting success behind it. With no
+    // head yet, `Some("none")` records the create-assertion at the default `now`.
+    let builder = match fetch_canvas_head(client, channel_id).await? {
+        Some(head) => {
+            let head_id = head.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+                CliError::Other(format!("no canvas head id found for channel {channel_id}"))
+            })?;
+            let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
+        }
+        None => buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none")),
+    }
+    .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;

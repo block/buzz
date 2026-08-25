@@ -574,9 +574,15 @@ pub fn build_set_canvas(
 /// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
 /// legitimate first-party restore/edit whose local clock lags the head from
 /// landing behind that head in read order (which would "succeed" without
-/// changing the visible canvas). First-party signers (CLI restore, Desktop
-/// save/restore) MUST route disciplined canvas writes through this helper
-/// rather than re-deriving the timestamp.
+/// changing the visible canvas). First-party signers (CLI `set`/restore,
+/// Desktop save/restore) MUST route disciplined canvas writes through this
+/// helper rather than re-deriving the timestamp.
+///
+/// Ordering note: the `+ 1` bump guarantees a strictly greater `created_at`, so
+/// the write never ties the head. Writes that *do* share a second resolve by
+/// `id ASC` under `created_at DESC, id ASC` — the smallest event id wins the
+/// visible head, not the last write. This helper sidesteps that tie by stamping
+/// ahead; unconditional appends that omit the bump remain subject to it.
 pub fn build_set_canvas_after_head(
     channel_id: Uuid,
     content: &str,
@@ -596,7 +602,12 @@ pub fn build_set_canvas_after_head(
 
 /// Contract-v3 writer-discipline timestamp for a canvas write asserting a head
 /// at `head_created_at`: `max(now, head_created_at + 1)` (Unix seconds).
-fn canvas_write_created_at(head_created_at: u64) -> u64 {
+///
+/// The single home for canvas timestamp discipline. `build_set_canvas_after_head`
+/// stamps CLI restore/`set` writes with this, and Desktop's `set_canvas` calls
+/// it directly for the same reason, so the `max(now, head + 1)` rule is never
+/// re-derived per surface.
+pub fn canvas_write_created_at(head_created_at: u64) -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
