@@ -2578,6 +2578,31 @@ async fn handle_git_repo_announcement(
     event: &Event,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
+    handle_git_repo_announcement_inner(tenant, event, state, &GitRepoAnnouncementHooks::default())
+        .await
+}
+
+#[derive(Default)]
+pub(crate) struct GitRepoAnnouncementHooks {
+    #[cfg(test)]
+    pub(crate) post_lease_gate: Option<Arc<GitRepoAnnouncementGate>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct GitRepoAnnouncementGate {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
+}
+
+pub(crate) async fn handle_git_repo_announcement_inner(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    hooks: &GitRepoAnnouncementHooks,
+) -> anyhow::Result<()> {
+    #[cfg(not(test))]
+    let _ = hooks;
     // Extract repo identifier from d tag (required for NIP-33 parameterized replaceable events).
     let repo_id =
         extract_tag_value(event, "d").ok_or_else(|| anyhow::anyhow!("kind:30617 missing d tag"))?;
@@ -2677,6 +2702,32 @@ async fn handle_git_repo_announcement(
     // other attempt already established.
     let reserved_by_this_attempt = matches!(outcome, ReserveOutcome::Reserved);
 
+    // The event row and name registry are ordinary database state: if deletion
+    // quiescing wins before they commit, the DB write fence rejects them; if
+    // they committed first, the destructive DB stage purges them. The manifest
+    // and pointer below are external S3 effects, so acquire the durable
+    // serving-write lease immediately before that sequence. Once acquired,
+    // deletion must drain this lease before it can freeze the final object list.
+    let serving_write = buzz_deletion::acquire_serving_write(
+        &state.db,
+        tenant.community(),
+        "git_repo_announcement",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("repo announcement rejected by community deletion fence: {e}"))?;
+
+    #[cfg(test)]
+    if let Some(gate) = &hooks.post_lease_gate {
+        gate.reached.notify_one();
+        gate.resume.notified().await;
+    }
+
+    if let Err(error) = serving_write.verify().await {
+        return Err(anyhow::anyhow!(
+            "repo announcement lost community serving lease: {error}"
+        ));
+    }
+
     // Establish/confirm the manifest pointer, keeping the invariant
     // "repo announced ⟺ pointer exists" so the read path can rely on
     // pointer-absent meaning never-announced (keeping `info_refs`'s fail-closed
@@ -2691,10 +2742,16 @@ async fn handle_git_repo_announcement(
     //   re-announce must accept it untouched; only an absent pointer is
     //   repaired by seeding. Using the strict seed here would wrongly reject
     //   every re-announce after the first push.
-    let pointer_result = if reserved_by_this_attempt {
-        seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
-    } else {
-        ensure_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+    let pointer_operation = async {
+        if reserved_by_this_attempt {
+            seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+        } else {
+            ensure_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+        }
+    };
+    let pointer_result = match serving_write.protect(pointer_operation).await {
+        Ok(result) => result,
+        Err(error) => Err(error),
     };
     if let Err(pointer_err) = pointer_result {
         // A reserved name without a clone-able pointer is exactly the broken
@@ -2743,7 +2800,9 @@ async fn handle_git_repo_announcement(
     // initial empty signal is a one-time seeding notification, not something a
     // re-announce should replay.
     if reserved_by_this_attempt {
-        if let Err(e) = emit_initial_ref_state(tenant, state, &owner_hex, &repo_id).await {
+        if let Err(e) =
+            emit_initial_ref_state(tenant, state, serving_write.lease(), &owner_hex, &repo_id).await
+        {
             // Non-fatal: the manifest is the source of truth; this is just the
             // derived notification. A failure here means subscribers miss the
             // "repo now exists" event, but clone/push still works.
@@ -2756,6 +2815,9 @@ async fn handle_git_repo_announcement(
         }
     }
 
+    serving_write.finish().await.map_err(|e| {
+        anyhow::anyhow!("repo announcement lost community serving lease on release: {e}")
+    })?;
     Ok(())
 }
 
@@ -2897,6 +2959,7 @@ async fn ensure_manifest_pointer(
 async fn emit_initial_ref_state(
     tenant: &TenantContext,
     state: &Arc<AppState>,
+    lease: &buzz_db::deletion::ServingWriteLease,
     owner_hex: &str,
     repo_id: &str,
 ) -> anyhow::Result<()> {
@@ -2914,7 +2977,7 @@ async fn emit_initial_ref_state(
         .map_err(|e| anyhow::anyhow!("build_ref_state_event: {e}"))?;
     let (stored, was_inserted) = state
         .db
-        .insert_event(tenant.community(), &event, None)
+        .insert_event_with_serving_write_guard(lease, &event, None)
         .await
         .map_err(|e| anyhow::anyhow!("insert kind:30618: {e}"))?;
     if was_inserted {

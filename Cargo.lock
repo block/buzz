@@ -1136,6 +1136,7 @@ dependencies = [
  "infer",
  "mp4",
  "nostr 0.44.7",
+ "quick-xml 0.38.4",
  "rust-s3",
  "serde",
  "serde_json",

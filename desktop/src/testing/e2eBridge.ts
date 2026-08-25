@@ -4419,6 +4419,15 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               sig: "mocksig".repeat(20).slice(0, 128),
             },
             {
+              id: "mock-forum-offsite-thread",
+              pubkey: ALICE_PUBKEY,
+              created_at: Math.floor(Date.now() / 1000) - 85 * 60,
+              kind: 45001,
+              tags: [["h", channelId]],
+              content: "Team offsite planning and travel notes.",
+              sig: "mocksig".repeat(20).slice(0, 128),
+            },
+            {
               id: "mock-forum-release-reply",
               pubkey: ALICE_PUBKEY,
               created_at: Math.floor(Date.now() / 1000) - 80 * 60,

@@ -81,6 +81,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onScrollTargetResolved: () => void;
   onScrollTargetSettled?: (messageId: string) => void;
   scrollTargetHighlights?: boolean;
+  searchMessageId?: string | null;
+  searchQuery?: string;
   onSelectReplyTarget: (message: TimelineMessage) => void;
   onSend: (
     content: string,
@@ -185,6 +187,8 @@ export function MessageThreadPanel({
   replyTargetMessage,
   scrollTargetId,
   scrollTargetHighlights = true,
+  searchMessageId,
+  searchQuery,
   threadHead,
   videoReviewPresentation,
   threadReplies,
@@ -562,6 +566,9 @@ export function MessageThreadPanel({
                   onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
                 }
                 profiles={profiles}
+                searchQuery={
+                  searchMessageId === threadHead.id ? searchQuery : undefined
+                }
                 showDepthGuides={shouldShowThreadBranchGuides}
                 videoReviewCommentRootId={videoReviewPresentation?.commentRootIdsByMessageId.get(
                   threadHead.id,
@@ -725,6 +732,11 @@ export function MessageThreadPanel({
                           onSendToChannel={stableSendToChannel}
                           onToggleReaction={onToggleReaction}
                           profiles={profiles}
+                          searchQuery={
+                            searchMessageId === entry.message.id
+                              ? searchQuery
+                              : undefined
+                          }
                           showDepthGuides={shouldShowThreadBranchGuides}
                           videoReviewCommentRootId={videoReviewPresentation?.commentRootIdsByMessageId.get(
                             entry.message.id,

@@ -310,11 +310,11 @@ pub struct StorageManifest {
 pub struct PrefixManifest {
     /// Exact community-scoped listing prefix.
     pub prefix: String,
-    /// Objects under the prefix at enumeration time.
+    /// Object versions and delete markers under the prefix at enumeration time.
     pub object_count: u64,
-    /// Total object bytes under the prefix at enumeration time.
+    /// Total object-version bytes under the prefix at enumeration time.
     pub total_bytes: u64,
-    /// Hex SHA-256 of the newline-terminated ascending key stream.
+    /// Hex SHA-256 of the newline-terminated ascending version-entry stream.
     pub keys_digest: String,
 }
 
@@ -325,8 +325,86 @@ pub struct ManifestKeyChunk {
     pub chunk_no: i64,
     /// The tenant prefix every key in this chunk lives under.
     pub prefix: String,
-    /// Strictly ascending keys.
+    /// Strictly ascending serialized manifest entries.
     pub keys: Vec<String>,
+}
+
+/// One immutable object-store manifest entry.
+///
+/// Version 5 storage manifests serialize entries as
+/// `key\u{1f}version_id\u{1f}kind`, where kind is `object` or
+/// `delete_marker`. Version 4 manifests used bare keys. Keeping the side-table
+/// column name unchanged avoids a database migration while making the stream
+/// explicitly version-aware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageManifestEntry {
+    /// Object key.
+    pub key: String,
+    /// S3 version id.
+    pub version_id: String,
+    /// Either `object` or `delete_marker`.
+    pub kind: String,
+}
+
+impl StorageManifestEntry {
+    /// Create a manifest entry.
+    pub fn new(
+        key: impl Into<String>,
+        version_id: impl Into<String>,
+        kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            version_id: version_id.into(),
+            kind: kind.into(),
+        }
+    }
+
+    /// Serialize this entry into the chunk stream.
+    pub fn encode(&self) -> Result<String> {
+        validate_manifest_component("key", &self.key)?;
+        validate_manifest_component("version id", &self.version_id)?;
+        validate_manifest_component("kind", &self.kind)?;
+        if self.kind != "object" && self.kind != "delete_marker" {
+            return Err(DbError::DeletionSafety(format!(
+                "unsupported storage manifest entry kind {}",
+                self.kind
+            )));
+        }
+        Ok(format!(
+            "{}\u{1f}{}\u{1f}{}",
+            self.key, self.version_id, self.kind
+        ))
+    }
+
+    /// Decode a manifest stream entry.
+    pub fn decode(value: &str) -> Result<Self> {
+        let mut parts = value.split('\u{1f}');
+        let key = parts.next().unwrap_or_default();
+        let version_id = parts.next().ok_or_else(|| {
+            DbError::DeletionSafety("storage manifest entry is missing version id".to_string())
+        })?;
+        let kind = parts.next().ok_or_else(|| {
+            DbError::DeletionSafety("storage manifest entry is missing kind".to_string())
+        })?;
+        if parts.next().is_some() {
+            return Err(DbError::DeletionSafety(
+                "storage manifest entry has too many fields".to_string(),
+            ));
+        }
+        let entry = Self::new(key, version_id, kind);
+        entry.encode()?;
+        Ok(entry)
+    }
+}
+
+fn validate_manifest_component(name: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.contains(['\n', '\u{1f}']) {
+        return Err(DbError::DeletionSafety(format!(
+            "storage manifest {name} is empty or contains a reserved delimiter"
+        )));
+    }
+    Ok(())
 }
 
 /// One durable fleet-wide object-store taxonomy sweep record.
@@ -358,11 +436,11 @@ type TaxonomySweepRow = (
     i64,
 );
 
-/// Streaming SHA-256 over a strictly ascending key stream.
+/// Streaming SHA-256 over a strictly ascending storage manifest stream.
 ///
 /// The executor's prefix enumeration and the destructive freeze's chunk
-/// validation both fold keys through this, so "the chunk rows are exactly
-/// the frozen enumeration" reduces to digest equality. Each key is hashed
+/// validation both fold entries through this, so "the chunk rows are exactly
+/// the frozen enumeration" reduces to digest equality. Each entry is hashed
 /// with a trailing newline so concatenation cannot alias two streams.
 pub struct KeyStreamDigest {
     hasher: Sha256,
@@ -395,6 +473,17 @@ impl KeyStreamDigest {
                 "storage key stream is not strictly ascending at {key}"
             )));
         }
+        self.fold_unordered(key)
+    }
+
+    /// Fold an already-canonical manifest entry whose source ordering is owned
+    /// by the object store, not by key lexicographic order.
+    ///
+    /// S3 `ListObjectVersions` sorts by key but orders multiple versions of one
+    /// key by recency with opaque version ids, so version-aware manifests cannot
+    /// require strictly ascending serialized entries. Digest equality still
+    /// binds the exact stream that was listed and chunked.
+    pub fn fold_unordered(&mut self, key: &str) -> Result<()> {
         self.hasher.update(key.as_bytes());
         self.hasher.update(b"\n");
         self.last = Some(key.to_owned());
@@ -2594,7 +2683,7 @@ async fn live_fenced_tables_on(conn: &mut PgConnection) -> Result<BTreeSet<Strin
 
 /// Fail closed when a community-prefix inventory has an unsafe shape.
 pub fn validate_storage_manifest(manifest: &StorageManifest) -> Result<()> {
-    if manifest.version != 4 {
+    if !matches!(manifest.version, 4 | 5) {
         return Err(DbError::DeletionSafety(format!(
             "unsupported storage manifest version {}",
             manifest.version
@@ -2682,12 +2771,21 @@ fn validate_manifest_key_chunks(
             ));
         }
         for key in &keys.0 {
-            if !key.starts_with(chunk_prefix.as_str()) {
+            let prefix_key = if manifest.version >= 5 {
+                StorageManifestEntry::decode(key)?.key
+            } else {
+                key.clone()
+            };
+            if !prefix_key.starts_with(chunk_prefix.as_str()) {
                 return Err(DbError::DeletionSafety(format!(
-                    "frozen key {key} is outside its chunk prefix {chunk_prefix}"
+                    "frozen key {prefix_key} is outside its chunk prefix {chunk_prefix}"
                 )));
             }
-            digest.fold(key)?;
+            if manifest.version >= 5 {
+                digest.fold_unordered(key)?;
+            } else {
+                digest.fold(key)?;
+            }
         }
     }
     if let Some(summary) = current {
@@ -3040,6 +3138,36 @@ mod tests {
     }
 
     #[test]
+    fn frozen_inventory_digest_is_canonical_for_v5_manifest_entries() {
+        let entry = StorageManifestEntry::new("_meta/c/a.json", "null", "object")
+            .encode()
+            .expect("entry");
+        let mut digest = KeyStreamDigest::new();
+        digest.fold_unordered(&entry).expect("fold entry");
+        let (keys_digest, object_count) = digest.finish();
+        let inventory = FrozenInventory {
+            schema: SchemaManifest {
+                scoped_tables: vec!["events".to_string()],
+                row_counts: BTreeMap::from([("events".to_string(), 1)]),
+                fenced_tables: vec!["events".to_string()],
+            },
+            storage: StorageManifest {
+                version: 5,
+                prefixes: vec![PrefixManifest {
+                    prefix: "_meta/c/".to_string(),
+                    object_count,
+                    total_bytes: 4,
+                    keys_digest,
+                }],
+            },
+        };
+        let digest = inventory.digest().unwrap();
+        let round_tripped: FrozenInventory =
+            serde_json::from_slice(&serde_json::to_vec(&inventory).unwrap()).unwrap();
+        assert_eq!(digest, round_tripped.digest().unwrap());
+    }
+
+    #[test]
     fn key_stream_digest_requires_strict_order_and_is_chunking_invariant() {
         let keys = ["a/1", "a/2", "a/3"];
         let mut whole = KeyStreamDigest::new();
@@ -3098,6 +3226,49 @@ mod tests {
         // No chunks at all only matches an all-empty manifest.
         assert!(validate_manifest_key_chunks(&manifest, &[]).is_err());
         assert!(validate_manifest_key_chunks(&storage_manifest(), &[]).is_ok());
+    }
+
+    #[test]
+    fn versioned_manifest_entries_decode_and_validate_chunks() {
+        let entries = vec![
+            StorageManifestEntry::new("_meta/c/1", "v2", "object")
+                .encode()
+                .expect("entry 1"),
+            StorageManifestEntry::new("_meta/c/1", "v1", "delete_marker")
+                .encode()
+                .expect("entry 2"),
+        ];
+        let mut digest = KeyStreamDigest::new();
+        for entry in &entries {
+            digest.fold_unordered(entry).expect("fold version entry");
+        }
+        let (hex_digest, count) = digest.finish();
+        let mut manifest = storage_manifest();
+        manifest.version = 5;
+        manifest.prefixes[0].object_count = count;
+        manifest.prefixes[0].keys_digest = hex_digest;
+
+        let chunk = |entries: &[String]| {
+            vec![(
+                0,
+                "_meta/c/".to_string(),
+                sqlx::types::Json(entries.to_vec()),
+            )]
+        };
+        // v5 freeze validation is retry-stable: a retried freeze with the
+        // same canonical version-entry stream is accepted, while a drifted
+        // stream is rejected.
+        assert!(validate_manifest_key_chunks(&manifest, &chunk(&entries)).is_ok());
+        assert!(validate_manifest_key_chunks(&manifest, &chunk(&entries)).is_ok());
+
+        let foreign = vec![StorageManifestEntry::new("_uploads/c/1", "v1", "object")
+            .encode()
+            .expect("foreign entry")];
+        assert!(validate_manifest_key_chunks(&manifest, &chunk(&foreign)).is_err());
+        assert!(StorageManifestEntry::decode("_meta/c/1").is_err());
+        assert!(StorageManifestEntry::new("_meta/c/1", "v1", "unknown")
+            .encode()
+            .is_err());
     }
 
     #[test]
