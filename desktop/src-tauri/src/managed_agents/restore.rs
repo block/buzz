@@ -89,7 +89,7 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
 ///
 /// Split into three phases to minimise lock contention with the frontend:
 ///   A (under lock): sync process state, cleanup, collect agents to start
-///   B (no locks):   resolve commands and spawn processes in parallel
+///   B (no store/runtime locks): resolve commands and spawn processes serially
 ///   C (re-lock):    write back PIDs and status to records on disk
 pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
@@ -288,75 +288,65 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
-    let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
-        let owner_hex_ref = owner_hex.as_deref();
-        let handles: Vec<_> = agents_to_start
-            .iter()
-            .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-            .map(|record| {
-                let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
-                    let outcome =
-                        match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
-                        {
-                            Ok(key) => {
-                                // F2: if a concurrent startup reconcile already
-                                // tracked a live child for this exact pair during
-                                // the Phase A window, leave it alone. Mirrors the
-                                // live-child guard in `start_pair`.
-                                let already_live = app
-                                    .state::<AppState>()
-                                    .managed_agent_processes
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
-                                        })
-                                    })
-                                    .unwrap_or(false);
-                                if already_live {
-                                    SpawnOutcome::Skipped
-                                } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                            )
-                                        }) {
-                                        Ok(process) => {
-                                            SpawnOutcome::Spawned(key, Box::new(process))
-                                        }
-                                        Err(error) => SpawnOutcome::Failed(error),
-                                    }
-                                }
-                            }
-                            Err(error) => SpawnOutcome::Failed(error),
-                        };
-                    (record.pubkey.clone(), outcome)
-                });
-                handle
-            })
-            .collect();
+    // ── Phase B (transition lock held): resolve and spawn serially ────────────
+    // Launch restore previously spawned every harness concurrently. Even though
+    // restored harnesses are lazy, their first wakes can cluster and reproduce
+    // the same MCP-heavy initialization contention. Keep one deterministic
+    // spawn lane and add a small bounded stagger between candidates. The
+    // initialize-only 300s budget + retry in spawn_agent_child is the hard
+    // safety net; this stagger simply avoids creating the burst in the first
+    // place.
+    let owner_hex_ref = owner_hex.as_deref();
+    let mut spawn_results: Vec<AgentSpawnResult> = Vec::with_capacity(agents_to_start.len());
+    for (position, record) in agents_to_start.iter().enumerate() {
+        if shutdown_started.load(Ordering::SeqCst) {
+            break;
+        }
+        if position > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if shutdown_started.load(Ordering::SeqCst) {
+                break;
+            }
+        }
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+        let workspace_relay =
+            crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
+        let relay_url =
+            crate::relay::effective_agent_relay_url(&record.relay_url, &workspace_relay);
+        let outcome = match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url) {
+            Ok(key) => {
+                // F2: if a concurrent startup reconcile already tracked a live
+                // child for this exact pair during the Phase A window, leave it
+                // alone. Mirrors the live-child guard in `start_pair`.
+                let already_live = app
+                    .state::<AppState>()
+                    .managed_agent_processes
+                    .lock()
+                    .ok()
+                    .and_then(|mut runtimes| {
+                        runtimes
+                            .get_mut(&key)
+                            .map(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+                    })
+                    .unwrap_or(false);
+                if already_live {
+                    SpawnOutcome::Skipped
+                } else {
+                    match super::terminate_untracked_pair_runtime(app, &key).and_then(|()| {
+                        // F1: restore spawns lazy, matching reconcile and manual
+                        // start. Eager restore would silently reintroduce N idle
+                        // brains on every launch.
+                        spawn_agent_child(app, record, &key.relay_url, true, owner_hex_ref)
+                    }) {
+                        Ok(process) => SpawnOutcome::Spawned(key, Box::new(process)),
+                        Err(error) => SpawnOutcome::Failed(error),
+                    }
+                }
+            }
+            Err(error) => SpawnOutcome::Failed(error),
+        };
+        spawn_results.push((record.pubkey.clone(), outcome));
+    }
 
     if spawn_results.is_empty() {
         return Ok(());

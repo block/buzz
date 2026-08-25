@@ -15,6 +15,28 @@ use crate::{
 };
 
 use super::claude_config::{apply_claude_model_env, apply_effort_env};
+
+// The harness itself keeps its historical 60-second / zero-retry defaults for
+// direct CLI callers. Desktop opts into a wider, bounded initialize-only budget
+// because managed agents commonly boot several MCP servers during initialize.
+// 300 seconds is a conservative product judgment, not a duration inferred from
+// the right-censored 60-second incident data. Actual durations are logged by
+// buzz-acp so this value can be tuned from completed handshakes.
+const DESKTOP_INIT_TIMEOUT_SECONDS: u64 = 300;
+const DESKTOP_INIT_RETRIES: u32 = 1;
+const DESKTOP_INIT_RETRY_BACKOFF_MILLIS: u64 = 1_000;
+
+fn apply_desktop_init_policy(command: &mut std::process::Command) {
+    command.env(
+        "BUZZ_ACP_INIT_TIMEOUT",
+        DESKTOP_INIT_TIMEOUT_SECONDS.to_string(),
+    );
+    command.env("BUZZ_ACP_INIT_RETRIES", DESKTOP_INIT_RETRIES.to_string());
+    command.env(
+        "BUZZ_ACP_INIT_RETRY_BACKOFF_MS",
+        DESKTOP_INIT_RETRY_BACKOFF_MILLIS.to_string(),
+    );
+}
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
@@ -679,6 +701,11 @@ pub fn spawn_agent_child(
     }
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
+    // Initialize has its own policy. These Desktop defaults are written before
+    // descriptor.env below, so an explicit per-runtime/persona/agent setting
+    // remains authoritative and can tune the budget without changing the
+    // ordinary non-prompt/session RPC timeout.
+    apply_desktop_init_policy(&mut command);
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {

@@ -1,7 +1,31 @@
 use crate::managed_agents::known_acp_runtime;
+use std::collections::HashMap;
 
 #[path = "cli_tests.rs"]
 mod cli_tests;
+
+#[test]
+fn desktop_managed_agents_use_a_bounded_initialize_only_policy() {
+    let mut command = std::process::Command::new("ignored");
+    super::apply_desktop_init_policy(&mut command);
+    let env: HashMap<String, String> = command
+        .get_envs()
+        .filter_map(|(key, value)| {
+            Some((
+                key.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    assert_eq!(env.get("BUZZ_ACP_INIT_TIMEOUT").map(String::as_str), Some("300"));
+    assert_eq!(env.get("BUZZ_ACP_INIT_RETRIES").map(String::as_str), Some("1"));
+    assert_eq!(
+        env.get("BUZZ_ACP_INIT_RETRY_BACKOFF_MS")
+            .map(String::as_str),
+        Some("1000")
+    );
+    assert!(!env.contains_key("BUZZ_ACP_REQUEST_TIMEOUT"));
+}
 
 // ── desktop binary name tests ───────────────────────────────────────────
 

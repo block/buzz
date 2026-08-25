@@ -48,6 +48,8 @@ export const CLI_ACP_INTERNAL_ERROR_COPY =
 const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
 /** Bare form of the standard JSON-RPC -32603 message (after stripping the ACP wrapper prefix). */
 const BARE_INTERNAL_ERROR = "Internal error";
+export const AGENT_INIT_TIMEOUT_COPY =
+  "Agent startup timed out while its tools were initializing. Buzz will retry once; if it still fails, start fewer agents at the same time and review the agent log.";
 
 function recoverEmbeddedCode(trimmed: string): {
   code: number;
@@ -68,6 +70,15 @@ export function friendlyAgentLastError(
   if (raw == null) return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
+
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.includes("timed out during init") ||
+    (lower.includes("agent initialize failed") &&
+      lower.includes("request timeout"))
+  ) {
+    return { severity: "generic", copy: AGENT_INIT_TIMEOUT_COPY };
+  }
 
   // Structured code first; a code embedded in the message string is the
   // same signal recovered from a record that lost the field.
