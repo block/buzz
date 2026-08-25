@@ -428,7 +428,7 @@ function HandoffDetail({ record }: { record: AgentHandoffRecord }) {
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold">{record.title}</h4>
         <span className="text-xs text-muted-foreground">
-          from {record.senderPubkey.slice(0, 12)}…
+          from {truncatePubkey(record.senderPubkey)}
         </span>
       </div>
       {record.summary ? (
