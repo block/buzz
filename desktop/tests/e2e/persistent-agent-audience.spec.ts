@@ -8,6 +8,14 @@ const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
+const KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY =
+  "buzz.messages.keepMentionedAgentsPinned";
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript((storageKey) => {
+    window.localStorage.removeItem(storageKey);
+  }, KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY);
+});
 
 async function seedTheme(page: Page, theme: string, accent = "#c0a2f1") {
   await page.addInitScript(
