@@ -2228,7 +2228,8 @@ test("selected GIFs keep distinct accessible names in the composer and lightbox"
   page,
 }) => {
   const gifs = await routeGifMocks(page);
-  await openGifGrid(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
 
   // Select two differently titled GIFs.
   for (const gif of gifs) {
