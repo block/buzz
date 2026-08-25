@@ -280,12 +280,9 @@ export const MessageRow = React.memo(
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
     const addressedAgentPubkeys = React.useMemo(() => {
-      const taggedPubkeys = getAgentAddressMentionPubkeys(message.tags).filter(
-        isKnownAgentPubkey,
-      );
       return getVisibleAgentAddressPubkeys(
         message.body,
-        taggedPubkeys,
+        getAgentAddressMentionPubkeys(message.tags).filter(isKnownAgentPubkey),
         mentionPubkeysByName,
       );
     }, [isKnownAgentPubkey, mentionPubkeysByName, message.body, message.tags]);
