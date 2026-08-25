@@ -4,6 +4,9 @@ param(
     [switch]$SkipSidecarBuild,
     [switch]$SkipChecks,
     [switch]$CleanNativeDependencies,
+    [switch]$EnableUpdater,
+    [switch]$AllowInsecureUpdaterEndpoint,
+    [string]$VersionOverride,
     [string]$OutputDirectory,
     [string]$BuildCacheDirectory
 )
@@ -24,6 +27,36 @@ $ManagedNodeArchiveName = "node-v24.18.0-win-x64.zip"
 $ManagedNodeArchiveSha256 = "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821"
 $CodexAcpPackage = "@agentclientprotocol/codex-acp"
 $CodexAcpVersion = "1.2.0"
+
+if ($VersionOverride -and
+    $VersionOverride -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+    throw "VersionOverride must be a semantic version; got '$VersionOverride'."
+}
+if ($AllowInsecureUpdaterEndpoint -and -not $EnableUpdater) {
+    throw "AllowInsecureUpdaterEndpoint requires EnableUpdater."
+}
+
+$UpdaterPublicKey = [string]$env:BUZZ_UPDATER_PUBLIC_KEY
+$UpdaterEndpoint = [string]$env:BUZZ_UPDATER_ENDPOINT
+$UpdaterPrivateKey = [string]$env:TAURI_SIGNING_PRIVATE_KEY
+$UpdaterPrivateKeyPassword = [string]$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+if ($EnableUpdater) {
+    $MissingUpdaterValues = @()
+    if (-not $UpdaterPublicKey.Trim()) { $MissingUpdaterValues += "BUZZ_UPDATER_PUBLIC_KEY" }
+    if (-not $UpdaterEndpoint.Trim()) { $MissingUpdaterValues += "BUZZ_UPDATER_ENDPOINT" }
+    if (-not $UpdaterPrivateKey.Trim()) { $MissingUpdaterValues += "TAURI_SIGNING_PRIVATE_KEY" }
+    if ($MissingUpdaterValues.Count -gt 0) {
+        throw "EnableUpdater requires: $($MissingUpdaterValues -join ', ')."
+    }
+
+    $UpdaterEndpointUri = $null
+    if (-not [Uri]::TryCreate($UpdaterEndpoint, [UriKind]::Absolute, [ref]$UpdaterEndpointUri)) {
+        throw "BUZZ_UPDATER_ENDPOINT must be an absolute URL; got '$UpdaterEndpoint'."
+    }
+    if ($UpdaterEndpointUri.Scheme -ne "https" -and -not $AllowInsecureUpdaterEndpoint) {
+        throw "BUZZ_UPDATER_ENDPOINT must use HTTPS unless AllowInsecureUpdaterEndpoint is set."
+    }
+}
 
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $RepositoryRoot "dist\codex-lab-windows"
@@ -223,7 +256,8 @@ if ($HostTriple -ne $Target) {
 }
 
 # Lab builds must never inherit local relay addresses, credentials, reconnect
-# hooks, or updater signing configuration from the packaging shell.
+# hooks, or updater signing configuration unless updater packaging was
+# explicitly requested and validated above.
 $BuildEnvironmentKeys = @(
     "BUZZ_RELAY_URL",
     "BUZZ_RELAY_HTTP",
@@ -244,6 +278,14 @@ foreach ($key in $BuildEnvironmentKeys) {
 }
 $DeepLinkScheme = "buzz-codex-lab"
 $env:BUZZ_DESKTOP_BUILD_DEEP_LINK_SCHEME = $DeepLinkScheme
+if ($EnableUpdater) {
+    $env:BUZZ_UPDATER_PUBLIC_KEY = $UpdaterPublicKey
+    $env:BUZZ_UPDATER_ENDPOINT = $UpdaterEndpoint
+    $env:TAURI_SIGNING_PRIVATE_KEY = $UpdaterPrivateKey
+    if ($UpdaterPrivateKeyPassword) {
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $UpdaterPrivateKeyPassword
+    }
+}
 
 # Rust embeds dependency source paths in panic metadata and MSVC may record an
 # absolute PDB path in each PE image. Remap the packaging account's home and
@@ -317,7 +359,22 @@ if (-not $SkipSidecarBuild) {
 
 $CodexAcpBundle = New-CodexAcpOfflineBundle
 $GeneratedConfigPath = Join-Path $BuildCacheDirectory "tauri.codex-lab.generated.conf.json"
+$BaseConfig = Get-Content -LiteralPath (Join-Path $TauriDirectory "tauri.conf.json") -Raw -Encoding UTF8 |
+    ConvertFrom-Json
+$ArtifactVersion = if ($VersionOverride) { $VersionOverride } else { [string]$BaseConfig.version }
 $GeneratedConfig = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($VersionOverride) {
+    $GeneratedConfig | Add-Member -MemberType NoteProperty -Name version -Value $VersionOverride -Force
+}
+if ($EnableUpdater) {
+    $GeneratedConfig.bundle.createUpdaterArtifacts = $true
+    $GeneratedConfig.plugins.updater | Add-Member -MemberType NoteProperty -Name pubkey -Value $UpdaterPublicKey -Force
+    $GeneratedConfig.plugins.updater.endpoints = @($UpdaterEndpoint)
+    if ($AllowInsecureUpdaterEndpoint) {
+        $GeneratedConfig.plugins.updater | Add-Member -MemberType NoteProperty `
+            -Name dangerousInsecureTransportProtocol -Value $true -Force
+    }
+}
 $CodexAcpResourceDirectory = Join-Path $BinariesDirectory "codex-acp"
 New-Item -ItemType Directory -Path $CodexAcpResourceDirectory -Force | Out-Null
 $BundledCodexAcpArchive = Join-Path $CodexAcpResourceDirectory "codex-acp-win-x64.zip"
@@ -395,17 +452,29 @@ if (-not $Installer) {
     throw "No NSIS installer was produced in $BundleDirectory"
 }
 
-$BaseConfig = Get-Content -LiteralPath (Join-Path $TauriDirectory "tauri.conf.json") -Raw -Encoding UTF8 |
-    ConvertFrom-Json
+$InstallerSignature = $null
+if ($EnableUpdater) {
+    $InstallerSignaturePath = "$($Installer.FullName).sig"
+    if (-not (Test-Path -LiteralPath $InstallerSignaturePath -PathType Leaf)) {
+        throw "Updater signature was not produced: $InstallerSignaturePath"
+    }
+    $InstallerSignature = Get-Item -LiteralPath $InstallerSignaturePath
+}
+
 $Commit = (& git.exe -C $RepositoryRoot rev-parse --short=12 HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Commit) {
     throw "Could not resolve the source commit."
 }
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-$ArtifactName = "Buzz-Codex-Lab_$($BaseConfig.version)_${Commit}_x64-setup.exe"
+$ArtifactName = "Buzz-Codex-Lab_${ArtifactVersion}_${Commit}_x64-setup.exe"
 $ArtifactPath = Join-Path $OutputDirectory $ArtifactName
 Copy-Item -LiteralPath $Installer.FullName -Destination $ArtifactPath -Force
+$ArtifactSignaturePath = $null
+if ($InstallerSignature) {
+    $ArtifactSignaturePath = "$ArtifactPath.sig"
+    Copy-Item -LiteralPath $InstallerSignature.FullName -Destination $ArtifactSignaturePath -Force
+}
 
 $ArtifactHash = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $SidecarHashes = foreach ($sidecar in $RequiredSidecars) {
@@ -418,7 +487,7 @@ $SidecarHashes = foreach ($sidecar in $RequiredSidecars) {
 }
 $BuildInfo = [ordered]@{
     product = "Buzz Codex Lab"
-    version = [string]$BaseConfig.version
+    version = $ArtifactVersion
     commit = $Commit
     target = $Target
     built_at = (Get-Date).ToUniversalTime().ToString("o")
@@ -427,6 +496,7 @@ $BuildInfo = [ordered]@{
         sha256 = $ArtifactHash
         size = (Get-Item -LiteralPath $ArtifactPath).Length
         signed = $false
+        updater_signed = [bool]$EnableUpdater
     }
     bundled_sidecars = $SidecarHashes
     bundled_codex_acp = [ordered]@{
@@ -439,6 +509,12 @@ $BuildInfo = [ordered]@{
     embedded_relay_configuration = $false
     embedded_identity_or_api_key = $false
     deep_link_scheme = $DeepLinkScheme
+    deep_link_schemes = @("buzz", $DeepLinkScheme)
+    updater = [ordered]@{
+        enabled = [bool]$EnableUpdater
+        endpoint = if ($EnableUpdater) { $UpdaterEndpoint } else { $null }
+        signature = if ($ArtifactSignaturePath) { Split-Path -Leaf $ArtifactSignaturePath } else { $null }
+    }
     source_worktree_clean = $true
     builder_home_path_remapped = $true
     native_source_paths_trimmed = $true
@@ -447,11 +523,18 @@ $BuildInfo = [ordered]@{
 
 $BuildInfo | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath (Join-Path $OutputDirectory "BUILD-INFO.json") -Encoding UTF8
-"$ArtifactHash  $ArtifactName" |
-    Set-Content -LiteralPath (Join-Path $OutputDirectory "SHA256SUMS.txt") -Encoding ASCII
+$ChecksumLines = @("$ArtifactHash  $ArtifactName")
+if ($ArtifactSignaturePath) {
+    $SignatureHash = (Get-FileHash -LiteralPath $ArtifactSignaturePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $ChecksumLines += "$SignatureHash  $(Split-Path -Leaf $ArtifactSignaturePath)"
+}
+$ChecksumLines | Set-Content -LiteralPath (Join-Path $OutputDirectory "SHA256SUMS.txt") -Encoding ASCII
 
 Write-Host ""
 Write-Host "Buzz Codex Lab installer ready:"
 Write-Host "  $ArtifactPath"
 Write-Host "  SHA256: $ArtifactHash"
-Write-Warning "This evaluation installer is unsigned and may trigger Windows SmartScreen."
+if ($ArtifactSignaturePath) {
+    Write-Host "  Updater signature: $ArtifactSignaturePath"
+}
+Write-Warning "This evaluation installer is not Authenticode-signed and may trigger Windows SmartScreen."
