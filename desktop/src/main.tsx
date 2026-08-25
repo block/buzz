@@ -14,6 +14,7 @@ import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
+import { AppExtensionProviders } from "@/extensions/AppExtensionProviders";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
@@ -89,17 +90,19 @@ function renderApp() {
             enabled={huddleWindowChannelId() === null}
           >
             <ThemeProvider defaultTheme="buzz">
-              <TooltipProvider>
-                <EmojiBurstProvider>
-                  <PoofBurstProvider>
-                    <UpdaterProvider>
-                      <App />
-                      <NostrBindConsentDialog />
-                    </UpdaterProvider>
-                    <Toaster />
-                  </PoofBurstProvider>
-                </EmojiBurstProvider>
-              </TooltipProvider>
+              <AppExtensionProviders>
+                <TooltipProvider>
+                  <EmojiBurstProvider>
+                    <PoofBurstProvider>
+                      <UpdaterProvider>
+                        <App />
+                        <NostrBindConsentDialog />
+                      </UpdaterProvider>
+                      <Toaster />
+                    </PoofBurstProvider>
+                  </EmojiBurstProvider>
+                </TooltipProvider>
+              </AppExtensionProviders>
             </ThemeProvider>
           </CommunityOnboardingProvider>
         </CommunitiesProvider>

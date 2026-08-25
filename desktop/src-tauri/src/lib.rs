@@ -34,6 +34,8 @@ mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
 mod persona_catalog;
+#[cfg(feature = "authentik-poc")]
+mod oidc_poc_proxy;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
@@ -51,6 +53,7 @@ mod unread_catch_up;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
+mod workbench_oidc_store;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 #[doc(hidden)]
@@ -520,6 +523,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            workbench_oidc_store::workbench_oidc_user_load,
+            workbench_oidc_store::workbench_oidc_user_save,
+            workbench_oidc_store::workbench_oidc_user_delete,
+            workbench_oidc_store::workbench_oidc_user_keys,
+            #[cfg(feature = "authentik-poc")]
+            oidc_poc_proxy::oidc_poc_proxy,
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,
@@ -923,7 +932,6 @@ pub fn run() {
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);
             }
-
             // AppKit terminates through libc exit(), which runs C++ static
             // destructors. The embedded ggml/Metal runtime currently aborts in
             // that destructor phase even after its node has stopped cleanly.

@@ -20,6 +20,7 @@
     "websocket:default",
     "window-state:default",
     "dialog:default",
+    "deep-link:allow-get-current",
     "updater:allow-check",
     "updater:allow-download",
     "updater:allow-install",

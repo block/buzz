@@ -7,7 +7,7 @@ fn dev_keyring_service(configured: Option<String>) -> String {
 }
 
 pub(crate) fn keyring_service() -> &'static str {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || cfg!(feature = "dev-identity") {
         static DEV_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         DEV_SERVICE
             .get_or_init(|| dev_keyring_service(std::env::var("BUZZ_DEV_KEYRING_SERVICE").ok()))
@@ -39,6 +39,13 @@ mod tests {
             dev_keyring_service(Some("buzz-desktop".to_string())),
             "buzz-desktop-dev"
         );
+    }
+
+    #[test]
+    fn release_acceptance_feature_uses_a_development_keyring() {
+        if cfg!(feature = "dev-identity") {
+            assert_ne!(super::keyring_service(), "buzz-desktop");
+        }
     }
 
     #[test]

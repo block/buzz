@@ -659,6 +659,7 @@ impl ChannelInfoResolver {
 
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
+    pub turn_extension: Option<Arc<dyn crate::turn_observer::TurnExtension>>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
     pub max_turn_duration: Duration,
@@ -1073,11 +1074,12 @@ struct NewSessionChannelContext<'a> {
     channel_type: Option<&'a str>,
 }
 
-async fn create_session_and_apply_model(
+async fn create_session_and_apply_model_with_turn_mcp(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
     channel: NewSessionChannelContext<'_>,
+    turn_mcp_server: Option<&McpServer>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
@@ -1104,12 +1106,15 @@ async fn create_session_and_apply_model(
         .session_title
         .as_deref()
         .map(|agent_name| compose_session_title(agent_name, channel.name));
-    let mcp_servers = mcp_servers_with_git_origin(
+    let mut mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
         channel.id,
         channel.channel_type,
         ctx.session_title.as_deref(),
     );
+    if let Some(server) = turn_mcp_server {
+        mcp_servers.push(server.clone());
+    }
 
     let resp = agent
         .acp
@@ -1331,6 +1336,16 @@ async fn create_session_and_apply_model(
     }
 
     Ok(resp.session_id)
+}
+
+#[cfg(test)]
+async fn create_session_and_apply_model(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    agent_core: Option<&str>,
+    channel: NewSessionChannelContext<'_>,
+) -> Result<String, AcpError> {
+    create_session_and_apply_model_with_turn_mcp(agent, ctx, agent_core, channel, None).await
 }
 
 fn mcp_servers_with_git_origin(
@@ -1814,6 +1829,7 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    agent.acp.set_turn_observer(None);
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -1950,6 +1966,47 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
+    // Product extensions may issue capabilities scoped to exactly one trusted
+    // source event and one turn. The pool only manages their generic lifecycle.
+    let source_event = batch
+        .as_ref()
+        .and_then(|batch| batch.events.last())
+        .map(|event| &event.event);
+    let source_channel_id = batch.as_ref().map(|batch| batch.channel_id);
+    let mut turn_extension_access = if let Some(extension) = &ctx.turn_extension {
+        let agent_id = ctx.agent_keys.public_key().to_hex();
+        match extension
+            .begin_turn(crate::turn_observer::TurnExtensionRequest {
+                source_event,
+                channel_id: source_channel_id,
+                agent_id: &agent_id,
+                turn_id: &turn_id,
+            })
+            .await
+        {
+            Ok(access) => access,
+            Err(error) => {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::Protocol(error)),
+                    None,
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(access) = &mut turn_extension_access {
+        if access.requires_fresh_session() {
+            agent.state.invalidate(&source);
+        }
+        access.start_observation(&mut agent.acp);
+    }
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `<system>` user-message
@@ -2082,7 +2139,7 @@ pub async fn run_prompt_task(
                 // agent in several channels doesn't produce identical session
                 // rows; `title_channel` comes from the single resolve above and
                 // is `None` for DM, unresolved, and unnamed channels.
-                match create_session_and_apply_model(
+                match create_session_and_apply_model_with_turn_mcp(
                     &mut agent,
                     &ctx,
                     agent_core.as_deref(),
@@ -2093,6 +2150,9 @@ pub async fn run_prompt_task(
                         id: Some(*cid),
                         channel_type: origin_channel_type.as_deref(),
                     },
+                    turn_extension_access
+                        .as_ref()
+                        .and_then(|access| access.mcp_server()),
                 )
                 .await
                 {
@@ -2147,7 +2207,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(
+                match create_session_and_apply_model_with_turn_mcp(
                     &mut agent,
                     &ctx,
                     None,
@@ -2158,6 +2218,7 @@ pub async fn run_prompt_task(
                         id: None,
                         channel_type: None,
                     },
+                    None,
                 )
                 .await
                 {
@@ -2755,6 +2816,18 @@ pub async fn run_prompt_task(
         }
     };
 
+    if let Some(access) = &mut turn_extension_access {
+        access
+            .finish(crate::turn_observer::TurnExtensionFinishContext {
+                acp: &mut agent.acp,
+                rest_client: &ctx.rest_client,
+                source_event,
+                channel_id: source_channel_id,
+                completed: matches!(prompt_result, Ok(StopReason::EndTurn)),
+            })
+            .await;
+    }
+
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
@@ -2776,24 +2849,28 @@ pub async fn run_prompt_task(
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
             );
 
-            let should_rotate = should_rotate || {
-                let limit = ctx.max_turns_per_session;
-                if limit > 0 {
-                    match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
-                            *count += 1;
-                            *count >= limit
+            let should_rotate = should_rotate
+                || turn_extension_access
+                    .as_ref()
+                    .is_some_and(|access| access.requires_fresh_session())
+                || {
+                    let limit = ctx.max_turns_per_session;
+                    if limit > 0 {
+                        match &source {
+                            PromptSource::Channel(cid) => {
+                                let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                                *count += 1;
+                                *count >= limit
+                            }
+                            PromptSource::Heartbeat => {
+                                agent.state.heartbeat_turn_count += 1;
+                                agent.state.heartbeat_turn_count >= limit
+                            }
                         }
-                        PromptSource::Heartbeat => {
-                            agent.state.heartbeat_turn_count += 1;
-                            agent.state.heartbeat_turn_count >= limit
-                        }
+                    } else {
+                        false
                     }
-                } else {
-                    false
-                }
-            };
+                };
 
             if should_rotate {
                 tracing::info!(
@@ -8171,6 +8248,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         use crate::relay::RestClient;
         PromptContext {
             mcp_servers: vec![],
+            turn_extension: None,
             initial_message: None,
             idle_timeout: Duration::from_secs(60),
             max_turn_duration: Duration::from_secs(120),

@@ -1,0 +1,19 @@
+.disposition-form { display: grid; gap: 1rem; }
+.disposition-form > label, .inspection-line label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; }
+.disposition-form input, .disposition-form textarea { border: 1px solid var(--line); border-radius: .2rem; background: white; color: var(--ink); padding: .72rem .8rem; font: inherit; }
+.disposition-form textarea { min-height: 5rem; resize: vertical; }
+.disposition-callout { display: grid; gap: .3rem; border-left: .2rem solid var(--green); background: #eaf2ee; padding: .8rem 1rem; }
+.disposition-callout span { color: var(--muted); font-size: .82rem; }
+.inspection-line { display: grid; grid-template-columns: minmax(10rem, 1.5fr) .7fr .7fr .7fr; align-items: end; gap: .75rem; border-bottom: 1px solid var(--line); padding: .75rem 0; }
+.inspection-line > div { display: grid; gap: .15rem; }
+.inspection-line > div span { color: var(--muted); font-size: .76rem; }
+.inspection-line > span { align-self: center; color: var(--muted); }
+.logistics-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.logistics-fields label { display: grid; gap: .35rem; }
+.return-analytics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; margin-bottom: .8rem; }
+.return-analytics > div { display: grid; gap: .2rem; border: 1px solid var(--line); border-radius: .2rem; background: white; padding: .75rem .9rem; }
+.return-analytics span, .return-analytics small { color: var(--muted); }
+.return-analytics span { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+.return-analytics strong { font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+.return-analytics small { font-size: .7rem; }
+@media (max-width: 760px) { .inspection-line { grid-template-columns: 1fr 1fr; } .return-analytics { grid-template-columns: 1fr 1fr; } .logistics-fields { grid-template-columns: 1fr; } }

@@ -70,7 +70,7 @@ type ProjectRepositoryActionsPanelProps = {
   onOpenTerminal: () => void;
   onRepositoryChange: (repositoryId: string) => void;
   onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
   profiles?: UserProfileLookup;
   pullRequests: ProjectPullRequest[];
   project: Project;

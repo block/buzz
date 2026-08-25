@@ -1374,7 +1374,6 @@ export function createMarkdownComponents(
       ? parseSupportedLinkPreview(href, relayOrigin)
       : null;
     const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
-
     return (
       <ExternalLinkAnchor
         anchorProps={props}
@@ -1687,7 +1686,7 @@ export function createMarkdownComponents(
  * sixteen instances ever exist. Module-stable maps mean cached markdown
  * element trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "9";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };

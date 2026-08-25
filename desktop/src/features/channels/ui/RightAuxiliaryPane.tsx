@@ -10,7 +10,7 @@ type RightAuxiliaryPaneProps = {
   constrainToAvailableSpace?: boolean;
   detached?: boolean;
   onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
   showResizeIndicator?: boolean;
   testId?: string;
   widthPx: number;
@@ -47,10 +47,10 @@ export function RightAuxiliaryPane({
     >
       <button
         aria-label="Resize panel"
-        className="peer/right-pane-resize group/right-pane-resize absolute inset-y-0 left-0 z-50 w-3 -translate-x-1/2 cursor-col-resize"
+        className="peer/right-pane-resize group/right-pane-resize absolute inset-y-0 left-0 z-50 w-3 touch-none cursor-col-resize select-none"
         data-testid="right-auxiliary-pane-resize-handle"
         onDoubleClick={canResetWidth ? onResetWidth : undefined}
-        onPointerDown={onResizeStart}
+        onMouseDown={onResizeStart}
         title={
           canResetWidth
             ? "Drag to resize. Double-click to reset width."

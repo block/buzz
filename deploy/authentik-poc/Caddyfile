@@ -1,0 +1,92 @@
+auth.bizfin.localhost {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy server:9000
+}
+
+business.bizfin.localhost {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  @gateway path /api/me /api/identity-bindings/* /api/embed-sessions* /api/session /api/logout /api/logout/* /api/oidc/backchannel-logout /embed/bootstrap
+  handle @gateway {
+    reverse_proxy business-auth-gateway:3100
+  }
+  @business_core path /api/v1/*
+  handle @business_core {
+    reverse_proxy host.docker.internal:3110
+  }
+  handle {
+    reverse_proxy host.docker.internal:4174
+  }
+}
+
+workbench.bizfin.localhost {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy host.docker.internal:1420
+}
+
+# Dedicated local endpoints for the Business Agent read-only stack. Keeping
+# these separate avoids disturbing the existing Workbench routes while the
+# agent integration is exercised end to end.
+business-agent-auth.bizfin.localhost {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy host.docker.internal:3210
+}
+
+business-agent-core.bizfin.localhost {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy host.docker.internal:3220
+}
+
+business-agent-read.bizfin.localhost {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy host.docker.internal:3230
+}
+
+auth.bizfin.test {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy server:9000
+}
+
+business.bizfin.test {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy business-auth-mock:3000
+}
+
+workbench.bizfin.test {
+  tls /certs/bizfin.local.pem /certs/bizfin.local-key.pem
+  reverse_proxy host.docker.internal:1420
+}
+
+# Desktop POC only: WKWebView cannot use a CA trusted only in the developer's
+# login keychain. Keep browser authorization on HTTPS and proxy only the public
+# metadata/JWKS plus PKCE-protected public-client endpoints over loopback.
+http://localhost, http://127.0.0.1 {
+  @token path /_pacioli_oidc/token/
+  handle @token {
+    rewrite * /application/o/token/
+    reverse_proxy server:9000 {
+      header_up Host auth.bizfin.localhost
+      header_up X-Forwarded-Host auth.bizfin.localhost
+      header_up X-Forwarded-Proto https
+    }
+  }
+
+  @userinfo path /_pacioli_oidc/userinfo/
+  handle @userinfo {
+    rewrite * /application/o/userinfo/
+    reverse_proxy server:9000 {
+      header_up Host auth.bizfin.localhost
+      header_up X-Forwarded-Host auth.bizfin.localhost
+      header_up X-Forwarded-Proto https
+    }
+  }
+
+  @jwks path /_pacioli_oidc/workbench/jwks/
+  handle @jwks {
+    rewrite * /application/o/workbench/jwks/
+    reverse_proxy server:9000 {
+      header_up Host auth.bizfin.localhost
+      header_up X-Forwarded-Host auth.bizfin.localhost
+      header_up X-Forwarded-Proto https
+    }
+  }
+}

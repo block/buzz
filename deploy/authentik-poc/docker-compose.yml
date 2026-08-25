@@ -1,0 +1,154 @@
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_DB: ${PG_DB:-authentik}
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_PASSWORD: ${PG_PASS:?database password required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      - database:/var/lib/postgresql/data
+
+  server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.8.0}
+    command: server
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment: &authentik_environment
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?secret key required}
+    ports:
+      - "${COMPOSE_PORT_HTTP:-9000}:9000"
+      - "${COMPOSE_PORT_HTTPS:-9443}:9443"
+    shm_size: 512mb
+    volumes:
+      - ./data:/data
+      - ./custom-templates:/templates
+
+  worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.8.0}
+    command: worker
+    user: root
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment: *authentik_environment
+    shm_size: 512mb
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+      - ./certs:/certs
+      - ./custom-templates:/templates
+
+  business-auth-mock:
+    build: ./business-auth-mock
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BUSINESS_OIDC_ISSUER: ${BUSINESS_OIDC_ISSUER:?business issuer required}
+      BUSINESS_OIDC_CLIENT_ID: ${BUSINESS_OIDC_CLIENT_ID:?business client id required}
+      BUSINESS_OIDC_CLIENT_SECRET: ${BUSINESS_OIDC_CLIENT_SECRET:?business client secret required}
+      BUSINESS_OIDC_REDIRECT_URI: ${BUSINESS_OIDC_REDIRECT_URI:?business redirect URI required}
+      BUSINESS_POST_LOGOUT_REDIRECT_URI: ${BUSINESS_POST_LOGOUT_REDIRECT_URI:?business logout redirect required}
+      WORKBENCH_ORIGIN: ${WORKBENCH_ORIGIN:?workbench origin required}
+      BUSINESS_COOKIE_SECURE: ${BUSINESS_COOKIE_SECURE:-true}
+      BUSINESS_COOKIE_SAME_SITE: ${BUSINESS_COOKIE_SAME_SITE:-Lax}
+      BUSINESS_EMBED_AUDIENCE: ${BUSINESS_EMBED_AUDIENCE:-business-dock}
+      BUSINESS_EMBED_CALLBACK_URI: ${BUSINESS_EMBED_CALLBACK_URI:-buzz-dev://auth/business-bootstrap}
+      BUSINESS_SESSION_DB: /data/business-sessions.sqlite
+      PORT: 3000
+    ports:
+      - "${BUSINESS_PORT_HTTP:-3001}:3000"
+    volumes:
+      - business_sessions:/data
+
+  business-auth-postgresql:
+    image: docker.io/library/postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: business_auth
+      POSTGRES_USER: business_auth
+      POSTGRES_PASSWORD: ${PG_PASS:?database password required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d business_auth -U business_auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "127.0.0.1:55442:5432"
+    volumes:
+      - business_auth_database:/var/lib/postgresql/data
+
+  business-auth-migrate:
+    build:
+      context: ../..
+      dockerfile: services/business-auth-gateway/Dockerfile
+    command: ["--migrate-only"]
+    environment:
+      DATABASE_URL: postgres://business_auth:${PG_PASS}@business-auth-postgresql:5432/business_auth
+    depends_on:
+      business-auth-postgresql:
+        condition: service_healthy
+    restart: "no"
+
+  business-auth-gateway:
+    build:
+      context: ../..
+      dockerfile: services/business-auth-gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://business_auth:${PG_PASS}@business-auth-postgresql:5432/business_auth
+      BIND_ADDR: 0.0.0.0:3100
+      AUTHENTIK_ISSUER: https://auth.bizfin.localhost/application/o/workbench/
+      WORKBENCH_CLIENT_ID: bizfin-workbench-v3-1-poc
+      BUSINESS_CLIENT_ID: bizfin-business-v3-1-poc
+      ALLOWED_WORKBENCH_ORIGINS: tauri://localhost,http://tauri.localhost,https://workbench.bizfin.localhost
+      BUSINESS_APP_ORIGIN: https://business.bizfin.localhost
+      IDENTITY_BINDING_CHALLENGE_TTL_SECONDS: 90
+      EMBED_SESSION_TTL_SECONDS: 30
+      BUSINESS_SESSION_TTL_SECONDS: 86400
+      EMBED_SESSION_RATE_LIMIT_PER_MINUTE: 10
+      SESSION_CLEANUP_INTERVAL_SECONDS: 60
+      BUSINESS_SESSION_COOKIE_NAME: __Host-bizfin_business
+      BUSINESS_SESSION_COOKIE_SECURE: "true"
+      BUSINESS_SESSION_COOKIE_SAMESITE: None
+      DEPLOYMENT_ID: local-v3-2
+      GLOBAL_LOGOUT_REDIRECT_URI: buzz-dev://auth/logout-callback
+      SSL_CERT_FILE: /certs/rootCA.pem
+      RUST_LOG: business_auth_gateway=warn
+    volumes:
+      - ./certs/rootCA.pem:/certs/rootCA.pem:ro
+    depends_on:
+      business-auth-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  database:
+    driver: local
+  business_sessions:
+    driver: local
+  business_auth_database:
+    driver: local

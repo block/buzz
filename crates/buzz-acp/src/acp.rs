@@ -14,6 +14,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
+use crate::turn_observer::TurnObserver;
 use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
 };
@@ -214,6 +215,9 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Optional product integration hook. The ACP transport only forwards
+    /// normalized session updates; policy and parsing stay in the integration.
+    turn_observer: Option<Box<dyn TurnObserver>>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +567,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_observer: None,
         })
     }
 
@@ -575,6 +580,14 @@ impl AcpClient {
     /// Update metadata that will be attached to subsequent raw wire events.
     pub fn set_observer_context(&mut self, context: ObserverContext) {
         self.observer_context = context;
+    }
+
+    pub(crate) fn set_turn_observer(&mut self, observer: Option<Box<dyn TurnObserver>>) {
+        self.turn_observer = observer;
+    }
+
+    pub(crate) fn take_turn_observer(&mut self) -> Option<Box<dyn TurnObserver>> {
+        self.turn_observer.take()
     }
 
     /// Return a clone of the observer handle, if attached.
@@ -1747,6 +1760,9 @@ impl AcpClient {
     /// needs no run id.
     fn handle_session_update(&mut self, msg: &serde_json::Value) -> bool {
         let update = &msg["params"]["update"];
+        if let Some(observer) = &mut self.turn_observer {
+            observer.on_session_update(update);
+        }
         let update_type = update
             .get("sessionUpdate")
             .and_then(|v| v.as_str())

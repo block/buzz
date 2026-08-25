@@ -1,0 +1,96 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 3rem 2rem;
+}
+
+.environment-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  border: 1px solid #c97a18;
+  border-radius: 0.55rem;
+  padding: 0.8rem 1rem;
+  background: color-mix(in srgb, #f59e0b 16%, Canvas);
+}
+
+.environment-banner span,
+.draft-warning {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.lifecycle-view {
+  margin-bottom: 1.5rem;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  border-radius: 0.65rem;
+  padding: 1rem;
+}
+
+.lifecycle-view h2 {
+  margin: 0.25rem 0 0.65rem;
+  font-size: 1.2rem;
+}
+
+.lifecycle-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.eyebrow,
+dt {
+  color: GrayText;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0.35rem 0 2rem;
+  font-size: 1.7rem;
+}
+
+dl {
+  display: grid;
+  gap: 0.75rem;
+}
+
+dl div {
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+}
+
+dd {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.5rem;
+}
+
+button {
+  border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+  border-radius: 0.45rem;
+  padding: 0.65rem 0.9rem;
+  background: CanvasText;
+  color: Canvas;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}

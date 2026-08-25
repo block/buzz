@@ -1,4 +1,16 @@
 {
   "identifier": "xyz.block.buzz.app.dev",
-  "productName": "Buzz Dev"
+  "productName": "Buzz Dev",
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "Buzz Local Development"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["buzz-dev"]
+      }
+    }
+  }
 }

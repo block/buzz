@@ -160,7 +160,7 @@ export type ChannelPaneProps = {
   ) => Promise<void>;
   onThreadScrollTargetResolved: () => void;
   onThreadPanelResizeStart: (
-    event: React.PointerEvent<HTMLButtonElement>,
+    event: React.MouseEvent<HTMLButtonElement>,
   ) => void;
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;

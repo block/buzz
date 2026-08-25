@@ -18,7 +18,7 @@ type UserProfilePanelFrameProps = {
   isSplitLayout: boolean;
   onClose: () => void;
   onResetWidth?: () => void;
-  onResizeStart?: React.PointerEventHandler<HTMLButtonElement>;
+  onResizeStart?: React.MouseEventHandler<HTMLButtonElement>;
   personaDialogs: React.ReactNode;
   profileBody: React.ReactNode;
   splitPaneClamp: boolean;

@@ -1,0 +1,30 @@
+[package]
+name = "business-read-api"
+description = "Reference read-only Business API for production-adapter and desensitized acceptance testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+business-analytics = { path = "../business-analytics" }
+business-anomaly-contracts = { path = "../../crates/business-anomaly-contracts" }
+business-iam = { path = "../../crates/business-iam" }
+business-query-contracts = { path = "../../crates/business-query-contracts" }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

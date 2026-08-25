@@ -1,0 +1,16 @@
+{
+  "version": "trade-risk-v1.0",
+  "lowMarginThreshold": "0.03",
+  "receivableOverdueDays": 60,
+  "receivableOutstandingThreshold": "10000.00",
+  "uninvoicedShipmentDays": 7,
+  "invoiceUnpaidDays": 30,
+  "purchasePriceWindowDays": 30,
+  "purchasePriceIncreaseRate": "0.10",
+  "purchasePriceMinSamples": 3,
+  "inventoryAgingDays": 180,
+  "inventoryNoSalesDays": 90,
+  "receiptUninvoicedDays": 30,
+  "paymentReceiptGap": "0.20",
+  "staleAfterMinutes": 1440
+}

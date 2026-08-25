@@ -720,6 +720,7 @@ impl RunCtx<'_> {
                     // carrying both a hook objection and a reply reminder costs
                     // one rejection and delivers both texts.
                     if self.cfg.require_reply
+                        && self.mcp.has_shell_tool()
                         && !buzz_reply_call_seen
                         && reply_nags < MAX_REPLY_NAGS
                     {

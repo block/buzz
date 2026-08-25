@@ -5,6 +5,10 @@ import {
   AUXILIARY_PANEL_MIN_WIDTH_PX,
   getAuxiliaryPanelMaxWidth,
 } from "@/shared/layout/AuxiliaryPanel";
+import {
+  formatHorizontalResizeIndicator,
+  startHorizontalMouseResize,
+} from "@/shared/lib/startHorizontalMouseResize";
 
 const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
 
@@ -89,42 +93,35 @@ export function useThreadPanelWidth(
   }, [sessionKey, widthPx]);
 
   const onResizeStart = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      // Leave the second press unshielded so double-click reset can complete.
+      if (event.detail > 1) return;
       const startX = event.clientX;
       const startWidth = widthPx;
-      const previousCursor = document.body.style.cursor;
-      const previousUserSelect = document.body.style.userSelect;
-
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      setIsResizing(true);
-
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const deltaX = startX - moveEvent.clientX;
-        const nextWidth = Math.max(
-          minWidthPx,
-          Math.min(
-            getAuxiliaryPanelMaxWidth(getAvailableWidth()),
-            startWidth + deltaX,
+      startHorizontalMouseResize(
+        event,
+        (clientX) => {
+          const availableWidth = getAvailableWidth();
+          const deltaX = startX - clientX;
+          const nextWidth = Math.max(
+            minWidthPx,
+            Math.min(
+              getAuxiliaryPanelMaxWidth(availableWidth),
+              startWidth + deltaX,
+            ),
+          );
+          setWidthPx(nextWidth);
+          return formatHorizontalResizeIndicator(nextWidth, availableWidth);
+        },
+        {
+          indicatorText: formatHorizontalResizeIndicator(
+            widthPx,
+            getAvailableWidth(),
           ),
-        );
-        setWidthPx(nextWidth);
-      };
-
-      const handlePointerEnd = () => {
-        document.body.style.cursor = previousCursor;
-        document.body.style.userSelect = previousUserSelect;
-        setIsResizing(false);
-        window.removeEventListener("pointermove", handlePointerMove);
-        window.removeEventListener("pointerup", handlePointerEnd);
-        window.removeEventListener("pointercancel", handlePointerEnd);
-      };
-
-      window.addEventListener("pointermove", handlePointerMove);
-      window.addEventListener("pointerup", handlePointerEnd);
-      window.addEventListener("pointercancel", handlePointerEnd);
+          onFinish: () => setIsResizing(false),
+          onStart: () => setIsResizing(true),
+        },
+      );
     },
     [getAvailableWidth, minWidthPx, widthPx],
   );

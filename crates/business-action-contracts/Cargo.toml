@@ -1,0 +1,17 @@
+[package]
+name = "business-action-contracts"
+description = "Strict contracts for human-confirmed business follow-up work and non-executable approval drafts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+business-anomaly-contracts = { path = "../business-anomaly-contracts" }
+business-query-contracts = { path = "../business-query-contracts" }
+chrono = { workspace = true }
+schemars = { workspace = true, features = ["derive", "chrono04", "uuid1"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

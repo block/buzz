@@ -1,0 +1,376 @@
+.settlement-form {
+  color: var(--ink);
+  background: #fbfaf6;
+  border: 1px solid var(--line);
+}
+
+.settlement-form > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 20px;
+  background: #e5eef2;
+  border-bottom: 1px solid var(--line);
+}
+
+.settlement-form.supplier > header {
+  background: #f2eadb;
+}
+
+.settlement-form > header span,
+.settlement-field > span,
+.settlement-note > span,
+.allocation-heading span,
+.settlement-balance > div > span {
+  color: var(--muted);
+  font: 10px ui-monospace, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settlement-form > header h3 {
+  margin: 3px 0;
+  font: 700 22px "Arial Narrow", sans-serif;
+}
+
+.settlement-form > header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settlement-form > header > strong {
+  padding: 5px 9px;
+  color: var(--blue);
+  white-space: nowrap;
+  border: 1px solid currentColor;
+  font: 700 10px ui-monospace, monospace;
+  letter-spacing: 0.08em;
+}
+
+.settlement-form.supplier > header > strong {
+  color: #9b6417;
+}
+
+.settlement-form form,
+.settlement-confirm-step {
+  padding: 20px;
+}
+
+.settlement-loading {
+  margin: 0;
+  padding: 32px 20px;
+}
+
+.settlement-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.settlement-field,
+.settlement-note {
+  display: grid;
+  gap: 5px;
+}
+
+.settlement-field input,
+.settlement-field select,
+.settlement-note textarea,
+.allocation-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  color: var(--ink);
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 1px;
+  font: inherit;
+}
+
+.settlement-field input:focus,
+.settlement-field select:focus,
+.settlement-note textarea:focus,
+.allocation-row input:focus {
+  outline: 2px solid #e2a33a;
+  outline-offset: 1px;
+}
+
+.money-input {
+  display: grid;
+  grid-template-columns: auto 1fr;
+}
+
+.money-input > span {
+  display: grid;
+  place-items: center;
+  padding: 0 10px;
+  color: white;
+  background: var(--ink);
+  font: 10px ui-monospace, monospace;
+}
+
+.money-input input {
+  border-left: 0;
+}
+
+.settlement-note {
+  margin-top: 16px;
+}
+
+.settlement-note textarea {
+  min-height: 70px;
+  resize: vertical;
+}
+
+.settlement-boundary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 10px 12px;
+  color: #425963;
+  background: #edf2f3;
+  border-left: 3px solid #75929e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settlement-boundary svg {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+}
+
+.settlement-notice {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  color: var(--stamp);
+  background: #fff0ee;
+  border-left: 3px solid var(--stamp);
+}
+
+.settlement-form form > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.settlement-form form > footer > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settlement-form form > footer button,
+.settlement-confirm-step > button {
+  min-height: 44px;
+}
+
+.settlement-balance {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-bottom: 1px solid var(--line);
+}
+
+.settlement-balance > div:not(.balance-track) {
+  display: grid;
+  gap: 5px;
+  padding: 16px 20px;
+  border-left: 1px solid var(--line);
+}
+
+.settlement-balance > div:first-child {
+  border-left: 0;
+}
+
+.settlement-balance strong {
+  font: 700 20px ui-monospace, monospace;
+}
+
+.settlement-balance strong small {
+  font-size: 10px;
+}
+
+.settlement-balance .emphasis {
+  color: var(--blue);
+  background: #f0f6f8;
+}
+
+.supplier .settlement-balance .emphasis {
+  color: #98600f;
+  background: #fbf5e9;
+}
+
+.balance-track {
+  grid-column: 1 / -1;
+  height: 5px;
+  background: #dce6e9;
+}
+
+.balance-track i {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  transition: width 180ms ease-out;
+}
+
+.settlement-confirm-step {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.settlement-confirm-step > div {
+  display: grid;
+  gap: 5px;
+}
+
+.settlement-confirm-step span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settlement-confirm-step .settlement-notice {
+  grid-column: 1 / -1;
+}
+
+.allocation-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 12px;
+}
+
+.allocation-heading h4 {
+  margin: 3px 0 0;
+  font-size: 17px;
+}
+
+.allocation-heading > strong {
+  color: var(--blue);
+  font: 700 18px ui-monospace, monospace;
+}
+
+.allocation-list {
+  border: 1px solid var(--line);
+}
+
+.allocation-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(140px, 0.8fr) 150px 62px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border-bottom: 1px solid #dce5e8;
+}
+
+.allocation-row:last-child {
+  border-bottom: 0;
+}
+
+.allocation-row > span {
+  display: grid;
+  gap: 3px;
+}
+
+.allocation-row small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.allocation-row button {
+  min-height: 40px;
+  padding-inline: 10px;
+}
+
+.allocation-empty {
+  padding: 26px 18px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.allocation-check {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 14px;
+  color: white;
+  background: var(--ink);
+  font: 700 12px ui-monospace, monospace;
+}
+
+.allocation-check.over {
+  background: var(--stamp);
+}
+
+.settlement-complete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 180px;
+}
+
+.settlement-complete svg {
+  width: 40px;
+  height: 40px;
+  color: var(--green);
+}
+
+.settlement-complete div {
+  display: grid;
+  gap: 4px;
+}
+
+.settlement-complete span {
+  color: var(--muted);
+}
+
+@media (max-width: 760px) {
+  .settlement-grid,
+  .settlement-balance {
+    grid-template-columns: 1fr;
+  }
+
+  .settlement-balance > div:not(.balance-track) {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .settlement-balance > div:first-child {
+    border-top: 0;
+  }
+
+  .allocation-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .allocation-row input {
+    grid-column: 1;
+  }
+
+  .settlement-form form > footer,
+  .settlement-confirm-step {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .settlement-form form > footer button,
+  .settlement-confirm-step > button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .balance-track i {
+    transition: none;
+  }
+}

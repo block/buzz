@@ -1,0 +1,16 @@
+[package]
+name = "business-query-contracts"
+description = "Strict read-only business query contracts shared by the Business MCP and API adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+schemars = { workspace = true, features = ["derive", "chrono04", "uuid1"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

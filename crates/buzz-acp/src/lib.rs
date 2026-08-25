@@ -9,9 +9,11 @@ mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
 mod prompt_project;
+mod product_extensions;
 mod queue;
 mod relay;
 mod setup_mode;
+mod turn_observer;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -2192,17 +2194,38 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
+    let turn_extension = product_extensions::load_from_env(&config.agent_command)
+        .map_err(|error| anyhow::anyhow!("turn extension configuration error: {error}"))?;
+    let turn_extension_policy = turn_extension
+        .as_ref()
+        .map(|extension| extension.startup_policy());
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers: if turn_extension_policy
+            .is_some_and(|policy| policy.replace_standard_mcp_servers)
+        {
+            vec![]
+        } else {
+            build_mcp_servers(&config)
+        },
+        turn_extension,
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
-        max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
+        max_turn_duration: Duration::from_secs(
+            turn_extension_policy
+                .and_then(|policy| policy.max_turn_duration)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(config.max_turn_duration_secs),
+        ),
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
-        base_prompt: if config.no_base_prompt {
+        base_prompt: if let Some(base_prompt) =
+            turn_extension_policy.and_then(|policy| policy.base_prompt)
+        {
+            Some(base_prompt)
+        } else if config.no_base_prompt {
             None
         } else if let Some(content) = base_prompt_content {
             Some(Box::leak(content.into_boxed_str()))
@@ -2220,7 +2243,8 @@ async fn tokio_main() -> Result<()> {
         agent_owner_pubkey: startup_owner
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
-        memory_enabled: config.memory_enabled,
+        memory_enabled: config.memory_enabled
+            && !turn_extension_policy.is_some_and(|policy| policy.disable_memory),
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     });

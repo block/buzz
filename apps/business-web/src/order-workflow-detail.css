@@ -1,0 +1,131 @@
+.record-detail {
+  max-width: 920px;
+  margin: 0 auto;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  box-shadow: 7px 7px 0 var(--workflow-accent-soft);
+}
+
+.record-detail-intro {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.72fr) 1.28fr;
+  gap: 20px;
+  align-items: end;
+  padding: 18px 20px;
+  background: var(--workflow-accent-soft);
+  border-bottom: 1px solid var(--line);
+}
+
+.record-detail-intro span {
+  color: var(--workflow-accent-ink);
+  font:
+    700 10px ui-monospace,
+    monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.record-detail-intro p,
+.record-detail > footer p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.record-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.record-detail-field {
+  min-width: 0;
+  padding: 16px 18px;
+  border-right: 1px solid #d9e2e5;
+  border-bottom: 1px solid #d9e2e5;
+}
+
+.record-detail-field:nth-child(3n) {
+  border-right: 0;
+}
+
+.record-detail-field dt {
+  margin-bottom: 7px;
+  color: var(--muted);
+  font:
+    10px ui-monospace,
+    monospace;
+  letter-spacing: 0.05em;
+}
+
+.record-detail-field dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.record-detail-field.money dd {
+  color: var(--workflow-accent-ink);
+  font:
+    700 19px "Arial Narrow",
+    sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.record-detail-field.status dd {
+  display: inline-flex;
+  padding: 4px 7px;
+  color: var(--workflow-accent-ink);
+  background: var(--workflow-accent-soft);
+  border: 1px solid color-mix(in srgb, var(--workflow-accent) 35%, white);
+  font-size: 11px;
+}
+
+.record-detail-field.id {
+  grid-column: span 2;
+}
+
+.record-detail-field.id code {
+  color: var(--workflow-accent-ink);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.record-detail > footer {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 18px;
+}
+
+.record-detail > footer span {
+  padding: 4px 7px;
+  color: #536873;
+  background: #edf2f4;
+  border: 1px solid #c9d5da;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .record-detail {
+    box-shadow: none;
+  }
+
+  .record-detail-intro,
+  .record-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .record-detail-field,
+  .record-detail-field:nth-child(3n) {
+    grid-column: auto;
+    border-right: 0;
+  }
+
+  .record-detail > footer {
+    grid-template-columns: 1fr;
+  }
+}

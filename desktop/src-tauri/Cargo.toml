@@ -24,6 +24,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["system-keyring"]
 mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:mesh-llm-client", "dep:mesh-llm-node", "dep:mesh-llm-system", "dep:mesh-llm-events"]
+# Release-mode acceptance bundles still need a development identity. Do not
+# infer this from debug_assertions: Tauri packages are optimized release builds.
+dev-identity = []
+# Local Authentik transport exists only in explicitly marked POC bundles.
+authentik-poc = ["dev-identity"]
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
 system-keyring = ["dep:keyring"]

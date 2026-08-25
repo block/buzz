@@ -1,0 +1,178 @@
+# yaml-language-server: $schema=https://goauthentik.io/blueprints/schema.json
+version: 1
+metadata:
+  name: Business Dock V3.1 local SSO POC
+  labels:
+    blueprints.goauthentik.io/description: >-
+      Local-only POC identities, groups, and strict OIDC clients. This file is
+      mounted only by docker-compose.poc-provision.yml; production is disabled.
+context:
+  poc_admin_password: !Env POC_ADMIN_PASSWORD
+  poc_user_password: !Env POC_USER_PASSWORD
+  workbench_client_id: !Env WORKBENCH_OIDC_CLIENT_ID
+  business_client_id: !Env BUSINESS_OIDC_CLIENT_ID
+  business_client_secret: !Env BUSINESS_OIDC_CLIENT_SECRET
+entries:
+  - model: authentik_core.group
+    id: group-admin
+    identifiers:
+      name: bizfin-admin
+    attrs:
+      is_superuser: false
+  - model: authentik_core.group
+    id: group-finance
+    identifiers:
+      name: bizfin-finance
+    attrs:
+      is_superuser: false
+  - model: authentik_core.group
+    id: group-business
+    identifiers:
+      name: bizfin-business
+    attrs:
+      is_superuser: false
+
+  - model: authentik_core.user
+    state: created
+    identifiers:
+      username: poc-admin
+    attrs:
+      name: POC Admin
+      email: poc-admin@bizfin.localhost
+      is_active: true
+      password: !Context poc_admin_password
+      groups:
+        - !KeyOf group-admin
+        - !KeyOf group-finance
+        - !KeyOf group-business
+  - model: authentik_core.user
+    state: created
+    identifiers:
+      username: poc-user
+    attrs:
+      name: POC User
+      email: poc-user@bizfin.localhost
+      is_active: true
+      password: !Context poc_user_password
+      groups:
+        - !KeyOf group-finance
+        - !KeyOf group-business
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: require-pkce-s256
+    identifiers:
+      name: business-dock-v3.1-require-pkce-s256
+    attrs:
+      expression: |
+        challenge = request.context.get("oauth_code_challenge")
+        method = request.context.get("oauth_code_challenge_method")
+        return bool(challenge) and method == "S256"
+
+  - model: authentik_providers_oauth2.oauth2provider
+    id: workbench-provider
+    identifiers:
+      name: BizFin Workbench
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: public
+      client_id: !Context workbench_client_id
+      grant_types:
+        - authorization_code
+        - refresh_token
+      refresh_token_validity: days=90
+      refresh_token_threshold: days=7
+      redirect_uris:
+        - matching_mode: strict
+          url: https://workbench.bizfin.test/auth/callback
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: https://workbench.bizfin.test/auth/callback?e2e=mock
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: https://workbench.bizfin.localhost/auth/callback
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: https://workbench.bizfin.localhost/auth/callback?e2e=mock
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: buzz-dev://auth/callback
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: https://workbench.bizfin.test/
+          redirect_uri_type: logout
+        - matching_mode: strict
+          url: https://workbench.bizfin.localhost/
+          redirect_uri_type: logout
+        - matching_mode: strict
+          url: buzz-dev://auth/logout-callback
+          redirect_uri_type: logout
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+  - model: authentik_core.application
+    id: workbench-application
+    identifiers:
+      slug: workbench
+    attrs:
+      name: BizFin Workbench
+      provider: !KeyOf workbench-provider
+  - model: authentik_policies.policybinding
+    identifiers:
+      policy: !KeyOf require-pkce-s256
+      target: !KeyOf workbench-application
+      order: 0
+    attrs:
+      enabled: true
+      negate: false
+      timeout: 30
+
+  - model: authentik_providers_oauth2.oauth2provider
+    id: business-provider
+    identifiers:
+      name: BizFin Business System
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: confidential
+      client_id: !Context business_client_id
+      client_secret: !Context business_client_secret
+      grant_types:
+        - authorization_code
+      redirect_uris:
+        - matching_mode: strict
+          url: https://business.bizfin.test/auth/callback
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: https://business.bizfin.localhost/auth/callback
+          redirect_uri_type: authorization
+        - matching_mode: strict
+          url: https://business.bizfin.test/
+          redirect_uri_type: logout
+        - matching_mode: strict
+          url: https://business.bizfin.localhost/
+          redirect_uri_type: logout
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+  - model: authentik_core.application
+    id: business-application
+    identifiers:
+      slug: business
+    attrs:
+      name: BizFin Business System
+      provider: !KeyOf business-provider
+  - model: authentik_policies.policybinding
+    identifiers:
+      policy: !KeyOf require-pkce-s256
+      target: !KeyOf business-application
+      order: 0
+    attrs:
+      enabled: true
+      negate: false
+      timeout: 30

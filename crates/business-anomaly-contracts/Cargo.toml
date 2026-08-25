@@ -1,0 +1,17 @@
+[package]
+name = "business-anomaly-contracts"
+description = "Strict facts, inputs, findings, and result contracts for deterministic business anomaly analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+business-query-contracts = { path = "../business-query-contracts" }
+chrono = { workspace = true }
+schemars = { workspace = true, features = ["derive", "chrono04", "uuid1"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

@@ -27,7 +27,18 @@ members = [
     "crates/buzz-pair-relay",
     "crates/buzz-relay-mesh",
     "crates/buzz-dev-mcp",
+    "crates/business-query-contracts",
+    "crates/business-anomaly-contracts",
+    "crates/business-action-contracts",
+    "crates/business-execution-contracts",
+    "crates/business-iam",
+    "services/business-analytics",
+    "services/business-action-service",
+    "services/business-read-api",
+    "services/business-read-mcp",
     "crates/buzz-voice",
+    "services/business-auth-gateway",
+    "services/business-core",
     "crates/buzz-backend-kubernetes",
     "crates/buzz-datastore-tracing",
     "examples/countdown-bot",
@@ -54,7 +65,7 @@ tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip"
 
 # Database
 sqlx = { version = "0.9", features = [
-    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "rust_decimal"
 ] }
 
 # Redis
@@ -79,6 +90,7 @@ postcard    = { version = "1", default-features = false, features = ["use-std"] 
 iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring"] }
 serde_json  = { version = "1", features = ["raw_value"] }
 serde_yaml  = "0.9"
+rust_decimal = "1"
 evalexpr    = "11"
 cron        = "0.16"
 # Observability
@@ -108,6 +120,7 @@ sha2      = "0.11"
 hex       = "0.4"
 hmac      = "0.13"
 base64    = "0.22"
+jsonwebtoken = "9.3"
 
 # Randomness
 rand = "0.10"

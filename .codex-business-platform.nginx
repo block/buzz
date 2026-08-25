@@ -1,0 +1,147 @@
+server {
+    server_name auth.shiyueshizi.com;
+
+    location ~ ^/application/o/(token|userinfo|workbench/jwks)/$|^/application/o/workbench/\.well-known/openid-configuration$ {
+        proxy_pass http://127.0.0.1:9100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Credentials;
+        proxy_hide_header Access-Control-Allow-Headers;
+        proxy_hide_header Access-Control-Allow-Methods;
+        add_header Access-Control-Allow-Origin "tauri://localhost" always;
+        add_header Access-Control-Allow-Credentials "true" always;
+        add_header Access-Control-Allow-Headers "authorization,content-type" always;
+        add_header Access-Control-Allow-Methods "GET,POST,OPTIONS" always;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:9100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    listen [::]:443 ssl; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/business-platform/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/business-platform/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+
+server {
+    server_name business.shiyueshizi.com;
+    root /opt/business-platform/shared/business-web;
+    index index.html;
+
+    location = /api/me { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location ^~ /api/identity-bindings/ { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location ^~ /api/embed-sessions { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location = /api/session { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location ^~ /api/logout { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location = /api/oidc/backchannel-logout { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location = /embed/bootstrap { proxy_pass http://127.0.0.1:3100; include proxy_params; access_log off; }
+    location ^~ /internal/agent- { proxy_pass http://127.0.0.1:3100; include proxy_params; }
+    location ^~ /api/v1/ { proxy_pass http://127.0.0.1:3120; include proxy_params; }
+    location ^~ /v1/ { proxy_pass http://127.0.0.1:3120; include proxy_params; }
+    location / { try_files $uri $uri/ /index.html; }
+
+    listen [::]:443 ssl; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/business-platform/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/business-platform/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+
+server {
+    server_name business-read.shiyueshizi.com;
+    location / { proxy_pass http://127.0.0.1:3130; include proxy_params; }
+
+    listen [::]:443 ssl; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/business-platform/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/business-platform/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+
+server {
+    server_name workbench.shiyueshizi.com;
+    default_type text/html;
+    return 200 '<!doctype html><meta charset="utf-8"><title>企业工作台</title><h1>企业工作台</h1><p>请使用 Buzz 客户端登录。</p>';
+
+    listen [::]:443 ssl; # managed by Certbot
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/business-platform/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/business-platform/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+server {
+    if ($host = auth.shiyueshizi.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    listen [::]:80;
+    server_name auth.shiyueshizi.com;
+    return 404; # managed by Certbot
+
+
+}
+
+server {
+    if ($host = workbench.shiyueshizi.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    listen [::]:80;
+    server_name workbench.shiyueshizi.com;
+    return 404; # managed by Certbot
+
+
+}
+
+server {
+    if ($host = business.shiyueshizi.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    listen [::]:80;
+    server_name business.shiyueshizi.com;
+    return 404; # managed by Certbot
+
+
+}
+
+server {
+    if ($host = business-read.shiyueshizi.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    listen [::]:80;
+    server_name business-read.shiyueshizi.com;
+    return 404; # managed by Certbot
+
+
+}

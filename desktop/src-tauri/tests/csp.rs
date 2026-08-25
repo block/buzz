@@ -192,6 +192,14 @@ fn connect_src_allows_ipc_and_cleartext_relays() {
 }
 
 #[test]
+fn frame_src_defaults_to_self_only() {
+    // The `pnpm tauri` wrapper replaces this directive at build time with
+    // `'self'` plus the exact validated VITE_BUSINESS_APP_ORIGIN. Keeping the
+    // checked-in default self-only makes direct Cargo builds fail closed.
+    assert_eq!(sources("frame-src"), vec!["'self'".to_owned()]);
+}
+
+#[test]
 fn script_src_stays_free_of_unsafe_inline_and_eval() {
     let allowed = sources("script-src");
     // The inline boot script in index.html is covered by Tauri's build-time

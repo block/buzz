@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Business System Mock</title>
+    <link rel="stylesheet" href="/business-dock-test.css" />
+  </head>
+  <body>
+    <main>
+      <div class="environment-banner" role="status">
+        <strong>Desensitized Acceptance UI</strong>
+        <span>Production Disabled</span>
+      </div>
+      <p class="eyebrow">Development fixture · no authority-system writes</p>
+      <h1>Business System Mock</h1>
+      <section id="lifecycle-view" class="lifecycle-view" aria-live="polite">
+        <p class="eyebrow" id="lifecycle-kind">Finding lifecycle</p>
+        <h2 id="lifecycle-title">经营异常处置工作台</h2>
+        <p id="lifecycle-summary">仅创建内部处置记录；不修改销售、采购、库存、资金或财务权威数据。</p>
+        <p id="draft-only-warning" class="draft-warning" hidden>
+          Draft Only · 此内容仅为审批材料草稿，尚未提交正式审批，也不会触发任何业务操作。
+        </p>
+        <dl class="lifecycle-facts">
+          <div><dt>Condition</dt><dd id="condition-status">active</dd></div>
+          <div><dt>Review</dt><dd id="review-status">unreviewed</dd></div>
+          <div><dt>Trace</dt><dd id="lifecycle-trace">trace-v6-acceptance</dd></div>
+        </dl>
+      </section>
+      <dl>
+        <div><dt>Current URL</dt><dd id="current-url"></dd></div>
+        <div><dt>Theme</dt><dd id="theme">unknown</dd></div>
+        <div><dt>Bridge</dt><dd id="bridge">connecting</dd></div>
+        <div><dt>Refreshes</dt><dd id="refresh-count">0</dd></div>
+        <div><dt>Resource</dt><dd id="current-resource">none</dd></div>
+        <div><dt>Auth V3</dt><dd id="auth-status">authenticated</dd></div>
+      </dl>
+      <div class="actions">
+        <button id="open-anomaly" type="button">Open anomaly finding</button>
+        <button id="open-proposal" type="button">Open action proposal</button>
+        <button id="prepare-work-item" type="button">Prepare Work Item Preview</button>
+        <button id="confirm-work-item" type="button">Confirm Work Item</button>
+        <button id="open-work-item" type="button">Open work item</button>
+        <button id="open-approval-draft" type="button">Open approval draft</button>
+        <button id="open-order" type="button">Open sales order SO-1042</button>
+        <button id="change-resource" type="button">Change Resource</button>
+        <button id="mark-dirty" type="button">Mark Dirty</button>
+        <button id="mark-clean" type="button">Mark Clean</button>
+        <button id="action-success" type="button">Action Success</button>
+        <button id="action-failed" type="button">Action Failed</button>
+        <button id="data-changed" type="button">Data Changed</button>
+        <button id="auth-required" type="button">Require Auth</button>
+        <button id="auth-success" type="button">Authenticate</button>
+        <button id="auth-expired" type="button">Expire Session</button>
+      </div>
+    </main>
+    <script src="/business-dock-test.js"></script>
+  </body>
+</html>

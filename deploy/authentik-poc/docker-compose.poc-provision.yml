@@ -1,0 +1,8 @@
+# V3.1 local POC only. Production must not include this overlay.
+services:
+  server:
+    volumes:
+      - ./blueprints:/blueprints/custom:ro
+  worker:
+    volumes:
+      - ./blueprints:/blueprints/custom:ro

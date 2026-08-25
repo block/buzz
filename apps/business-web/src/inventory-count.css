@@ -1,0 +1,46 @@
+.inventory-control { margin: 18px 0; border: 1px solid var(--line); background: #eef3f4; }
+.inventory-control > header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 16px; border-bottom:1px solid var(--line); }
+.inventory-control > header div { display:grid; gap:2px; }
+.inventory-control > header span { color:var(--muted); font:10px ui-monospace,monospace; letter-spacing:.08em; text-transform:uppercase; }
+.inventory-health { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line); border-bottom:1px solid var(--line); }
+.inventory-health > div { display:grid; gap:3px; padding:12px 14px; background:white; }
+.inventory-health span,.inventory-health small { color:var(--muted); font-size:11px; }
+.inventory-health strong { font-size:18px; font-variant-numeric:tabular-nums; }
+.inventory-count-table { background:white; }
+.inventory-count-head,.inventory-count-table article { display:grid; grid-template-columns:1.3fr .8fr .7fr 1fr 1.5fr; align-items:center; gap:12px; min-width:800px; padding:10px 14px; border-bottom:1px solid var(--line); }
+.inventory-count-table { overflow-x:auto; }
+.inventory-count-head { color:var(--muted); background:#dfe8eb; font:10px ui-monospace,monospace; text-transform:uppercase; }
+.inventory-count-table article > div:first-child { display:grid; gap:3px; }
+.inventory-count-table article code { color:var(--muted); }
+.inventory-count-actions { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+.count-status { padding:4px 7px; border:1px solid var(--line); color:var(--muted); font-size:10px; }
+.count-status.counting,.count-status.counted { color:#8a5a0a; background:#fff6df; border-color:#dfc47c; }
+.count-status.posted { color:#176341; background:#e6f4ec; border-color:#8bc6a7; }
+.count-status.cancelled { color:var(--stamp); background:#fff0ee; }
+.inventory-count-empty,.inventory-count-notice { margin:0; padding:16px; color:var(--muted); }
+.inventory-count-notice { color:var(--stamp); background:#fff0ee; border-left:3px solid var(--stamp); }
+.aging-register { border-top:1px solid var(--line); background:white; }
+.aging-register summary { cursor:pointer; padding:12px 14px; font-weight:700; }
+.aging-register > div { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:12px; padding:9px 14px; border-top:1px solid var(--line); }
+.inventory-count-scrim { position:fixed; inset:0 auto auto 0; z-index:1200; display:grid; place-items:center; width:calc(100vw * var(--page-zoom-inverse, 1)); height:calc(100dvh * var(--page-zoom-inverse, 1)); padding:24px; background:rgb(4 17 27 / 58%); }
+.inventory-count-modal { width:min(920px,100%); max-height:calc(90dvh * var(--page-zoom-inverse, 1)); overflow:auto; background:#fbfaf6; border:1px solid #071827; box-shadow:8px 8px 0 rgb(4 17 27 / 24%); }
+.inventory-count-modal > header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center; padding:14px 18px; color:white; background:var(--ink); }
+.inventory-count-modal > header button { min-width:40px; min-height:40px; color:white; background:transparent; border:1px solid rgb(255 255 255 / 30%); }
+.count-form,.count-command { display:grid; gap:14px; padding:18px; }
+.count-form > label { display:grid; gap:5px; color:var(--muted); font-size:11px; }
+.count-form input,.count-form select,.count-form textarea { min-width:0; padding:10px; color:var(--ink); background:white; border:1px solid var(--line); font:inherit; }
+.count-form textarea { min-height:64px; resize:vertical; }
+.count-callout { display:grid; gap:4px; padding:11px 13px; background:#eaf2ee; border-left:3px solid var(--green); }
+.count-callout span { color:var(--muted); font-size:12px; }
+.count-callout.danger { background:#fff0ee; border-color:var(--stamp); }
+.count-sku-list,.count-entry-lines { border:1px solid var(--line); background:white; }
+.count-sku-list > header { display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:#dfe8eb; }
+.count-sku-list > label { display:grid; grid-template-columns:24px 1fr auto; gap:10px; align-items:center; padding:9px 10px; border-top:1px solid var(--line); }
+.count-sku-list > label span { display:flex; gap:8px; }
+.count-sku-list small { color:var(--muted); }
+.count-entry-lines > div { display:grid; grid-template-columns:1.4fr .7fr .8fr .5fr .9fr; gap:10px; align-items:end; padding:10px; border-top:1px solid var(--line); }
+.count-entry-lines > div:first-child { border-top:0; }
+.count-entry-lines > div > span:first-child,.count-entry-lines label { display:grid; gap:3px; }
+.count-entry-lines small,.count-entry-lines label span { color:var(--muted); font-size:10px; }
+.count-entry-lines .positive { color:var(--green); }.count-entry-lines .negative { color:var(--stamp); }
+@media(max-width:760px){.inventory-health{grid-template-columns:1fr 1fr}.count-entry-lines>div{grid-template-columns:1fr 1fr}.aging-register>div{grid-template-columns:1fr 1fr}.inventory-count-scrim{padding:8px}}

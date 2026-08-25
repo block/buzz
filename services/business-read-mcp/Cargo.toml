@@ -1,0 +1,33 @@
+[package]
+name = "business-read-mcp"
+description = "Fixed-surface read-only MCP server for Business Agent queries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "business_read_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "business-read-mcp"
+path = "src/main.rs"
+
+[dependencies]
+business-anomaly-contracts = { path = "../../crates/business-anomaly-contracts" }
+business-action-contracts = { path = "../../crates/business-action-contracts" }
+business-query-contracts = { path = "../../crates/business-query-contracts" }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }

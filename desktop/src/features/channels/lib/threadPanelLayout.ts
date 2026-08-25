@@ -16,7 +16,7 @@ export type ThreadPanelLayoutProps = {
   showBackButton?: boolean;
   onHeaderTitleClick?: () => void;
   onResetWidth?: () => void;
-  onResizeStart?: React.PointerEventHandler<HTMLButtonElement>;
+  onResizeStart?: React.MouseEventHandler<HTMLButtonElement>;
   splitPaneClamp?: boolean;
   testId?: string;
   transparentChrome?: boolean;

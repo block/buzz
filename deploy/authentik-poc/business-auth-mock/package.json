@@ -1,0 +1,8 @@
+{
+  "name": "pacioli-business-auth-mock",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openid-client": "6.8.1"
+  }
+}

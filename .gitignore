@@ -39,6 +39,7 @@ blob-report/
 
 # Node modules (pnpm workspace hoists to root)
 node_modules/
+/apps/business-web/dist/
 
 # Root npm lockfiles are accidental; desktop uses pnpm in /desktop.
 /package-lock.json
@@ -72,3 +73,8 @@ identity.key
 
 # Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
 deploy/charts/*/charts/*.tgz
+# Authentik POC runtime material
+deploy/authentik-poc/.env
+deploy/authentik-poc/data/
+deploy/authentik-poc/certs/
+deploy/authentik-poc/custom-templates/

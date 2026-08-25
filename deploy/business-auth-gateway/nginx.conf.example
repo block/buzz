@@ -1,0 +1,24 @@
+map $request_uri $safe_request_uri {
+  ~^/embed/bootstrap /embed/bootstrap?code=[REDACTED];
+  default $uri;
+}
+log_format business_safe '$remote_addr $request_method $safe_request_uri $status $request_id';
+
+server {
+  listen 443 ssl http2;
+  server_name business.example.com;
+  access_log /var/log/nginx/business-access.log business_safe;
+  ssl_certificate /run/secrets/tls_certificate;
+  ssl_certificate_key /run/secrets/tls_private_key;
+
+  location = /embed/bootstrap {
+    proxy_pass http://business-auth-gateway:3100;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Trace-Id $request_id;
+  }
+  location /api/ {
+    proxy_pass http://business-auth-gateway:3100;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Trace-Id $request_id;
+  }
+}

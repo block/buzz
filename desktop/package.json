@@ -16,13 +16,13 @@
     "format": "biome format --write .",
     "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\"",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "node ./scripts/tauri-business-dock.mjs",
     "test:e2e": "pnpm build:e2e && playwright test",
     "test:e2e:smoke": "pnpm build:e2e && playwright test --project=smoke",
     "test:e2e:integration": "pnpm build:e2e && playwright test --project=integration",
     "test:e2e:release-smoke": "pnpm build:e2e && playwright test --config=playwright.release-smoke.config.ts",
     "test:e2e:report": "playwright show-report",
-    "tauri:build": "tauri build"
+    "tauri:build": "pnpm tauri build"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -51,6 +51,7 @@
     "@tanstack/react-router": "^1.168.10",
     "@tanstack/react-virtual": "^3.14.2",
     "@tauri-apps/api": "~2.11",
+    "@tauri-apps/plugin-deep-link": "~2.4.9",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "~2.5",
     "@tauri-apps/plugin-process": "^2.3.1",
@@ -70,6 +71,7 @@
     "lucide-react": "^1.0.0",
     "mdast-util-from-markdown": "^2.0.3",
     "motion": "^12.38.0",
+    "oidc-client-ts": "^3.5.0",
     "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",

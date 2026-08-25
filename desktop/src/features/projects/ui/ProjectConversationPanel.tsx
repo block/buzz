@@ -47,7 +47,7 @@ export function ProjectConversationPanel({
   hit: SearchHit;
   onClose: () => void;
   onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
   sharedHeaderBackdrop?: boolean;
   widthPx: number;
 }) {
@@ -345,7 +345,7 @@ function wrapProjectConversationPane(
     canResetWidth: boolean;
     isOverlay: boolean;
     onResetWidth: () => void;
-    onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+    onResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
     widthPx: number;
   },
 ) {

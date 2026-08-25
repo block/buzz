@@ -1,0 +1,27 @@
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    networks:
+      default:
+        aliases:
+          - auth.bizfin.localhost
+          - business.bizfin.localhost
+          - workbench.bizfin.localhost
+          - auth.bizfin.test
+          - business.bizfin.test
+          - workbench.bizfin.test
+
+  business-auth-mock:
+    environment:
+      NODE_EXTRA_CA_CERTS: /certs/rootCA.pem
+    volumes:
+      - ./certs/rootCA.pem:/certs/rootCA.pem:ro

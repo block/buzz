@@ -2,6 +2,8 @@ import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
+import { useOptionalBusinessDock } from "@/features/business-dock/BusinessDockProvider";
+import { buildBusinessUrl } from "@/features/business-dock/businessResourceResolver";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 
@@ -34,6 +36,22 @@ export function ExternalLinkAnchor({
   isLinearLink: boolean;
   label: string;
 }) {
+  const businessDock = useOptionalBusinessDock();
+  const businessResource =
+    href && businessDock
+      ? businessDock.resolveBusinessResourceLink(href)
+      : null;
+  const businessLink =
+    businessResource &&
+    businessDock?.config &&
+    buildBusinessUrl(businessResource, businessDock.config)
+      ? {
+          onOpenInBrowser: () =>
+            businessDock.openBusinessResourceInBrowser(businessResource),
+          onOpenInDock: () =>
+            businessDock.openBusinessResource(businessResource),
+        }
+      : null;
   const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
@@ -46,6 +64,18 @@ export function ExternalLinkAnchor({
         isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
       )}
       href={href}
+      onClick={(event) => {
+        if (!businessLink) {
+          anchorProps.onClick?.(event);
+          return;
+        }
+        event.preventDefault();
+        if (event.metaKey || event.ctrlKey) {
+          businessLink.onOpenInBrowser();
+          return;
+        }
+        businessLink.onOpenInDock();
+      }}
       onContextMenuCapture={(event) => {
         if (!href) return;
         event.preventDefault();
@@ -67,10 +97,25 @@ export function ExternalLinkAnchor({
         <MediaContextMenu
           dataAttributes={["data-link-context-menu"]}
           items={[
+            ...(businessLink
+              ? [
+                  {
+                    label: "Open in Business Dock",
+                    onSelect: () => {
+                      closeMenu();
+                      businessLink.onOpenInDock();
+                    },
+                  },
+                ]
+              : []),
             {
-              label: "Open link",
+              label: businessLink ? "Open in Browser" : "Open link",
               onSelect: () => {
                 closeMenu();
+                if (businessLink) {
+                  businessLink.onOpenInBrowser();
+                  return;
+                }
                 void openUrl(href).catch(() => {
                   toast.error("Failed to open link");
                 });

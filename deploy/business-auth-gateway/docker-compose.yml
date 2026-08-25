@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      BUSINESS_AUTH_RUNTIME_DATABASE_ROLE: ${BUSINESS_AUTH_RUNTIME_DATABASE_ROLE:?required}
+      BUSINESS_AUTH_RUNTIME_DATABASE_PASSWORD: ${BUSINESS_AUTH_RUNTIME_DATABASE_PASSWORD:?required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - business-auth-postgres:/var/lib/postgresql/data
+      - ./postgres-init/001-runtime-role.sh:/docker-entrypoint-initdb.d/001-runtime-role.sh:ro
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: services/business-auth-gateway/Dockerfile
+    command: ["--migrate-only"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      BUSINESS_AUTH_RUNTIME_DATABASE_ROLE: ${BUSINESS_AUTH_RUNTIME_DATABASE_ROLE:?required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: services/business-auth-gateway/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${BUSINESS_AUTH_RUNTIME_DATABASE_ROLE}:${BUSINESS_AUTH_RUNTIME_DATABASE_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      BIND_ADDR: 0.0.0.0:3100
+      AUTHENTIK_ISSUER: ${AUTHENTIK_ISSUER:?required}
+      WORKBENCH_CLIENT_ID: ${WORKBENCH_CLIENT_ID:?required}
+      BUSINESS_CLIENT_ID: ${BUSINESS_CLIENT_ID:?required}
+      ALLOWED_WORKBENCH_ORIGINS: ${ALLOWED_WORKBENCH_ORIGINS:?required}
+      BUSINESS_APP_ORIGIN: ${BUSINESS_APP_ORIGIN:?required}
+      IDENTITY_BINDING_CHALLENGE_TTL_SECONDS: ${IDENTITY_BINDING_CHALLENGE_TTL_SECONDS:-90}
+      EMBED_SESSION_TTL_SECONDS: ${EMBED_SESSION_TTL_SECONDS:-30}
+      BUSINESS_SESSION_TTL_SECONDS: ${BUSINESS_SESSION_TTL_SECONDS:-86400}
+      EMBED_SESSION_RATE_LIMIT_PER_MINUTE: ${EMBED_SESSION_RATE_LIMIT_PER_MINUTE:-10}
+      SESSION_CLEANUP_INTERVAL_SECONDS: ${SESSION_CLEANUP_INTERVAL_SECONDS:-60}
+      BUSINESS_SESSION_COOKIE_NAME: ${BUSINESS_SESSION_COOKIE_NAME:-__Host-bizfin_business}
+      BUSINESS_SESSION_COOKIE_SECURE: ${BUSINESS_SESSION_COOKIE_SECURE:-true}
+      BUSINESS_SESSION_COOKIE_SAMESITE: ${BUSINESS_SESSION_COOKIE_SAMESITE:-None}
+      DEPLOYMENT_ID: ${DEPLOYMENT_ID:?required}
+      GLOBAL_LOGOUT_REDIRECT_URI: ${GLOBAL_LOGOUT_REDIRECT_URI:?required}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    ports: ["127.0.0.1:3100:3100"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/business-auth-gateway", "--version"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  business-auth-postgres:

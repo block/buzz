@@ -60,7 +60,7 @@ export function ProjectConversationPanelController({
   fallbackPanelWidthPx: number;
   onOpenConversation: () => void;
   onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
   resetKey: string;
   sharedHeaderBackdrop?: boolean;
   widthPx: number;

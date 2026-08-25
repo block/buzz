@@ -14,7 +14,7 @@ type ChannelManagementAuxiliaryPanelProps = {
   onOpenMembers?: () => void;
   onResetThreadPanelWidth: () => void;
   onThreadPanelResizeStart: (
-    event: React.PointerEvent<HTMLButtonElement>,
+    event: React.MouseEvent<HTMLButtonElement>,
   ) => void;
   threadPanelWidthPx: number;
   useSplitAuxiliaryPane: boolean;

@@ -303,6 +303,11 @@ impl McpRegistry {
         self.by_qname.contains_key(qname)
     }
 
+    /// Whether this session exposes the shell path used for explicit Buzz replies.
+    pub fn has_shell_tool(&self) -> bool {
+        self.by_qname.keys().any(|name| name.ends_with("__shell"))
+    }
+
     /// True if `qname` resolves to a hidden hook tool (bare name starts
     /// with `_`). Used to reject hook calls coming from the LLM path —
     /// hooks are only callable via `call_hooks`.

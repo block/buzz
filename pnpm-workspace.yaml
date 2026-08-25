@@ -2,6 +2,7 @@ packages:
   - "desktop"
   - "web"
   - "admin-web"
+  - "apps/business-web"
 allowBuilds:
   esbuild: true
 overrides:

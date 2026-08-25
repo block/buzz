@@ -483,6 +483,79 @@ relay-release: bootstrap _ensure-migrations
     set +o allexport
     cargo run -p buzz-relay --release
 
+# Build an isolated V3.2 macOS acceptance bundle. The dev identifier plus the
+# authentik-poc feature keep keychain, WebKit and application data separate
+# from the user's Buzz install while excluding the POC proxy from real builds.
+business-dock-macos-build: bootstrap _ensure-sidecar-stubs _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cargo build --release -p buzz-relay -p buzz-admin -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cd {{desktop_dir}}
+    pnpm tauri build --bundles app --features authentik-poc --config src-tauri/tauri.dev.conf.json
+
+# Start Relay, wait for readiness, and launch the isolated packaged app.
+business-dock-macos-acceptance:
+    ./scripts/macos-business-dock-acceptance.sh
+
+# Verify the dedicated runtime exposes exactly the fixed Business MCP tools.
+business-agent-runtime-acceptance:
+    cargo build -p buzz-agent -p business-read-mcp
+    node ./scripts/business-agent-runtime-acceptance.mjs
+
+# Run the focused V6 lifecycle, protected-action API, read-only MCP, and Dock checks.
+business-action-check:
+    cargo test -p business-action-contracts -p business-action-service -p business-read-mcp -p business-auth-gateway -p buzz-acp --lib
+    pnpm -C desktop test
+    pnpm -C desktop typecheck
+    pnpm -C desktop check
+
+# V6.5 contracts and the checked-in honest blocked-readiness evidence.
+business-v65-check:
+    cargo test -p business-execution-contracts
+
+business-v7-readiness:
+    cargo run -p business-execution-contracts --bin v7-readiness-check -- docs/business-execution/v7-readiness-evidence.json
+
+# Business Core B1: master data, enterprise roles, six data-scope dimensions,
+# object access checks, and assignee/approver eligibility.
+business-core-check:
+    cargo fmt --all -- --check
+    cargo clippy -p business-core --all-targets -- -D warnings
+    cargo test -p business-core
+
+# B2 static/unit gates. PostgreSQL E2E is opt-in via
+# BUSINESS_CORE_B2_TEST_DATABASE_URL and must target a disposable database.
+business-b2-check: business-core-check
+    cargo clippy -p business-read-api -p business-query-contracts --all-targets -- -D warnings
+    cargo test -p business-read-api -p business-query-contracts
+    pnpm --filter business-web build
+
+# B3 static/unit gates. PostgreSQL E2E is opt-in via
+# BUSINESS_CORE_B3_TEST_DATABASE_URL and must target a disposable database.
+business-b3-check: business-b2-check
+    cargo clippy -p business-core -p business-read-api --all-targets -- -D warnings
+    cargo test -p business-core -p business-read-api
+    pnpm --filter business-web build
+    pnpm -C desktop exec node --test src/features/business-dock/businessResourceResolver.test.mjs
+
+# B4 profitability, deterministic allocation, immutable report snapshots,
+# real Read API/MCP integration, Business Web, and Business Dock resources.
+# PostgreSQL E2E is opt-in via BUSINESS_CORE_B4_TEST_DATABASE_URL.
+business-b4-check: business-b3-check
+    cargo clippy -p business-core -p business-read-api -p business-read-mcp -p business-query-contracts --all-targets -- -D warnings
+    cargo test -p business-core -p business-read-api -p business-read-mcp -p business-query-contracts
+    pnpm --filter business-web build
+    pnpm -C desktop exec node --test src/features/business-dock/businessResourceResolver.test.mjs
+
+# S1 stabilizes B1-B4 and adds scoped operating dashboards/data-quality reads.
+# PostgreSQL E2E reuses the disposable B4 workflow because S1 reads those facts.
+business-s1-check: business-b4-check
+    cargo clippy -p business-core --all-targets -- -D warnings
+    cargo test -p business-core
+    pnpm --filter business-web build
+    pnpm -C desktop exec node --test src/features/business-dock/businessResourceResolver.test.mjs
+
 
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
 dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
@@ -543,7 +616,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
-    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    pnpm tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run only the desktop app. No relay, database, Docker, migrations, or .env are needed.
 # The app opens normally and asks for a community before making a relay connection.
@@ -572,7 +645,7 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     fi
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
-    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    pnpm tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs
@@ -607,7 +680,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
-    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    pnpm tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the production relay (installs deps + builds agent tools automatically)
 production *ARGS: bootstrap _ensure-sidecar-stubs
@@ -642,7 +715,7 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting production on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
-    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    pnpm tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop frontend dev server (port derived from worktree)
 desktop-dev:

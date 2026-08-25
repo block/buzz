@@ -1,0 +1,18 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "com.bizfin.business-query-agent",
+  "name": "Business Query Agent",
+  "version": "1.0.0",
+  "description": "Read-only business operations query assistant",
+  "license": "Apache-2.0",
+  "personas": ["agents/business-query.persona.md"],
+  "defaults": {
+    "triggers": {
+      "mentions": true,
+      "keywords": [],
+      "all_messages": false
+    },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}

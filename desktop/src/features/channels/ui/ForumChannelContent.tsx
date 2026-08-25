@@ -25,7 +25,7 @@ type ForumChannelContentProps = {
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
-  onPanelResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onPanelResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onProfilePanelTabChange: (
     tab: ProfilePanelTab,
     options?: { replace?: boolean },

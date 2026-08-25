@@ -38,7 +38,7 @@ type AuxiliaryPanelProps = {
   layout?: AuxiliaryPanelLayout;
   onClose: () => void;
   onResetWidth?: () => void;
-  onResizeStart?: React.PointerEventHandler<HTMLButtonElement>;
+  onResizeStart?: React.MouseEventHandler<HTMLButtonElement>;
   resizeHandleAriaLabel?: string;
   resizeHandleTestId?: string;
   siblings?: React.ReactNode;
@@ -113,10 +113,10 @@ export function AuxiliaryPanel({
     onResizeStart != null ? (
       <button
         aria-label={resizeHandleAriaLabel}
-        className="peer/auxiliary-panel-resize group/auxiliary-panel-resize absolute inset-y-0 left-0 z-40 w-3 -translate-x-1/2 cursor-col-resize"
+        className="peer/auxiliary-panel-resize group/auxiliary-panel-resize absolute inset-y-0 left-0 z-40 w-3 touch-none cursor-col-resize select-none"
         data-testid={resizeHandleTestId}
         onDoubleClick={canResetWidth ? onResetWidth : undefined}
-        onPointerDown={onResizeStart}
+        onMouseDown={onResizeStart}
         title={
           canResetWidth
             ? "Drag to resize. Double-click to reset width."
@@ -124,7 +124,7 @@ export function AuxiliaryPanel({
         }
         type="button"
       >
-        <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/auxiliary-panel-resize:bg-border/80 group-focus-visible/auxiliary-panel-resize:bg-border/80" />
+        <span className="absolute bottom-0 left-0 top-10 w-px bg-border/80 transition-[width,background-color] group-hover/auxiliary-panel-resize:w-1 group-hover/auxiliary-panel-resize:bg-primary/70 group-focus-visible/auxiliary-panel-resize:w-1 group-focus-visible/auxiliary-panel-resize:bg-primary/70" />
       </button>
     ) : null;
 
