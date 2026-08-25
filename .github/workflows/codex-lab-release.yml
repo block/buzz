@@ -1,0 +1,173 @@
+name: Buzz Codex Lab release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version for the Codex Lab build
+        required: true
+        type: string
+
+concurrency:
+  group: buzz-codex-lab-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build and publish Windows updater
+    if: github.repository == 'chemyibinjiang/buzz'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      BUZZ_UPDATER_ENDPOINT: https://github.com/chemyibinjiang/buzz/releases/download/buzz-codex-lab-latest/latest.json
+    steps:
+      - name: Require integration branch
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/Lin/develop" ]]; then
+            echo "::error::Codex Lab releases must run from Lin/develop; got $GITHUB_REF"
+            exit 1
+          fi
+
+      - name: Validate version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version is not semantic: $VERSION"
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.14.1
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11.4.0
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Build signed Codex Lab installer
+        shell: pwsh
+        env:
+          BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.CODEX_LAB_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.CODEX_LAB_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.CODEX_LAB_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          .\scripts\build-codex-lab-windows.ps1 `
+            -EnableUpdater `
+            -VersionOverride '${{ inputs.version }}' `
+            -SkipDependencyInstall
+
+      - name: Resolve release artifacts
+        id: artifacts
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $info = Get-Content -LiteralPath 'dist\codex-lab-windows\BUILD-INFO.json' -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+          if ($info.version -ne $env:VERSION -or -not $info.updater.enabled) {
+            throw 'Build metadata does not describe the requested updater release.'
+          }
+          $installer = Join-Path 'dist\codex-lab-windows' $info.installer.name
+          $signature = "$installer.sig"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $signature -PathType Leaf)) {
+            throw 'Signed updater artifacts are missing.'
+          }
+          "installer=$installer" >> $env:GITHUB_OUTPUT
+          "installer_name=$($info.installer.name)" >> $env:GITHUB_OUTPUT
+          "signature=$signature" >> $env:GITHUB_OUTPUT
+
+      - name: Verify updater signature
+        shell: pwsh
+        env:
+          BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.CODEX_LAB_UPDATER_PUBLIC_KEY }}
+        run: |
+          .\scripts\verify-codex-lab-updater.ps1 `
+            -InstallerPath '${{ steps.artifacts.outputs.installer }}' `
+            -SignaturePath '${{ steps.artifacts.outputs.signature }}' `
+            -PublicKey $env:BUZZ_UPDATER_PUBLIC_KEY
+
+      - name: Generate latest.json
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          INSTALLER_NAME: ${{ steps.artifacts.outputs.installer_name }}
+          SIGNATURE: ${{ steps.artifacts.outputs.signature }}
+        run: |
+          VERSION_TAG="buzz-codex-lab-v${VERSION}"
+          ASSET_URL="https://github.com/chemyibinjiang/buzz/releases/download/${VERSION_TAG}/${INSTALLER_NAME}"
+          node scripts/generate-codex-lab-latest.mjs \
+            --version "$VERSION" \
+            --signature-file "$SIGNATURE" \
+            --url "$ASSET_URL" \
+            --output dist/codex-lab-windows/latest.json
+
+      - name: Publish immutable version release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          INSTALLER: ${{ steps.artifacts.outputs.installer }}
+          SIGNATURE: ${{ steps.artifacts.outputs.signature }}
+        run: |
+          VERSION_TAG="buzz-codex-lab-v${VERSION}"
+          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
+            echo "::error::Release already exists: $VERSION_TAG"
+            exit 1
+          fi
+          gh release create "$VERSION_TAG" \
+            "$INSTALLER" \
+            "$SIGNATURE" \
+            --target "$GITHUB_SHA" \
+            --title "Buzz Codex Lab v${VERSION}" \
+            --notes "Signed Buzz Codex Lab Windows updater built from ${GITHUB_SHA}." \
+            --prerelease
+
+      - name: Publish stable updater manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view buzz-codex-lab-latest >/dev/null 2>&1; then
+            gh release create buzz-codex-lab-latest \
+              --target "$GITHUB_SHA" \
+              --title "Buzz Codex Lab updater channel" \
+              --notes "Mutable manifest consumed by Buzz Codex Lab clients." \
+              --prerelease
+          fi
+          gh release upload buzz-codex-lab-latest \
+            dist/codex-lab-windows/latest.json \
+            --clobber
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-codex-lab-${{ inputs.version }}
+          path: |
+            ${{ steps.artifacts.outputs.installer }}
+            ${{ steps.artifacts.outputs.signature }}
+            dist/codex-lab-windows/latest.json
+            dist/codex-lab-windows/BUILD-INFO.json
+            dist/codex-lab-windows/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30

@@ -133,14 +133,52 @@ Artifacts are written to `dist/codex-lab-windows/`:
 - `SHA256SUMS.txt`
 - `BUILD-INFO.json`
 
-The build script clears relay, identity-injection, reconnect-hook, updater, and
-signing environment variables before compiling. It rebuilds and verifies every
-bundled Windows sidecar, creates the pinned offline Codex ACP archive in the
-external build cache, and embeds that archive in the NSIS installer.
+The default build clears relay, identity-injection, reconnect-hook, updater,
+and signing environment variables before compiling. It rebuilds and verifies
+every bundled Windows sidecar, creates the pinned offline Codex ACP archive in
+the external build cache, and embeds that archive in the NSIS installer.
 
 Rust and native source paths are remapped or trimmed during release builds. A
 stable incremental Cargo cache is kept under
 `%LOCALAPPDATA%\BuzzCodexLabBuild`; pass `-BuildCacheDirectory` to override it.
+
+## Publish Signed Updates
+
+The one-time bootstrap installer registers the application and enables Tauri's
+updater. Later Windows releases are downloaded, signature-verified, installed,
+and relaunched from inside Buzz. The updater signature protects the update
+channel but is separate from Authenticode code signing; evaluation builds may
+still show a Windows SmartScreen warning.
+
+Configure these repository secrets in `chemyibinjiang/buzz`:
+
+- `CODEX_LAB_UPDATER_PUBLIC_KEY`
+- `CODEX_LAB_UPDATER_PRIVATE_KEY`
+- `CODEX_LAB_UPDATER_PRIVATE_KEY_PASSWORD`
+
+Never commit the private key or password. Run the **Buzz Codex Lab release**
+workflow from `Lin/develop` with a version greater than the installed version.
+The workflow publishes an immutable version release and updates this stable
+manifest URL:
+
+```text
+https://github.com/chemyibinjiang/buzz/releases/download/buzz-codex-lab-latest/latest.json
+```
+
+For a local signed build, provide the same values through the standard Tauri
+environment variables and opt in explicitly:
+
+```powershell
+$env:BUZZ_UPDATER_PUBLIC_KEY = Get-Content -LiteralPath '<public-key>' -Raw
+$env:BUZZ_UPDATER_ENDPOINT = 'https://github.com/chemyibinjiang/buzz/releases/download/buzz-codex-lab-latest/latest.json'
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath '<private-key>' -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '<password>'
+.\scripts\build-codex-lab-windows.ps1 -EnableUpdater -VersionOverride 0.5.12
+```
+
+Only release from the shared `Lin/develop` integration branch. Feature work
+should arrive there through short-lived branches and reviewed pull requests so
+the updater never distributes an unmerged developer branch.
 
 ## Build The Invite Site
 
