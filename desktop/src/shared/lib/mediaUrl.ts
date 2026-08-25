@@ -53,6 +53,26 @@ function canonicalOrigin(url: string): string | null {
 }
 
 /**
+ * Return the canonical host and port for HTTP(S) relay comparison.
+ *
+ * Self-hosted test relays are sometimes configured as `wss://` while clients
+ * reach them over `ws://`. Those relays advertise HTTPS media URLs even though
+ * only HTTP is listening. Treat the same authority as relay-owned so the
+ * authenticated localhost proxy can repair the transport scheme.
+ */
+function canonicalAuthority(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.host;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Monotonic cache generation, bumped on every `resetMediaCaches` (i.e.
  * workspace switch). Async lookups capture the current generation and may
  * only publish results while it is still current, so a lookup started for the
@@ -313,8 +333,10 @@ export function rewriteRelayUrl(url: string): string {
   const m = RELAY_MEDIA_RE.exec(url);
   if (!m) return url;
 
-  // Only proxy URLs that belong to our relay. External Blossom URLs
-  // (different origin) pass through unchanged — they work fine via WKWebView.
+  // Only proxy URLs that belong to our relay. External Blossom URLs with a
+  // different authority pass through unchanged. A same-host URL advertised
+  // with the wrong HTTP(S) scheme still belongs to this relay and needs the
+  // authenticated proxy to repair the transport.
   // If the relay origin isn't cached yet, fall through to the rewrite path
   // as a safe default (relay URLs need the proxy to avoid Cloudflare 403s).
   // Compare canonicalized origins: hosts are case-insensitive, and the relay
@@ -322,7 +344,11 @@ export function rewriteRelayUrl(url: string): string {
   // was typed with uppercase (e.g. wss://PENDING-SEED.communities.buzz.xyz).
   if (cachedRelayOrigin) {
     const urlOrigin = canonicalOrigin(url);
-    if (urlOrigin !== cachedRelayOrigin) {
+    const urlAuthority = canonicalAuthority(url);
+    const relayAuthority = canonicalAuthority(cachedRelayOrigin);
+    const sameAuthority =
+      urlAuthority !== null && urlAuthority === relayAuthority;
+    if (urlOrigin !== cachedRelayOrigin && !sameAuthority) {
       return url;
     }
   }
