@@ -742,7 +742,9 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "hermes" | "hermes-agent" | "hermes-acp" => {
+            Some(Vec::new())
+        }
         _ => None,
     }
 }
@@ -1626,6 +1628,39 @@ mod tests {
             normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
             Vec::<String>::new()
         );
+    }
+
+    /// `hermes-acp` is a zero-arg adapter: the shipped shim already execs
+    /// `hermes acp "$@"`, so any `acp` argument buzz adds becomes `hermes acp acp`
+    /// and the adapter never starts.
+    ///
+    /// Without the zero-arg registration `default_agent_args` returns `None`, and
+    /// `normalize_agent_args` then returns the caller's args verbatim — so the
+    /// legacy Goose-era `["acp"]` fallback is passed straight through. Registering
+    /// hermes as zero-arg routes it into the `default_args.is_empty()` branch that
+    /// strips that legacy argument.
+    ///
+    /// The empty-args case is deliberately asserted too, but note it passes with
+    /// or without the fix; only the `["acp"]` case discriminates.
+    #[test]
+    fn hermes_is_a_zero_arg_agent() {
+        for command in ["hermes", "hermes-agent", "hermes-acp"] {
+            assert_eq!(
+                normalize_agent_args(command, Vec::new()),
+                Vec::<String>::new(),
+                "{command} must launch with no arguments"
+            );
+            assert_eq!(
+                normalize_agent_args(command, vec!["acp".into()]),
+                Vec::<String>::new(),
+                "{command} must drop the legacy Goose-era `acp` argument"
+            );
+            assert_eq!(
+                normalize_agent_args(command, vec!["--foo".into()]),
+                vec!["--foo".to_string()],
+                "{command} must still honour explicit user arguments"
+            );
+        }
     }
 
     #[test]
