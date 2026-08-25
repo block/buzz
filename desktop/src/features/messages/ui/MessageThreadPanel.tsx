@@ -106,6 +106,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
     remove: boolean,
   ) => Promise<void>;
   profiles?: UserProfileLookup;
+  recentMentionPubkeys?: readonly string[];
   replyTargetMessage: TimelineMessage | null;
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
@@ -184,6 +185,7 @@ export function MessageThreadPanel({
   onToggleReaction,
   onUnfollowThread,
   profiles,
+  recentMentionPubkeys,
   replyTargetMessage,
   scrollTargetId,
   scrollTargetHighlights = true,
@@ -510,8 +512,12 @@ export function MessageThreadPanel({
       tabIndex={-1}
       ref={threadBodyRef}
     >
+      {/* The gallery is intentionally DOM-scoped: only media currently rendered
+          in this open thread participates. Collapsed or unloaded descendants
+          join only after the thread UI renders them. */}
       <div
         className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
+        data-image-gallery-scope="thread"
         ref={threadContentRef}
         style={
           hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
@@ -851,6 +857,7 @@ export function MessageThreadPanel({
                   : `Reply in thread to ${threadHead.author}`
               }
               profiles={profiles}
+              recentMentionPubkeys={recentMentionPubkeys}
               replyTarget={composerReplyTarget}
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}

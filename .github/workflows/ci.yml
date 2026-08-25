@@ -75,6 +75,8 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Relay image eligibility contract
+        run: scripts/test-relay-image-eligibility-workflow.sh
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
       - name: OSS desktop promotion contract
@@ -685,6 +687,18 @@ jobs:
         # are ignored by the infrastructure-free unit-test job.
         run: |
           filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)'
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E "${filter}" \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Database pressure observability PostgreSQL tests
+        # Explicit pool acquisition and advisory-lock metrics require real
+        # Postgres and are ignored by the infrastructure-free unit-test job.
+        run: |
+          filter='package(buzz-db) and test(/observability::tests::(pool_acquire_records_success_timeout_and_error_with_wait_time|advisory_lock_records_success_contention_timeout_and_error)/)'
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E "${filter}" \

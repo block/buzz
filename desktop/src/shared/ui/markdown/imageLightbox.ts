@@ -32,6 +32,7 @@ export type ImageGalleryDirection = "forward" | "backward";
 export type ImageGalleryItem = {
   alt: string | undefined;
   dim?: string;
+  trigger?: HTMLElement;
   resolvedSrc: string;
   src: string | undefined;
   thumbnailBox?: ImageLightboxBox;
@@ -339,12 +340,15 @@ function imageLightboxThumbnailTargetForItem(
   sourceScope: Element | null | undefined,
 ): ImageLightboxThumbnailTarget | null {
   const root = sourceScope?.isConnected ? sourceScope : document.body;
-  const triggers = Array.from(
-    root.querySelectorAll<HTMLElement>("[data-image-lightbox-trigger]"),
-  );
+  const triggers = item.trigger
+    ? [item.trigger]
+    : Array.from(
+        root.querySelectorAll<HTMLElement>("[data-image-lightbox-trigger]"),
+      );
 
   for (const trigger of triggers) {
     const isCurrentItem =
+      item.trigger != null ||
       trigger.dataset.imageLightboxResolvedSrc === item.resolvedSrc ||
       (item.src != null && trigger.dataset.imageLightboxSrc === item.src);
     if (!isCurrentItem) {
@@ -386,6 +390,7 @@ export function imageLightboxSourceScopeForTrigger(
   trigger: HTMLElement,
 ): Element | null {
   return (
+    trigger.closest("[data-image-gallery-scope]") ??
     trigger.closest(IMAGE_LIGHTBOX_MARKDOWN_SCOPE_SELECTOR) ??
     trigger.closest("[data-testid='message-row']")
   );
@@ -409,6 +414,7 @@ function imageGalleryItemFromTrigger(
   return {
     alt: trigger.dataset.imageLightboxAlt || undefined,
     dim: trigger.dataset.imageLightboxDim || inferredDim,
+    trigger,
     resolvedSrc,
     src: trigger.dataset.imageLightboxSrc || undefined,
     thumbnailBox: thumbnail?.box,

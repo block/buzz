@@ -43,6 +43,7 @@ import {
   markdownPropsAreEqual,
 } from "./markdownUtils";
 import { ImageMosaic } from "./markdown/ImageMosaic";
+import { ImageGalleryStatus } from "./markdown/ImageGalleryStatus";
 import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls";
 import {
   CODE_BLOCK_CLASS,
@@ -145,12 +146,30 @@ type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
 
+function copyImageToClipboard(src: string | undefined) {
+  if (!src) return;
+  invokeTauri("copy_image_to_clipboard", { url: src })
+    .then(() => {
+      toast.success("Copied to clipboard");
+    })
+    .catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Copy failed";
+      toast.error(msg);
+    });
+}
+
+function downloadImage(src: string | undefined) {
+  if (!src) return;
+  invokeTauri("download_image", { url: src }).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : "Download failed";
+    toast.error(msg);
+  });
+}
+
 function ImageZoomOverlay({
   alt,
   galleryIndex = 0,
   galleryItems,
-  onCopy,
-  onDownload,
   onClose,
   resolvedSrc,
   sourceBox,
@@ -161,8 +180,6 @@ function ImageZoomOverlay({
   alt: string | undefined;
   galleryIndex?: number;
   galleryItems?: ImageGalleryItem[];
-  onCopy: (src: string | undefined) => void;
-  onDownload: (src: string | undefined) => void;
   onClose: () => void;
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
@@ -718,13 +735,13 @@ function ImageZoomOverlay({
   const handleMenuCopy = React.useCallback(() => {
     setMenu(null);
     markControlGesture();
-    onCopy(currentItem.src);
-  }, [currentItem.src, markControlGesture, onCopy]);
+    copyImageToClipboard(currentItem.src);
+  }, [currentItem.src, markControlGesture]);
   const handleMenuDownload = React.useCallback(() => {
     setMenu(null);
     markControlGesture();
-    onDownload(currentItem.src);
-  }, [currentItem.src, markControlGesture, onDownload]);
+    downloadImage(currentItem.src);
+  }, [currentItem.src, markControlGesture]);
 
   return createPortal(
     <div
@@ -859,7 +876,7 @@ function ImageZoomOverlay({
                 custom={galleryDirection}
                 exit="exit"
                 initial="enter"
-                key={currentItem.resolvedSrc}
+                key={`${currentIndex}:${currentItem.resolvedSrc}`}
                 src={currentItem.resolvedSrc}
                 transition={{
                   duration: prefersReducedMotion
@@ -936,7 +953,7 @@ function ImageZoomOverlay({
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              onDownload(currentItem.src);
+              downloadImage(currentItem.src);
             }}
           >
             <Download className="h-4 w-4" />
@@ -952,6 +969,7 @@ function ImageZoomOverlay({
             updateZoom={updateZoom}
             zoom={zoom}
           />
+          <ImageGalleryStatus {...{ currentIndex, itemCount: items.length }} />
         </div>
       </div>
       {menu && canActOnCurrentImage ? (
@@ -1000,7 +1018,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   useSmoothCorners(inlineImageRef);
   useSmoothCorners(thumbnailImageRef);
-
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
     src: string;
@@ -1078,7 +1095,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
 
     return () => observer.disconnect();
   }, []);
-
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
@@ -1089,7 +1105,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     e.nativeEvent.stopImmediatePropagation();
     setMenu({ x: e.clientX, y: e.clientY });
   };
-
   const openLightbox = React.useCallback(
     (image: HTMLImageElement) => {
       if (!resolvedSrc || isInsideHiddenSpoiler(image)) {
@@ -1113,6 +1128,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
             {
               alt,
               dim,
+              trigger: triggerRef.current,
               resolvedSrc,
               src,
               thumbnailBox: sourceBox,
@@ -1140,27 +1156,13 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
 
   const handleCopyImage = React.useCallback((copySrc: string | undefined) => {
     setMenu(null);
-    if (!copySrc) return;
-    invokeTauri("copy_image_to_clipboard", { url: copySrc })
-      .then(() => {
-        toast.success("Copied to clipboard");
-      })
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : "Copy failed";
-        toast.error(msg);
-      });
+    copyImageToClipboard(copySrc);
   }, []);
 
   const handleDownload = React.useCallback(
     (downloadSrc: string | undefined) => {
       setMenu(null);
-      if (!downloadSrc) return;
-      invokeTauri("download_image", { url: downloadSrc }).catch(
-        (err: unknown) => {
-          const msg = err instanceof Error ? err.message : "Download failed";
-          toast.error(msg);
-        },
-      );
+      downloadImage(downloadSrc);
     },
     [],
   );
@@ -1215,8 +1217,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
           alt={alt}
           galleryIndex={lightboxState.galleryIndex}
           galleryItems={lightboxState.galleryItems}
-          onCopy={handleCopyImage}
-          onDownload={handleDownload}
           onClose={() => setLightboxState(null)}
           resolvedSrc={resolvedSrc}
           sourceBox={lightboxState.sourceBox}
