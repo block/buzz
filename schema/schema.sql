@@ -399,6 +399,7 @@ CREATE TABLE workflow_runs (
     error_code          TEXT,
     webhook_idempotency_key_hash BYTEA,
     webhook_payload_hash BYTEA,
+    webhook_definition_hash BYTEA,
     webhook_execution_claimed_at TIMESTAMPTZ,
     webhook_execution_claim_token UUID,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -407,14 +408,17 @@ CREATE TABLE workflow_runs (
         (
             webhook_idempotency_key_hash IS NULL
             AND webhook_payload_hash IS NULL
+            AND webhook_definition_hash IS NULL
             AND webhook_execution_claimed_at IS NULL
             AND webhook_execution_claim_token IS NULL
         )
         OR (
             webhook_idempotency_key_hash IS NOT NULL
             AND webhook_payload_hash IS NOT NULL
+            AND webhook_definition_hash IS NOT NULL
             AND octet_length(webhook_idempotency_key_hash) = 32
             AND octet_length(webhook_payload_hash) = 32
+            AND octet_length(webhook_definition_hash) = 32
             AND (
                 (
                     webhook_execution_claimed_at IS NULL

@@ -239,6 +239,8 @@ pub enum WorkflowWebhookRunReservation {
     },
     /// The key was already used with a different request payload.
     PayloadConflict,
+    /// The key was reserved for a different workflow definition.
+    DefinitionConflict,
 }
 
 /// A winning scheduled workflow fire claim.
@@ -854,6 +856,7 @@ pub async fn reserve_workflow_webhook_run(
     trigger_context: Option<&serde_json::Value>,
     idempotency_key: &str,
     payload: &[u8],
+    definition_hash: &[u8],
 ) -> Result<WorkflowWebhookRunReservation> {
     let proposed_id = Uuid::new_v4();
     let key_hash = Sha256::digest(idempotency_key.as_bytes()).to_vec();
@@ -862,12 +865,14 @@ pub async fn reserve_workflow_webhook_run(
         r#"
         INSERT INTO workflow_runs
             (community_id, id, workflow_id, status, current_step, execution_trace,
-             trigger_context, webhook_idempotency_key_hash, webhook_payload_hash)
-        VALUES ($1, $2, $3, 'pending', 0, '[]', $4, $5, $6)
+             trigger_context, webhook_idempotency_key_hash, webhook_payload_hash,
+             webhook_definition_hash)
+        VALUES ($1, $2, $3, 'pending', 0, '[]', $4, $5, $6, $7)
         ON CONFLICT (community_id, workflow_id, webhook_idempotency_key_hash)
             WHERE webhook_idempotency_key_hash IS NOT NULL
         DO UPDATE SET webhook_idempotency_key_hash = EXCLUDED.webhook_idempotency_key_hash
-        RETURNING id, status::text AS status, webhook_payload_hash
+        RETURNING id, status::text AS status, webhook_payload_hash,
+                  webhook_definition_hash
         "#,
     )
     .bind(community_id.as_uuid())
@@ -876,6 +881,7 @@ pub async fn reserve_workflow_webhook_run(
     .bind(trigger_context)
     .bind(key_hash)
     .bind(&payload_hash)
+    .bind(definition_hash)
     .fetch_one(pool)
     .await?;
 
@@ -888,6 +894,10 @@ pub async fn reserve_workflow_webhook_run(
         return Ok(WorkflowWebhookRunReservation::PayloadConflict);
     }
     let status = row.try_get::<String, _>("status")?.parse()?;
+    let stored_definition_hash: Vec<u8> = row.try_get("webhook_definition_hash")?;
+    if status == RunStatus::Pending && stored_definition_hash != definition_hash {
+        return Ok(WorkflowWebhookRunReservation::DefinitionConflict);
+    }
     Ok(WorkflowWebhookRunReservation::Replayed { run_id, status })
 }
 
@@ -2148,6 +2158,7 @@ mod tests {
             None,
             "request-123",
             br#"{"ticket":"T-1"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("reserve first webhook run");
@@ -2162,6 +2173,7 @@ mod tests {
             None,
             "request-123",
             br#"{"ticket":"T-1"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("replay webhook run");
@@ -2183,20 +2195,23 @@ mod tests {
         .expect("count workflow runs");
         assert_eq!(count, 1);
 
-        let (key_hash, payload_hash): (Vec<u8>, Vec<u8>) = sqlx::query_as(
-            "SELECT webhook_idempotency_key_hash, webhook_payload_hash \
+        let (key_hash, payload_hash, definition_hash): (Vec<u8>, Vec<u8>, Vec<u8>) =
+            sqlx::query_as(
+                "SELECT webhook_idempotency_key_hash, webhook_payload_hash, \
+                    webhook_definition_hash \
              FROM workflow_runs WHERE community_id = $1 AND id = $2",
-        )
-        .bind(community.as_uuid())
-        .bind(run_id)
-        .fetch_one(&pool)
-        .await
-        .expect("read stored webhook hashes");
+            )
+            .bind(community.as_uuid())
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read stored webhook hashes");
         assert_eq!(key_hash, Sha256::digest(b"request-123").as_slice());
         assert_eq!(
             payload_hash,
             Sha256::digest(br#"{"ticket":"T-1"}"#).as_slice()
         );
+        assert_eq!(definition_hash, vec![0u8; 32]);
     }
 
     #[tokio::test]
@@ -2213,6 +2228,7 @@ mod tests {
             None,
             "request-456",
             br#"{"ticket":"T-1"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("reserve first webhook run");
@@ -2223,11 +2239,105 @@ mod tests {
             None,
             "request-456",
             br#"{"ticket":"T-2"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("detect payload conflict");
 
         assert_eq!(conflict, WorkflowWebhookRunReservation::PayloadConflict);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_rejects_changed_workflow_definition() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+
+        reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "request-definition",
+            br#"{"ticket":"T-1"}"#,
+            &[0xa1; 32],
+        )
+        .await
+        .expect("reserve first webhook run");
+        let conflict = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "request-definition",
+            br#"{"ticket":"T-1"}"#,
+            &[0xb2; 32],
+        )
+        .await
+        .expect("detect definition conflict");
+
+        assert_eq!(conflict, WorkflowWebhookRunReservation::DefinitionConflict);
+        let pending_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow_runs \
+             WHERE community_id = $1 AND workflow_id = $2 AND status = 'pending'",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count pending workflow runs");
+        assert_eq!(pending_count, 1);
+
+        for status in [
+            RunStatus::Running,
+            RunStatus::WaitingApproval,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            let key = format!("request-definition-{status}");
+            let created = reserve_workflow_webhook_run(
+                &pool,
+                community,
+                workflow_id,
+                None,
+                &key,
+                br#"{"ticket":"T-2"}"#,
+                &[0xa1; 32],
+            )
+            .await
+            .expect("reserve run before status transition");
+            let WorkflowWebhookRunReservation::Created(run_id) = created else {
+                panic!("first request must create a run: {created:?}");
+            };
+            sqlx::query(
+                "UPDATE workflow_runs SET status = $3::run_status \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(run_id)
+            .bind(status.to_string())
+            .execute(&pool)
+            .await
+            .expect("transition reserved run status");
+
+            let replay = reserve_workflow_webhook_run(
+                &pool,
+                community,
+                workflow_id,
+                None,
+                &key,
+                br#"{"ticket":"T-2"}"#,
+                &[0xb2; 32],
+            )
+            .await
+            .expect("replay non-pending run");
+            assert_eq!(
+                replay,
+                WorkflowWebhookRunReservation::Replayed { run_id, status }
+            );
+        }
     }
 
     #[tokio::test]
@@ -2249,6 +2359,7 @@ mod tests {
                     None,
                     "concurrent-request",
                     br#"{"ticket":"T-3"}"#,
+                    &[0u8; 32],
                 )
                 .await
             }));
@@ -2272,6 +2383,9 @@ mod tests {
                 WorkflowWebhookRunReservation::PayloadConflict => {
                     panic!("identical concurrent payloads must not conflict");
                 }
+                WorkflowWebhookRunReservation::DefinitionConflict => {
+                    panic!("identical concurrent definitions must not conflict");
+                }
             }
         }
 
@@ -2292,6 +2406,7 @@ mod tests {
             None,
             "claim-concurrent",
             br#"{"ticket":"T-5"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("reserve webhook run");
@@ -2334,6 +2449,7 @@ mod tests {
             None,
             "claim-recovery",
             br#"{"ticket":"T-6"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("reserve webhook run");
@@ -2403,6 +2519,7 @@ mod tests {
             None,
             "claim-fencing",
             br#"{"ticket":"T-7"}"#,
+            &[0u8; 32],
         )
         .await
         .expect("reserve webhook run");
@@ -2456,28 +2573,35 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn webhook_reservation_rejects_partial_hash_pairs() {
+    async fn webhook_reservation_rejects_partial_hash_sets() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
         let (workflow_id, _) = make_workflow_in(&pool, community).await;
         let hash = vec![0x42_u8; 32];
 
-        for (key_hash, payload_hash) in [(Some(hash.clone()), None), (None, Some(hash.clone()))] {
+        let partial_hash_sets = [
+            (Some(hash.clone()), None, None),
+            (None, Some(hash.clone()), None),
+            (None, None, Some(hash.clone())),
+            (Some(hash.clone()), Some(hash.clone()), None),
+        ];
+        for (key_hash, payload_hash, definition_hash) in partial_hash_sets {
             let error = sqlx::query(
                 r#"
                 INSERT INTO workflow_runs
                     (community_id, workflow_id, webhook_idempotency_key_hash,
-                     webhook_payload_hash)
-                VALUES ($1, $2, $3::bytea, $4::bytea)
+                     webhook_payload_hash, webhook_definition_hash)
+                VALUES ($1, $2, $3::bytea, $4::bytea, $5::bytea)
                 "#,
             )
             .bind(community.as_uuid())
             .bind(workflow_id)
             .bind(key_hash)
             .bind(payload_hash)
+            .bind(definition_hash)
             .execute(&pool)
             .await
-            .expect_err("partial hash pair must violate the CHECK constraint");
+            .expect_err("partial hash set must violate the CHECK constraint");
             assert_eq!(
                 error.as_database_error().and_then(|db| db.code()),
                 Some("23514".into())
@@ -2523,6 +2647,7 @@ mod tests {
                 None,
                 "shared-key",
                 br#"{"ticket":"T-4"}"#,
+                &[0u8; 32],
             )
             .await
             .expect("reserve isolated webhook run");

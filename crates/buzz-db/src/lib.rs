@@ -4089,6 +4089,7 @@ impl Db {
         trigger_context: Option<&serde_json::Value>,
         idempotency_key: &str,
         payload: &[u8],
+        definition_hash: &[u8],
     ) -> Result<workflow::WorkflowWebhookRunReservation> {
         workflow::reserve_workflow_webhook_run(
             &self.pool,
@@ -4097,6 +4098,7 @@ impl Db {
             trigger_context,
             idempotency_key,
             payload,
+            definition_hash,
         )
         .await
     }

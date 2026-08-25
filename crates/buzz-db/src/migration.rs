@@ -1133,19 +1133,23 @@ mod tests {
 
         assert!(normalized_migration.contains("add column webhook_idempotency_key_hash bytea"));
         assert!(normalized_migration.contains("add column webhook_payload_hash bytea"));
+        assert!(normalized_migration.contains("add column webhook_definition_hash bytea"));
         assert!(
             normalized_migration.contains("add column webhook_execution_claimed_at timestamptz")
         );
         assert!(normalized_migration.contains("add column webhook_execution_claim_token uuid"));
         let empty_hash_pair = "webhook_idempotency_key_hash is null \
             and webhook_payload_hash is null \
+            and webhook_definition_hash is null \
             and webhook_execution_claimed_at is null \
             and webhook_execution_claim_token is null";
         assert!(normalize_sql(sql).contains(empty_hash_pair));
         let complete_hash_pair = "or ( webhook_idempotency_key_hash is not null \
             and webhook_payload_hash is not null \
+            and webhook_definition_hash is not null \
             and octet_length(webhook_idempotency_key_hash) = 32 \
-            and octet_length(webhook_payload_hash) = 32";
+            and octet_length(webhook_payload_hash) = 32 \
+            and octet_length(webhook_definition_hash) = 32";
         let complete_claim = "webhook_execution_claimed_at is null \
             and webhook_execution_claim_token is null ) or ( \
             webhook_execution_claimed_at is not null \
@@ -1190,6 +1194,7 @@ mod tests {
         let desired_schema = include_str!("../../../schema/schema.sql");
         assert!(desired_schema.contains("webhook_idempotency_key_hash BYTEA"));
         assert!(desired_schema.contains("webhook_payload_hash BYTEA"));
+        assert!(desired_schema.contains("webhook_definition_hash BYTEA"));
         assert!(desired_schema.contains("webhook_execution_claimed_at TIMESTAMPTZ"));
         assert!(desired_schema.contains("webhook_execution_claim_token UUID"));
         assert!(desired_schema.contains("workflow_runs_webhook_idempotency_hashes CHECK"));
@@ -1201,6 +1206,12 @@ mod tests {
             "ON workflow_runs (community_id, workflow_id, webhook_idempotency_key_hash)"
         ));
         assert!(desired_schema.contains("WHERE webhook_idempotency_key_hash IS NOT NULL"));
+
+        let schema_repair = include_str!("../../../scripts/attach-schema-partitions.sql");
+        assert!(schema_repair.contains("workflow_runs_webhook_idempotency_hashes"));
+        assert!(schema_repair.contains("webhook_definition_hash IS NOT NULL"));
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        assert!(!ci.contains("WHERE conname = 'workflow_runs_webhook_idempotency_hashes'"));
     }
 
     #[test]

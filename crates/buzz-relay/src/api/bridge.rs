@@ -1989,6 +1989,7 @@ enum WebhookExecutionPlan {
     ClaimThenSpawn,
     DoNotSpawn,
     PayloadConflict,
+    DefinitionConflict,
 }
 
 fn webhook_execution_plan(
@@ -1999,6 +2000,7 @@ fn webhook_execution_plan(
 
     match (keyed, reservation) {
         (_, Reservation::PayloadConflict) => WebhookExecutionPlan::PayloadConflict,
+        (_, Reservation::DefinitionConflict) => WebhookExecutionPlan::DefinitionConflict,
         (false, Reservation::Created(_)) => WebhookExecutionPlan::SpawnWithoutClaim,
         (true, Reservation::Created(_))
         | (
@@ -2181,6 +2183,7 @@ pub async fn workflow_webhook(
                     trigger_ctx_json.as_ref(),
                     key,
                     &body,
+                    &workflow.definition_hash,
                 )
                 .await
         }
@@ -2207,6 +2210,12 @@ pub async fn workflow_webhook(
                 "idempotency key already used with a different payload",
             ));
         }
+        buzz_db::workflow::WorkflowWebhookRunReservation::DefinitionConflict => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "idempotency key reserved for a different workflow definition",
+            ));
+        }
     };
 
     let (should_spawn, claim_token) = match execution_plan {
@@ -2221,6 +2230,7 @@ pub async fn workflow_webhook(
         }
         WebhookExecutionPlan::DoNotSpawn => (false, None),
         WebhookExecutionPlan::PayloadConflict => (false, None),
+        WebhookExecutionPlan::DefinitionConflict => (false, None),
     };
 
     if should_spawn {
@@ -2655,6 +2665,10 @@ mod tests {
         assert_eq!(
             webhook_execution_plan(false, &Reservation::Created(run_id)),
             WebhookExecutionPlan::SpawnWithoutClaim
+        );
+        assert_eq!(
+            webhook_execution_plan(true, &Reservation::DefinitionConflict),
+            WebhookExecutionPlan::DefinitionConflict
         );
         assert_eq!(
             webhook_execution_plan(
