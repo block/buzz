@@ -385,6 +385,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             height: modeHeight,
             isPicking: isPickingImage.value,
             onCamera: () {
+              error.value = null;
               isCapturingImage.value = true;
               onImageCameraActiveChanged(true);
             },

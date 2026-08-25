@@ -378,6 +378,54 @@ void runProfileEditImageSelectionTests() {
     expect(find.bySemanticsLabel('Flip camera'), findsOneWidget);
   });
 
+  testWidgets('clears gallery errors when opening the inline camera', (
+    tester,
+  ) async {
+    final uploadService = _FakeMediaUploadService(failImagePreparation: true);
+    addTearDown(uploadService.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: ProfileEditPage(
+          imageAvatarCaptureBuilder:
+              ({required height, required onAccepted, required onClosed}) =>
+                  _FakeImageAvatarCapture(
+                    onAccepted: onAccepted,
+                    onClosed: onClosed,
+                  ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('image-source-library')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text("We couldn't prepare that photo. Try again."),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('image-source-camera')));
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('fake-image-camera')), findsOneWidget);
+    expect(
+      find.text("We couldn't prepare that photo. Try again."),
+      findsNothing,
+    );
+    await tester.tap(find.byKey(const ValueKey('fake-image-camera-accept')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text("We couldn't prepare that photo. Try again."),
+      findsNothing,
+    );
+  });
+
   testWidgets('accepts an inline camera photo before enabling profile Save', (
     tester,
   ) async {

@@ -979,16 +979,19 @@ class _FakeProfileNotifier extends ProfileNotifier {
 }
 
 class _FakeMediaUploadService extends MediaUploadService {
-  _FakeMediaUploadService({this.delayGallery = false})
-    : super(
-        baseUrl: 'https://relay.example',
-        nsec: null,
-        pickGalleryImage: () async => null,
-        pickGalleryVideo: () async => null,
-      );
+  _FakeMediaUploadService({
+    this.delayGallery = false,
+    this.failImagePreparation = false,
+  }) : super(
+         baseUrl: 'https://relay.example',
+         nsec: null,
+         pickGalleryImage: () async => null,
+         pickGalleryVideo: () async => null,
+       );
 
   var _camera = false;
   final bool delayGallery;
+  final bool failImagePreparation;
   final _gallerySelection = Completer<XFile?>();
   int uploadCount = 0;
 
@@ -1014,7 +1017,10 @@ class _FakeMediaUploadService extends MediaUploadService {
   }
 
   @override
-  Future<Uint8List> prepareImageBytes(XFile image) => image.readAsBytes();
+  Future<Uint8List> prepareImageBytes(XFile image) async {
+    if (failImagePreparation) throw Exception('image preparation failed');
+    return image.readAsBytes();
+  }
 
   @override
   Future<BlobDescriptor> uploadBytes(
