@@ -35,6 +35,15 @@ if grep -Fq "buzz-staging-dev" "$workflow"; then
   exit 1
 fi
 
+# The merge job reads scripts/create-deployment-eligibility-predicate.jq from the
+# workspace, so it must check out the source first. Guard against the checkout being
+# dropped from that job (the workspace is otherwise empty and jq exits non-zero).
+merge_job=$(awk '/^  merge:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  merge:/{exit} f' "$workflow")
+grep -Fq "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" <<<"$merge_job" || {
+  echo "merge job must check out the source before building the eligibility predicate" >&2
+  exit 1
+}
+
 select_run() {
   jq -r --arg source_sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -f "$selector" | jq -r '.id // empty'
 }
