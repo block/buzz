@@ -14,6 +14,8 @@
 //! (`Db::resolve_host`); the relay depends on the trait, not the query, so the
 //! binding is testable without a database.
 
+use std::collections::HashMap;
+
 use buzz_core::tenant::{normalize_host, CommunityId, TenantContext};
 
 /// Resolves a normalized connection host to its community, or `None` when the
@@ -65,12 +67,40 @@ pub enum BindError<E> {
 /// error) returns a [`BindError`] the caller turns into a generic rejection.
 /// There is deliberately no path that yields a default or fallback community.
 ///
-/// The returned [`TenantContext`] carries the *normalized* host, so downstream
-/// NIP-05 / audit labelling and the NIP-98 `u`-host check all see the same
-/// canonical form the community was resolved from.
+/// ## Resolution order — DB always wins
+///
+/// `host_aliases` (deployment config, `BUZZ_HOST_ALIASES`) lets one community
+/// legitimately answer on more than one host — e.g. a public CDN hostname
+/// plus an internal tailnet name (upstream #4952/#4953). Resolution order:
+///
+/// 1. Exact `communities.host` match for the normalized arrival host. A hit
+///    here binds immediately and `host_aliases` is never even consulted.
+/// 2. Only on a miss (`Ok(None)`) is the arrival host looked up as an alias
+///    key; its configured canonical is resolved through the *same*
+///    resolver, and a hit there binds the community.
+///
+/// Because step 1 always runs first and returns immediately on a hit, an
+/// alias entry can **never** shadow a real `communities.host` row — the DB
+/// is authoritative regardless of what `host_aliases` claims about that same
+/// host string.
+///
+/// ## What the returned context carries
+///
+/// The returned [`TenantContext`] always carries the *arrival* host — the
+/// normalized form of `raw_host`, which is the alias itself when resolution
+/// went through `host_aliases`, not the community's canonical
+/// `communities.host`. This is deliberate: [`crate::api::bridge::nip98_expected_url`]
+/// and `nip42_expected_relay_url` build the URL a client's signature must
+/// match from `tenant.host()`, and a client reaching the relay on an alias
+/// signs its NIP-98/NIP-42 event against *that* alias address — never the
+/// canonical host, which it may not even know about. Binding the arrival
+/// host means those checks (and NIP-05 / audit labelling) keep matching
+/// whatever address the request actually came in on, with zero changes
+/// needed in the auth verification code itself.
 pub async fn bind_community<R: HostResolver>(
     resolver: &R,
     raw_host: &str,
+    host_aliases: &HashMap<String, String>,
 ) -> Result<TenantContext, BindError<R::Error>> {
     let host = normalize_host(raw_host);
     // Inv_RowZero (host-binding seam): an empty raw_host carries no community
@@ -86,7 +116,14 @@ pub async fn bind_community<R: HostResolver>(
     }
     match resolver.resolve_host(&host).await {
         Ok(Some(community)) => Ok(TenantContext::resolved(community, host)),
-        Ok(None) => Err(BindError::UnmappedHost),
+        Ok(None) => match host_aliases.get(&host) {
+            Some(canonical) => match resolver.resolve_host(canonical).await {
+                Ok(Some(community)) => Ok(TenantContext::resolved(community, host)),
+                Ok(None) => Err(BindError::UnmappedHost),
+                Err(e) => Err(BindError::Lookup(e)),
+            },
+            None => Err(BindError::UnmappedHost),
+        },
         Err(e) => Err(BindError::Lookup(e)),
     }
 }
@@ -101,11 +138,24 @@ pub async fn bind_community<R: HostResolver>(
 /// [`bind_community`] path. This is deliberately NOT a default/fallback
 /// community: an unmapped `relay_url` host returns the same [`BindError`] as
 /// any other unmapped host.
+///
+/// Takes the same `host_aliases` map as [`bind_community`] and forwards it
+/// unchanged. In practice this is a no-op for every existing deployment:
+/// `relay_url`'s host is the deployment's own canonical host, so the exact
+/// `communities.host` lookup in step 1 always hits before `host_aliases`
+/// would ever be consulted. The parameter exists so both entry points share
+/// one signature rather than one silently ignoring alias config.
 pub async fn bind_deployment_community<R: HostResolver>(
     resolver: &R,
     relay_url: &str,
+    host_aliases: &HashMap<String, String>,
 ) -> Result<TenantContext, BindError<R::Error>> {
-    bind_community(resolver, &buzz_core::tenant::relay_url_authority(relay_url)).await
+    bind_community(
+        resolver,
+        &buzz_core::tenant::relay_url_authority(relay_url),
+        host_aliases,
+    )
+    .await
 }
 
 /// Extract the relay URL authority in the same normalized shape as request
@@ -180,10 +230,19 @@ mod tests {
         MapResolver { map, fail: false }
     }
 
+    /// The empty alias map — every pre-existing test uses this to prove
+    /// `BUZZ_HOST_ALIASES` unset/empty reproduces exact prior behavior
+    /// (T1: hard requirement 1).
+    fn no_aliases() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[tokio::test]
     async fn maps_known_host_to_its_community() {
         let r = resolver_with("relay.example", 1);
-        let ctx = bind_community(&r, "relay.example").await.expect("bound");
+        let ctx = bind_community(&r, "relay.example", &no_aliases())
+            .await
+            .expect("bound");
         assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(1));
         assert_eq!(ctx.host(), "relay.example");
     }
@@ -194,7 +253,7 @@ mod tests {
         // all bind to the same community (they cannot split a tenant).
         let r = resolver_with("relay.example", 7);
         for variant in ["RELAY.EXAMPLE", "relay.example.", "relay.example:443"] {
-            let ctx = bind_community(&r, variant)
+            let ctx = bind_community(&r, variant, &no_aliases())
                 .await
                 .unwrap_or_else(|_| panic!("variant {variant:?} should bind"));
             assert_eq!(
@@ -206,17 +265,104 @@ mod tests {
         }
     }
 
+    /// T2 (BUZZ_HOST_ALIASES): an unmapped host with a configured alias binds
+    /// to the canonical's community, but the returned context carries the
+    /// ARRIVAL host (the alias) — never the canonical — so NIP-98/NIP-42
+    /// verification matches whatever the client actually signed.
+    #[tokio::test]
+    async fn alias_binds_to_canonicals_community_but_context_keeps_arrival_host() {
+        let r = resolver_with("chat.example.com", 3);
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "internal.tailnet.example".to_string(),
+            "chat.example.com".to_string(),
+        );
+
+        let ctx = bind_community(&r, "internal.tailnet.example", &aliases)
+            .await
+            .expect("alias should bind through its canonical's community");
+        assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(3));
+        assert_eq!(
+            ctx.host(),
+            "internal.tailnet.example",
+            "context must carry the arrival (alias) host, not the canonical"
+        );
+    }
+
+    /// T3: a host that is neither a `communities.host` row nor an alias key
+    /// still fails closed with the generic `UnmappedHost`, identical to the
+    /// no-aliases-configured case — a non-empty alias map must not change
+    /// the rejection for hosts it says nothing about.
+    #[tokio::test]
+    async fn unmapped_host_with_nonempty_alias_map_still_fails_closed() {
+        let r = resolver_with("chat.example.com", 4);
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "internal.tailnet.example".to_string(),
+            "chat.example.com".to_string(),
+        );
+
+        let err = bind_community(&r, "evil.example", &aliases)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BindError::UnmappedHost));
+    }
+
+    /// T4 (hard requirement 3, "DB always wins"): an alias entry that names
+    /// the SAME host as a real `communities.host` row must never shadow it —
+    /// the DB row's own community binds, not wherever the alias points.
+    #[tokio::test]
+    async fn alias_can_never_shadow_a_real_community_host() {
+        let r = resolver_with("shadowed.example", 5);
+        let mut aliases = HashMap::new();
+        // Misconfigured/adversarial alias claiming "shadowed.example" is an
+        // alias for a different community entirely.
+        aliases.insert(
+            "shadowed.example".to_string(),
+            "somewhere-else.example".to_string(),
+        );
+
+        let ctx = bind_community(&r, "shadowed.example", &aliases)
+            .await
+            .expect("the real communities.host row must win");
+        assert_eq!(
+            ctx.community().as_uuid(),
+            &Uuid::from_u128(5),
+            "DB row's own community must bind, not the alias target"
+        );
+        assert_eq!(ctx.host(), "shadowed.example");
+    }
+
+    /// T5: an alias whose configured canonical has no `communities.host` row
+    /// fails closed with the same generic `UnmappedHost` — a dangling alias
+    /// must not surface a distinct error an unauthenticated caller could use
+    /// to probe deployment config.
+    #[tokio::test]
+    async fn alias_whose_canonical_is_missing_from_db_fails_closed() {
+        let r = resolver_with("chat.example.com", 6);
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "internal.tailnet.example".to_string(),
+            "nowhere.example".to_string(),
+        );
+
+        let err = bind_community(&r, "internal.tailnet.example", &aliases)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BindError::UnmappedHost));
+    }
+
     #[tokio::test]
     async fn deployment_url_keeps_nondefault_port_for_lookup() {
         let r = resolver_with("localhost:3000", 42);
-        let ctx = bind_deployment_community(&r, "ws://localhost:3000")
+        let ctx = bind_deployment_community(&r, "ws://localhost:3000", &no_aliases())
             .await
             .expect("deployment host should bind with non-default port");
         assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(42));
         assert_eq!(ctx.host(), "localhost:3000");
 
         let wrong = resolver_with("localhost", 42);
-        let err = bind_deployment_community(&wrong, "ws://localhost:3000")
+        let err = bind_deployment_community(&wrong, "ws://localhost:3000", &no_aliases())
             .await
             .unwrap_err();
         assert!(matches!(err, BindError::UnmappedHost));
@@ -226,7 +372,7 @@ mod tests {
     async fn deployment_url_normalizes_default_ports() {
         let r = resolver_with("relay.example", 9);
         for url in ["ws://relay.example:80", "wss://relay.example:443"] {
-            let ctx = bind_deployment_community(&r, url)
+            let ctx = bind_deployment_community(&r, url, &no_aliases())
                 .await
                 .unwrap_or_else(|_| panic!("url {url:?} should bind"));
             assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(9));
@@ -243,7 +389,9 @@ mod tests {
     #[tokio::test]
     async fn unmapped_host_fails_closed() {
         let r = resolver_with("relay.example", 1);
-        let err = bind_community(&r, "evil.example").await.unwrap_err();
+        let err = bind_community(&r, "evil.example", &no_aliases())
+            .await
+            .unwrap_err();
         assert!(matches!(err, BindError::UnmappedHost));
     }
 
@@ -253,7 +401,9 @@ mod tests {
             map: HashMap::new(),
             fail: true,
         };
-        let err = bind_community(&r, "relay.example").await.unwrap_err();
+        let err = bind_community(&r, "relay.example", &no_aliases())
+            .await
+            .unwrap_err();
         assert!(matches!(err, BindError::Lookup("db down")));
     }
 
@@ -287,7 +437,7 @@ mod tests {
             // A request with a missing or unreadable Host header reaches
             // `bind_community` with raw_host = "" (router.rs:169-172). The
             // fence must reject — the request never supplied a host.
-            let err = bind_community(&r, "").await.expect_err(
+            let err = bind_community(&r, "", &no_aliases()).await.expect_err(
                 "Inv_RowZero: an empty raw_host carries no community evidence; \
                  bind_community must fail closed regardless of the host map",
             );
@@ -308,7 +458,7 @@ mod tests {
         async fn whitespace_only_raw_host_fails_closed_even_if_db_has_empty_host_row() {
             let r = resolver_with("", 0xdeadbeef);
 
-            let err = bind_community(&r, "   ").await.expect_err(
+            let err = bind_community(&r, "   ", &no_aliases()).await.expect_err(
                 "Inv_RowZero: whitespace-only raw_host normalizes to empty \
                  (see buzz-core::tenant::normalize_host) and carries no \
                  community evidence",
@@ -326,7 +476,9 @@ mod tests {
         #[tokio::test]
         async fn non_empty_unmapped_host_still_fails_closed_after_fix() {
             let r = resolver_with("", 0xdeadbeef);
-            let err = bind_community(&r, "evil.example").await.unwrap_err();
+            let err = bind_community(&r, "evil.example", &no_aliases())
+                .await
+                .unwrap_err();
             assert!(matches!(err, BindError::UnmappedHost));
         }
     }
