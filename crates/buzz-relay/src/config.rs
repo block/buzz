@@ -292,6 +292,13 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Object-store provider backing both media blobs and Git storage.
+    ///
+    /// The relay builds exactly one client from this and shares it between the
+    /// two facades, so the provider is a property of the deployment rather
+    /// than of each call site. Selected by `BUZZ_OBJECT_STORE_PROVIDER`, which
+    /// defaults to the S3 settings above.
+    pub object_store: buzz_object_store::ObjectStoreConfig,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
@@ -880,6 +887,29 @@ impl Config {
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty()),
         };
+        // The provider is chosen once here; a Cloud Storage deployment carries
+        // no `BUZZ_S3_*` values at all, so its bucket comes from
+        // `BUZZ_OBJECT_STORE_BUCKET` rather than from the media settings.
+        let object_store = match buzz_object_store::ProviderSelection::from_env()
+            .map_err(ConfigError::InvalidValue)?
+        {
+            buzz_object_store::ProviderSelection::S3 => {
+                buzz_object_store::ObjectStoreConfig::S3(buzz_object_store::S3StoreConfig {
+                    endpoint: media.s3_endpoint.clone(),
+                    access_key: media.s3_access_key.clone(),
+                    secret_key: media.s3_secret_key.clone(),
+                    bucket: media.s3_bucket.clone(),
+                    region: media.s3_region.clone(),
+                    addressing_style: media.s3_addressing_style,
+                })
+            }
+            buzz_object_store::ProviderSelection::Gcs { bucket } => {
+                buzz_object_store::ObjectStoreConfig::Gcs(buzz_object_store::GcsStoreConfig::new(
+                    bucket,
+                ))
+            }
+        };
+
         let media_max_concurrent_uploads: usize =
             std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
                 .ok()
@@ -1235,6 +1265,7 @@ impl Config {
             allow_nip_oa_auth,
             klipy,
             media,
+            object_store,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
@@ -1769,6 +1800,79 @@ mod tests {
             invalid,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'")
+        ));
+    }
+
+    /// Restore an environment variable to whatever it was before a test.
+    fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    /// A deployment that has never heard of `BUZZ_OBJECT_STORE_PROVIDER` keeps
+    /// its S3 settings, including the endpoint and credentials that reach the
+    /// bundled MinIO.
+    #[test]
+    fn object_store_defaults_to_the_s3_settings() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_OBJECT_STORE_PROVIDER");
+        std::env::remove_var("BUZZ_OBJECT_STORE_PROVIDER");
+
+        let config = Config::from_env().expect("default config loads");
+
+        restore_env("BUZZ_OBJECT_STORE_PROVIDER", previous);
+
+        match config.object_store {
+            buzz_object_store::ObjectStoreConfig::S3(s3) => {
+                assert_eq!(s3.endpoint, config.media.s3_endpoint);
+                assert_eq!(s3.bucket, config.media.s3_bucket);
+                assert_eq!(s3.region, config.media.s3_region);
+                assert_eq!(s3.addressing_style, config.media.s3_addressing_style);
+            }
+            other => panic!("expected the S3 provider by default, got {other:?}"),
+        }
+    }
+
+    /// Selecting Cloud Storage takes its bucket from
+    /// `BUZZ_OBJECT_STORE_BUCKET`, never from `BUZZ_S3_BUCKET`: a Cloud
+    /// Storage deployment sets no `BUZZ_S3_*` values, so falling back to that
+    /// default would address a bucket nobody configured.
+    #[test]
+    fn gcs_provider_requires_its_own_bucket() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_provider = std::env::var_os("BUZZ_OBJECT_STORE_PROVIDER");
+        let previous_bucket = std::env::var_os("BUZZ_OBJECT_STORE_BUCKET");
+
+        std::env::set_var("BUZZ_OBJECT_STORE_PROVIDER", "gcs");
+        std::env::remove_var("BUZZ_OBJECT_STORE_BUCKET");
+        let without_bucket = Config::from_env();
+
+        std::env::set_var("BUZZ_OBJECT_STORE_BUCKET", "buzz-objects");
+        let with_bucket = Config::from_env();
+
+        std::env::set_var("BUZZ_OBJECT_STORE_PROVIDER", "minio");
+        let unknown_provider = Config::from_env();
+
+        restore_env("BUZZ_OBJECT_STORE_PROVIDER", previous_provider);
+        restore_env("BUZZ_OBJECT_STORE_BUCKET", previous_bucket);
+
+        assert!(matches!(
+            without_bucket,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OBJECT_STORE_BUCKET must be set")
+        ));
+        match with_bucket.expect("gcs config loads").object_store {
+            buzz_object_store::ObjectStoreConfig::Gcs(gcs) => {
+                assert_eq!(gcs.bucket, "buzz-objects");
+            }
+            other => panic!("expected the GCS provider, got {other:?}"),
+        }
+        assert!(matches!(
+            unknown_provider,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must be 's3' or 'gcs'")
         ));
     }
 

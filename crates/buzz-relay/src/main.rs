@@ -448,9 +448,17 @@ async fn main() -> anyhow::Result<()> {
         .media
         .validate()
         .map_err(|e| anyhow::anyhow!("invalid media config: {e}"))?;
-    let media_storage = buzz_media::MediaStorage::new(&config.media)
-        .map_err(|e| anyhow::anyhow!("failed to initialize media storage: {e}"))?;
-    info!("Media storage connected");
+    // One provider client per process, shared by the media facade and (via
+    // `AppState`) the Git facade. Connecting can perform provider admission
+    // checks — Cloud Storage refuses a bucket whose configuration would break
+    // deletion — so a misconfigured backend fails startup here rather than
+    // during the first delete.
+    let object_store = buzz_object_store::connect(&config.object_store)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to initialize object storage: {e}"))?;
+    let provider = object_store.provider();
+    let media_storage = buzz_media::MediaStorage::with_store(object_store);
+    info!(%provider, "Object storage connected");
 
     let (app_state, audit_shutdown) = AppState::new(
         config.clone(),

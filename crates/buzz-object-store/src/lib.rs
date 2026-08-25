@@ -16,7 +16,8 @@
 //! - the [`ObjectStoreError`] taxonomy, which separates a *classified*
 //!   provider answer from an *unknown* transport outcome;
 //! - the S3 provider ([`providers::s3`]), which is the only place an ETag
-//!   exists.
+//!   exists, and the Google Cloud Storage provider ([`providers::gcs`]), which
+//!   is the only place an object generation exists.
 //!
 //! Domain code above this seam — `MediaStorage`, `GitStore` — is a thin facade
 //! that adds Buzz semantics (tenant-scoped sidecar keys, content addressing,
@@ -28,13 +29,107 @@ pub mod revision;
 
 use std::path::Path;
 use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
 pub use error::ObjectStoreError;
+pub use providers::gcs::{GcsObjectStore, GcsRetryConfig, GcsStoreConfig};
 pub use providers::s3::{S3AddressingStyle, S3ObjectStore, S3StoreConfig};
 pub use revision::{ConditionalWrite, ProviderKind, Revision, WriteCondition};
+
+/// Which provider a deployment selects, before its settings are resolved.
+///
+/// Split from [`ObjectStoreConfig`] because the two callers that build a store
+/// — the relay and the deletion tool — have different defaults for the S3
+/// settings but must agree on how the provider itself is chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderSelection {
+    /// S3 or an S3-compatible backend, configured by the `BUZZ_S3_*` settings.
+    S3,
+    /// Google Cloud Storage, authenticated with Application Default
+    /// Credentials and addressed by bucket name alone.
+    Gcs {
+        /// Bucket name from `BUZZ_OBJECT_STORE_BUCKET`.
+        bucket: String,
+    },
+}
+
+impl ProviderSelection {
+    /// Read the provider selection from the environment.
+    ///
+    /// `BUZZ_OBJECT_STORE_PROVIDER` defaults to `s3`, so a deployment that has
+    /// never heard of this variable keeps its existing behavior. Selecting
+    /// `gcs` requires `BUZZ_OBJECT_STORE_BUCKET`: a Cloud Storage deployment
+    /// sets no `BUZZ_S3_*` values at all, so there is no bucket to fall back
+    /// to and guessing one would address the wrong data.
+    pub fn from_env() -> Result<Self, String> {
+        let provider = match std::env::var("BUZZ_OBJECT_STORE_PROVIDER") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(Self::S3),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(
+                    "BUZZ_OBJECT_STORE_PROVIDER must be valid Unicode and one of 's3' or 'gcs'"
+                        .to_string(),
+                );
+            }
+        };
+        match provider.parse::<ProviderKind>()? {
+            ProviderKind::S3 => Ok(Self::S3),
+            ProviderKind::Gcs => {
+                let bucket = std::env::var("BUZZ_OBJECT_STORE_BUCKET")
+                    .ok()
+                    .filter(|bucket| !bucket.trim().is_empty())
+                    .ok_or_else(|| {
+                        "BUZZ_OBJECT_STORE_BUCKET must be set when \
+                         BUZZ_OBJECT_STORE_PROVIDER=gcs"
+                            .to_string()
+                    })?;
+                Ok(Self::Gcs {
+                    bucket: bucket.trim().to_string(),
+                })
+            }
+        }
+    }
+}
+
+impl FromStr for ProviderKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "s3" => Ok(Self::S3),
+            "gcs" => Ok(Self::Gcs),
+            _ => Err(format!(
+                "BUZZ_OBJECT_STORE_PROVIDER must be 's3' or 'gcs', got {value:?}"
+            )),
+        }
+    }
+}
+
+/// A fully resolved provider configuration, ready to connect.
+#[derive(Debug, Clone)]
+pub enum ObjectStoreConfig {
+    /// S3 or an S3-compatible backend.
+    S3(S3StoreConfig),
+    /// Google Cloud Storage.
+    Gcs(GcsStoreConfig),
+}
+
+/// Build the single object-store client this process shares between media and
+/// Git storage.
+///
+/// Connecting is async because a provider may have admission checks to run: the
+/// Cloud Storage provider reads bucket metadata here and refuses to return a
+/// client for a bucket whose configuration would break deletion.
+pub async fn connect(config: &ObjectStoreConfig) -> Result<Arc<dyn ObjectStore>, ObjectStoreError> {
+    match config {
+        ObjectStoreConfig::S3(s3) => Ok(Arc::new(S3ObjectStore::new(s3)?)),
+        ObjectStoreConfig::Gcs(gcs) => Ok(Arc::new(GcsObjectStore::connect(gcs).await?)),
+    }
+}
 
 /// A stream of object byte chunks, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream =
@@ -310,5 +405,32 @@ pub trait ObjectStore: Send + Sync {
             });
         }
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_names_parse() {
+        assert_eq!("s3".parse::<ProviderKind>(), Ok(ProviderKind::S3));
+        assert_eq!("gcs".parse::<ProviderKind>(), Ok(ProviderKind::Gcs));
+    }
+
+    /// Unknown or near-miss spellings fail rather than silently selecting the
+    /// default provider: a typo in `BUZZ_OBJECT_STORE_PROVIDER` must not
+    /// quietly point a Cloud Storage deployment at S3.
+    #[test]
+    fn unknown_provider_names_are_rejected() {
+        for invalid in ["", "S3", "GCS", "google", "gs", "minio"] {
+            let error = invalid
+                .parse::<ProviderKind>()
+                .expect_err("must reject unknown provider");
+            assert!(
+                error.contains("must be 's3' or 'gcs'"),
+                "unexpected error for {invalid:?}: {error}"
+            );
+        }
     }
 }

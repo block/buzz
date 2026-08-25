@@ -4,4 +4,5 @@
 //! facade. Provider-specific vocabulary — ETags, generations, addressing
 //! styles, credential chains — stays inside these modules.
 
+pub mod gcs;
 pub mod s3;

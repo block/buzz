@@ -13,10 +13,16 @@ axum = { workspace = true }
 bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
+google-cloud-gax = "1.13"
+google-cloud-storage = "=1.17.0"
 quick-xml = { version = "0.38", features = ["serialize"] }
+rand = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+google-cloud-wkt = "1.7"
