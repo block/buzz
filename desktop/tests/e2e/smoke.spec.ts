@@ -394,6 +394,53 @@ test("highlights the clicked forum post when its route is already open", async (
   );
 });
 
+test("ordinary same-channel activation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("shipped");
+  await page.getByTestId("search-result-mock-engineering-shipped").click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-engineering-shipped"]');
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "shipped",
+  );
+  await expect(page).toHaveURL(
+    /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9(?:\?thread=mock-engineering-shipped)?$/,
+  );
+
+  await page.getByTestId("channel-engineering").click();
+
+  await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary same-forum activation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill("checklist");
+  await page.getByTestId("search-result-mock-forum-release-thread").click();
+
+  const post = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(post.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Release checklist: async feedback thread.").click();
+
+  await expect(post.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
 test("ordinary forum navigation clears a prior search highlight", async ({
   page,
 }) => {

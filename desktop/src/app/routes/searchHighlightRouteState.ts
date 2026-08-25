@@ -5,9 +5,13 @@ import {
 
 export function selectSearchHighlightRouteState(location: {
   state: unknown;
-}): SearchHighlightNavigation | null {
-  return parseSearchHighlightNavigation(
-    (location.state as { searchHighlight?: unknown } | undefined)
-      ?.searchHighlight,
-  );
+}): SearchHighlightNavigation | null | undefined {
+  const state = location.state as { searchHighlight?: unknown } | undefined;
+  if (!(state && "searchHighlight" in state)) {
+    return undefined;
+  }
+  if (state.searchHighlight === null) {
+    return null;
+  }
+  return parseSearchHighlightNavigation(state.searchHighlight) ?? undefined;
 }

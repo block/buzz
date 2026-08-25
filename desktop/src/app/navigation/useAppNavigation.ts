@@ -43,8 +43,13 @@ export function useAppNavigation() {
       guardedTarget?: GuardedNavigation,
     ) => {
       const nextLocation = router.buildLocation(next as never);
+      const hasStateUpdate = next.state !== undefined;
 
-      if (location.href === nextLocation.href && !behavior.force) {
+      if (
+        location.href === nextLocation.href &&
+        !behavior.force &&
+        !hasStateUpdate
+      ) {
         return false;
       }
 
@@ -271,7 +276,7 @@ export function useAppNavigation() {
         force?: boolean;
         messageId?: string;
         /** Transient context for highlighting the selected search result. */
-        searchHighlight?: SearchHighlightNavigation;
+        searchHighlight?: SearchHighlightNavigation | null;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
         thread?: string;
@@ -297,12 +302,14 @@ export function useAppNavigation() {
             ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
-          state: options?.searchHighlight
-            ? (previousState: Record<string, unknown>) => ({
-                ...previousState,
-                searchHighlight: options.searchHighlight,
-              })
-            : undefined,
+          state:
+            options?.searchHighlight !== undefined
+              ? (previousState: Record<string, unknown>) => {
+                  const nextState = { ...previousState };
+                  nextState.searchHighlight = options.searchHighlight;
+                  return nextState;
+                }
+              : undefined,
         },
         {
           force: options?.force,
@@ -343,7 +350,7 @@ export function useAppNavigation() {
         replace?: boolean;
         replyId?: string;
         /** Transient context for highlighting the selected search result. */
-        searchHighlight?: SearchHighlightNavigation;
+        searchHighlight?: SearchHighlightNavigation | null;
       },
     ) => {
       return commitNavigation(
@@ -356,12 +363,14 @@ export function useAppNavigation() {
           search: {
             ...(options?.replyId ? { replyId: options.replyId } : {}),
           },
-          state: options?.searchHighlight
-            ? (previousState: Record<string, unknown>) => ({
-                ...previousState,
-                searchHighlight: options.searchHighlight,
-              })
-            : undefined,
+          state:
+            options?.searchHighlight !== undefined
+              ? (previousState: Record<string, unknown>) => {
+                  const nextState = { ...previousState };
+                  nextState.searchHighlight = options.searchHighlight;
+                  return nextState;
+                }
+              : undefined,
         },
         {
           force: options?.force,

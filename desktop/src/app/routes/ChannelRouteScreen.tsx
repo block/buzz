@@ -21,7 +21,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
   channelId: string;
-  searchHighlight: SearchHighlightNavigation | null;
+  searchHighlight: SearchHighlightNavigation | null | undefined;
   selectedPostId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
@@ -136,7 +136,7 @@ export function ChannelRouteScreen({
     return cachedTarget ? [cachedTarget] : [];
   });
   const [activeSearchHighlight, setActiveSearchHighlight] =
-    React.useState<SearchHighlightNavigation | null>(searchHighlight);
+    React.useState<SearchHighlightNavigation | null>(searchHighlight ?? null);
   const appliedSearchActivationIdRef = React.useRef<string | null>(
     searchHighlight?.activationId ?? null,
   );
@@ -145,6 +145,11 @@ export function ChannelRouteScreen({
   // Retain the applied activation locally until an ordinary route transition
   // explicitly arrives without search state.
   React.useEffect(() => {
+    if (searchHighlight === null) {
+      appliedSearchActivationIdRef.current = null;
+      setActiveSearchHighlight(null);
+      return;
+    }
     if (!searchHighlight) {
       const ordinaryTargetIds = [
         selectedPostId,
@@ -270,7 +275,7 @@ export function ChannelRouteScreen({
         void closeForumPost(channelId);
       }}
       onSelectForumPost={(postId) => {
-        void goForumPost(channelId, postId);
+        void goForumPost(channelId, postId, { searchHighlight: null });
       }}
       selectedForumPostId={selectedPostId}
       targetForumReplyId={targetReplyId}

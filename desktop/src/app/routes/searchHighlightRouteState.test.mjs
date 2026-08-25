@@ -18,8 +18,15 @@ test("selects valid transient search highlight state", () => {
   );
 });
 
-test("ordinary navigation without highlight state clears the selection", () => {
-  assert.equal(selectSearchHighlightRouteState({ state: {} }), null);
+test("target cleanup without highlight state preserves the selection", () => {
+  assert.equal(selectSearchHighlightRouteState({ state: {} }), undefined);
+});
+
+test("ordinary navigation explicitly clears the selection", () => {
+  assert.equal(
+    selectSearchHighlightRouteState({ state: { searchHighlight: null } }),
+    null,
+  );
 });
 
 test("ignores malformed router state", () => {
@@ -27,6 +34,6 @@ test("ignores malformed router state", () => {
     selectSearchHighlightRouteState({
       state: { searchHighlight: { messageId: "message", query: "mentions" } },
     }),
-    null,
+    undefined,
   );
 });
