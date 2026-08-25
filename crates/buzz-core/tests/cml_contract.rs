@@ -1,4 +1,4 @@
-use buzz_core::cml::{parse_cml, CmlStatus};
+use buzz_core::cml::{derive_host_id, parse_cml, CmlStatus};
 
 fn valid_cml() -> String {
     serde_json::json!({
@@ -72,6 +72,32 @@ fn reviewer_must_be_distinct_and_fourth_round_is_rejected() {
         serde_json::json!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     value["review"]["round"] = serde_json::json!(4);
     assert!(parse_cml(&value.to_string()).is_err());
+}
+
+#[test]
+fn host_ids_are_stable_within_scope_and_unlinkable_across_scope_or_agent() {
+    let secret = [7_u8; 32];
+    let community = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+    let channel_a = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+    let channel_b = uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+    let agent_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let agent_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let first = derive_host_id(&secret, community, channel_a, agent_a).unwrap();
+    assert_eq!(
+        first,
+        derive_host_id(&secret, community, channel_a, agent_a).unwrap()
+    );
+    assert_ne!(
+        first,
+        derive_host_id(&secret, community, channel_b, agent_a).unwrap()
+    );
+    assert_ne!(
+        first,
+        derive_host_id(&secret, community, channel_a, agent_b).unwrap()
+    );
+    assert!(first.starts_with("h_") && first.len() == 18);
+    assert!(!first.contains(agent_a));
 }
 
 #[test]

@@ -5,8 +5,10 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -217,6 +219,28 @@ pub enum Presence {
     Stale,
     /// No sufficiently recent heartbeat exists.
     Offline,
+}
+
+/// Derive a stable channel-scoped pseudonymous host identifier.
+///
+/// The host secret remains local. Community, channel, and agent identity are
+/// domain-separated in the HMAC so the same machine cannot be correlated across
+/// channels and two agents on one machine receive different identifiers.
+pub fn derive_host_id(
+    host_secret: &[u8; 32],
+    community_id: Uuid,
+    channel_id: Uuid,
+    agent_pubkey: &str,
+) -> Result<String, CmlError> {
+    validate_pubkey("agent_pubkey", agent_pubkey)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(host_secret)
+        .map_err(|_| CmlError::Validation("invalid host secret".into()))?;
+    mac.update(b"buzz-cml-host-id-v1\0");
+    mac.update(community_id.as_bytes());
+    mac.update(channel_id.as_bytes());
+    mac.update(agent_pubkey.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    Ok(format!("h_{}", hex::encode(&digest[..8])))
 }
 
 /// Parse and semantically validate a strict CML v1 document.

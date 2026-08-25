@@ -11,6 +11,8 @@ pub mod agent_turn_metric;
 pub mod channel;
 /// Buzz CML task snapshots and canonical export.
 pub mod cml;
+/// Signed CML task-event validation and deterministic reduction.
+pub mod cml_event;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;
