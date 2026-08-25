@@ -206,28 +206,34 @@ pub(crate) enum CanvasRevisionSpec {
 /// Parse the optional canvas `expected-revision` precondition from an event.
 ///
 /// Returns `Ok(None)` when the tag is absent (backward-compatible unconditional
-/// append). A single well-formed tag yields `Some(spec)`. Duplicate
-/// `expected-revision` tags or a malformed value reject as `invalid:`.
+/// append). The tag shape is exactly `["expected-revision", value]`: a
+/// one-element `["expected-revision"]` or any three-or-more-element form is
+/// malformed and rejects `invalid:` — it is never treated as absent. At most
+/// one `expected-revision` tag may be present. A single well-formed tag yields
+/// `Some(spec)`.
 pub(crate) fn parse_canvas_expected_revision(
     event: &Event,
 ) -> Result<Option<CanvasRevisionSpec>, IngestError> {
-    let mut values = event.tags.iter().filter_map(|tag| {
-        let parts = tag.as_slice();
-        if parts.len() >= 2 && parts[0] == "expected-revision" {
-            Some(parts[1].as_str())
-        } else {
-            None
-        }
-    });
+    let mut tags = event
+        .tags
+        .iter()
+        .map(nostr::Tag::as_slice)
+        .filter(|parts| parts.first().map(String::as_str) == Some("expected-revision"));
 
-    let Some(value) = values.next() else {
+    let Some(tag) = tags.next() else {
         return Ok(None);
     };
-    if values.next().is_some() {
+    if tags.next().is_some() {
         return Err(IngestError::Rejected(
             "invalid: duplicate expected-revision tag".into(),
         ));
     }
+    if tag.len() != 2 {
+        return Err(IngestError::Rejected(
+            "invalid: expected-revision tag must have exactly one value".into(),
+        ));
+    }
+    let value = tag[1].as_str();
 
     if value == "none" {
         return Ok(Some(CanvasRevisionSpec::NoHead));
@@ -3238,6 +3244,11 @@ async fn ingest_event_inner(
                     "conflict: canvas changed since it was loaded".into(),
                 ));
             }
+            buzz_db::ChannelHeadWriteStatus::SupersedeFailed => {
+                return Err(IngestError::Rejected(
+                    "conflict: canvas write does not supersede the current head".into(),
+                ));
+            }
             buzz_db::ChannelHeadWriteStatus::Inserted => (stored_event, true),
             buzz_db::ChannelHeadWriteStatus::Duplicate => (stored_event, false),
         }
@@ -3475,6 +3486,32 @@ mod tests {
                 Err(IngestError::Rejected(m)) if m.contains("bad expected canvas revision")
             ));
         }
+    }
+
+    #[test]
+    fn canvas_expected_revision_rejects_one_element_tag() {
+        // A bare `["expected-revision"]` is malformed, never treated as absent.
+        let event = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "content")
+            .tags([nostr::Tag::parse(["expected-revision"]).unwrap()])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign canvas event");
+        assert!(matches!(
+            parse_canvas_expected_revision(&event),
+            Err(IngestError::Rejected(m)) if m.contains("exactly one value")
+        ));
+    }
+
+    #[test]
+    fn canvas_expected_revision_rejects_three_element_tag() {
+        let id = "a".repeat(64);
+        let event = EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "content")
+            .tags([nostr::Tag::parse(["expected-revision", &id, "extra"]).unwrap()])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign canvas event");
+        assert!(matches!(
+            parse_canvas_expected_revision(&event),
+            Err(IngestError::Rejected(m)) if m.contains("exactly one value")
+        ));
     }
 
     #[test]

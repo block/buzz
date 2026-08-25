@@ -263,34 +263,43 @@ pub async fn cmd_list_channel_members(
     Ok(())
 }
 
-/// Fetch a channel's full canvas event stream (kind 40100).
-async fn fetch_canvas_stream(
+/// Fetch the live canvas head (kind 40100) for a channel.
+///
+/// The relay orders results `created_at DESC, id ASC`, so a `limit: 1` query
+/// returns exactly the head every surface agrees on — no full-stream scan, no
+/// silent page clamp.
+async fn fetch_canvas_head(
     client: &BuzzClient,
     channel_id: &str,
-) -> Result<Vec<serde_json::Value>, CliError> {
+) -> Result<Option<serde_json::Value>, CliError> {
     let filter = serde_json::json!({
         "kinds": [40100],
-        "#h": [channel_id]
+        "#h": [channel_id],
+        "limit": 1,
     });
     let resp = client.query(&filter).await?;
-    Ok(serde_json::from_str(&resp).unwrap_or_default())
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    Ok(events.into_iter().next())
 }
 
-/// Return the live canvas head from a stream, applying the relay's head
-/// ordering: newest `created_at`, ties broken by lowest event ID.
-fn canvas_head(events: &[serde_json::Value]) -> Option<&serde_json::Value> {
-    events.iter().max_by(|a, b| {
-        let ts = |e: &serde_json::Value| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        let id = |e: &serde_json::Value| {
-            e.get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-        // Later timestamp wins; on a tie the lower id is the head, so reverse
-        // the id comparison to make it the max under this ordering.
-        ts(a).cmp(&ts(b)).then_with(|| id(b).cmp(&id(a)))
-    })
+/// Fetch a single canvas revision by event ID, scoped to the channel and kind.
+///
+/// An ID-scoped query resolves revisions of any age; scanning a capped stream
+/// would report a retained-but-old revision as absent.
+async fn fetch_canvas_revision(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: &str,
+) -> Result<Option<serde_json::Value>, CliError> {
+    let filter = serde_json::json!({
+        "ids": [revision],
+        "kinds": [40100],
+        "#h": [channel_id],
+        "limit": 1,
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    Ok(events.into_iter().next())
 }
 
 pub async fn cmd_get_canvas(
@@ -299,17 +308,15 @@ pub async fn cmd_get_canvas(
     revision: Option<&str>,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
-    if let Some(revision) = revision {
-        validate_hex64(revision)?;
-    }
-    let events = fetch_canvas_stream(client, channel_id).await?;
     let selected = match revision {
-        Some(revision) => events
-            .iter()
-            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(revision)),
-        None => canvas_head(&events),
+        Some(revision) => {
+            validate_hex64(revision)?;
+            fetch_canvas_revision(client, channel_id, revision).await?
+        }
+        None => fetch_canvas_head(client, channel_id).await?,
     };
     if let Some(content) = selected
+        .as_ref()
         .and_then(|e| e.get("content"))
         .and_then(|c| c.as_str())
     {
@@ -321,27 +328,23 @@ pub async fn cmd_get_canvas(
 }
 
 /// List canvas revisions newest-first as JSON `{event_id, author, created_at}`.
+///
+/// Uses composite `(until, before_id)` pagination so a `limit` above one relay
+/// page returns the full requested window instead of a silently truncated one.
 pub async fn cmd_canvas_history(
     client: &BuzzClient,
     channel_id: &str,
     limit: usize,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
-    let mut events = fetch_canvas_stream(client, channel_id).await?;
-    // Newest first; ties broken by lowest id so the head sorts first.
-    events.sort_by(|a, b| {
-        let ts = |e: &serde_json::Value| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        let id = |e: &serde_json::Value| {
-            e.get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-        ts(b).cmp(&ts(a)).then_with(|| id(a).cmp(&id(b)))
+    let filter = serde_json::json!({
+        "kinds": [40100],
+        "#h": [channel_id],
     });
+    let capped = u32::try_from(limit).unwrap_or(u32::MAX);
+    let events = client.query_paginated(filter, capped).await?;
     let revisions: Vec<serde_json::Value> = events
         .iter()
-        .take(limit)
         .map(|e| {
             serde_json::json!({
                 "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
@@ -356,18 +359,25 @@ pub async fn cmd_canvas_history(
 
 /// Restore the canvas to a previous revision by re-publishing its content with
 /// an `expected-revision` precondition pinned to the current head.
+///
+/// The target revision is fetched by an ID-scoped query (resolves any age) and
+/// the head by a separate `limit: 1` query — neither scans the full stream. The
+/// republished event is signed with `created_at = max(now, head.created_at + 1)`
+/// (contract v3 writer discipline) so it sorts strictly ahead of the asserted
+/// head and the relay's head-advancement guard is not tripped.
 pub async fn cmd_restore_canvas(
     client: &BuzzClient,
     channel_id: &str,
     revision: &str,
 ) -> Result<(), CliError> {
+    use nostr::Timestamp;
+
     let channel_uuid = parse_uuid(channel_id)?;
     validate_hex64(revision)?;
-    let events = fetch_canvas_stream(client, channel_id).await?;
 
-    let content = events
-        .iter()
-        .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(revision))
+    let content = fetch_canvas_revision(client, channel_id, revision)
+        .await?
+        .as_ref()
         .and_then(|e| e.get("content"))
         .and_then(|c| c.as_str())
         .ok_or_else(|| {
@@ -377,13 +387,18 @@ pub async fn cmd_restore_canvas(
         })?
         .to_string();
 
-    let head = canvas_head(&events)
-        .and_then(|e| e.get("id"))
+    let head = fetch_canvas_head(client, channel_id)
+        .await?
+        .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+    let head_id = head
+        .get("id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+    let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some(head))
-        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some(head_id))
+        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?
+        .custom_created_at(Timestamp::from(canvas_write_timestamp(head_created_at)));
     let event = client.sign_event(builder)?;
     match client.submit_event(event).await {
         Ok(resp) => {
@@ -395,6 +410,17 @@ pub async fn cmd_restore_canvas(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Writer-discipline timestamp for a canvas write asserting `head_created_at`:
+/// `max(now, head.created_at + 1)`. Guarantees the new event sorts strictly
+/// ahead of the asserted head under `created_at DESC, id ASC` (contract v3).
+fn canvas_write_timestamp(head_created_at: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.max(head_created_at.saturating_add(1))
 }
 
 pub async fn cmd_create_channel(
