@@ -1,11 +1,11 @@
 use std::{
     collections::HashSet,
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -21,37 +21,15 @@ const SHARED_RUNTIME_COMMAND_ENV: &str = "BUZZ_CODEX_APP_SERVER_COMMAND";
 const SHARED_RUNTIME_ERROR_TAIL_BYTES: u64 = 4096;
 const CODEX_CODE_MODE_HOST_FLAG: &str = "features.code_mode_host=true";
 #[cfg(windows)]
-const WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT: &str = r#"
-param([Parameter(Mandatory=$true)][string]$ConfigPath)
-$ErrorActionPreference='Stop'
-$config=Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-try {
-  Start-Process `
-    -FilePath ([string]$config.executable) `
-    -WorkingDirectory ([string]$config.working_directory) `
-    -ArgumentList @('-c','features.code_mode_host=true','app-server','--listen',([string]$config.url)) `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput ([string]$config.stdout_log) `
-    -RedirectStandardError ([string]$config.stderr_log) | Out-Null
-} catch {
-  $message='buzz shared runtime launcher failed: ' + $_.Exception.Message + [Environment]::NewLine
-  [IO.File]::AppendAllText([string]$config.stderr_log,$message,[Text.Encoding]::UTF8)
-  exit 1
-}
-"#;
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
-const WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT: &str = r#"
-$ErrorActionPreference='Stop'
-$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}
-$result=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-  CommandLine=$env:BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE
-  ProcessStartupInformation=$startup
+const WINDOWS_CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+#[cfg(windows)]
+fn windows_shared_runtime_creation_flags() -> u32 {
+    WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_NEW_PROCESS_GROUP
 }
-if ($result.ReturnValue -ne 0) {
-  throw "Win32_Process.Create returned $($result.ReturnValue)"
-}
-$result.ProcessId
-"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CodexSharedRuntimeConfig {
     version: u32,
@@ -663,6 +641,32 @@ fn codex_shared_runtime_args(url: &str) -> Vec<String> {
     ]
 }
 
+fn append_shared_runtime_launch_log(
+    log_path: &Path,
+    executable: &Path,
+    url: &str,
+    process_id: Option<u32>,
+) -> Result<(), String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|error| format!("failed to open {}: {error}", log_path.display()))?;
+    writeln!(
+        log,
+        "buzz shared runtime launch: timestamp={timestamp} method=direct pid={} executable={} url={url}",
+        process_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "pending".to_string()),
+        executable.display()
+    )
+    .map_err(|error| format!("failed to write {}: {error}", log_path.display()))
+}
+
 fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> {
     let executable = find_codex_app_server_executable()?;
 
@@ -670,73 +674,70 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
     {
         use std::os::windows::process::CommandExt;
 
-        let base_dir = managed_agents_base_dir(app)?;
-        let logs_dir = base_dir.join("logs");
+        let logs_dir = managed_agents_base_dir(app)?.join("logs");
         fs::create_dir_all(&logs_dir)
             .map_err(|error| format!("failed to create {}: {error}", logs_dir.display()))?;
-        let launcher_path = base_dir.join("codex-shared-runtime-launcher.ps1");
-        fs::write(&launcher_path, WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT)
-            .map_err(|error| format!("failed to write {}: {error}", launcher_path.display()))?;
         let stdout_log = logs_dir.join("codex-shared-runtime.stdout.log");
         let stderr_log = logs_dir.join("codex-shared-runtime.stderr.log");
-        fs::write(&stdout_log, [])
-            .map_err(|error| format!("failed to reset {}: {error}", stdout_log.display()))?;
-        fs::write(&stderr_log, [])
-            .map_err(|error| format!("failed to reset {}: {error}", stderr_log.display()))?;
-        let launcher_config_path = base_dir.join("codex-shared-runtime-launcher.json");
         let working_directory = executable
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let launcher_config = serde_json::to_vec_pretty(&serde_json::json!({
-            "executable": executable,
-            "working_directory": working_directory,
-            "url": url,
-            "stdout_log": stdout_log,
-            "stderr_log": stderr_log,
-        }))
-        .map_err(|error| format!("failed to serialize Codex runtime launcher: {error}"))?;
-        fs::write(&launcher_config_path, launcher_config).map_err(|error| {
-            format!(
-                "failed to write {}: {error}",
-                launcher_config_path.display()
-            )
-        })?;
 
-        // WMI owns the transient launcher, so the shared backend survives Buzz
-        // updates. Both the launcher and Codex run without console windows.
-        let command_line = format!(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\" -ConfigPath \"{}\"",
-            launcher_path.display(),
-            launcher_config_path.display()
-        );
-        let output = Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT,
-            ])
-            .env("BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE", command_line)
-            .creation_flags(0x0800_0000)
-            .output()
-            .map_err(|error| format!("failed to request Codex runtime start: {error}"))?;
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if detail.is_empty() {
-                "Windows could not start the Codex shared runtime".to_string()
-            } else {
-                detail
-            });
-        }
+        append_shared_runtime_launch_log(&stderr_log, &executable, url, None)?;
+        let stdout = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stdout_log)
+            .map_err(|error| format!("failed to open {}: {error}", stdout_log.display()))?;
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log)
+            .map_err(|error| format!("failed to open {}: {error}", stderr_log.display()))?;
+        let child = Command::new(&executable)
+            .args(codex_shared_runtime_args(url))
+            .current_dir(working_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .creation_flags(windows_shared_runtime_creation_flags())
+            .spawn();
+        let child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                let mut log = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&stderr_log)
+                    .map_err(|log_error| {
+                        format!(
+                            "failed to start {}: {error}; failed to open {}: {log_error}",
+                            executable.display(),
+                            stderr_log.display()
+                        )
+                    })?;
+                writeln!(
+                    log,
+                    "buzz shared runtime launch failed: executable={} error={error}",
+                    executable.display()
+                )
+                .map_err(|log_error| {
+                    format!(
+                        "failed to start {}: {error}; failed to write {}: {log_error}",
+                        executable.display(),
+                        stderr_log.display()
+                    )
+                })?;
+                return Err(format!("failed to start {}: {error}", executable.display()));
+            }
+        };
+        append_shared_runtime_launch_log(&stderr_log, &executable, url, Some(child.id()))?;
         Ok(())
     }
 
     #[cfg(not(windows))]
     {
-        use std::process::Stdio;
-
         let logs_dir = managed_agents_base_dir(app)?.join("logs");
         fs::create_dir_all(&logs_dir)
             .map_err(|error| format!("failed to create {}: {error}", logs_dir.display()))?;
@@ -1120,8 +1121,6 @@ mod tests {
                 DEFAULT_CODEX_SHARED_APP_SERVER_URL,
             ]
         );
-        #[cfg(windows)]
-        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains(CODEX_CODE_MODE_HOST_FLAG));
     }
 
     #[cfg(target_os = "macos")]
@@ -1269,11 +1268,32 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_shared_runtime_launch_is_hidden_and_logged() {
-        assert!(WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT.contains("ShowWindow"));
-        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-WindowStyle Hidden"));
-        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-WorkingDirectory"));
-        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-RedirectStandardOutput"));
-        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-RedirectStandardError"));
+        let flags = windows_shared_runtime_creation_flags();
+        assert_ne!(flags & WINDOWS_CREATE_NO_WINDOW, 0);
+        assert_ne!(flags & WINDOWS_CREATE_NEW_PROCESS_GROUP, 0);
+    }
+
+    #[test]
+    fn shared_runtime_launch_log_records_method_executable_and_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("codex-shared-runtime.stderr.log");
+        let executable = dir
+            .path()
+            .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+
+        append_shared_runtime_launch_log(
+            &log_path,
+            &executable,
+            DEFAULT_CODEX_SHARED_APP_SERVER_URL,
+            Some(1234),
+        )
+        .unwrap();
+        let log = fs::read_to_string(log_path).unwrap();
+
+        assert!(log.contains("method=direct"));
+        assert!(log.contains("pid=1234"));
+        assert!(log.contains(executable.to_string_lossy().as_ref()));
+        assert!(log.contains(DEFAULT_CODEX_SHARED_APP_SERVER_URL));
     }
 
     #[test]
