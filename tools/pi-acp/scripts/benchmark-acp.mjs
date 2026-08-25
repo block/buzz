@@ -8,6 +8,25 @@ const command = process.argv[2];
 if (!command)
   throw new Error("usage: benchmark-acp.mjs <adapter-command> [args-json]");
 const args = process.argv[3] ? JSON.parse(process.argv[3]) : [];
+const scenario = process.argv[4] || "question";
+const scenarios = {
+  question: {
+    prompt: "Return exactly: PI_ACP_CANARY_OK",
+    expected: "PI_ACP_CANARY_OK",
+    system:
+      "Benchmark mode. Do not call tools. Return exactly the requested text and nothing else.",
+  },
+  kanban: {
+    prompt:
+      "Use the available compact Kanban task reader, never the full board. Search for 'Pilot Pi harness' with limit 1. Return only the matching task title, with no quotes or explanation.",
+    expected:
+      "BUZZ AGENTS. Pilot Pi harness integration through a pi-acp adapter",
+    system:
+      "Benchmark mode. Use only one compact filtered Kanban query. After reading it, return exactly the requested title and nothing else.",
+  },
+};
+const selected = scenarios[scenario];
+if (!selected) throw new Error(`unknown scenario: ${scenario}`);
 const child = spawn(command, args, {
   cwd: process.cwd(),
   env: process.env,
@@ -84,8 +103,7 @@ try {
     {
       cwd: process.cwd(),
       mcpServers: [],
-      systemPrompt:
-        "Benchmark mode. Do not call tools. Return exactly the requested text and nothing else.",
+      systemPrompt: selected.system,
     },
     60_000,
   );
@@ -94,7 +112,7 @@ try {
     "session/prompt",
     {
       sessionId: created.sessionId,
-      prompt: [{ type: "text", text: "Return exactly: PI_ACP_CANARY_OK" }],
+      prompt: [{ type: "text", text: selected.prompt }],
       _meta: {
         buzz: {
           channelId: "4dcab690-a2ca-4a56-9e5d-d901d12f83c3",
@@ -123,10 +141,11 @@ try {
     `${JSON.stringify(
       {
         adapter: initialized.agentInfo?.name || command,
+        scenario,
         elapsedMs: Math.round(performance.now() - started),
         stopReason: result.stopReason,
         text,
-        exact: text.trim() === "PI_ACP_CANARY_OK",
+        exact: text.trim() === selected.expected,
         tools,
         usage: usageEvent?.params?.update || result.usage || null,
       },
