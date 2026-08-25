@@ -224,6 +224,51 @@ test("feedback can be searched and filtered by community and time", async ({
   await expect(page.getByText("Calls are much more reliable")).toHaveCount(0);
 });
 
+test("feedback filters contain long community names", async ({ page }) => {
+  await page.setViewportSize({ width: 1415, height: 720 });
+  await page.route("**/api/admin/v1/feedback", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "long-community",
+          communityId: "long-community",
+          communityHost: `${"long-community-name-".repeat(5)}buzz.example.com`,
+          submitterPubkey: "21".repeat(32),
+          category: "bug",
+          bodySummary: "The filter row stays within its container",
+          receivedAt: new Date().toISOString(),
+        },
+      ]),
+    }),
+  );
+
+  await page.goto("/feedback");
+
+  const filters = page.locator(".feedback-filters");
+  const status = page.getByLabel("Status");
+  await expect(filters).toBeVisible();
+  await expect(status).toBeVisible();
+
+  const [filtersBox, statusBox] = await Promise.all([
+    filters.boundingBox(),
+    status.boundingBox(),
+  ]);
+  expect(filtersBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
+  if (!filtersBox || !statusBox) {
+    throw new Error("feedback filter bounds were unavailable");
+  }
+  expect(statusBox.x + statusBox.width).toBeLessThanOrEqual(
+    filtersBox.x + filtersBox.width,
+  );
+  const pageWidths = await page.evaluate(() => ({
+    client: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(pageWidths.scroll).toBe(pageWidths.client);
+});
+
 test("feedback status is stored locally by feedback id", async ({ page }) => {
   await page.route("**/api/admin/v1/feedback", (route) =>
     route.fulfill({
