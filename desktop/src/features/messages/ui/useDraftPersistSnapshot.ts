@@ -2,9 +2,10 @@ import * as React from "react";
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
-import type {
-  DraftMentionRef,
-  DraftState,
+import {
+  getDraftStoreScope,
+  type DraftMentionRef,
+  type DraftState,
 } from "@/features/messages/lib/useDrafts";
 
 type UseDraftPersistLifecycleParams = {
@@ -70,6 +71,10 @@ type UseDraftPersistLifecycleResult = {
 };
 
 const authoritativelyClearedDraftKeys = new Set<string>();
+
+function scopedDraftKey(draftKey: string): string {
+  return `${getDraftStoreScope()}:${draftKey}`;
+}
 
 /**
  * Owns the draft-persist lifecycle for `MessageComposer`.
@@ -147,18 +152,21 @@ export function useDraftPersistLifecycle({
         : [];
     }
     restoreQueuedAttachments?.(restoredQueuedAttachmentsRef.current);
-    const wasAuthoritativelyCleared = effectiveDraftKey
-      ? authoritativelyClearedDraftKeys.has(effectiveDraftKey)
+    const authoritativeDraftKey = effectiveDraftKey
+      ? scopedDraftKey(effectiveDraftKey)
+      : null;
+    const wasAuthoritativelyCleared = authoritativeDraftKey
+      ? authoritativelyClearedDraftKeys.has(authoritativeDraftKey)
       : false;
-    const saved =
-      effectiveDraftKey && !wasAuthoritativelyCleared
-        ? loadDraft(effectiveDraftKey)
-        : undefined;
+    const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
     emptyContentIsAuthoritativeRef.current = wasAuthoritativelyCleared;
     isRestoringContentRef.current = true;
     if (saved) {
-      setContent(saved.content);
-      restoreMentionRefs(saved.mentionRefs ?? []);
+      const restoredContent = wasAuthoritativelyCleared ? "" : saved.content;
+      setContent(restoredContent);
+      restoreMentionRefs(
+        wasAuthoritativelyCleared ? [] : (saved.mentionRefs ?? []),
+      );
       // Set the persist-snapshot ref SYNCHRONOUSLY before calling the async
       // state setter, so the cleanup closure (which may fire before the state
       // update commits in React StrictMode's simulate-unmount pass) reads the
@@ -200,12 +208,13 @@ export function useDraftPersistLifecycle({
   const trackAuthoredContent = React.useCallback(
     (content: string) => {
       if (!effectiveDraftKey || isRestoringContentRef.current) return;
+      const authoritativeDraftKey = scopedDraftKey(effectiveDraftKey);
       if (content.length > 0) {
-        authoritativelyClearedDraftKeys.delete(effectiveDraftKey);
+        authoritativelyClearedDraftKeys.delete(authoritativeDraftKey);
         emptyContentIsAuthoritativeRef.current = false;
         return;
       }
-      authoritativelyClearedDraftKeys.add(effectiveDraftKey);
+      authoritativelyClearedDraftKeys.add(authoritativeDraftKey);
       emptyContentIsAuthoritativeRef.current = true;
       persistDraft(
         effectiveDraftKey,
