@@ -549,6 +549,14 @@ pub fn build_set_canvas(
 ) -> Result<EventBuilder, SdkError> {
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(expected_revision) = expected_revision {
+        if expected_revision != "none"
+            && (expected_revision.len() != 64
+                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+            )));
+        }
         tags.push(tag(&["expected-revision", expected_revision])?);
     }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
@@ -571,6 +579,12 @@ pub fn build_set_canvas_after_head(
     head_id: &str,
     head_created_at: u64,
 ) -> Result<EventBuilder, SdkError> {
+    if head_created_at == u64::MAX {
+        return Err(SdkError::InvalidInput(
+            "head_created_at must be below u64::MAX so the write can stamp strictly ahead of it"
+                .into(),
+        ));
+    }
     let created_at = canvas_write_created_at(head_created_at);
     Ok(build_set_canvas(channel_id, content, Some(head_id))?
         .custom_created_at(nostr::Timestamp::from(created_at)))
@@ -2973,6 +2987,36 @@ mod tests {
         let past_head = 1_000_u64;
         let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, past_head).unwrap());
         assert!(ev.created_at.as_secs() > past_head);
+    }
+
+    #[test]
+    fn set_canvas_rejects_malformed_expected_revision() {
+        let cid = uuid();
+        // Wrong length (63 hex chars).
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"a".repeat(63))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Correct length but non-hex.
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"z".repeat(64))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Literal "none" and a valid 64-hex id are accepted.
+        assert!(build_set_canvas(cid, "x", Some("none")).is_ok());
+        assert!(build_set_canvas(cid, "x", Some(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn set_canvas_after_head_rejects_max_head_created_at() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        // u64::MAX cannot be stamped strictly ahead of: reject instead of
+        // silently saturating and breaking the head-advancement guarantee.
+        assert!(matches!(
+            build_set_canvas_after_head(cid, "# Restored", &head, u64::MAX),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 
     #[test]

@@ -278,7 +278,11 @@ async fn fetch_canvas_head(
         "limit": 1,
     });
     let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas head: {e}"
+        ))
+    })?;
     Ok(events.into_iter().next())
 }
 
@@ -298,7 +302,11 @@ async fn fetch_canvas_revision(
         "limit": 1,
     });
     let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas revision: {e}"
+        ))
+    })?;
     Ok(events.into_iter().next())
 }
 
@@ -394,6 +402,14 @@ pub async fn cmd_restore_canvas(
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
     let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // Restoring the revision that is already the head would publish a new event
+    // with identical content, growing history with a redundant revision. Match
+    // Desktop, which hides Restore on the current revision, by short-circuiting.
+    if head_id.eq_ignore_ascii_case(revision) {
+        println!("revision {revision} is already the current revision");
+        return Ok(());
+    }
 
     let builder =
         buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
