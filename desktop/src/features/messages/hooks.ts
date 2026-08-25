@@ -25,6 +25,12 @@ import {
 } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
 import {
+  channelHeadCacheScope,
+  channelHeadHydration,
+  consumeHydratedChannel,
+} from "@/features/messages/lib/channelHeadCache";
+import { storeChannelHeadCache } from "@/shared/api/tauriChannelHeadCache";
+import {
   mergeMessages,
   mergeTimelineCacheMessages,
 } from "@/features/messages/lib/messageMerge";
@@ -99,6 +105,18 @@ function isChannelWindowTimelineRow(
     isBroadcastReply(event.tags) ||
     channelWindowThreadRepliesInChannel(window)
   );
+}
+
+export function resolveCachedReplyRootId(
+  parentEventId: string,
+  messageCaches: readonly RelayEvent[][],
+): string | null {
+  for (const messages of messageCaches) {
+    if (messages.some((event) => event.id === parentEventId)) {
+      return resolveReplyRootId(parentEventId, messages);
+    }
+  }
+  return null;
 }
 
 export function createOptimisticMessage(
@@ -273,18 +291,30 @@ export function reconcileFetchedChannelWindow(
     emptyChannelWindowStore();
   const next = replaceNewestChannelWindow(current, page);
   queryClient.setQueryData(windowKey, next);
+  const scope = channelHeadCacheScope(queryClient);
+  if (scope) {
+    void storeChannelHeadCache(scope, channelId, events).catch((error) => {
+      console.warn("Failed to persist channel head", channelId, error);
+    });
+  }
   return reconcileChannelWindowMessages(next, previousMessages);
 }
 
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
-
   return useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
     queryKey,
     queryFn: async ({ signal }) => {
       if (!channel) throw new Error("No channel selected.");
+      // Persisted heads seed asynchronously; wait for that seed so a channel
+      // opened during boot takes the hydrated path instead of racing it with
+      // a cold relay fetch.
+      await channelHeadHydration(queryClient);
+      if (consumeHydratedChannel(queryClient, channel.id)) {
+        return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      }
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const events = await getChannelWindowEvents(channel.id);
@@ -409,36 +439,45 @@ export function useChannelSubscription(channel: Channel | null) {
       });
     });
 
+    // The live subscription starts at "now", so it cannot close the gap
+    // between the last page snapshot and subscription establishment. Always
+    // refresh once subscription setup settles — on success because freshness
+    // alone is not proof that no relay events landed in that interval, and on
+    // failure because a hydrated channel has no other authoritative fetch:
+    // the relay window endpoint may be healthy even when the live socket is
+    // not, and the reconnect listener above re-syncs when it recovers.
+    const refreshAfterSubscribe = (outcome: string) => {
+      if (isDisposed) return;
+      void refreshNewestWindow().catch((error) => {
+        if (!isDisposed) {
+          console.error(
+            `Failed to refresh channel window after ${outcome}`,
+            channelId,
+            error,
+          );
+        }
+      });
+    };
     relayClient
       .subscribeToChannelLive(channelId, (event) => {
         if (!isDisposed) {
           appendMessage(event);
         }
       })
-      .then((dispose) => {
-        if (isDisposed) {
-          void dispose();
-          return;
-        }
-
-        cleanup = dispose;
-        // The live subscription starts at "now", so it cannot close the gap
-        // between the last page snapshot and subscription establishment. Always
-        // refresh after the subscription is active; freshness alone is not a
-        // proof that no relay events landed in that interval.
-        void refreshNewestWindow().catch((error) => {
-          if (!isDisposed) {
-            console.error(
-              "Failed to refresh channel window after subscribing",
-              channelId,
-              error,
-            );
+      .then(
+        (dispose) => {
+          if (isDisposed) {
+            void dispose();
+            return;
           }
-        });
-      })
-      .catch((error) => {
-        console.error("Failed to subscribe to channel", channelId, error);
-      });
+          cleanup = dispose;
+          refreshAfterSubscribe("subscribing");
+        },
+        (error) => {
+          console.error("Failed to subscribe to channel", channelId, error);
+          refreshAfterSubscribe("subscription failure");
+        },
+      );
 
     return () => {
       isDisposed = true;
@@ -554,6 +593,17 @@ export function useSendMessageMutation(
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
           ) ?? [];
+        const threadCaches = queryClient
+          .getQueriesData<RelayEvent[]>({
+            queryKey: ["thread-replies", effectiveChannel.id],
+          })
+          .flatMap(([, events]) => (events ? [events] : []));
+        const suppliedRootEventId = parentEventId
+          ? resolveCachedReplyRootId(parentEventId, [
+              cachedMessages,
+              ...threadCaches,
+            ])
+          : null;
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
@@ -565,6 +615,9 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          undefined,
+          undefined,
+          suppliedRootEventId,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -575,7 +628,7 @@ export function useSendMessageMutation(
               effectiveChannel.id,
               identity.pubkey,
               parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
+              result.rootEventId ?? parentEventId,
               recipientPubkeys,
             )
           : [];
@@ -646,11 +699,17 @@ export function useSendMessageMutation(
       }
 
       const queryKey = channelMessagesKey(effectiveChannel.id);
-      await queryClient.cancelQueries({ queryKey });
+      const windowKey = channelWindowKey(effectiveChannel.id);
+      // The rendered timeline is projected from the channel-window cache. Cancel
+      // both reads before snapshotting either cache so an older window response
+      // cannot replace the optimistic row between onMutate and onSuccess.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey }),
+        queryClient.cancelQueries({ queryKey: windowKey }),
+      ]);
 
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const windowKey = channelWindowKey(effectiveChannel.id);
       const previousWindow =
         queryClient.getQueryData<ChannelWindowStore>(windowKey);
       const optimisticMessage = createOptimisticMessage(

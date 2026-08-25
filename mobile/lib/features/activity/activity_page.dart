@@ -377,7 +377,7 @@ class ActivityPage extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
         showBottomDivider: true,
-        bottomDividerOpacity: 0.06,
+        bottomDividerOpacity: 0.07,
         title: Text('Activity', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [

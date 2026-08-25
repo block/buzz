@@ -306,6 +306,8 @@ type MockBridgeOptions = {
   channelWindowDelayMs?: number;
   /** Advertise community-level thread replies in channel windows. */
   threadRepliesInChannel?: boolean;
+  /** Delay (ms) for newest-page fetches; see e2eBridge mock config. */
+  channelHeadDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
   /** Override whether get_profile reports a real kind:0 event. */

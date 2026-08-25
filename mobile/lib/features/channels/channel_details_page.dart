@@ -255,6 +255,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     return FrostedScaffold(
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
+        centerTitle: true,
         leading: usesNativeIosGlassBackButton
             ? IosGlassNavigationButton(
                 key: const ValueKey('channel-details-ios-glass-back'),
@@ -279,7 +280,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         frostedBlurSigma:
             _channelDetailsHeaderFrostMaxBlurSigma * headerFrostProgress.value,
         showBottomDivider: headerFrostProgress.value > 0,
-        bottomDividerOpacity: 0.15 * headerFrostProgress.value,
+        bottomDividerOpacity: 0.07 * headerFrostProgress.value,
         title: AnimatedSwitcher(
           duration: reducedMotion
               ? Duration.zero

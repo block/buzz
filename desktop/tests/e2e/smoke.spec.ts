@@ -892,3 +892,55 @@ test("does not shift the timeline when the composer grows", async ({
   expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(2);
   expect(after.distanceFromBottom).toBeGreaterThan(160);
 });
+
+test("lifts Jump to latest when the composer grows", async ({ page }) => {
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await ensureTimelineScrollable(page, `Jump pill growth ${Date.now()}`);
+  await page.waitForTimeout(400);
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  const jumpToLatest = page.getByTestId("message-scroll-to-latest");
+  const composer = page.getByTestId("message-composer");
+  await expect(jumpToLatest).toBeVisible();
+  const initialPillBox = await jumpToLatest.boundingBox();
+  const initialComposerBox = await composer.boundingBox();
+
+  await input.fill(
+    [
+      "Composer growth line one",
+      "Composer growth line two",
+      "Composer growth line three",
+      "Composer growth line four",
+    ].join("\n"),
+  );
+
+  await expect
+    .poll(async () => (await composer.boundingBox())?.height ?? 0)
+    .toBeGreaterThan((initialComposerBox?.height ?? 0) + 40);
+  await page.waitForTimeout(250);
+
+  const expandedPillBox = await jumpToLatest.boundingBox();
+  const expandedComposerBox = await composer.boundingBox();
+  expect(initialPillBox).not.toBeNull();
+  expect(initialComposerBox).not.toBeNull();
+  expect(expandedPillBox).not.toBeNull();
+  expect(expandedComposerBox).not.toBeNull();
+
+  const composerGrowth =
+    (expandedComposerBox?.height ?? 0) - (initialComposerBox?.height ?? 0);
+  const pillLift = (initialPillBox?.y ?? 0) - (expandedPillBox?.y ?? 0);
+  expect(pillLift).toBeGreaterThanOrEqual(composerGrowth - 2);
+  expect(
+    (expandedPillBox?.y ?? 0) + (expandedPillBox?.height ?? 0),
+  ).toBeLessThanOrEqual(expandedComposerBox?.y ?? 0);
+});

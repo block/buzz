@@ -13,6 +13,8 @@ import { getWorkflowActivationWarning } from "@/features/workflows/ui/workflowAc
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
 import { WorkflowEditorHost } from "@/features/workflows/ui/WorkflowEditorHost";
+import { useWorkflowListAuthorPresentations } from "@/features/workflows/ui/useWorkflowListAuthorPresentations";
+import { useWorkflowListMessagePresentations } from "@/features/workflows/ui/useWorkflowListMessagePresentations";
 import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
 import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
 import {
@@ -146,6 +148,9 @@ export function WorkflowsView({
   });
 
   const allWorkflows = allWorkflowsQuery.data ?? [];
+  const workflows = allWorkflows.map(({ workflow }) => workflow);
+  const authorPresentations = useWorkflowListAuthorPresentations(workflows);
+  const messagePresentations = useWorkflowListMessagePresentations(workflows);
 
   const triggerMutation = useMutation({
     mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
@@ -310,12 +315,14 @@ export function WorkflowsView({
               <CreateWorkflowCard onClick={onCreateWorkflow} />
               {allWorkflows.map(({ workflow, channelName }) => (
                 <WorkflowCard
+                  authorPresentation={authorPresentations.get(workflow.id)}
                   channelName={channelName}
                   isTogglingEnabled={
                     toggleEnabledMutation.isPending &&
                     toggleEnabledMutation.variables?.id === workflow.id
                   }
                   key={workflow.id}
+                  messagePresentation={messagePresentations.get(workflow.id)}
                   onDelete={handleDelete}
                   onDuplicate={handleDuplicate}
                   onEdit={handleEdit}

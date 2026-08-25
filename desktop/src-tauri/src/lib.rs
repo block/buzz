@@ -3,6 +3,7 @@ mod app_menu;
 mod app_state;
 mod archive;
 mod builderlab;
+mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
@@ -234,6 +235,7 @@ pub fn run() {
         .manage(archive::sync::ArchiveSyncState::default())
         .manage(native_relay_client::NativeRelayClient::default())
         .manage(observed_unread::ObservedUnreadStore::default())
+        .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -650,6 +652,7 @@ pub fn run() {
             add_reaction,
             remove_reaction,
             get_event,
+            get_events,
             show_native_notification,
             #[cfg(target_os = "macos")]
             macos_notifications::take_pending_activations,
@@ -724,6 +727,9 @@ pub fn run() {
             unread_catch_up::unread_catch_up,
             observed_unread::observed_unread_open_scope,
             observed_unread::observed_unread_ingest,
+            channel_head_cache::channel_head_cache_load,
+            channel_head_cache::channel_head_cache_store,
+            channel_head_cache::channel_head_cache_clear,
             list_personas,
             create_persona,
             update_persona,

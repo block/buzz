@@ -111,7 +111,9 @@ Clients **partition by kind before any cursor math**:
 2. **Aux closure** (`include_aux`) — reactions (7), deletions (5, 9005),
    and edits (40003) targeting the retained rows by `#e`, **plus**
    deletions targeting those aux events (the transitive second hop, e.g.
-   a delete-of-a-reaction). One round trip; no client `#e` fan-out.
+   a delete-of-a-reaction). One round trip; no client `#e` fan-out. Each
+   hop is drained server-side across the DB page clamp, so the closure is
+   complete rather than newest-1000.
 3. **Thread summaries** (`include_summaries`) — one relay-signed
    `kind:39005` per row that has replies.
 4. **Window bounds** — exactly one relay-signed `kind:39006` per window
@@ -159,6 +161,8 @@ Both kinds are relay-only: client submission is rejected at ingest.
   show root/thread context, and let "Reply" target the original thread/reply
   without requiring the side panel. A backlink/open-thread affordance may route
   to the root message and open the side panel.
+- Thread filters may opt into `include_aux` to append the same authorized
+  two-hop reactions, edits, and deletions closure as a channel-window response.
 
 ## Siblings
 
