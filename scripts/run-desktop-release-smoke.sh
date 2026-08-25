@@ -103,6 +103,7 @@ else
   RELAY_BIN="${ROOT}/target/ci/buzz-relay"
 fi
 log "starting relay at ${RELAY_HTTP_URL}"
+RELAY_PRIVATE_KEY="$(openssl rand -hex 32)"
 env \
   DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/${DB_NAME}" \
   REDIS_URL="redis://localhost:6379/${REDIS_DB}" \
@@ -110,6 +111,7 @@ env \
   BUZZ_BIND_ADDR="127.0.0.1:${RELAY_PORT}" \
   BUZZ_HEALTH_PORT="${HEALTH_PORT}" \
   BUZZ_METRICS_PORT="${METRICS_PORT}" \
+  BUZZ_RELAY_PRIVATE_KEY="${RELAY_PRIVATE_KEY}" \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
   BUZZ_RECONCILE_CHANNELS=true \
   BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=1000000 \
