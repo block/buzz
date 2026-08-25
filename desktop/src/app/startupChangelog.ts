@@ -5,6 +5,14 @@ export type StartupChangelogEntry = {
 
 export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
   {
+    title: "0.5.13 更新",
+    items: [
+      "新增竖屏视频支持、Agent 分享头像压缩和更具体的分享错误提示。",
+      "MCP 文件工具支持使用 `~` 指向用户主目录，也兼容 MSYS 路径。",
+      "增加本地签名更新包发布能力，并继续改进 Windows Codex runtime 启动。",
+    ],
+  },
+  {
     title: "Agent handoff",
     items: [
       "Agent 可以根据当前 ACP 会话自动生成 Markdown 交接内容。",
