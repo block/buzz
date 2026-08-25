@@ -6,6 +6,10 @@ get from zero to a merged pull request.
 
 If you have questions that aren't answered here, [open an issue](https://github.com/block/buzz/issues/new).
 
+If you believe you found a security vulnerability, do not open a public issue.
+Follow our [security policy](SECURITY.md) to submit a private vulnerability
+report instead.
+
 ---
 
 ## Table of Contents

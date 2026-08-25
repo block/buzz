@@ -89,6 +89,7 @@ class _SheetCloseButton extends StatelessWidget {
         onPressed: closeSheet,
         width: 44,
         height: 44,
+        foregroundColor: context.colors.primary,
       );
     }
 
@@ -100,7 +101,7 @@ class _SheetCloseButton extends StatelessWidget {
         style: IconButton.styleFrom(
           padding: EdgeInsets.zero,
           backgroundColor: context.colors.surfaceContainerHighest,
-          foregroundColor: context.colors.onSurface,
+          foregroundColor: context.colors.primary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),

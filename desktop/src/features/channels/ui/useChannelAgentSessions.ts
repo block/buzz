@@ -39,6 +39,7 @@ type UseChannelAgentSessionsOptions = {
   openAgentSessionPubkey: string | null;
   openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
+  requireThreadEditResolution: () => boolean;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
   setOpenAgentSessionChannelId: PanelValueSetter;
@@ -173,6 +174,7 @@ export function useChannelAgentSessions({
   openAgentSessionPubkey,
   openThreadHeadId,
   profilePanelPubkey = null,
+  requireThreadEditResolution,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
   setOpenAgentSessionChannelId,
@@ -209,6 +211,7 @@ export function useChannelAgentSessions({
 
   const openAgentSession = React.useCallback(
     (pubkey: string, channelId?: string | null) => {
+      if (!requireThreadEditResolution()) return;
       if (!isAgentSessionOpen) {
         returnTarget.capture(
           resolveAgentSessionReturnTarget({
@@ -234,6 +237,7 @@ export function useChannelAgentSessions({
       isAgentSessionOpen,
       openThreadHeadId,
       profilePanelPubkey,
+      requireThreadEditResolution,
       returnTarget,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,

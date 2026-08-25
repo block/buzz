@@ -625,7 +625,7 @@ pub async fn lock_member_snapshot(
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
     // duplicate heads without introducing a lock-order inversion.
-    let replacement_lock = crate::event_replacement_lock_key(
+    let replacement_lock = crate::replaceable::event_replacement_lock_key(
         community_id,
         39002,
         relay_pubkey,
