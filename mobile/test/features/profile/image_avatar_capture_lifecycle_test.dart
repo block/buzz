@@ -64,6 +64,59 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
   });
+
+  testWidgets('waits for an in-flight camera before lifecycle replacement', (
+    tester,
+  ) async {
+    final platform = _TestCameraPlatform(blockInitializeForCameraIds: {1});
+    final previousPlatform = CameraPlatform.instance;
+    CameraPlatform.instance = platform;
+    addTearDown(() => CameraPlatform.instance = previousPlatform);
+    final lifecycle = _TestLifecycleNotifier();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appLifecycleProvider.overrideWith(() => lifecycle)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: SizedBox(
+              height: 400,
+              child: ImageAvatarCapture(
+                height: 400,
+                onAccepted: (_) {},
+                onClosed: () {},
+                loadCameras: platform.availableCameras,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(platform.createdCameraIds, [1]);
+
+    lifecycle.setLifecycle(AppLifecycleState.paused);
+    await tester.pump();
+    lifecycle.setLifecycle(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+    expect(platform.createdCameraIds, [1]);
+
+    platform.completeInitialize(1);
+    await tester.pump();
+    await tester.pump();
+    expect(platform.disposedCameraIds, [1]);
+    expect(platform.createdCameraIds, [1, 2]);
+    final shutter = tester.widget<InkWell>(
+      find.byKey(const ValueKey('image-camera-shutter')),
+    );
+    expect(shutter.onTap, isNotNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
 }
 
 class _TestLifecycleNotifier extends AppLifecycleNotifier {
@@ -79,11 +132,16 @@ class _TestLifecycleNotifier extends AppLifecycleNotifier {
 }
 
 class _TestCameraPlatform extends CameraPlatform {
-  _TestCameraPlatform({Set<int>? blockDisposeForCameraIds})
-    : _blockDisposeForCameraIds = blockDisposeForCameraIds ?? const {};
+  _TestCameraPlatform({
+    Set<int>? blockDisposeForCameraIds,
+    Set<int>? blockInitializeForCameraIds,
+  }) : _blockDisposeForCameraIds = blockDisposeForCameraIds ?? const {},
+       _blockInitializeForCameraIds = blockInitializeForCameraIds ?? const {};
 
   final Set<int> _blockDisposeForCameraIds;
+  final Set<int> _blockInitializeForCameraIds;
   final _disposeCompleters = <int, Completer<void>>{};
+  final _initializeCompleters = <int, Completer<void>>{};
   final _initializedControllers =
       <int, StreamController<CameraInitializedEvent>>{};
   final _errorControllers = <int, StreamController<CameraErrorEvent>>{};
@@ -133,6 +191,9 @@ class _TestCameraPlatform extends CameraPlatform {
     int cameraId, {
     ImageFormatGroup imageFormatGroup = ImageFormatGroup.unknown,
   }) async {
+    if (_blockInitializeForCameraIds.contains(cameraId)) {
+      await (_initializeCompleters[cameraId] ??= Completer<void>()).future;
+    }
     _initializedControllers[cameraId]!.add(
       CameraInitializedEvent(
         cameraId,
@@ -161,6 +222,10 @@ class _TestCameraPlatform extends CameraPlatform {
     if (_blockDisposeForCameraIds.contains(cameraId)) {
       await (_disposeCompleters[cameraId] ??= Completer<void>()).future;
     }
+  }
+
+  void completeInitialize(int cameraId) {
+    _initializeCompleters[cameraId]!.complete();
   }
 
   void failDispose(int cameraId) {
