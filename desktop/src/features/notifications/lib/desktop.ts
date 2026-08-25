@@ -378,6 +378,8 @@ export async function sendDesktopNotification(
   // center delegate because the Tauri plugin does not deliver desktop clicks.
   // Windows needs WinRT toast notifications so the app registers with
   // Settings > System > Notifications and click actions work.
+  // Do NOT use the Tauri notification plugin's sendNotification() on Windows —
+  // the native WinRT path handles delivery and click actions exclusively.
   // See src-tauri/src/commands/notifications.rs.
   if (isTauri() && (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())) {
     try {
