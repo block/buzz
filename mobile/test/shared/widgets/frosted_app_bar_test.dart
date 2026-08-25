@@ -87,6 +87,37 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('centers a title between asymmetric navigation controls', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: const Stack(
+          children: [
+            FrostedAppBar(
+              centerTitle: true,
+              leading: SizedBox(width: 48, height: 48),
+              title: Text('Profile', key: ValueKey('centered-title')),
+              actions: [SizedBox(width: 96, height: 48)],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final titleRect = tester.getRect(
+      find.byKey(const ValueKey('centered-title')),
+    );
+    expect(
+      titleRect.center.dx,
+      closeTo(
+        tester.view.physicalSize.width / tester.view.devicePixelRatio / 2,
+        0.01,
+      ),
+    );
+  });
+
   testWidgets('uses the native glass back control on iOS', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -146,6 +177,38 @@ void main() {
       isTrue,
     );
     debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('uses the theme primary color for automatic navigation glyphs', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const Stack(
+                  children: [FrostedAppBar(title: Text('Destination'))],
+                ),
+              ),
+            ),
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    final backButton = tester.widget<IconButton>(
+      find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == 'Back',
+      ),
+    );
+    expect(backButton.color, AppTheme.light().colorScheme.primary);
   });
 
   testWidgets('replaces native glass while a Flutter backdrop is active', (

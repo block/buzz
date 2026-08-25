@@ -4,6 +4,7 @@ import { beforeEach, test } from "node:test";
 import {
   isAtOrAfterConversationOpener,
   mergeProjectAgentConversationEvents,
+  projectAgentMembershipInput,
   restoreProjectsAgentConversation,
   submitProjectAgentMessage,
   visibleConversationMessages,
@@ -390,6 +391,24 @@ test("storage round-trips opener-anchored pointers and clears them", () => {
 
   clearStoredProjectsAgentConversation(WORKSPACE_ID);
   assert.equal(readStoredProjectsAgentConversation(WORKSPACE_ID), null);
+});
+
+test("project-home membership carries the captured relay and signer scopes", () => {
+  assert.deepEqual(
+    projectAgentMembershipInput({
+      channelId: "project-home",
+      agentPubkey: AGENT_PUBKEY,
+      relayScope: "wss://tenant-a.example",
+      signerScope: SELF_PUBKEY,
+    }),
+    {
+      channelId: "project-home",
+      pubkeys: [AGENT_PUBKEY],
+      role: "bot",
+      expectedRelayUrl: "wss://tenant-a.example",
+      expectedSignerPubkey: SELF_PUBKEY,
+    },
+  );
 });
 
 // ── submitProjectAgentMessage ───────────────────────────────────────────────

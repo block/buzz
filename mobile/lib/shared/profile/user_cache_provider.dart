@@ -33,6 +33,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     return null;
   }
 
+  /// Stores a profile that was fetched or updated outside the batch loader.
+  void put(UserProfile profile) {
+    state = {...state, profile.pubkey.toLowerCase(): profile};
+  }
+
   /// Preload profiles for a list of pubkeys (e.g. channel members).
   void preload(List<String> pubkeys) {
     final uncached = pubkeys

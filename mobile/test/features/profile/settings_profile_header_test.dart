@@ -40,6 +40,31 @@ void main() {
     expect((header.padding as EdgeInsets).bottom, Grid.twelve);
   });
 
+  testWidgets('shows the display name directly beneath the avatar', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          presenceProvider.overrideWith(() => _FakePresenceNotifier('online')),
+          userStatusProvider.overrideWith(() => _FakeUserStatusNotifier(null)),
+          customEmojiListProvider.overrideWithValue(const []),
+        ],
+        child: const SettingsProfileHeader(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final avatar = find.byKey(const ValueKey('settings-profile-avatar'));
+    final name = find.text('Test');
+    expect(name, findsOneWidget);
+    expect(
+      tester.getTopLeft(name).dy,
+      greaterThan(tester.getBottomLeft(avatar).dy),
+    );
+  });
+
   testWidgets('shows the poster until the animated avatar is ready', (
     tester,
   ) async {

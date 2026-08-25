@@ -114,6 +114,9 @@ async fn connect_authenticated_audio_socket(
         "type": "auth",
         "event": event_json,
         "parent_channel_id": parent_channel_id,
+        // Use the released v2 contract while deployed relays remain capped at
+        // v2. Relay-to-client media therefore has a one-byte peer-index prefix;
+        // see huddle::wire for the compatibility tradeoff.
         "protocol_version": super::wire::PROTOCOL_VERSION,
     });
     ws_tx

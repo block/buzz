@@ -26,7 +26,9 @@ use nostr::{Event, EventBuilder, PublicKey, Tag, Timestamp};
 use crate::agent_management::{build_project_channel, CreateProjectChannelDraft};
 use crate::client::BuzzClient;
 use crate::commands::parse_write_response;
-use crate::commands::project_channel::repo_id_from_project_slug;
+use crate::commands::project_channel::{
+    repo_id_from_project_slug, require_repo_channel_binding, truncate_repo_name,
+};
 use crate::commands::repos::{build_create_announcement, fetch_own_repo_announcement};
 use crate::error::CliError;
 
@@ -115,16 +117,25 @@ fn project_tags_match_channel<'a>(tags: impl IntoIterator<Item = &'a Tag>, chann
         .any(|tag| tag_name(tag) == Some("buzz-channel") && tag_value(tag) == Some(channel))
 }
 
+pub(crate) const PROJECT_QUERY_EVENT_BOUND: u32 = 10_000;
+
 pub(crate) async fn fetch_projects_for_channel(
     client: &BuzzClient,
     channel: &str,
 ) -> Result<Vec<Event>, CliError> {
     let filter = serde_json::json!({
         "kinds": [KIND_PROJECT],
-        "limit": 1000,
     });
-    let raw = client.query(&filter).await?;
-    Ok(parse_events(&raw)?
+    let events: Vec<Event> = client
+        .query_all_bounded(filter, PROJECT_QUERY_EVENT_BOUND)
+        .await?
+        .into_iter()
+        .map(|event| {
+            serde_json::from_value(event)
+                .map_err(|e| CliError::Other(format!("failed to parse relay response: {e}")))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(events
         .into_iter()
         .filter(|event| project_tags_match_channel(event.tags.iter(), channel))
         .collect())
@@ -707,14 +718,12 @@ async fn ensure_default_create_repo(
     channel: &str,
 ) -> Result<String, CliError> {
     let repo_id = repo_id_from_project_slug(slug)?;
-    if fetch_own_repo_announcement(client, &repo_id)
-        .await?
-        .is_some()
-    {
+    if let Some(existing) = fetch_own_repo_announcement(client, &repo_id).await? {
+        require_repo_channel_binding(&existing, channel)?;
         return Ok(repo_id);
     }
     let raw_name = name.unwrap_or(slug);
-    let display_name: String = raw_name.chars().take(128).collect();
+    let display_name = truncate_repo_name(raw_name);
     let builder = build_create_announcement(
         &repo_id,
         Some(&display_name),
@@ -725,8 +734,30 @@ async fn ensure_default_create_repo(
         Some(channel),
     )?;
     let event = client.sign_event(builder)?;
-    client.submit_event(event).await?;
+    let raw = client.submit_event(event).await?;
+    let winner = fetch_own_repo_announcement(client, &repo_id).await?;
+    verify_default_repo_write(&raw, winner.as_ref(), channel)?;
     Ok(repo_id)
+}
+
+pub(crate) fn verify_default_repo_write(
+    raw: &str,
+    winner: Option<&Event>,
+    channel: &str,
+) -> Result<(), CliError> {
+    match parse_write_response(
+        raw,
+        "default repository changed concurrently; checking the winning head",
+    ) {
+        Ok(_) | Err(CliError::Conflict(_)) => {}
+        Err(error) => return Err(error),
+    }
+    let winner = winner.ok_or_else(|| {
+        CliError::Conflict(
+            "default repository write was not authoritative; retry project creation".into(),
+        )
+    })?;
+    require_repo_channel_binding(winner, channel)
 }
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -840,6 +871,125 @@ mod tests {
     use nostr::Tag;
 
     use super::*;
+
+    async fn run_default_repo_create_race(
+        winning_channel: &str,
+    ) -> (Result<(), CliError>, Vec<u16>) {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let requested_channel = "11111111-1111-4111-8111-111111111111";
+        let keys = nostr::Keys::generate();
+        let winner = build_create_announcement(
+            "app",
+            Some("App"),
+            None,
+            &[],
+            None,
+            &[],
+            Some(winning_channel),
+        )
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+        let winner_json = serde_json::to_value(winner).unwrap();
+        let posted_kinds = Arc::new(Mutex::new(Vec::new()));
+        let server_kinds = posted_kinds.clone();
+        let repo_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_repo_queries = repo_queries.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 65_536];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let (status, body) = if request.starts_with("POST /query ") {
+                    let is_repo_query = request.contains("30617");
+                    let repo_query_index = is_repo_query.then(|| {
+                        server_repo_queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    });
+                    if repo_query_index == Some(1) {
+                        ("200 OK", serde_json::json!([winner_json]).to_string())
+                    } else {
+                        ("200 OK", "[]".to_string())
+                    }
+                } else if request.starts_with("POST /events ") {
+                    let json_start = request.find("\r\n\r\n").unwrap() + 4;
+                    let event: serde_json::Value =
+                        serde_json::from_str(&request[json_start..]).unwrap();
+                    let kind = event["kind"].as_u64().unwrap() as u16;
+                    server_kinds.lock().unwrap().push(kind);
+                    if kind == buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16 {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "event_id": event["id"], "accepted": true, "message": "duplicate"
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "event_id": event["id"], "accepted": true, "message": ""
+                            })
+                            .to_string(),
+                        )
+                    }
+                } else {
+                    ("404 Not Found", "{}".to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = crate::client::BuzzClient::new(base_url, keys, None, None).unwrap();
+        let result = cmd_create(
+            &client,
+            "app",
+            &[],
+            Some("App"),
+            None,
+            Some(requested_channel),
+            None,
+        )
+        .await;
+        server.abort();
+        let kinds = posted_kinds.lock().unwrap().clone();
+        (result, kinds)
+    }
+
+    #[tokio::test]
+    async fn create_does_not_publish_project_after_default_repo_loses_to_foreign_home() {
+        let (result, posted_kinds) =
+            run_default_repo_create_race("22222222-2222-4222-8222-222222222222").await;
+
+        assert!(matches!(result, Err(CliError::Conflict(_))));
+        assert_eq!(
+            posted_kinds,
+            vec![buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16],
+            "the command must stop before publishing kind:30621"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_is_idempotent_when_dominated_default_repo_winner_matches_home() {
+        let (result, posted_kinds) =
+            run_default_repo_create_race("11111111-1111-4111-8111-111111111111").await;
+
+        result.expect("matching winning repo head permits project publication");
+        assert_eq!(
+            posted_kinds,
+            vec![
+                buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16,
+                buzz_core::kind::KIND_PROJECT as u16,
+            ]
+        );
+    }
 
     // ── Coordinate expansion ──────────────────────────────────────────────────
 

@@ -728,6 +728,27 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Query a filter exhaustively up to `max_events`.
+    ///
+    /// One extra event is requested so reaching the bound is reported as
+    /// truncation instead of being mistaken for authoritative absence.
+    pub async fn query_all_bounded(
+        &self,
+        filter: serde_json::Value,
+        max_events: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let probe_limit = max_events
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("query bound is too large".into()))?;
+        let events = self.query_pages(filter, Some(probe_limit)).await?;
+        if events.len() > max_events as usize {
+            return Err(CliError::Other(format!(
+                "query exceeded the exhaustive {max_events}-event bound; narrow the query or retry"
+            )));
+        }
+        Ok(events)
+    }
+
     /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
     /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
     ///

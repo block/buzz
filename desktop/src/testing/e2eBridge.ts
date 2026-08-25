@@ -19,7 +19,11 @@ import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type {
+  ChannelTemplate,
+  FeedItemCategory,
+  RelayEvent,
+} from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -370,6 +374,8 @@ type E2eConfig = {
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
+    /** Delay (ms) applied to newest-page channel-window requests. */
+    channelHeadDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     /** Override whether get_profile reports a real kind:0 event. */
@@ -769,7 +775,7 @@ type RawFeedItem = {
   // backend always emits the key, as `null` when unknown.
   channel_type?: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: FeedItemCategory;
 };
 
 type RawHomeFeedResponse = {
@@ -5571,19 +5577,20 @@ async function handleGetChannelWindow(
     return relayQuery(config, [filter]);
   };
 
-  if (!args.cursor) {
-    return execute();
-  }
-
   const probe = window as unknown as {
     __CHANNEL_WINDOW_FETCH_COUNT__?: number;
     __CHANNEL_WINDOW_INFLIGHT__?: number;
     __CHANNEL_WINDOW_INFLIGHT_PEAK__?: number;
   };
-  probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
-    (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
+  if (args.cursor !== null) {
+    probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
+      (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
+  }
 
-  const delayMs = getConfig()?.mock?.channelWindowDelayMs ?? 0;
+  const delayMs =
+    args.cursor === null
+      ? (getConfig()?.mock?.channelHeadDelayMs ?? 0)
+      : (getConfig()?.mock?.channelWindowDelayMs ?? 0);
   if (delayMs <= 0) {
     return execute();
   }
@@ -7415,6 +7422,8 @@ async function handleAddChannelMembers(
     channelId: string;
     pubkeys: string[];
     role?: RawChannelMember["role"];
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawAddChannelMembersResponse> {
@@ -7424,6 +7433,8 @@ async function handleAddChannelMembers(
       window.setTimeout(resolve, addChannelMembersDelayMs),
     );
   }
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
   const configuredErrors = config?.mock?.addChannelMembersErrors;
   if (configuredErrors && configuredErrors.length > 0) {
     const index = Math.min(
@@ -9610,6 +9621,7 @@ async function handleSendChannelMessage(
     channelId: string;
     content: string;
     parentEventId?: string | null;
+    rootEventId?: string | null;
     kind?: number | null;
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
@@ -9732,7 +9744,8 @@ async function handleSendChannelMessage(
           parentEventId: null,
           rootEventId: null,
         };
-    const rootEventId = parentThread.rootEventId ?? args.parentEventId;
+    const rootEventId =
+      args.rootEventId ?? parentThread.rootEventId ?? args.parentEventId;
     const depth = parentEvent
       ? (() => {
           let currentEvent: RelayEvent | undefined = parentEvent;
@@ -9791,7 +9804,7 @@ async function handleSendChannelMessage(
         args.channelId,
         relayIdentity.pubkey,
         args.parentEventId,
-        args.parentEventId,
+        args.rootEventId ?? args.parentEventId,
         args.mentionPubkeys,
       )
     : buildTopLevelMessageTags(
@@ -9809,8 +9822,12 @@ async function handleSendChannelMessage(
   return {
     event_id: result.event_id,
     parent_event_id: args.parentEventId ?? null,
-    root_event_id: args.parentEventId ?? null,
-    depth: args.parentEventId ? 1 : 0,
+    root_event_id: args.rootEventId ?? args.parentEventId ?? null,
+    depth: args.parentEventId
+      ? args.rootEventId && args.rootEventId !== args.parentEventId
+        ? 2
+        : 1
+      : 0,
     created_at: Math.floor(Date.now() / 1000),
   };
 }
@@ -13922,6 +13939,59 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "fetch_persona_catalog":
         return mockPersonaCatalogPublications();
+      case "channel_head_cache_load": {
+        const args = payload as {
+          scope: { pubkey: string; relayUrl: string };
+          limit: number;
+        };
+        const key = `buzz-e2e-channel-head:${args.scope.pubkey.toLowerCase()}:${args.scope.relayUrl.toLowerCase().replace(/\/$/, "")}`;
+        const entries = JSON.parse(
+          window.localStorage.getItem(key) ?? "[]",
+        ) as Array<{
+          channelId: string;
+          events: RelayEvent[];
+          savedAt: number;
+          lastVisitedAt: number;
+        }>;
+        return entries
+          .sort((left, right) => right.lastVisitedAt - left.lastVisitedAt)
+          .slice(0, args.limit);
+      }
+      case "channel_head_cache_store": {
+        const args = payload as {
+          scope: { pubkey: string; relayUrl: string };
+          channelId: string;
+          events: RelayEvent[];
+        };
+        const key = `buzz-e2e-channel-head:${args.scope.pubkey.toLowerCase()}:${args.scope.relayUrl.toLowerCase().replace(/\/$/, "")}`;
+        const entries = JSON.parse(
+          window.localStorage.getItem(key) ?? "[]",
+        ) as Array<{
+          channelId: string;
+          events: RelayEvent[];
+          savedAt: number;
+          lastVisitedAt: number;
+        }>;
+        const now = Math.floor(Date.now() / 1000);
+        const next = entries
+          .filter((entry) => entry.channelId !== args.channelId)
+          .concat({
+            channelId: args.channelId,
+            events: args.events,
+            savedAt: now,
+            lastVisitedAt: now,
+          })
+          .sort((left, right) => right.lastVisitedAt - left.lastVisitedAt)
+          .slice(0, 32);
+        window.localStorage.setItem(key, JSON.stringify(next));
+        return null;
+      }
+      case "channel_head_cache_clear": {
+        const args = payload as { scope: { pubkey: string; relayUrl: string } };
+        const key = `buzz-e2e-channel-head:${args.scope.pubkey.toLowerCase()}:${args.scope.relayUrl.toLowerCase().replace(/\/$/, "")}`;
+        window.localStorage.removeItem(key);
+        return null;
+      }
       case "observed_unread_open_scope": {
         const request = payload as {
           request: {

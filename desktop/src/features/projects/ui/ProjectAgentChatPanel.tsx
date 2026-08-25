@@ -11,6 +11,7 @@ import type { ProjectDetailAgentContext } from "@/features/projects/lib/projectD
 import { projectDetailAgentContextBlock } from "@/features/projects/lib/projectDetailAgentContext";
 import { pickDefaultProjectsAgent } from "@/features/projects/lib/projectAgentSelection";
 import {
+  projectAgentMembershipInput,
   restoreProjectsAgentConversation,
   submitProjectAgentMessage,
 } from "@/features/projects/lib/projectAgentConversation";
@@ -157,17 +158,23 @@ export function ProjectAgentChatPanel({
         // `submitProjectAgentMessage` binds every relay side effect to the
         // scope captured here (fail closed), and threads follow-ups onto the
         // opener so a same-second follow-up cannot be hidden by id ordering.
-        if (homeChannel) {
+        if (
+          homeChannel &&
+          (!conversation || conversation.channel.id === homeChannel.id)
+        ) {
           const alreadyMember = homeChannel.memberPubkeys.some(
             (pubkey) =>
               normalizePubkey(pubkey) === normalizePubkey(selectedAgent.pubkey),
           );
           if (!alreadyMember) {
-            await addChannelMembers({
-              channelId: homeChannel.id,
-              pubkeys: [selectedAgent.pubkey],
-              role: "bot",
-            });
+            await addChannelMembers(
+              projectAgentMembershipInput({
+                channelId: homeChannel.id,
+                agentPubkey: selectedAgent.pubkey,
+                relayScope,
+                signerScope,
+              }),
+            );
           }
         }
         const { channel, sent } = await submitProjectAgentMessage({
@@ -238,6 +245,7 @@ export function ProjectAgentChatPanel({
       openDmMutation,
       relayScope,
       selectedAgent,
+      signerScope,
       startAgentMutation,
       storageScope,
     ],

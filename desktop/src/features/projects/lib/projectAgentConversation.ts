@@ -2,12 +2,32 @@ import type {
   ProjectsConversationOpener,
   StoredProjectsAgentConversation,
 } from "@/features/projects/lib/projectAgentConversationStorage";
-import type { Channel } from "@/shared/api/types";
+import type { AddChannelMembersInput, Channel } from "@/shared/api/types";
 import {
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+
+export function projectAgentMembershipInput({
+  channelId,
+  agentPubkey,
+  relayScope,
+  signerScope,
+}: {
+  channelId: string;
+  agentPubkey: string;
+  relayScope: string | null;
+  signerScope: string | null;
+}): AddChannelMembersInput {
+  return {
+    channelId,
+    pubkeys: [agentPubkey],
+    role: "bot",
+    expectedRelayUrl: relayScope ?? undefined,
+    expectedSignerPubkey: signerScope ?? undefined,
+  };
+}
 
 /**
  * True when `event` is the conversation opener or comes after it in the

@@ -291,7 +291,7 @@ pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    match channel_info.resolve(channel_id).await {
+    match channel_info.resolve_channel_metadata(channel_id).await {
         Some(info) => info.channel_type == "dm",
         None => {
             tracing::warn!(
@@ -5675,8 +5675,8 @@ mod author_gate_tests {
         assert!(is_dm_channel(id, &resolver).await);
         assert_eq!(
             requests.load(Ordering::SeqCst),
-            2,
-            "channel metadata and project context each resolve once, then cache"
+            1,
+            "author-gate DM classification resolves and caches channel metadata only"
         );
         server.abort();
     }
