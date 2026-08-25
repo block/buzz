@@ -42,6 +42,21 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
+fn nest_agents_template_separates_commit_attribution_claims() {
+    assert_eq!(AGENTS_MD.matches("## Git Commit Attribution").count(), 1);
+    assert!(AGENTS_MD.contains(
+        "Git authorship, co-authorship, DCO sign-off, and cryptographic signing are separate claims"
+    ));
+    assert!(AGENTS_MD
+        .contains("Request, approval, review, or accountability alone is not co-authorship"));
+    assert!(AGENTS_MD.contains("A sign-off is not an approval marker"));
+    assert!(AGENTS_MD.contains("Never use another person's signing key"));
+    assert!(AGENTS_MD.contains("inspect every outgoing commit against the actual upstream or base"));
+    assert!(AGENTS_MD.contains("An agent-owned repository may use the agent as author"));
+    assert!(!AGENTS_MD.contains("every commit MUST include a `Signed-off-by`"));
+}
+
+#[test]
 fn ensure_nest_creates_all_dirs_and_agents_md() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
@@ -429,6 +444,34 @@ fn refresh_agents_md_writes_version_file() {
     ensure_nest_at(&root).unwrap();
     let version = fs::read_to_string(root.join(".nest-agents-version")).unwrap();
     assert_eq!(version.trim(), NEST_AGENTS_VERSION.to_string());
+}
+
+#[test]
+fn refresh_agents_md_upgrades_attribution_and_preserves_owned_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+
+    let agents_md = root.join("AGENTS.md");
+    fs::write(
+        &agents_md,
+        "# Buzz Nest\n\n## Git Commit Identity\n\n\
+         - **Human sign-off (required):** every commit MUST include a `Signed-off-by`.\n\n\
+         <!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\n\
+         ## Active Agents\n\n| Name | Persona | How to address |\n\
+         |------|---------|----------------|\n| Kit | Builder | @Kit |\n\
+         <!-- END BUZZ MANAGED -->\n\n## Local Notes\n\nKeep me.\n",
+    )
+    .unwrap();
+    fs::write(root.join(".nest-agents-version"), "4\n").unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert_eq!(content.matches("## Git Commit Attribution").count(), 1);
+    assert!(!content.contains("**Human sign-off (required):**"));
+    assert!(content.contains("| Kit | Builder | @Kit |"));
+    assert!(content.contains("## Local Notes\n\nKeep me."));
 }
 
 #[test]

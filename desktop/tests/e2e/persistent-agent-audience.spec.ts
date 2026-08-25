@@ -8,6 +8,20 @@ const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
+const KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY =
+  "buzz.messages.keepMentionedAgentsPinned";
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript((storageKey) => {
+    window.localStorage.removeItem(storageKey);
+  }, KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY);
+});
+
+async function keepMentionedAgentsPinned(page: Page) {
+  await page.addInitScript((storageKey) => {
+    window.localStorage.setItem(storageKey, "true");
+  }, KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY);
+}
 
 async function seedTheme(page: Page, theme: string, accent = "#c0a2f1") {
   await page.addInitScript(
@@ -271,7 +285,7 @@ test("automatically mentions multiple agents from the mention picker", async ({
   ).toBeVisible();
 });
 
-test("Tab immediately selects a manually mentioned agent", async ({ page }) => {
+test("Tab inserts a one-time agent mention by default", async ({ page }) => {
   await installAudienceFixtures(page);
   await openGeneral(page);
 
@@ -286,7 +300,7 @@ test("Tab immediately selects a manually mentioned agent", async ({ page }) => {
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
   const selectAllShortcut = await page.evaluate(() =>
     /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "Meta+A" : "Control+A",
   );
@@ -301,6 +315,7 @@ test("Tab immediately selects a manually mentioned agent", async ({ page }) => {
 test("primary+Shift+M addresses the default agent, then selects the highlighted agent", async ({
   page,
 }) => {
+  await keepMentionedAgentsPinned(page);
   await installAudienceFixtures(page);
   await openGeneral(page);
 
@@ -448,7 +463,7 @@ test("the mention button opens settings and can undo an address", async ({
     .toContain(AGENT_A);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
 });
 
 test("always-mentioned agents remain in the mention button while Enter-send resolves", async ({
@@ -568,9 +583,10 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
   await expect(avatar).toHaveAttribute("data-shake-version", "1");
 });
 
-test("a manually mentioned agent becomes selected immediately", async ({
+test("a manual mention persists when automatic mentions are enabled", async ({
   page,
 }) => {
+  await keepMentionedAgentsPinned(page);
   await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
   await openGeneral(page);
 
@@ -652,6 +668,7 @@ test("a manually mentioned agent becomes selected immediately", async ({
 test("the auto-pin popover can turn off automatic agent mentions", async ({
   page,
 }) => {
+  await keepMentionedAgentsPinned(page);
   await installAudienceFixtures(page);
   await openGeneral(page);
 
@@ -717,6 +734,7 @@ test("reduced motion removes addressed agents without spatial animation", async 
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
+  await keepMentionedAgentsPinned(page);
   await installAudienceFixtures(page);
   await openGeneral(page);
 
