@@ -336,3 +336,44 @@ valid `latest.json`. The manifest covers all four platform keys
 (`darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`,
 `windows-x86_64`); a missing entry usually means that platform's
 release job failed. Check the workflow run.
+
+Installed apps always fetch:
+
+`https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json`
+
+That file may point asset URLs at the versioned `desktop-v<version>` release.
+The rolling release only needs a correct `latest.json` last; the binaries live
+on the versioned release.
+
+### Auto-updater fails on macOS (signature / install error)
+Historical releases uploaded both Apple Silicon and Intel updater archives as
+the same rolling basename (`Buzz.app.tar.gz`). The later arch clobbered the
+earlier one while `latest.json` still advertised both platform keys with
+different signatures. Intel and Apple Silicon clients then saw signature or
+install failures.
+
+Current release jobs rename those archives before publish
+(`Buzz_<version>_aarch64.app.tar.gz` and `Buzz_<version>_x64.app.tar.gz`) and
+fail the assemble job if two platforms share a basename.
+
+**Recovery for a machine that cannot auto-update today:**
+
+1. Quit Buzz.
+2. Download the matching DMG from the latest GitHub release:
+   - Apple Silicon: `Buzz_<version>_aarch64.dmg`
+   - Intel: `Buzz_<version>_x64.dmg`
+3. Replace `/Applications/Buzz.app` from the DMG and relaunch.
+4. Confirm the version under **Settings → Software Updates**.
+
+In-app update works again only after a later desktop release publishes a
+`latest.json` whose macOS URLs are the uniquely named archives above. Manual
+DMG install does not repair the old rolling `Buzz.app.tar.gz` channel by
+itself.
+
+### Settings → Software Updates states
+| UI state | Meaning |
+|----------|---------|
+| Automatic updates aren't available on this build | Build was compiled without updater secrets (dev/canary/local). Use a GitHub release DMG. |
+| Update failed: … | Updater plugin ran; download, signature, or install failed. On macOS check the channel bug above. |
+| In-app updates aren't supported on this Linux package | Non-AppImage install (for example `.deb`). Download AppImage or reinstall manually. |
+| You're on the latest version | Installed version is already the manifest version. |
