@@ -51,6 +51,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  camera_platform_interface: ^2.13.1
   crypto: ^3.0.7
   custom_lint: ^0.8.0
   riverpod_lint: ^3.1.0

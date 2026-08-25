@@ -3,7 +3,9 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import type { ChannelRole, ChannelType } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import type { TeamMentionMember } from "./mentionCandidates";
+import type { MentionCandidate, TeamMentionMember } from "./mentionCandidates";
+import { mentionCandidateLabel } from "./mentionCandidates";
+import { pickDefaultAgentCandidate } from "./mentionRanking";
 
 export type MentionSuggestionCandidate = {
   kind: "identity" | "persona" | "team";
@@ -73,4 +75,27 @@ export function mapMentionCandidateToSuggestion(opts: {
     ownerLabel,
     role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
   };
+}
+
+export function pickDefaultAgentSuggestion(opts: {
+  activePersonaIds: ReadonlySet<string>;
+  agentProvenanceReady: boolean;
+  candidates: readonly MentionCandidate[];
+  channelType?: ChannelType | null;
+  currentPubkey?: string | null;
+  ownerProfiles?: UserProfileLookup;
+  profiles?: UserProfileLookup;
+  recentMentionPubkeys?: readonly string[];
+}): MentionSuggestion | null {
+  const candidate = pickDefaultAgentCandidate(
+    opts.candidates,
+    opts.activePersonaIds,
+    opts.recentMentionPubkeys,
+  );
+  if (!candidate) return null;
+  return mapMentionCandidateToSuggestion({
+    ...opts,
+    candidate,
+    label: mentionCandidateLabel(candidate),
+  });
 }

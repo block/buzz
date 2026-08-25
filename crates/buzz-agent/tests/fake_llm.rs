@@ -16,6 +16,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+mod common;
+use common::approve_permission;
+
 /// A `cwd` value that `Path::is_absolute()` accepts on every platform this
 /// suite runs on. `/tmp` is absolute on Unix but not on Windows (it lacks a
 /// drive prefix), so `session/new` rejects it there with "cwd must be an
@@ -408,12 +411,7 @@ async fn unsupported_image_response_recovers_without_replaying_image() {
     loop {
         let message = h.recv().await;
         if message.get("method") == Some(&json!("session/request_permission")) {
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": message["id"],
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&message)).await;
         } else if message["id"] == json!(prompt_id) {
             assert_eq!(message["result"]["stopReason"], "end_turn");
             break;

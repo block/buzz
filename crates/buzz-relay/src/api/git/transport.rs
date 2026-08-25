@@ -2426,6 +2426,104 @@ mod track_c_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres and MinIO"]
+    async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-announce-lease-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let (request, claim) = approved_deletion(&state, &host).await;
+        let tenant = TenantContext::resolved(community, host.clone());
+        let owner_keys = Keys::generate();
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let event = EventBuilder::new(Kind::Custom(30_617), "")
+            .tags([Tag::parse(["d", &repo]).expect("d tag")])
+            .sign_with_keys(&owner_keys)
+            .expect("sign announcement");
+        let gate = Arc::new(crate::handlers::side_effects::GitRepoAnnouncementGate::default());
+        let hooks = crate::handlers::side_effects::GitRepoAnnouncementHooks {
+            post_lease_gate: Some(Arc::clone(&gate)),
+        };
+        let announce_state = Arc::clone(&state);
+        let announce_tenant = tenant.clone();
+        let announce = tokio::spawn(async move {
+            let result = crate::handlers::side_effects::handle_git_repo_announcement_inner(
+                &announce_tenant,
+                &event,
+                &announce_state,
+                &hooks,
+            )
+            .await;
+            let owner_hex = hex::encode(owner_keys.public_key().to_bytes());
+            (result, owner_hex)
+        });
+
+        gate.reached.notified().await;
+        state
+            .db
+            .deletion_store()
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("quiesce after announcement lease");
+        let error = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect_err("announcement serving lease must block fence");
+        assert!(matches!(
+            error,
+            buzz_db::DbError::ServingWritesNotDrained { .. }
+        ));
+
+        gate.resume.notify_one();
+        let (announce_result, owner_hex) = announce.await.expect("announcement task");
+        announce_result.expect("announcement completes");
+        let pointer_key = crate::api::git::manifest::pointer_key(community, &owner_hex, &repo);
+        assert!(
+            state
+                .git_store
+                .get_pointer(&pointer_key)
+                .await
+                .expect("read pointer")
+                .is_some(),
+            "announcement pointer must be durable before lease release"
+        );
+        assert!(state
+            .db
+            .deletion_store()
+            .serving_writes_drained(community)
+            .await
+            .expect("serving lease released"));
+        let generation = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect("fence after pointer seed");
+        assert_eq!(generation, 1);
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request.id)
+                .await
+                .expect("fenced request")
+                .stage,
+            buzz_db::deletion::DeletionStage::Fenced
+        );
+        drop(state);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
         let (state, pool) = finalize_test_state().await;
         let host = format!("git-finalize-{}.example", uuid::Uuid::new_v4().simple());

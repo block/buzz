@@ -473,10 +473,13 @@ pub async fn transfer_ownership(
 
     // 1. Serialize on the transferee so concurrent transfers to the same
     //    recipient cannot both pass the ownership count check.
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(owner_count_advisory_lock_key(&pubkey))
-        .execute(&mut *tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Membership,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(owner_count_advisory_lock_key(&pubkey))
+            .execute(&mut *tx),
+    )
+    .await?;
 
     // 2. Lock the current owner row FOR UPDATE and verify the expected owner.
     //    FOR UPDATE prevents the stale-owner race: a concurrent transfer that
@@ -637,7 +640,7 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")

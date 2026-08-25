@@ -13,7 +13,6 @@ export { MENTION_REFERENCE_TAG };
 
 export type PendingNonMemberMentionSend = {
   addressedAgentPubkeys: string[];
-  audienceRevision: number;
   inlineAgentMentionPubkeys: string[];
   capturedChannelId: string | null;
   capturedThreadContext: {
@@ -38,7 +37,6 @@ export type PendingNonMemberMentionSend = {
 
 export type SendMessageWithMentionFlowInput = {
   addressedAgentPubkeys?: readonly string[];
-  audienceRevision?: number;
   capturedChannelId: string | null;
   capturedThreadContext?: PendingNonMemberMentionSend["capturedThreadContext"];
   pendingImeta: ImetaMedia[];

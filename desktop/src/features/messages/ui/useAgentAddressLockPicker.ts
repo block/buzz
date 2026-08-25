@@ -16,8 +16,7 @@ import type { MentionSuggestion } from "./MentionAutocomplete";
 function buildMentionRemovalEdits(
   text: string,
   displayNames: readonly string[],
-  queryStart: number,
-  cursor: number,
+  queryRange?: { start: number; end: number },
 ): AutocompleteEdit[] {
   const ranges = displayNames.flatMap((displayName) =>
     getMentionOffsets(text, displayName).map((start) => {
@@ -26,10 +25,12 @@ function buildMentionRemovalEdits(
       return { start, end };
     }),
   );
-  ranges.push({
-    start: Math.max(0, Math.min(queryStart, text.length)),
-    end: Math.max(0, Math.min(cursor, text.length)),
-  });
+  if (queryRange) {
+    ranges.push({
+      start: Math.max(0, Math.min(queryRange.start, text.length)),
+      end: Math.max(0, Math.min(queryRange.end, text.length)),
+    });
+  }
 
   const merged = ranges
     .filter(({ start, end }) => start < end)
@@ -56,6 +57,8 @@ export function useAgentAddressLockPicker({
   audience,
   audienceScope,
   mentions,
+  onAddressAgentMention,
+  onAutoPinAgentMention,
   onPulseAddressLock,
   profiles,
   richText,
@@ -64,6 +67,8 @@ export function useAgentAddressLockPicker({
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
+  onAddressAgentMention?: (suggestion: MentionSuggestion) => void;
+  onAutoPinAgentMention?: (suggestion: MentionSuggestion) => void;
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
@@ -79,6 +84,12 @@ export function useAgentAddressLockPicker({
     unpinnedAgentPubkeysRef.current.clear();
   }
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
+  const visibleAgentMentionPubkeysRef = React.useRef(new Set<string>());
+  const mentionSyncScopeRef = React.useRef(audienceScope);
+  if (mentionSyncScopeRef.current !== audienceScope) {
+    mentionSyncScopeRef.current = audienceScope;
+    visibleAgentMentionPubkeysRef.current.clear();
+  }
   const [announcement, setAnnouncement] = React.useState("");
   const lockedAgents = React.useMemo<ComposerAddressAgent[]>(
     () =>
@@ -104,41 +115,42 @@ export function useAgentAddressLockPicker({
       }),
     [audience.pubkeys, mentions.getMentionDisplayName, profiles],
   );
-  const consumeAddressSuggestion = React.useCallback(
-    (
-      suggestion: MentionSuggestion,
-      { removeInlineMentions }: { removeInlineMentions: boolean },
-    ): string | null => {
-      const pubkey = normalizePubkey(suggestion.pubkey ?? "");
-      if (!audienceScope || !pubkey || !suggestion.isAgent) return null;
-
-      const { text, cursor } = richText.getPlainTextAndCursor();
-      const matchingDisplayNames = removeInlineMentions
-        ? mentions
-            .getDraftMentionRefs(text)
-            .filter((ref) => normalizePubkey(ref.pubkey) === pubkey)
-            .map((ref) => ref.displayName)
-        : [];
-      mentions.cancelMentionAutocomplete();
-      for (const edit of buildMentionRemovalEdits(
-        text,
-        matchingDisplayNames,
-        mentions.mentionStartIndex,
-        cursor,
-      )) {
-        applyAutocompleteEdit(edit);
+  const trackMentionAddressedAgent = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      if (audienceScope && normalized) {
+        visibleAgentMentionPubkeysRef.current.add(normalized);
       }
-      return pubkey;
+    },
+    [audienceScope],
+  );
+  const syncAddressedAgentsFromText = React.useCallback(
+    (text: string) => {
+      if (!audienceScope) return;
+      const presentAgentPubkeys = new Set(
+        mentions
+          .getDraftMentionRefs(text)
+          .filter((ref) => ref.isAgent)
+          .map((ref) => normalizePubkey(ref.pubkey)),
+      );
+      for (const pubkey of visibleAgentMentionPubkeysRef.current) {
+        if (
+          !presentAgentPubkeys.has(pubkey) &&
+          lockedAgentPubkeys.has(pubkey)
+        ) {
+          audience.removePubkey(pubkey);
+        }
+      }
+      visibleAgentMentionPubkeysRef.current = presentAgentPubkeys;
     },
     [
-      applyAutocompleteEdit,
+      audience.removePubkey,
       audienceScope,
-      mentions.cancelMentionAutocomplete,
+      lockedAgentPubkeys,
       mentions.getDraftMentionRefs,
-      mentions.mentionStartIndex,
-      richText.getPlainTextAndCursor,
     ],
   );
+
   const removeAddressedAgent = React.useCallback(
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
@@ -148,24 +160,63 @@ export function useAgentAddressLockPicker({
     },
     [audience.removePubkey, audienceScope],
   );
+  const removeAddressedAgentMentions = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      if (!audienceScope || !normalized) return;
+      const { text } = richText.getPlainTextAndCursor();
+      const matchingDisplayNames = mentions
+        .getDraftMentionRefs(text)
+        .filter((ref) => normalizePubkey(ref.pubkey) === normalized)
+        .map((ref) => ref.displayName);
+      for (const edit of buildMentionRemovalEdits(text, matchingDisplayNames)) {
+        applyAutocompleteEdit(edit);
+      }
+      removeAddressedAgent(normalized);
+    },
+    [
+      applyAutocompleteEdit,
+      audienceScope,
+      mentions.getDraftMentionRefs,
+      removeAddressedAgent,
+      richText.getPlainTextAndCursor,
+    ],
+  );
   const toggleAlwaysAddressAgent = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (!audienceScope || !pubkey || !suggestion.isAgent) return;
 
       if (lockedAgentPubkeys.has(pubkey)) {
-        removeAddressedAgent(pubkey);
+        removeAddressedAgentMentions(pubkey);
         setAnnouncement(
           `Stopped automatically mentioning ${suggestion.displayName}`,
         );
       } else {
         unpinnedAgentPubkeysRef.current.delete(pubkey);
-        audience.addPubkey(pubkey);
-        onPulseAddressLock(pubkey);
+        mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
+          isAgent: true,
+        });
+        const { text } = richText.getPlainTextAndCursor();
+        if (getMentionOffsets(text, suggestion.displayName).length === 0) {
+          applyAutocompleteEdit({
+            replaceFromOffset: 0,
+            replaceToOffset: 0,
+            insertText: `@${suggestion.displayName} `,
+            preserveSelection: true,
+          });
+        }
+        trackMentionAddressedAgent(pubkey);
+        if (onAddressAgentMention) {
+          onAddressAgentMention(suggestion);
+        } else {
+          audience.addPubkey(pubkey);
+          onPulseAddressLock(pubkey);
+        }
         setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
       }
 
-      if (mentions.isMentionOpen) {
+      if (mentions.isMentionOpen && mentions.isInlineMentionSelection()) {
         const { text, cursor } = richText.getPlainTextAndCursor();
         const activeMention = detectPrefixQuery("@", text, cursor, [
           suggestion.displayName.toLowerCase(),
@@ -190,12 +241,16 @@ export function useAgentAddressLockPicker({
       audience.addPubkey,
       audienceScope,
       lockedAgentPubkeys,
+      mentions.isInlineMentionSelection,
       mentions.isMentionOpen,
       mentions.mentionStartIndex,
       mentions.openMentionPicker,
+      mentions.registerMentionPubkey,
+      onAddressAgentMention,
       onPulseAddressLock,
-      removeAddressedAgent,
+      removeAddressedAgentMentions,
       richText.getPlainTextAndCursor,
+      trackMentionAddressedAgent,
     ],
   );
 
@@ -209,15 +264,25 @@ export function useAgentAddressLockPicker({
           unpinnedAgentPubkeysRef.current.has(pubkey);
         if (mentions.isInlineMentionSelection() || wasUnpinned) {
           applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+          if (wasUnpinned) unpinnedAgentPubkeysRef.current.delete(pubkey);
+          trackMentionAddressedAgent(pubkey);
+          onAutoPinAgentMention?.(suggestion);
           return;
         }
 
-        consumeAddressSuggestion(suggestion, { removeInlineMentions: false });
+        applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
         if (!lockedAgentPubkeys.has(pubkey)) {
-          audience.addPubkey(pubkey);
+          trackMentionAddressedAgent(pubkey);
+          if (onAddressAgentMention) {
+            onAddressAgentMention(suggestion);
+          } else {
+            audience.addPubkey(pubkey);
+            onPulseAddressLock(pubkey);
+          }
           setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
+        } else {
+          onPulseAddressLock(pubkey);
         }
-        onPulseAddressLock(pubkey);
         return;
       }
 
@@ -228,11 +293,83 @@ export function useAgentAddressLockPicker({
       applyAutocompleteEdit,
       audience.addPubkey,
       audienceScope,
-      consumeAddressSuggestion,
       lockedAgentPubkeys,
       mentions.isInlineMentionSelection,
       mentions.insertMention,
+      onAddressAgentMention,
+      onAutoPinAgentMention,
       onPulseAddressLock,
+      richText.getPlainTextAndCursor,
+      trackMentionAddressedAgent,
+    ],
+  );
+
+  const restoreAddressedAgentMentions = React.useCallback(
+    (
+      pubkeys?: readonly string[],
+      allowedUnpinnedPubkeys: readonly string[] = [],
+    ) => {
+      const restorePubkeys = pubkeys
+        ? new Set(pubkeys.map(normalizePubkey))
+        : null;
+      const allowedUnpinned = new Set(
+        allowedUnpinnedPubkeys.map(normalizePubkey),
+      );
+      const currentAudiencePubkeys = new Set(
+        audience.pubkeys.map(normalizePubkey),
+      );
+      const targetAgents = [...(restorePubkeys ?? currentAudiencePubkeys)]
+        .filter(
+          (pubkey) =>
+            currentAudiencePubkeys.has(pubkey) || allowedUnpinned.has(pubkey),
+        )
+        .map((pubkey) => {
+          const profile = profiles?.[pubkey];
+          const displayName =
+            profile?.displayName?.trim() ||
+            profile?.name?.trim() ||
+            profile?.nip05Handle?.trim() ||
+            mentions.getMentionDisplayName(pubkey)?.trim() ||
+            lockedAgentNamesRef.current.get(pubkey) ||
+            truncatePubkey(pubkey);
+          return { pubkey, displayName };
+        });
+      const { text } = richText.getPlainTextAndCursor();
+      for (const agent of targetAgents) {
+        if (getMentionOffsets(text, agent.displayName).length > 0) {
+          visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
+        }
+      }
+      const missingAgents = targetAgents.filter(
+        (agent) =>
+          (!unpinnedAgentPubkeysRef.current.has(agent.pubkey) ||
+            allowedUnpinned.has(agent.pubkey)) &&
+          getMentionOffsets(text, agent.displayName).length === 0,
+      );
+      if (missingAgents.length === 0) return text;
+      for (const agent of missingAgents) {
+        mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
+          isAgent: true,
+        });
+        visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
+      }
+      const insertedText = `${missingAgents
+        .map((agent) => `@${agent.displayName}`)
+        .join(" ")} `;
+      applyAutocompleteEdit({
+        replaceFromOffset: 0,
+        replaceToOffset: 0,
+        insertText: insertedText,
+        preserveSelection: true,
+      });
+      return `${insertedText}${text}`;
+    },
+    [
+      applyAutocompleteEdit,
+      audience.pubkeys,
+      mentions.getMentionDisplayName,
+      mentions.registerMentionPubkey,
+      profiles,
       richText.getPlainTextAndCursor,
     ],
   );
@@ -242,7 +379,10 @@ export function useAgentAddressLockPicker({
     lockedAgents,
     lockedAgentPubkeys,
     removeAddressedAgent,
+    restoreAddressedAgentMentions,
     selectMentionSuggestion,
+    syncAddressedAgentsFromText,
     toggleAlwaysAddressAgent,
+    trackMentionAddressedAgent,
   };
 }
