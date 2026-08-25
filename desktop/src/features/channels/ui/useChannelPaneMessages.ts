@@ -4,30 +4,26 @@ import {
   isWelcomeSetupSystemMessage,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
-import {
-  buildMainTimelineEntries,
-  type MainTimelineEntry,
-} from "@/features/messages/lib/threadPanel";
+import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { isWelcomeExperienceChannel } from "@/features/onboarding/welcome";
 
 type ChannelPaneMessagesOptions = Pick<
   ChannelPaneProps,
-  "activeChannel" | "messages" | "profiles" | "threadSummaries"
+  | "activeChannel"
+  | "messages"
+  | "profiles"
+  | "threadRepliesInChannel"
+  | "threadSummaries"
 > & {
-  inlineThreadHeadId?: string | null;
-  inlineThreadMessages?: MainTimelineEntry[];
-  inlineThreadMessagesPending?: boolean;
   isHuddleTranscript: boolean;
 };
 
 export function useChannelPaneMessages({
   activeChannel,
-  inlineThreadHeadId = null,
-  inlineThreadMessages = [],
-  inlineThreadMessagesPending = false,
   isHuddleTranscript,
   messages,
   profiles,
+  threadRepliesInChannel,
   threadSummaries,
 }: ChannelPaneMessagesOptions) {
   const visibleMessages = React.useMemo(() => {
@@ -43,36 +39,19 @@ export function useChannelPaneMessages({
   }, [activeChannel, isHuddleTranscript, messages]);
 
   const mainTimelineEntries = React.useMemo(() => {
-    const entries = isHuddleTranscript
+    return isHuddleTranscript
       ? visibleMessages.map((message) => ({ message, summary: null }))
       : buildMainTimelineEntries(
           visibleMessages,
           new Set(),
           threadSummaries,
           profiles,
+          { threadRepliesInChannel },
         );
-
-    if (isHuddleTranscript || !inlineThreadHeadId) {
-      return entries;
-    }
-
-    return entries.map((entry) =>
-      entry.message.id === inlineThreadHeadId
-        ? {
-            ...entry,
-            inlineThread: {
-              isPending: inlineThreadMessagesPending,
-              replies: inlineThreadMessages,
-            },
-          }
-        : entry,
-    );
   }, [
-    inlineThreadHeadId,
-    inlineThreadMessages,
-    inlineThreadMessagesPending,
     isHuddleTranscript,
     profiles,
+    threadRepliesInChannel,
     threadSummaries,
     visibleMessages,
   ]);

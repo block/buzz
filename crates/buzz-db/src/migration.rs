@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -684,6 +684,18 @@ mod tests {
             .as_str()
             .contains("ALTER TABLE communities ADD COLUMN icon"));
         assert!(!migrations[0].sql.as_str().contains("icon"));
+
+        // Same additive-migration rule for projected thread replies in the
+        // channel timeline: its own version, never folded into 0001.
+        assert_eq!(migrations[32].version, 33);
+        assert!(migrations[32]
+            .sql
+            .as_str()
+            .contains("thread_replies_in_channel"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("thread_replies_in_channel"));
         // Same additive-migration rule for the e-tag containment GIN index
         // (channel-window aux closure): its own version, never folded into 0001.
         assert_eq!(migrations[3].version, 4);

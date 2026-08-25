@@ -370,6 +370,8 @@ type E2eConfig = {
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
+    /** Advertise community-level thread replies in channel windows. */
+    threadRepliesInChannel?: boolean;
     profileReadDelayMs?: number;
     profileReadError?: string;
     /** Override whether get_profile reports a real kind:0 event. */
@@ -3099,6 +3101,7 @@ const relayWebsocketConnectAttemptStarts: number[] = [];
 let mockAuthSigningAttempts = 0;
 let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
+let mockThreadRepliesInChannel = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
@@ -5394,6 +5397,7 @@ function buildMockChannelWindowBounds(
   },
   hasMore: boolean,
   nextCursor: { created_at: number; id: string } | null,
+  threadRepliesInChannel: boolean,
 ): RelayEvent {
   const suffix = args.cursor
     ? `${args.cursor.created_at}:${args.cursor.event_id.toLowerCase()}`
@@ -5405,7 +5409,11 @@ function buildMockChannelWindowBounds(
     created_at: Math.floor(Date.now() / 1000),
     kind: KIND_CHANNEL_WINDOW_BOUNDS,
     tags: [["d", boundsKey]],
-    content: JSON.stringify({ has_more: hasMore, next_cursor: nextCursor }),
+    content: JSON.stringify({
+      has_more: hasMore,
+      next_cursor: nextCursor,
+      thread_replies_in_channel: threadRepliesInChannel,
+    }),
     sig: "mocksig".repeat(20).slice(0, 128),
   };
 }
@@ -5480,9 +5488,12 @@ async function handleGetChannelWindow(
       // parse both modes identically. Top-level timeline rows in relay order,
       // then exactly one kind-39006 bounds event.
       const events = getMockMessageStore(args.channelId);
+      const threadRepliesInChannel = mockThreadRepliesInChannel;
       const candidates = events
         .filter(
-          (event) => TIMELINE_KINDS.has(event.kind) && isMockTopLevelRow(event),
+          (event) =>
+            TIMELINE_KINDS.has(event.kind) &&
+            (threadRepliesInChannel || isMockTopLevelRow(event)),
         )
         .sort(
           (left, right) =>
@@ -5525,7 +5536,12 @@ async function handleGetChannelWindow(
         ...rows,
         ...aux,
         ...summaries,
-        buildMockChannelWindowBounds(args, hasMore, nextCursor),
+        buildMockChannelWindowBounds(
+          args,
+          hasMore,
+          nextCursor,
+          threadRepliesInChannel,
+        ),
       ];
     }
 
@@ -10482,6 +10498,12 @@ function sendToMockSocket(args: {
     }
 
     if (event.kind === 9033) {
+      const threadRepliesTag = event.tags.find(
+        (tag) => tag[0] === "thread_replies_in_channel",
+      );
+      if (threadRepliesTag) {
+        mockThreadRepliesInChannel = threadRepliesTag[1] === "true";
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -10688,6 +10710,7 @@ export function maybeInstallE2eTauriMocks() {
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
   cancelledMediaUploadIds = new Set<string>();
+  mockThreadRepliesInChannel = config.mock?.threadRepliesInChannel === true;
   window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ = 0;
   window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
     const queued = deferredLinkPreviewMetadataQueue.splice(0);
@@ -11910,6 +11933,13 @@ export function maybeInstallE2eTauriMocks() {
         }
         return activeConfig?.mock?.linkPreviewMetadata ?? null;
       }
+      case "fetch_workspace_profile":
+        return {
+          icon: null,
+          threadRepliesInChannel: mockThreadRepliesInChannel,
+        };
+      case "fetch_workspace_icon":
+        return null;
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {

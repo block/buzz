@@ -41,9 +41,10 @@ function wirePage(rows) {
   ];
 }
 
-function newestPage(rows) {
+function newestPage(rows, { threadRepliesInChannel = false } = {}) {
   return {
     startCursor: null,
+    threadRepliesInChannel,
     rows: rows.map((event) => ({ event, thread: null })),
     aux: [],
     nextCursor: null,
@@ -164,6 +165,31 @@ test("test_projection_retains_pending_send_and_non_broadcast_thread_reply", asyn
   assert.deepEqual(
     projected.map((event) => event.content),
     ["initial", "pending", "thread-reply"],
+  );
+});
+
+test("test_projection_mode_drops_cache_only_thread_replies", () => {
+  const harness = createHarness();
+  const threadReply = {
+    ...event("thread-reply", 120),
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "root"],
+      ["e", "parent", "", "reply"],
+    ],
+  };
+  const projectedWindow = replaceNewestChannelWindow(
+    harness.client.getQueryData(harness.windowKey),
+    newestPage([event("initial", 100)], { threadRepliesInChannel: true }),
+  );
+
+  const projected = reconcileChannelWindowMessages(projectedWindow, [
+    threadReply,
+  ]);
+
+  assert.deepEqual(
+    projected.map((event) => event.content),
+    ["initial"],
   );
 });
 

@@ -10,7 +10,7 @@
 //! | 9030 | Add member      | admin or owner       |
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
-//! | 9033 | Set workspace profile (icon) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
+//! | 9033 | Set workspace profile (icon, thread display) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
 
 use std::sync::Arc;
 
@@ -92,6 +92,14 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn parse_thread_replies_in_channel(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err("thread_replies_in_channel must be true or false".to_string()),
+    }
 }
 
 /// Whether `sender_role` may set the workspace profile (kind:9033).
@@ -256,7 +264,7 @@ async fn execute_relay_admin_command(
         .map(|m| m.role.as_str())
         .unwrap_or("");
 
-    // kind:9033 — Set workspace profile (icon). Handled before p-tag
+    // kind:9033 — Set workspace profile. Handled before p-tag
     // extraction: it targets the relay itself, not a member pubkey.
     if kind == RELAY_ADMIN_SET_WORKSPACE_PROFILE {
         // Steward detection only matters on open relays (closed relays gate on
@@ -287,20 +295,45 @@ async fn execute_relay_admin_command(
             );
         }
 
-        // Empty or missing icon tag clears the workspace icon.
-        let icon = extract_tag_value(event, "icon").unwrap_or_default();
-        validate_workspace_icon(&icon)?;
+        let icon = extract_tag_value(event, "icon");
+        let thread_replies_in_channel = extract_tag_value(event, "thread_replies_in_channel")
+            .as_deref()
+            .map(parse_thread_replies_in_channel)
+            .transpose()?;
+        if thread_replies_in_channel.is_some() && sender_role != "admin" && sender_role != "owner" {
+            return Err("actor not authorized: must be admin or owner".to_string());
+        }
 
-        state
-            .db
-            .set_community_icon(
-                tenant.community(),
-                (!icon.is_empty()).then_some(icon.as_str()),
-            )
-            .await
-            .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        if let Some(icon) = icon.as_deref() {
+            validate_workspace_icon(icon)?;
+            state
+                .db
+                .set_community_icon(tenant.community(), (!icon.is_empty()).then_some(icon))
+                .await
+                .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        } else if thread_replies_in_channel.is_none() {
+            // Legacy 9033 behavior: an empty command clears the workspace icon.
+            state
+                .db
+                .set_community_icon(tenant.community(), None)
+                .await
+                .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        }
 
-        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        if let Some(enabled) = thread_replies_in_channel {
+            state
+                .db
+                .set_community_thread_replies_in_channel(tenant.community(), enabled)
+                .await
+                .map_err(|e| format!("failed to store workspace profile: {e}"))?;
+        }
+
+        info!(
+            sender = %sender_hex,
+            icon_len = icon.as_deref().map(str::len),
+            thread_replies_in_channel = ?thread_replies_in_channel,
+            "workspace profile updated"
+        );
         return Ok(());
     }
 
@@ -683,6 +716,22 @@ mod tests {
         assert!(validate_workspace_icon(&long_url).is_err());
         let long_data = format!("data:image/png;base64,{}", "A".repeat(98_304));
         assert!(validate_workspace_icon(&long_data).is_err());
+    }
+
+    #[test]
+    fn thread_replies_in_channel_accepts_boolish_values() {
+        for value in ["true", "1", "yes", "on", "TRUE"] {
+            assert_eq!(parse_thread_replies_in_channel(value), Ok(true));
+        }
+        for value in ["false", "0", "no", "off", "FALSE"] {
+            assert_eq!(parse_thread_replies_in_channel(value), Ok(false));
+        }
+    }
+
+    #[test]
+    fn thread_replies_in_channel_rejects_unknown_values() {
+        assert!(parse_thread_replies_in_channel("maybe").is_err());
+        assert!(parse_thread_replies_in_channel("").is_err());
     }
 
     // ─── Call-site integration: the 9033 gate wired to real config + DB ────

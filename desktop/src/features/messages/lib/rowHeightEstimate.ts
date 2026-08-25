@@ -33,7 +33,6 @@ const PREVIEW_CARD = 70;
 const MESSAGE_ITEM_BOTTOM_PADDING = 10; // TimelineMessageList pb-2.5
 const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
 const CONTINUATION_MIN_ESTIMATE = 28;
-const INLINE_THREAD_LOADING_HEIGHT = 64;
 
 function mediaHeightFromDim(dim: string | undefined): number {
   const dimensions = dimensionsFromDim(dim);
@@ -171,17 +170,11 @@ export function estimateTimelineItemHeight(item: TimelineItem): number {
     ? estimateRowHeight(item.entry.message, {
         isContinuation: item.isContinuation,
       }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
-    : item.kind === "inline-thread-reply"
-      ? estimateRowHeight(item.entry.message, {
-          isContinuation: item.isContinuation,
-        }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
-      : item.kind === "inline-thread-loading"
-        ? INLINE_THREAD_LOADING_HEIGHT
-        : item.kind === "system"
-          ? estimateRowHeight(item.entry.message)
-          : item.kind === "system-group"
-            ? SYSTEM_GROUP_HEIGHT
-            : DIVIDER_HEIGHT;
+    : item.kind === "system"
+      ? estimateRowHeight(item.entry.message)
+      : item.kind === "system-group"
+        ? SYSTEM_GROUP_HEIGHT
+        : DIVIDER_HEIGHT;
 }
 
 export function timelineRowReserveStyle(

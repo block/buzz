@@ -64,6 +64,7 @@ export type ChannelPaneProps = {
   /** The kickoff is still setting up the team — the banner copy reads as setup status. */
   welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
+  threadRepliesInChannel: boolean;
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
   unreadCount?: number;

@@ -11,7 +11,6 @@ import {
   type DayGroupBoundary,
 } from "@/features/messages/lib/timelineSnapshot";
 import {
-  filterBroadcastThreadSubtrees,
   shouldRenderUnreadDivider,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
@@ -43,19 +42,6 @@ export type TimelineItem =
       entry: MainTimelineEntry;
       isContinuation: boolean;
       isFollowedByContinuation: boolean;
-    }
-  | {
-      kind: "inline-thread-loading";
-      key: string;
-      rootEntry: MainTimelineEntry;
-    }
-  | {
-      kind: "inline-thread-reply";
-      key: string;
-      entry: MainTimelineEntry;
-      rootEntry: MainTimelineEntry;
-      isContinuation: boolean;
-      isFollowedByContinuation: boolean;
     };
 
 export type TimelineItemsResult = {
@@ -77,17 +63,6 @@ export function getTimelineItemKey(item: TimelineItem): string {
 
 function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
-}
-
-function inlineThreadReplyRenderKey(
-  rootEntry: MainTimelineEntry,
-  replyEntry: MainTimelineEntry,
-): string {
-  return `inline-thread-reply:${entryRenderKey(rootEntry)}:${entryRenderKey(replyEntry)}`;
-}
-
-function inlineThreadLoadingRenderKey(rootEntry: MainTimelineEntry): string {
-  return `inline-thread-loading:${entryRenderKey(rootEntry)}`;
 }
 
 type MembershipChangePayload =
@@ -196,68 +171,6 @@ function buildMembershipGroups(
   return groups;
 }
 
-function appendInlineThreadItems(
-  items: TimelineItem[],
-  rootEntry: MainTimelineEntry,
-) {
-  const inlineThread = rootEntry.inlineThread;
-  if (!inlineThread) {
-    return false;
-  }
-  const inlineReplies = filterBroadcastThreadSubtrees(inlineThread.replies);
-
-  if (inlineReplies.length === 0) {
-    if (inlineThread.isPending) {
-      items.push({
-        kind: "inline-thread-loading",
-        key: inlineThreadLoadingRenderKey(rootEntry),
-        rootEntry,
-      });
-      return true;
-    }
-
-    return false;
-  }
-
-  let previousInlineEntry: MainTimelineEntry | null = null;
-  let previousInlineItemIndex: number | null = null;
-
-  for (const replyEntry of inlineReplies) {
-    const { message } = replyEntry;
-    const isContinuation =
-      replyEntry.summary === null &&
-      !message.pending &&
-      !startsNewMessageGroup(message) &&
-      previousInlineEntry !== null &&
-      !previousInlineEntry.message.pending &&
-      hasSameMessageAuthor(previousInlineEntry.message, message) &&
-      isWithinGroupingWindow(
-        previousInlineEntry.message.createdAt,
-        message.createdAt,
-      );
-
-    if (isContinuation && previousInlineItemIndex !== null) {
-      const previousItem = items[previousInlineItemIndex];
-      if (previousItem?.kind === "inline-thread-reply") {
-        previousItem.isFollowedByContinuation = true;
-      }
-    }
-
-    previousInlineItemIndex = items.length;
-    items.push({
-      kind: "inline-thread-reply",
-      key: inlineThreadReplyRenderKey(rootEntry, replyEntry),
-      entry: replyEntry,
-      rootEntry,
-      isContinuation,
-      isFollowedByContinuation: false,
-    });
-    previousInlineEntry = replyEntry.summary === null ? replyEntry : null;
-  }
-
-  return true;
-}
-
 /**
  * Walks the (already top-level-filtered) entries once, emitting a day-divider
  * at each calendar-day boundary and an unread-divider above the first unread
@@ -340,8 +253,10 @@ export function buildTimelineItems(
     // that same standalone state until the send acknowledgement arrives.
     const isContinuation =
       !message.pending &&
+      !entry.projectedThread &&
       !startsNewMessageGroup(message) &&
       previousGroupEntry !== null &&
+      !previousGroupEntry.projectedThread &&
       !previousGroupEntry.message.pending &&
       hasSameMessageAuthor(previousGroupEntry.message, message) &&
       isWithinGroupingWindow(
@@ -365,11 +280,6 @@ export function buildTimelineItems(
       isFollowedByContinuation: false,
     });
     previousGroupEntry = entry;
-
-    if (appendInlineThreadItems(items, entry)) {
-      previousGroupEntry = null;
-      previousMessageItemIndex = null;
-    }
   }
 
   return { items };

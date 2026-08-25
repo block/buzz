@@ -16,7 +16,6 @@ import {
 import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
-  filterBroadcastReplySubtreeMessages,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
 import {
@@ -36,7 +35,7 @@ type UseChannelUnreadStateOptions = {
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
   openThreadMessages?: MainTimelineEntry[];
-  suppressBroadcastThreadReplies?: boolean;
+  threadRepliesInChannel?: boolean;
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
   clearChannelUnreadSource: (
@@ -69,7 +68,7 @@ export function useChannelUnreadState({
   threadReplyTargetId,
   expandedThreadReplyIds,
   openThreadMessages,
-  suppressBroadcastThreadReplies = false,
+  threadRepliesInChannel = false,
   getChannelReadAt,
   getMessageReadAt,
   clearChannelUnreadSource,
@@ -149,27 +148,7 @@ export function useChannelUnreadState({
     () => buildDirectReplyIdsByParentId(timelineMessages),
     [timelineMessages],
   );
-  const threadReadTimelineMessages = React.useMemo(
-    () =>
-      suppressBroadcastThreadReplies
-        ? filterBroadcastReplySubtreeMessages(
-            timelineMessages,
-            openThreadHeadId,
-          )
-        : timelineMessages,
-    [openThreadHeadId, suppressBroadcastThreadReplies, timelineMessages],
-  );
-  const visibleDirectReplyIdsByParentId = React.useMemo(
-    () =>
-      suppressBroadcastThreadReplies
-        ? buildDirectReplyIdsByParentId(threadReadTimelineMessages)
-        : directReplyIdsByParentId,
-    [
-      directReplyIdsByParentId,
-      suppressBroadcastThreadReplies,
-      threadReadTimelineMessages,
-    ],
-  );
+  const visibleDirectReplyIdsByParentId = directReplyIdsByParentId;
   const repliesByRootId = React.useMemo(
     () => buildRepliesByRootId(timelineMessages),
     [timelineMessages],
@@ -234,12 +213,14 @@ export function useChannelUnreadState({
         openFrontierSeconds,
         isActiveChannelForcedUnread || isActiveWelcomeInitialUnreadSuppressed,
         currentPubkey,
+        threadRepliesInChannel,
       ),
     [
       currentPubkey,
       isActiveChannelForcedUnread,
       isActiveWelcomeInitialUnreadSuppressed,
       openFrontierSeconds,
+      threadRepliesInChannel,
       timelineMessages,
     ],
   );
@@ -347,7 +328,7 @@ export function useChannelUnreadState({
     () =>
       openThreadHeadId
         ? computeThreadReplyUnreadCounts({
-            timelineMessages: threadReadTimelineMessages,
+            timelineMessages,
             subtreeReplyIds: collectReplyDescendantIds(
               openThreadHeadId,
               visibleDirectReplyIdsByParentId,
@@ -362,7 +343,7 @@ export function useChannelUnreadState({
     [
       openThreadHeadId,
       threadMessages,
-      threadReadTimelineMessages,
+      timelineMessages,
       getMessageReadAt,
       expandedThreadReplyIds,
       visibleDirectReplyIdsByParentId,

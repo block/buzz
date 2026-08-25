@@ -32,10 +32,6 @@ import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggl
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
 import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
 import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
-import {
-  setThreadTimelineMode,
-  useThreadTimelineMode,
-} from "@/features/channels/lib/threadTimelineModePreference";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
@@ -55,6 +51,7 @@ import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types"
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
 import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
+import { useProjectedThreadComposer } from "@/features/channels/ui/useProjectedThreadComposer";
 import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -155,6 +152,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   threadHeadMessage,
   threadMessages,
   threadMessagesPending = false,
+  threadRepliesInChannel = false,
   threadPanelWidthPx,
   threadScrollTargetId,
   threadTypingPubkeys,
@@ -185,6 +183,11 @@ export const ChannelPane = React.memo(function ChannelPane({
   const activeChannelIdRef = React.useRef(activeChannelId);
   const channelPaneMountedRef = React.useRef(false);
   activeChannelIdRef.current = activeChannelId;
+  const projectedThreadComposer = useProjectedThreadComposer({
+    activeChannelId,
+    onOpenThread,
+    threadRepliesInChannel,
+  });
   React.useEffect(() => {
     channelPaneMountedRef.current = true;
     return () => {
@@ -327,6 +330,9 @@ export const ChannelPane = React.memo(function ChannelPane({
         threadContext,
         forceRest,
       );
+      if (threadContext?.parentEventId) {
+        projectedThreadComposer.clearSentTarget(threadContext.parentEventId);
+      }
 
       if (
         channelId &&
@@ -348,6 +354,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       isActiveWelcomeChannel,
       knownAgentPubkeys,
       onSendMessage,
+      projectedThreadComposer,
     ],
   );
   const canDropInMainColumn =
@@ -406,17 +413,12 @@ export const ChannelPane = React.memo(function ChannelPane({
     onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
   });
   const channelIntro = isHuddleTranscript ? null : standardChannelIntro;
-  const threadTimelineMode = useThreadTimelineMode();
-  const showSelectedThreadInline =
-    threadTimelineMode === "inline" && !isHuddleTranscript;
   const { mainTimelineEntries, visibleMessages } = useChannelPaneMessages({
     activeChannel,
-    inlineThreadHeadId: showSelectedThreadInline ? openThreadHeadId : null,
-    inlineThreadMessages: threadMessages,
-    inlineThreadMessagesPending: threadMessagesPending,
     isHuddleTranscript,
     messages,
     profiles,
+    threadRepliesInChannel,
     threadSummaries,
   });
   useRenderScopedReactionHydration({
@@ -464,7 +466,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
   const useFocusThreadDrawer =
-    !showSelectedThreadInline &&
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
     (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
@@ -492,8 +493,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||
-      (!showSelectedThreadInline &&
-        (Boolean(threadHeadMessage) || shouldShowThreadSkeleton)) ||
+      Boolean(threadHeadMessage) ||
+      shouldShowThreadSkeleton ||
       Boolean(activeChannel && selectedAgent) ||
       Boolean(profilePanelPubkey));
   const wrapAux = (
@@ -536,9 +537,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     isSinglePanelView,
     useSplitAuxiliaryPane,
   });
-  const handleOpenInlineThreadPanel = React.useCallback(() => {
-    setThreadTimelineMode("panel");
-  }, []);
   const timelineReplyHandler =
     activeChannel?.archivedAt || isHuddleTranscript ? undefined : onOpenThread;
   return (
@@ -635,13 +633,15 @@ export const ChannelPane = React.memo(function ChannelPane({
               onMarkRead={onMarkRead}
               onReply={timelineReplyHandler}
               onOpenThread={isHuddleTranscript ? undefined : onOpenThread}
-              onExpandInlineThreadReplies={
-                showSelectedThreadInline ? onExpandThreadReplies : undefined
+              onOpenProjectedThread={
+                isHuddleTranscript
+                  ? undefined
+                  : projectedThreadComposer.openProjectedThread
               }
-              onOpenInlineThreadPanel={
-                showSelectedThreadInline
-                  ? handleOpenInlineThreadPanel
-                  : undefined
+              onReplyToProjectedThread={
+                activeChannel?.archivedAt || isHuddleTranscript
+                  ? undefined
+                  : projectedThreadComposer.replyToProjectedThread
               }
               channelName={activeChannel?.name}
               channelType={activeChannel?.channelType ?? null}
@@ -658,7 +658,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 Boolean(openThreadHeadId)
               }
               threadUnreadCounts={threadUnreadCounts}
-              threadReplyUnreadCounts={threadReplyUnreadCounts}
+              threadRepliesInChannel={threadRepliesInChannel}
             />
             {isNonMemberView ? (
               <div
@@ -729,6 +729,14 @@ export const ChannelPane = React.memo(function ChannelPane({
                     mediaController={mainComposerMedia}
                     onDeferredEditPendingChange={setMainDeferredEditPending}
                     onCancelEdit={onCancelEdit}
+                    onCancelReply={
+                      projectedThreadComposer.composerTarget
+                        ? projectedThreadComposer.cancelReply
+                        : undefined
+                    }
+                    onCaptureSendContext={
+                      projectedThreadComposer.captureSendContext
+                    }
                     onEditLastOwnMessage={handleEditLastOwnMainMessage}
                     onEditSave={onEditSave}
                     onPrepareSendChannel={
@@ -738,24 +746,31 @@ export const ChannelPane = React.memo(function ChannelPane({
                     }
                     onSend={handleSendMessage}
                     profiles={profiles}
+                    replyTarget={projectedThreadComposer.composerTarget}
                     showBackgroundUploadProgress={false}
                     placeholder={
-                      timeoutState.active
-                        ? "You're timed out by community moderators."
-                        : isModerationDmChannel
-                          ? "This channel is read-only."
-                          : activeChannel?.archivedAt
-                            ? "Archived channels are read-only."
-                            : activeChannel?.channelType === "forum"
-                              ? "Forum posting is not wired in this pass."
-                              : activeChannel
-                                ? activeChannel.channelType === "dm" &&
-                                  directMessageIntro
-                                  ? `Message ${directMessageIntro.displayName}`
-                                  : `Message #${activeChannel.name}`
-                                : "Select a channel"
+                      projectedThreadComposer.composerTarget
+                        ? undefined
+                        : timeoutState.active
+                          ? "You're timed out by community moderators."
+                          : isModerationDmChannel
+                            ? "This channel is read-only."
+                            : activeChannel?.archivedAt
+                              ? "Archived channels are read-only."
+                              : activeChannel?.channelType === "forum"
+                                ? "Forum posting is not wired in this pass."
+                                : activeChannel
+                                  ? activeChannel.channelType === "dm" &&
+                                    directMessageIntro
+                                    ? `Message ${directMessageIntro.displayName}`
+                                    : `Message #${activeChannel.name}`
+                                  : "Select a channel"
                     }
                     showTopBorder={false}
+                    typingParentEventId={
+                      projectedThreadComposer.target?.id ?? null
+                    }
+                    typingRootEventId={projectedThreadComposer.rootId}
                   />
                   {/* The activity accessory is anchored in the dock's reserved
                     bottom rail, so fading it cannot change the observed
@@ -807,7 +822,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             useSplitAuxiliaryPane={useSplitAuxiliaryPane}
             transparentChrome={hasSplitAuxiliaryPane}
           />
-        ) : threadHeadMessage && !showSelectedThreadInline ? (
+        ) : threadHeadMessage ? (
           (() => {
             const panel = (
               <MessageThreadPanel
@@ -879,7 +894,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             );
             return wrapThreadPanel(panel);
           })()
-        ) : shouldShowThreadSkeleton && !showSelectedThreadInline ? (
+        ) : shouldShowThreadSkeleton ? (
           (() => {
             if (isHuddleTranscript) {
               return wrapThreadPanel(<HuddleStartingView />);

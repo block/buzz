@@ -1,13 +1,6 @@
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
-import {
-  buildThreadPanelData,
-  filterBroadcastReplySubtreeMessages,
-} from "@/features/messages/lib/threadPanel";
+import { buildThreadPanelData } from "@/features/messages/lib/threadPanel";
 import type { RelayEvent } from "@/shared/api/types";
-
-type BuildIndependentThreadPanelOptions = {
-  excludeBroadcastReplySubtrees?: boolean;
-};
 
 export function buildIndependentThreadPanel(
   channelEvents: RelayEvent[],
@@ -15,7 +8,6 @@ export function buildIndependentThreadPanel(
   rootId: string | null,
   replyTargetId: string | null,
   expandedReplyIds: ReadonlySet<string>,
-  options: BuildIndependentThreadPanelOptions,
   ...formatArgs: Tail<Parameters<typeof formatTimelineMessages>>
 ) {
   if (!rootId) {
@@ -26,10 +18,7 @@ export function buildIndependentThreadPanel(
   }
   const head = channelEvents.find((event) => event.id === rootId);
   const events = head ? [head, ...replyEvents] : replyEvents;
-  const formattedMessages = formatTimelineMessages(events, ...formatArgs);
-  const messages = options.excludeBroadcastReplySubtrees
-    ? filterBroadcastReplySubtreeMessages(formattedMessages, rootId)
-    : formattedMessages;
+  const messages = formatTimelineMessages(events, ...formatArgs);
   return {
     ...buildThreadPanelData(messages, rootId, replyTargetId, expandedReplyIds),
     messages,

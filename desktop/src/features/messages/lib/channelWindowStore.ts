@@ -18,6 +18,7 @@ export type LiveThreadSummary = {
 };
 export type ChannelWindowPage = {
   startCursor: ChannelWindowCursor | null;
+  threadRepliesInChannel: boolean;
   rows: ChannelWindowRow[];
   aux: RelayEvent[];
   nextCursor: ChannelWindowCursor | null;
@@ -135,6 +136,11 @@ export function appendOlderChannelWindow(
   if (!cursorsEqual(page.startCursor, tail.nextCursor)) {
     throw new Error(
       "Channel page does not continue the retained cursor chain.",
+    );
+  }
+  if (page.threadRepliesInChannel !== tail.threadRepliesInChannel) {
+    throw new Error(
+      "Channel page thread-reply projection mode changed mid-chain.",
     );
   }
   const ids = new Set(
@@ -297,6 +303,11 @@ export function channelWindowHasMore(store: ChannelWindowStore) {
 export function channelWindowHistoryExhausted(store: ChannelWindowStore) {
   const tail = store.pages[store.pages.length - 1];
   return tail !== undefined && !tail.hasMore;
+}
+
+/** Whether the loaded channel window includes thread replies as timeline rows. */
+export function channelWindowThreadRepliesInChannel(store: ChannelWindowStore) {
+  return store.pages[0]?.threadRepliesInChannel ?? false;
 }
 
 /**

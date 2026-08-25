@@ -1441,6 +1441,56 @@ impl Db {
         Ok(())
     }
 
+    /// Returns whether this community projects thread replies into channels.
+    #[datastore_span(
+        name = "get_community_thread_replies_in_channel",
+        system = "postgresql"
+    )]
+    pub async fn get_community_thread_replies_in_channel(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool> {
+        let row = sqlx::query(
+            r#"
+            SELECT thread_replies_in_channel
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<bool, _>("thread_replies_in_channel"))
+            .transpose()?
+            .unwrap_or(false))
+    }
+
+    /// Sets whether this community projects thread replies into channels.
+    #[datastore_span(
+        name = "set_community_thread_replies_in_channel",
+        system = "postgresql"
+    )]
+    pub async fn set_community_thread_replies_in_channel(
+        &self,
+        community_id: CommunityId,
+        enabled: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET thread_replies_in_channel = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(enabled)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations
@@ -3055,10 +3105,18 @@ impl Db {
         limit: u32,
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
+        include_thread_replies: bool,
     ) -> Result<thread::ChannelWindow> {
-        self.get_channel_window_with_session(community_id, channel_id, limit, cursor, kind_filter)
-            .await
-            .map(|(window, _session)| window)
+        self.get_channel_window_with_session(
+            community_id,
+            channel_id,
+            limit,
+            cursor,
+            kind_filter,
+            include_thread_replies,
+        )
+        .await
+        .map(|(window, _session)| window)
     }
 
     /// [`Db::get_channel_window`], additionally returning the session that
@@ -3095,6 +3153,7 @@ impl Db {
         limit: u32,
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
+        include_thread_replies: bool,
     ) -> Result<(thread::ChannelWindow, ReadSession)> {
         let path: &'static str = if cursor.is_some() {
             "channel_cursor"
@@ -3116,6 +3175,7 @@ impl Db {
                     limit,
                     cursor.clone(),
                     kind_filter,
+                    include_thread_replies,
                 )
                 .await
                 {
@@ -3156,6 +3216,7 @@ impl Db {
             limit,
             cursor,
             kind_filter,
+            include_thread_replies,
         )
         .await?;
         Ok((
@@ -7652,7 +7713,7 @@ mod tests {
 
         // Head fetch (cursor: None) → writer: sees `fresh`, never `marker`.
         let head = db
-            .get_channel_window(cid, channel, 2, None, None)
+            .get_channel_window(cid, channel, 2, None, None, false)
             .await
             .expect("head window");
         let head_contents: Vec<String> = head
@@ -7669,7 +7730,7 @@ mod tests {
         // Cursor page → replica: sees `marker`, never `fresh`.
         let cursor = head.next_cursor.expect("has_more implies next_cursor");
         let page2 = db
-            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .get_channel_window(cid, channel, 10, Some(cursor), None, false)
             .await
             .expect("cursor window");
         let page2_contents: Vec<String> = page2
@@ -7729,7 +7790,7 @@ mod tests {
         let cid = CommunityId::from_uuid(community);
 
         let head = db
-            .get_channel_window(cid, channel, 1, None, None)
+            .get_channel_window(cid, channel, 1, None, None, false)
             .await
             .expect("head window");
         let cursor = head.next_cursor.expect("has_more implies next_cursor");
@@ -7737,7 +7798,7 @@ mod tests {
         // Guard against a vacuous pass: the cursor page must actually be
         // replica-eligible before we break the replica.
         let healthy = db
-            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None, false)
             .await
             .expect("healthy cursor window");
         assert!(
@@ -7756,7 +7817,7 @@ mod tests {
             .expect("drop replica events");
 
         let page = db
-            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .get_channel_window(cid, channel, 10, Some(cursor), None, false)
             .await
             .expect("replica failure must fall back to the writer, not error");
         let contents: Vec<&str> = page
@@ -7885,12 +7946,12 @@ mod tests {
         let cid = CommunityId::from_uuid(community);
 
         let head = db
-            .get_channel_window(cid, channel, 1, None, None)
+            .get_channel_window(cid, channel, 1, None, None, false)
             .await
             .expect("head window");
         let cursor = head.next_cursor.expect("has_more implies next_cursor");
         let (_window, mut session) = db
-            .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+            .get_channel_window_with_session(cid, channel, 10, Some(cursor), None, false)
             .await
             .expect("routed cursor window");
         assert!(
@@ -7967,14 +8028,14 @@ mod tests {
 
         // Head page on the writer yields the cursor for a replica-routed page.
         let head = db
-            .get_channel_window(cid, channel, 1, None, None)
+            .get_channel_window(cid, channel, 1, None, None, false)
             .await
             .expect("head window");
         let cursor = head.next_cursor.expect("has_more implies next_cursor");
 
         // Route the cursor page to the replica and HOLD the session.
         let (window, mut session) = db
-            .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+            .get_channel_window_with_session(cid, channel, 10, Some(cursor), None, false)
             .await
             .expect("routed cursor window");
         assert!(
@@ -8069,7 +8130,7 @@ mod tests {
 
         // Budget unset (rollout default): head → writer, fence open or not.
         let head = db
-            .get_channel_window(cid, channel, 2, None, None)
+            .get_channel_window(cid, channel, 2, None, None, false)
             .await
             .expect("head, gate off");
         assert_eq!(
@@ -8081,7 +8142,7 @@ mod tests {
         // Budget set, entry fresh (just recorded): head → replica.
         db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
         let head = db
-            .get_channel_window(cid, channel, 2, None, None)
+            .get_channel_window(cid, channel, 2, None, None, false)
             .await
             .expect("head, gate on");
         assert_eq!(
@@ -8097,7 +8158,7 @@ mod tests {
             std::time::Instant::now() - std::time::Duration::from_secs(10),
         );
         let head = db
-            .get_channel_window(cid, channel, 2, None, None)
+            .get_channel_window(cid, channel, 2, None, None, false)
             .await
             .expect("head, entry too old");
         assert_eq!(
@@ -8887,7 +8948,7 @@ mod tests {
 
         // Head page (writer): [m4, m3]; cursor lands on m3 (base+20).
         let head = db
-            .get_channel_window(cid, channel, 2, None, None)
+            .get_channel_window(cid, channel, 2, None, None, false)
             .await
             .expect("head window");
         let cursor = head.next_cursor.expect("has_more implies next_cursor");
@@ -8900,7 +8961,7 @@ mod tests {
                 .collect()
         };
         let page_closed = db
-            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None, false)
             .await
             .expect("cursor page, fence closed");
         assert_eq!(
@@ -8915,7 +8976,7 @@ mod tests {
             chrono::DateTime::from_timestamp(base as i64 + 5, 0).expect("ts"),
         );
         let page_below = db
-            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None, false)
             .await
             .expect("cursor page, fence below cursor");
         assert_eq!(
@@ -8929,7 +8990,7 @@ mod tests {
         // permanent-skip hole this fence exists to prevent.
         db.fence().force_open_for_tests(chrono::Utc::now());
         let page_hazard = db
-            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .get_channel_window(cid, channel, 10, Some(cursor), None, false)
             .await
             .expect("cursor page, fence wrongly open");
         assert_eq!(

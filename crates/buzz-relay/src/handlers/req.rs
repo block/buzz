@@ -1561,6 +1561,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             crate::config::DEFAULT_MAX_FRAME_BYTES,
             None,
         )

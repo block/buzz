@@ -5,7 +5,7 @@ import type {
   TimelineThreadSummaryParticipant,
 } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
-import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
+import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow.types";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import {
   getThreadReplyAvatarCenterRem,

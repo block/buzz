@@ -60,6 +60,7 @@ import {
   LinkPreviewStyleSetting,
   ProminentActiveTabSetting,
   ThreadLayoutSetting,
+  ThreadRepliesInChannelSetting,
 } from "./AppearanceSettingsControls";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
@@ -793,6 +794,7 @@ function ThemeSettingsCard() {
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />
+          <ThreadRepliesInChannelSetting />
         </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>

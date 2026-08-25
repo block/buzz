@@ -73,7 +73,7 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { useThreadTimelineMode } from "@/features/channels/lib/threadTimelineModePreference";
+import { channelWindowThreadRepliesInChannel } from "@/features/messages/lib/channelWindowStore";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
@@ -165,9 +165,6 @@ export function ChannelScreen({
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
   const isHuddleTranscript = useIsHuddleTranscript(activeChannelId);
-  const threadTimelineMode = useThreadTimelineMode();
-  const showSelectedThreadInline =
-    threadTimelineMode === "inline" && !isHuddleTranscript;
   const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
   const effectiveOpenThreadHeadId = useHuddleThreadIsolation({
     closeThread: setOpenThreadHeadId,
@@ -195,6 +192,13 @@ export function ChannelScreen({
   }, [activeChannelId, openThreadHeadId]);
   const messagesQuery = useChannelMessagesQuery(activeChannel);
   const windowQuery = useChannelWindowQuery(activeChannel);
+  const threadRepliesInChannel = React.useMemo(
+    () =>
+      windowQuery.data
+        ? channelWindowThreadRepliesInChannel(windowQuery.data)
+        : false,
+    [windowQuery.data],
+  );
   const threadRepliesQuery = useThreadReplies(
     activeChannel,
     effectiveOpenThreadHeadId,
@@ -205,12 +209,15 @@ export function ChannelScreen({
   const latestActiveMessage = React.useMemo(() => {
     const messages = messagesQuery.data;
     if (!messages) return null;
+    if (threadRepliesInChannel) {
+      return messages[messages.length - 1] ?? null;
+    }
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (getThreadReference(messages[index].tags).parentId === null)
         return messages[index];
     }
     return null;
-  }, [messagesQuery.data]);
+  }, [messagesQuery.data, threadRepliesInChannel]);
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
@@ -430,7 +437,6 @@ export function ChannelScreen({
     personaLookup,
     respondToLookup,
     relaySelfPubkey,
-    excludeBroadcastReplySubtrees: showSelectedThreadInline,
   });
   const visibleThreadReplies = threadPanelData.visibleReplies;
   const {
@@ -455,7 +461,7 @@ export function ChannelScreen({
     threadReplyTargetId,
     expandedThreadReplyIds,
     openThreadMessages: visibleThreadReplies,
-    suppressBroadcastThreadReplies: showSelectedThreadInline,
+    threadRepliesInChannel,
     clearChannelUnreadSource,
     getChannelReadAt,
     getMessageReadAt,
@@ -676,7 +682,7 @@ export function ChannelScreen({
     threadReplyTargetMessage,
   });
   const hasAuxiliaryPanel = Boolean(
-    (effectiveOpenThreadHeadId && !showSelectedThreadInline) ||
+    effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
       channelManagementOpen,
@@ -884,6 +890,7 @@ export function ChannelScreen({
                   isSinglePanelView={isSinglePanelView}
                   isTimelineLoading={isTimelineLoading}
                   messages={timelineMessages}
+                  threadRepliesInChannel={threadRepliesInChannel}
                   threadSummaries={threadSummaries}
                   onCancelEdit={handleCancelEdit}
                   onCancelThreadReply={handleCancelThreadReply}

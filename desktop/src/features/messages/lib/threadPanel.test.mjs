@@ -8,8 +8,6 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
   buildThreadSummaryFromVisibleEntries,
-  filterBroadcastReplySubtreeMessages,
-  filterBroadcastThreadSubtrees,
   hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
@@ -67,6 +65,55 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
     ),
     ["root", "broadcast-reply"],
   );
+});
+
+test("buildMainTimelineEntries projects all thread replies when enabled", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const directReply = message({
+    id: "direct-reply",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+  });
+  const nestedReply = message({
+    id: "nested-reply",
+    createdAt: 3,
+    parentId: "direct-reply",
+    rootId: "root",
+    depth: 2,
+    tags: [
+      ["e", "root", "", "root"],
+      ["e", "direct-reply", "", "reply"],
+    ],
+  });
+  const next = message({ id: "next", createdAt: 4 });
+
+  const entries = buildMainTimelineEntries(
+    [root, directReply, nestedReply, next],
+    undefined,
+    undefined,
+    undefined,
+    { threadRepliesInChannel: true },
+  );
+
+  assert.deepEqual(
+    entries.map((entry) => entry.message.id),
+    ["root", "direct-reply", "nested-reply", "next"],
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.message.depth),
+    [0, 0, 0, 0],
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.projectedThread?.rootId ?? null),
+    [null, "root", "root", null],
+  );
+  assert.equal(entries[1].projectedThread?.rootMessage, root);
+  assert.equal(entries[2].projectedThread?.rootMessage, root);
+  assert.equal(entries[1].summary, null);
+  assert.equal(entries[2].summary, null);
 });
 
 test("buildMainTimelineEntries keeps huddle thread replies out of the parent timeline summary", () => {
@@ -218,139 +265,6 @@ test("buildThreadPanelData keeps collapsed descendants out of visible replies", 
     ["branch"],
   );
   assert.equal(panelData.visibleReplies[0].summary?.replyCount, 1);
-});
-
-test("filterBroadcastThreadSubtrees removes expanded descendants with their broadcast parent", () => {
-  const normal = {
-    message: message({ id: "normal", depth: 1 }),
-    summary: null,
-  };
-  const broadcast = {
-    message: message({
-      id: "broadcast",
-      depth: 1,
-      tags: [
-        ["e", "root", "", "reply"],
-        ["broadcast", "1"],
-      ],
-    }),
-    summary: null,
-  };
-  const child = {
-    message: message({
-      id: "child",
-      depth: 2,
-      parentId: "broadcast",
-      rootId: "root",
-    }),
-    summary: null,
-  };
-  const sibling = {
-    message: message({
-      id: "sibling",
-      depth: 1,
-      parentId: "root",
-      rootId: "root",
-    }),
-    summary: null,
-  };
-
-  const filtered = filterBroadcastThreadSubtrees([
-    normal,
-    broadcast,
-    child,
-    sibling,
-  ]);
-
-  assert.deepEqual(
-    filtered.map((entry) => entry.message.id),
-    ["normal", "sibling"],
-  );
-});
-
-test("filterBroadcastReplySubtreeMessages removes collapsed broadcast descendants before summaries build", () => {
-  const root = message({ id: "root" });
-  const normal = message({
-    id: "normal",
-    createdAt: 2,
-    parentId: "root",
-    rootId: "root",
-    depth: 1,
-  });
-  const broadcast = message({
-    id: "broadcast",
-    createdAt: 3,
-    parentId: "normal",
-    rootId: "root",
-    depth: 2,
-    tags: [
-      ["e", "root", "", "root"],
-      ["e", "normal", "", "reply"],
-      ["broadcast", "1"],
-    ],
-  });
-  const child = message({
-    id: "child",
-    createdAt: 4,
-    parentId: "broadcast",
-    rootId: "root",
-    depth: 3,
-  });
-  const sibling = message({
-    id: "sibling",
-    createdAt: 5,
-    parentId: "root",
-    rootId: "root",
-    depth: 1,
-  });
-
-  const filteredMessages = filterBroadcastReplySubtreeMessages([
-    root,
-    normal,
-    broadcast,
-    child,
-    sibling,
-  ]);
-  const panelData = buildThreadPanelData(
-    filteredMessages,
-    "root",
-    null,
-    new Set(),
-  );
-
-  assert.deepEqual(
-    filteredMessages.map((entry) => entry.id),
-    ["root", "normal", "sibling"],
-  );
-  assert.deepEqual(
-    panelData.visibleReplies.map((entry) => entry.message.id),
-    ["normal", "sibling"],
-  );
-  assert.equal(panelData.visibleReplies[0].summary, null);
-});
-
-test("filterBroadcastReplySubtreeMessages preserves a selected broadcast root", () => {
-  const root = message({
-    id: "broadcast",
-    tags: [
-      ["e", "parent-root", "", "reply"],
-      ["broadcast", "1"],
-    ],
-  });
-  const child = message({
-    id: "child",
-    createdAt: 2,
-    parentId: "broadcast",
-    rootId: "broadcast",
-    depth: 1,
-  });
-
-  assert.deepEqual(
-    filterBroadcastReplySubtreeMessages([root, child], "broadcast").map(
-      (entry) => entry.id,
-    ),
-    ["broadcast", "child"],
-  );
 });
 
 test("buildThreadSummaryFromVisibleEntries counts visible rows and hidden descendants", () => {

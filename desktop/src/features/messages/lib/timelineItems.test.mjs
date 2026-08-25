@@ -421,146 +421,112 @@ test("buildTimelineItems: dividers break grouping while thread summaries do not"
   );
 });
 
-test("buildTimelineItems: inline thread replies render after their root with namespaced keys", () => {
-  const root = {
+test("buildTimelineItems: projected thread replies render as flat chronological message rows", () => {
+  const root = entry({
+    id: "root",
+    pubkey: "author-a",
+    createdAt: dayAt(2026, 6, 14, 12, 0),
+  });
+  const reply = {
     ...entry({
-      id: "root",
-      pubkey: "author-a",
-      createdAt: dayAt(2026, 6, 14, 12, 0),
+      id: "reply",
+      parentId: "root",
+      rootId: "root",
+      depth: 0,
+      pubkey: "author-b",
+      createdAt: dayAt(2026, 6, 14, 12, 1),
     }),
-    summary: {
-      threadHeadId: "root",
-      replyCount: 2,
-      lastReplyAt: dayAt(2026, 6, 14, 12, 2),
-      participants: [],
+    projectedThread: {
+      rootId: "root",
+      rootMessage: root.message,
     },
-    inlineThread: {
-      isPending: false,
-      replies: [
-        entry({
-          id: "reply-a",
-          parentId: "root",
-          rootId: "root",
-          depth: 1,
-          pubkey: "reply-author",
-          createdAt: dayAt(2026, 6, 14, 12, 1),
-        }),
-        entry({
-          id: "reply-b",
-          parentId: "root",
-          rootId: "root",
-          depth: 1,
-          pubkey: "reply-author",
-          createdAt: dayAt(2026, 6, 14, 12, 2),
-        }),
-      ],
+  };
+  const nestedReply = {
+    ...entry({
+      id: "nested-reply",
+      parentId: "reply",
+      rootId: "root",
+      depth: 0,
+      pubkey: "author-c",
+      createdAt: dayAt(2026, 6, 14, 12, 2),
+    }),
+    projectedThread: {
+      rootId: "root",
+      rootMessage: root.message,
     },
   };
 
   const { items } = buildTimelineItems(
-    [root, entry({ id: "next", createdAt: dayAt(2026, 6, 14, 12, 3) })],
+    [
+      root,
+      reply,
+      nestedReply,
+      entry({ id: "next", createdAt: dayAt(2026, 6, 14, 12, 3) }),
+    ],
     null,
   );
 
   assert.deepEqual(kinds(items), [
     "day-divider",
     "message",
-    "inline-thread-reply",
-    "inline-thread-reply",
+    "message",
+    "message",
     "message",
   ]);
   assert.deepEqual(items.map(getTimelineItemKey), [
     `day-${dayAt(2026, 6, 14, 0, 0)}`,
     "root",
-    "inline-thread-reply:root:reply-a",
-    "inline-thread-reply:root:reply-b",
+    "reply",
+    "nested-reply",
     "next",
   ]);
-  const inlineRows = items.filter(
-    (item) => item.kind === "inline-thread-reply",
-  );
   assert.deepEqual(
-    inlineRows.map((item) => item.isContinuation),
-    [false, true],
-  );
-  assert.deepEqual(
-    inlineRows.map((item) => item.isFollowedByContinuation),
-    [true, false],
+    items
+      .filter((item) => item.kind === "message")
+      .map((item) => item.entry.projectedThread?.rootId ?? null),
+    [null, "root", "root", null],
   );
 });
 
-test("buildTimelineItems: broadcast reply subtrees stay top-level when inline thread is open", () => {
-  const broadcastReply = entry({
-    id: "broadcast-reply",
-    parentId: "root",
-    rootId: "root",
-    depth: 1,
-    createdAt: dayAt(2026, 6, 14, 12, 1),
-    tags: [
-      ["e", "root", "", "reply"],
-      ["broadcast", "1"],
-    ],
+test("buildTimelineItems: projected replies break same-author grouping", () => {
+  const root = entry({
+    id: "root",
+    pubkey: "author-a",
+    createdAt: dayAt(2026, 6, 14, 12, 0),
   });
-  const broadcastChild = entry({
-    id: "broadcast-child",
-    parentId: "broadcast-reply",
-    rootId: "root",
-    depth: 2,
+  const projectedReply = {
+    ...entry({
+      id: "reply",
+      parentId: "root",
+      rootId: "root",
+      depth: 0,
+      pubkey: "author-a",
+      createdAt: dayAt(2026, 6, 14, 12, 1),
+    }),
+    projectedThread: {
+      rootId: "root",
+      rootMessage: root.message,
+    },
+  };
+  const next = entry({
+    id: "next",
+    pubkey: "author-a",
     createdAt: dayAt(2026, 6, 14, 12, 2),
-    tags: [
-      ["e", "root", "", "root"],
-      ["e", "broadcast-reply", "", "reply"],
-    ],
   });
-  const root = {
-    ...entry({
-      id: "root",
-      createdAt: dayAt(2026, 6, 14, 12, 0),
-    }),
-    inlineThread: {
-      isPending: false,
-      replies: [broadcastReply, broadcastChild],
-    },
-  };
 
-  const { items } = buildTimelineItems([root, broadcastReply], null);
+  const messageItems = buildTimelineItems(
+    [root, projectedReply, next],
+    null,
+  ).items.filter((item) => item.kind === "message");
 
-  assert.deepEqual(kinds(items), ["day-divider", "message", "message"]);
-  assert.deepEqual(items.map(getTimelineItemKey), [
-    `day-${dayAt(2026, 6, 14, 0, 0)}`,
-    "root",
-    "broadcast-reply",
-  ]);
-  assert.equal(
-    items.some(
-      (item) => item.key === "inline-thread-reply:root:broadcast-reply",
-    ),
-    false,
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, false, false],
   );
-  assert.equal(
-    items.some(
-      (item) => item.key === "inline-thread-reply:root:broadcast-child",
-    ),
-    false,
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [false, false, false],
   );
-});
-
-test("buildTimelineItems: pending inline threads get a stable loading row", () => {
-  const root = {
-    ...entry({
-      id: "root",
-      createdAt: dayAt(2026, 6, 14, 12, 0),
-    }),
-    inlineThread: {
-      isPending: true,
-      replies: [],
-    },
-  };
-
-  const { items } = buildTimelineItems([root], null);
-
-  assert.equal(items[2]?.kind, "inline-thread-loading");
-  assert.equal(getTimelineItemKey(items[2]), "inline-thread-loading:root");
 });
 
 test("buildTimelineItems: empty entries produce no items", () => {

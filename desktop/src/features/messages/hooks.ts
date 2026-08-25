@@ -55,6 +55,7 @@ import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // from the on-render overlay.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
+  channelWindowThreadRepliesInChannel,
   emptyChannelWindowStore,
   mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
@@ -77,13 +78,28 @@ import {
 type MessageQueryContext = {
   optimisticId: string;
   previousMessages: RelayEvent[];
+  previousThreadReplies?: RelayEvent[];
   previousWindow: ChannelWindowStore | undefined;
   channelId: string;
   queryKey: ReturnType<typeof channelMessagesKey>;
+  threadRootId?: string;
 };
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
+
+function isChannelWindowTimelineRow(
+  window: ChannelWindowStore,
+  event: RelayEvent,
+): boolean {
+  if (!CHANNEL_TIMELINE_KINDS.has(event.kind)) return false;
+  const thread = getThreadReference(event.tags);
+  return (
+    thread.parentId === null ||
+    isBroadcastReply(event.tags) ||
+    channelWindowThreadRepliesInChannel(window)
+  );
+}
 
 export function createOptimisticMessage(
   channelId: string,
@@ -309,8 +325,13 @@ export function useChannelSubscription(channel: Channel | null) {
       if (next !== current) queryClient.setQueryData(windowKey, next);
       return;
     }
-    const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
-    const threadReference = isTimelineRow
+    const windowKey = channelWindowKey(channelId);
+    const current =
+      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+      emptyChannelWindowStore();
+    const isTimelineKind = CHANNEL_TIMELINE_KINDS.has(event.kind);
+    const isTimelineRow = isChannelWindowTimelineRow(current, event);
+    const threadReference = isTimelineKind
       ? getThreadReference(event.tags)
       : null;
     if (threadReference?.parentId != null) {
@@ -321,7 +342,6 @@ export function useChannelSubscription(channel: Channel | null) {
           (current = []) => mergeMessages(current, event),
         );
       }
-      if (!isBroadcastReply(event.tags)) return;
     }
     if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
     if (!isTimelineRow) {
@@ -331,10 +351,6 @@ export function useChannelSubscription(channel: Channel | null) {
       );
     }
 
-    const windowKey = channelWindowKey(channelId);
-    const current =
-      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-      emptyChannelWindowStore();
     const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
     if (next !== current) {
       queryClient.setQueryData(windowKey, next);
@@ -648,10 +664,24 @@ export function useSendMessageMutation(
         sentFromThreadRootId ?? null,
         sentFromThreadRootExcerpt ?? null,
       );
+      const threadReference = getThreadReference(optimisticMessage.tags);
+      let previousThreadReplies: RelayEvent[] | undefined;
+      if (threadReference.parentId && threadReference.rootId) {
+        previousThreadReplies =
+          queryClient.getQueryData<RelayEvent[]>(
+            threadRepliesKey(effectiveChannel.id, threadReference.rootId),
+          ) ?? [];
+        queryClient.setQueryData<RelayEvent[]>(
+          threadRepliesKey(effectiveChannel.id, threadReference.rootId),
+          (current = []) => mergeMessages(current, optimisticMessage),
+        );
+      }
 
+      const baseWindow = previousWindow ?? emptyChannelWindowStore();
       const nextWindow = mergeLiveChannelWindowEvent(
-        previousWindow ?? emptyChannelWindowStore(),
+        baseWindow,
         optimisticMessage,
+        isChannelWindowTimelineRow(baseWindow, optimisticMessage),
       );
       queryClient.setQueryData(windowKey, nextWindow);
       projectChannelWindowMessages(queryClient, effectiveChannel.id);
@@ -659,9 +689,11 @@ export function useSendMessageMutation(
       return {
         optimisticId: optimisticMessage.id,
         previousMessages,
+        previousThreadReplies,
         previousWindow,
         channelId: effectiveChannel.id,
         queryKey,
+        threadRootId: threadReference.rootId ?? undefined,
       };
     },
     onError: (error, _variables, context) => {
@@ -678,6 +710,12 @@ export function useSendMessageMutation(
         channelWindowKey(context.channelId),
         context.previousWindow,
       );
+      if (context.threadRootId) {
+        queryClient.setQueryData(
+          threadRepliesKey(context.channelId, context.threadRootId),
+          context.previousThreadReplies,
+        );
+      }
     },
     onSuccess: (message, _variables, context) => {
       // An accepted send proves the write-block is lifted; clear any recorded
@@ -696,11 +734,29 @@ export function useSendMessageMutation(
         liveOverlay: current.liveOverlay.filter(
           (event) => event.id !== context.optimisticId,
         ),
+        liveAux: current.liveAux.filter(
+          (event) => event.id !== context.optimisticId,
+        ),
       };
-      const next = mergeLiveChannelWindowEvent(withoutPending, {
+      const acceptedMessage = {
         ...message,
         localKey: context.optimisticId,
-      });
+      };
+      if (context.threadRootId) {
+        queryClient.setQueryData<RelayEvent[]>(
+          threadRepliesKey(context.channelId, context.threadRootId),
+          (current = []) =>
+            mergeMessages(
+              current.filter((event) => event.id !== context.optimisticId),
+              acceptedMessage,
+            ),
+        );
+      }
+      const next = mergeLiveChannelWindowEvent(
+        withoutPending,
+        acceptedMessage,
+        isChannelWindowTimelineRow(withoutPending, acceptedMessage),
+      );
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
     },
