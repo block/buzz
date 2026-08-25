@@ -216,4 +216,11 @@ test("keeps the base label for unfiltered and custom triggers", () => {
     }),
     "Message posted",
   );
+  assert.equal(
+    workflowTriggerDescription({
+      on: "slash_command",
+      command: "new-task",
+    }),
+    "Command /new-task",
+  );
 });

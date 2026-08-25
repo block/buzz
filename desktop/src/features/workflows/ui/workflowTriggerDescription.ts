@@ -124,6 +124,9 @@ export function workflowTriggerDescription(
     omitUnresolvedReferences?: boolean;
   } = {},
 ): string {
+  if (trigger.on === "slash_command") {
+    return trigger.command ? `Command /${trigger.command}` : "Slash command";
+  }
   const baseLabel =
     EVENT_PHRASES[trigger.on as keyof typeof EVENT_PHRASES] ??
     TRIGGER_LABELS[trigger.on];

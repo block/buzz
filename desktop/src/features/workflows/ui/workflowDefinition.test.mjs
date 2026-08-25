@@ -32,6 +32,19 @@ test("reads only direct trigger and first-action types for card icons", () => {
 test("builds a plain-language workflow card label", () => {
   assert.equal(
     getWorkflowCardLabel({
+      trigger: { on: "slash_command", command: "new-task" },
+      steps: [
+        {
+          action: "send_message",
+          text: "@Planner /plan {{trigger.args}}",
+        },
+      ],
+    }),
+    "When /new-task is entered, send “@Planner /plan {{trigger.args}}”",
+  );
+
+  assert.equal(
+    getWorkflowCardLabel({
       trigger: { on: "message_posted" },
       steps: [{ action: "send_message", text: "Deploying now" }],
     }),

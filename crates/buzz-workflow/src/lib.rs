@@ -359,14 +359,6 @@ impl WorkflowEngine {
 
         let trigger_ctx = build_trigger_context(event);
 
-        let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Failed to serialize trigger context: {e}");
-                return Ok(());
-            }
-        };
-
         for workflow in workflows.iter() {
             let def: WorkflowDef = match serde_json::from_value(workflow.definition.clone()) {
                 Ok(d) => d,
@@ -380,9 +372,24 @@ impl WorkflowEngine {
                 continue;
             }
 
-            if !should_fire_workflow(&def, &trigger_ctx, workflow.id).await {
+            let Some(workflow_trigger_ctx) =
+                trigger_context_for_workflow(&def.trigger, &trigger_ctx)
+            else {
+                continue;
+            };
+
+            if !should_fire_workflow(&def, &workflow_trigger_ctx, workflow.id).await {
                 continue;
             }
+
+            let trigger_ctx_json: serde_json::Value =
+                match serde_json::to_value(&workflow_trigger_ctx) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize trigger context: {e}");
+                        continue;
+                    }
+                };
 
             // SEC-006: recheck the owner's *current* channel authority
             // immediately before run creation. The cached workflow list can be
@@ -427,7 +434,7 @@ impl WorkflowEngine {
 
             let engine = Arc::clone(self);
             let def_clone = def.clone();
-            let ctx_clone = trigger_ctx.clone();
+            let ctx_clone = workflow_trigger_ctx;
 
             tokio::spawn(async move {
                 let result =
@@ -904,7 +911,8 @@ async fn should_fire_workflow(
     let filter = match &def.trigger {
         TriggerDef::MessagePosted { filter }
         | TriggerDef::ReactionAdded { filter, .. }
-        | TriggerDef::DiffPosted { filter } => filter.as_ref(),
+        | TriggerDef::DiffPosted { filter }
+        | TriggerDef::SlashCommand { filter, .. } => filter.as_ref(),
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
     };
     if let Some(expr) = filter {
@@ -928,6 +936,42 @@ async fn should_fire_workflow(
     }
 
     true
+}
+
+/// Prepare the per-workflow trigger context after kind-level matching.
+///
+/// Ordinary event triggers reuse the base context unchanged. Slash commands
+/// additionally require an exact bare command token and expose the parsed name
+/// and argument tail as `trigger.command` / `trigger.args`. A leading mention
+/// never matches, preserving `@Agent /command` for ACP pass-through.
+fn trigger_context_for_workflow(
+    trigger: &TriggerDef,
+    base: &executor::TriggerContext,
+) -> Option<executor::TriggerContext> {
+    let TriggerDef::SlashCommand { command, .. } = trigger else {
+        return Some(base.clone());
+    };
+
+    let args = match_slash_command(&base.text, command)?;
+    let mut context = base.clone();
+    context.command.clone_from(command);
+    context.args = args;
+    Some(context)
+}
+
+/// Match `/name` or `/name <args>` at the start of a message.
+///
+/// Leading whitespace is ignored, matching ACP command handling. The command
+/// token must end at whitespace or end-of-input, so `/new-task-extra` cannot
+/// accidentally invoke `new-task`.
+fn match_slash_command(content: &str, expected: &str) -> Option<String> {
+    let after_slash = content.trim_start().strip_prefix('/')?;
+    let remainder = after_slash.strip_prefix(expected)?;
+    match remainder.chars().next() {
+        None => Some(String::new()),
+        Some(c) if c.is_whitespace() => Some(remainder.trim().to_owned()),
+        Some(_) => None,
+    }
 }
 
 /// Build a [`executor::TriggerContext`] from a [`buzz_core::StoredEvent`].
@@ -998,6 +1042,8 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         emoji,
         message_id,
         is_reply: event_is_reply(&event.event),
+        command: String::new(),
+        args: String::new(),
         webhook_fields: HashMap::new(),
     }
 }
@@ -1041,6 +1087,7 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
         TriggerDef::MessagePosted { .. } => kind_u32 == KIND_STREAM_MESSAGE,
         TriggerDef::ReactionAdded { .. } => kind_u32 == KIND_REACTION,
         TriggerDef::DiffPosted { .. } => kind_u32 == KIND_STREAM_MESSAGE_DIFF,
+        TriggerDef::SlashCommand { .. } => kind_u32 == KIND_STREAM_MESSAGE,
         // Schedule and Webhook triggers are not fired by channel events.
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => false,
     }
@@ -1355,6 +1402,66 @@ steps:
             &trigger,
             buzz_core::kind::KIND_REACTION
         ));
+    }
+
+    #[test]
+    fn slash_command_matches_stream_message_kind_only() {
+        let trigger = TriggerDef::SlashCommand {
+            command: "new-task".to_owned(),
+            filter: None,
+        };
+        assert!(trigger_matches_event(
+            &trigger,
+            buzz_core::kind::KIND_STREAM_MESSAGE
+        ));
+        assert!(!trigger_matches_event(
+            &trigger,
+            buzz_core::kind::KIND_REACTION
+        ));
+    }
+
+    #[test]
+    fn slash_command_requires_exact_bare_token_and_extracts_args() {
+        assert_eq!(
+            match_slash_command("/new-task Build feature XYZ", "new-task"),
+            Some("Build feature XYZ".to_owned())
+        );
+        assert_eq!(
+            match_slash_command("  /new-task\nBuild feature XYZ  ", "new-task"),
+            Some("Build feature XYZ".to_owned())
+        );
+        assert_eq!(
+            match_slash_command("/new-task", "new-task"),
+            Some(String::new())
+        );
+        assert_eq!(
+            match_slash_command("/new-task-extra nope", "new-task"),
+            None
+        );
+        assert_eq!(
+            match_slash_command("@Hermes /new-task nope", "new-task"),
+            None,
+            "mention-prefixed commands belong to ACP pass-through"
+        );
+        assert_eq!(match_slash_command("see /new-task", "new-task"), None);
+    }
+
+    #[test]
+    fn slash_command_populates_per_workflow_trigger_context() {
+        let trigger = TriggerDef::SlashCommand {
+            command: "new-task".to_owned(),
+            filter: None,
+        };
+        let base = executor::TriggerContext {
+            text: "/new-task Build feature XYZ".to_owned(),
+            author: "abc123".to_owned(),
+            ..Default::default()
+        };
+
+        let context = trigger_context_for_workflow(&trigger, &base).expect("should match");
+        assert_eq!(context.command, "new-task");
+        assert_eq!(context.args, "Build feature XYZ");
+        assert_eq!(context.author, "abc123");
     }
 
     #[test]
