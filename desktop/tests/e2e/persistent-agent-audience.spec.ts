@@ -182,6 +182,7 @@ test("keeps a queued-attachment send locked through upload and send settlement",
   await installAudienceFixtures(page, {
     deferredComposerUploads: true,
     uploadDelayMs: 2_000,
+    sendMessageDelayMs: 2_000,
     uploadDescriptors: [
       {
         filename: "delayed-video.mp4",
@@ -210,6 +211,14 @@ test("keeps a queued-attachment send locked through upload and send settlement",
     name: "delayed-video.mp4",
   });
 
+  const sendAttempts = () =>
+    page.evaluate(
+      () =>
+        window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+          (entry) => entry.command === "send_channel_message",
+        ).length ?? 0,
+    );
+  const sendAttemptsBefore = await sendAttempts();
   await input.press("Enter");
   await expect(composer.getByTestId("composer-upload-progress")).toBeVisible();
 
@@ -222,10 +231,15 @@ test("keeps a queued-attachment send locked through upload and send settlement",
   await input.press("Enter");
   await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
 
-  await expect(composer.getByTestId("composer-upload-progress")).toHaveCount(
-    0,
-    { timeout: 5_000 },
-  );
+  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
+
+  // Command entry marks the independently delayed finishSend() window. Keep
+  // the synchronous lock held and fence repeated submits until it settles.
+  await expect(composer.getByTestId("composer-upload-progress")).toBeVisible();
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
+  await input.press("Enter");
+  await input.press("Enter");
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
 
   await expect(
     page
