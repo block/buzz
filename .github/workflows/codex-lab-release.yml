@@ -97,6 +97,16 @@ jobs:
           "installer_name=$($info.installer.name)" >> $env:GITHUB_OUTPUT
           "signature=$signature" >> $env:GITHUB_OUTPUT
 
+      - name: Verify updater signature
+        shell: pwsh
+        env:
+          BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.CODEX_LAB_UPDATER_PUBLIC_KEY }}
+        run: |
+          .\scripts\verify-codex-lab-updater.ps1 `
+            -InstallerPath '${{ steps.artifacts.outputs.installer }}' `
+            -SignaturePath '${{ steps.artifacts.outputs.signature }}' `
+            -PublicKey $env:BUZZ_UPDATER_PUBLIC_KEY
+
       - name: Generate latest.json
         shell: bash
         env:
