@@ -867,12 +867,14 @@ export function ChannelScreen({
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
                   header={channelHeader}
-                  idleAuxiliaryPanel={idleAuxiliaryPanel}
-                  idleAuxiliaryHeaderActions={idleAuxiliaryHeaderActions}
-                  idleAuxiliaryOverridesThread={idleAuxiliaryOverridesThread}
-                  idleAuxiliaryTitle={idleAuxiliaryTitle}
-                  hasOlderMessages={hasOlderMessages}
-                  historyExhausted={historyExhausted}
+                  {...{
+                    idleAuxiliaryHeaderActions,
+                    idleAuxiliaryOverridesThread,
+                    idleAuxiliaryPanel,
+                    idleAuxiliaryTitle,
+                    hasOlderMessages,
+                    historyExhausted,
+                  }}
                   {...{ onAddFiles }}
                   onAddAgent={handleOpenAddBot}
                   onBrowseChannels={openBrowseChannels}
