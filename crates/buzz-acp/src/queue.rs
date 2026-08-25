@@ -1140,6 +1140,8 @@ pub(crate) fn format_event_block(
         block.push_str(&format!("\nTags: {tags_str}"));
     }
 
+    append_media_instructions(&mut block, &be.event);
+
     // Parsed structural fields.
     let thread = parse_thread_tags(&be.event);
     let mut parsed_parts = Vec::new();
@@ -1165,6 +1167,45 @@ pub(crate) fn format_event_block(
     }
 
     block
+}
+
+/// Surface NIP-92 attachments as actionable agent context.
+///
+/// Relay media is intentionally private, so a bare HTTP client receives 401.
+/// The event's raw `imeta` tag is not enough guidance for an agent to discover
+/// that distinction. Point agents at the authenticated CLI path and require
+/// inspection before they claim to have seen the attachment.
+fn append_media_instructions(block: &mut String, event: &Event) {
+    let attachments: Vec<(&str, Option<&str>)> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let fields = tag.as_slice();
+            if fields.first().map(String::as_str) != Some("imeta") {
+                return None;
+            }
+            let url = fields.iter().find_map(|field| field.strip_prefix("url "))?;
+            let mime = fields.iter().find_map(|field| field.strip_prefix("m "));
+            Some((url, mime))
+        })
+        .collect();
+
+    if attachments.is_empty() {
+        return;
+    }
+
+    block.push_str("\nAttachments:");
+    for (index, (url, mime)) in attachments.iter().enumerate() {
+        block.push_str(&format!(
+            "\n- [{}] {} — {}",
+            index + 1,
+            mime.unwrap_or("unknown type"),
+            url,
+        ));
+    }
+    block.push_str(
+        "\nIMPORTANT: Attachment pixels are not embedded in this text prompt. Before describing an image, download it with authenticated Buzz media access (`buzz media get <url> --output .scratch/buzz-attachment`) and inspect the local file. A plain `curl` may return 401. Never claim to see an attachment you have not inspected.",
+    );
 }
 
 /// Append a reply instruction when the agent is responding to a thread event.
@@ -3917,6 +3958,40 @@ mod tests {
             prompt.contains("Tags:"),
             "tags should always be included, even for stream messages"
         );
+    }
+
+    #[test]
+    fn test_format_event_block_surfaces_authenticated_media_instructions() {
+        let ch = Uuid::new_v4();
+        let url = "https://relay.test/media/screenshot.png";
+        let event = make_event_with_tags(
+            &format!("![image]({url})"),
+            vec![
+                vec!["h".into(), ch.to_string()],
+                vec![
+                    "imeta".into(),
+                    format!("url {url}"),
+                    "m image/png".into(),
+                    "x deadbeef".into(),
+                ],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(prompt.contains("Attachments:\n- [1] image/png"));
+        assert!(prompt.contains(url));
+        assert!(prompt.contains("buzz media get <url>"));
+        assert!(prompt.contains("Never claim to see an attachment you have not inspected"));
     }
 
     #[test]
