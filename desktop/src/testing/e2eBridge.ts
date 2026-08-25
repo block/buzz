@@ -56,6 +56,7 @@ import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
+  KIND_STREAM_MESSAGE_DIFF,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
@@ -4996,8 +4997,15 @@ async function handleGetForumThread(args: {
     throw new Error(`Mock forum thread not found: ${args.eventId}`);
   }
 
+  // Mirrors the real `get_forum_thread` reply filter (kinds 9/40008/45003) in
+  // desktop/src-tauri/src/commands/messages/forum.rs — keep the two in sync.
   const replies = events
-    .filter((event) => event.kind === 45003)
+    .filter(
+      (event) =>
+        event.kind === 45003 ||
+        event.kind === 9 ||
+        event.kind === KIND_STREAM_MESSAGE_DIFF,
+    )
     .filter((event) => {
       const thread = getThreadReferenceFromTags(event.tags);
       return (thread.rootEventId ?? thread.parentEventId) === root.id;

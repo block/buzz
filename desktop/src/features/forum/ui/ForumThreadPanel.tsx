@@ -16,11 +16,19 @@ import { Button } from "@/shared/ui/button";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { Markdown } from "@/shared/ui/markdown";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
+import { KIND_STREAM_MESSAGE_DIFF } from "@/shared/constants/kinds";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import { formatRelativeTime } from "../lib/time";
 import { DeleteActionMenu } from "./DeleteActionMenu";
 import { ForumComposer } from "./ForumComposer";
+
+const DiffMessage = React.lazy(
+  () => import("@/features/messages/ui/DiffMessage"),
+);
+const DiffMessageExpanded = React.lazy(
+  () => import("@/features/messages/ui/DiffMessageExpanded"),
+);
 
 type ForumThreadPanelProps = {
   thread: ForumThreadResponse | undefined;
@@ -77,6 +85,10 @@ function ReplyRow({
     mentionNames: replyMentionNames,
     mentionPubkeysByName: replyMentionPubkeysByName,
   } = resolveMentionProps(reply.tags, profiles);
+  const [diffExpanded, setDiffExpanded] = React.useState(false);
+  const isDiff = reply.kind === KIND_STREAM_MESSAGE_DIFF;
+  const getTag = (name: string) =>
+    reply.tags.find((tag) => tag[0] === name)?.[1];
 
   return (
     <div
@@ -112,18 +124,57 @@ function ReplyRow({
         ) : null}
       </div>
       <div className="mt-1.5 pl-8">
-        <Markdown
-          channelNames={channelNames}
-          className="text-sm"
-          content={reply.content}
-          messageId={reply.eventId}
-          linkPreviewsSuppressed={hasLinkPreviewSuppression(reply.tags)}
-          linkPreviewTags={reply.tags}
-          imetaByUrl={parseImetaTags(reply.tags)}
-          mentionNames={replyMentionNames}
-          mentionPubkeysByName={replyMentionPubkeysByName}
-        />
+        {isDiff ? (
+          <React.Suspense
+            fallback={
+              <div className="p-3 text-sm text-muted-foreground">
+                Loading diff…
+              </div>
+            }
+          >
+            <DiffMessage
+              commitSha={getTag("commit")}
+              content={reply.content}
+              description={getTag("description")}
+              filePath={getTag("file")}
+              onExpand={() => {
+                setDiffExpanded(true);
+              }}
+              repoUrl={getTag("repo")}
+              truncated={getTag("truncated") === "true"}
+            />
+          </React.Suspense>
+        ) : (
+          <Markdown
+            channelNames={channelNames}
+            className="text-sm"
+            content={reply.content}
+            messageId={reply.eventId}
+            linkPreviewsSuppressed={hasLinkPreviewSuppression(reply.tags)}
+            linkPreviewTags={reply.tags}
+            imetaByUrl={parseImetaTags(reply.tags)}
+            mentionNames={replyMentionNames}
+            mentionPubkeysByName={replyMentionPubkeysByName}
+          />
+        )}
       </div>
+      {isDiff && diffExpanded ? (
+        <React.Suspense
+          fallback={
+            <div className="p-3 text-sm text-muted-foreground">
+              Loading diff viewer…
+            </div>
+          }
+        >
+          <DiffMessageExpanded
+            content={reply.content}
+            filePath={getTag("file")}
+            onClose={() => {
+              setDiffExpanded(false);
+            }}
+          />
+        </React.Suspense>
+      ) : null}
     </div>
   );
 }
