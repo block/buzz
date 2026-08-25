@@ -1,13 +1,15 @@
 import 'dart:io';
-import 'dart:typed_data';
+import 'dart:async';
 import 'dart:ui' show SemanticsAction;
 
-import 'package:buzz/features/profile/animated_avatar_orientation.dart';
+import 'package:camera_platform_interface/camera_platform_interface.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
+import 'package:buzz/features/profile/animated_avatar_orientation.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image/image.dart' as image;
@@ -63,6 +65,43 @@ void main() {
       animatedAvatarPortraitFrameRotationDegrees(sensorOrientation: 450),
       90,
     );
+  });
+
+  testWidgets('animated capture releases a failed orientation-lock candidate', (
+    tester,
+  ) async {
+    final platform = _TestCameraPlatform(failLockForCameraIds: {1});
+    final previousPlatform = CameraPlatform.instance;
+    CameraPlatform.instance = platform;
+    addTearDown(() {
+      CameraPlatform.instance = previousPlatform;
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: SizedBox(
+              height: 600,
+              child: AnimatedAvatarCapture(
+                height: 600,
+                onPrepareChanged: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(platform.createdCameraIds, [1]);
+    expect(platform.disposedCameraIds, [1]);
+    expect(find.text('Could not access the camera.'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
   });
 
   testWidgets('completed review frames survive lifecycle changes', (
@@ -264,6 +303,89 @@ double _greenCenterX(Uint8List bytes) {
     }
   }
   return matchingX.reduce((left, right) => left + right) / matchingX.length;
+}
+
+class _TestCameraPlatform extends CameraPlatform {
+  _TestCameraPlatform({Set<int>? failLockForCameraIds})
+    : _failLockForCameraIds = failLockForCameraIds ?? const {};
+
+  final Set<int> _failLockForCameraIds;
+  final _initializedControllers =
+      <int, StreamController<CameraInitializedEvent>>{};
+  final _errorControllers = <int, StreamController<CameraErrorEvent>>{};
+  final _orientationController =
+      StreamController<DeviceOrientationChangedEvent>.broadcast();
+  final createdCameraIds = <int>[];
+  final disposedCameraIds = <int>[];
+  var _nextCameraId = 1;
+
+  @override
+  Future<List<CameraDescription>> availableCameras() async => const [
+    CameraDescription(
+      name: 'front',
+      lensDirection: CameraLensDirection.front,
+      sensorOrientation: 0,
+    ),
+  ];
+
+  @override
+  Future<int> createCameraWithSettings(
+    CameraDescription description,
+    MediaSettings mediaSettings,
+  ) async {
+    final cameraId = _nextCameraId++;
+    createdCameraIds.add(cameraId);
+    _initializedControllers[cameraId] =
+        StreamController<CameraInitializedEvent>.broadcast();
+    _errorControllers[cameraId] =
+        StreamController<CameraErrorEvent>.broadcast();
+    return cameraId;
+  }
+
+  @override
+  Stream<CameraInitializedEvent> onCameraInitialized(int cameraId) =>
+      _initializedControllers[cameraId]!.stream.asBroadcastStream();
+
+  @override
+  Stream<CameraErrorEvent> onCameraError(int cameraId) =>
+      _errorControllers[cameraId]!.stream.asBroadcastStream();
+
+  @override
+  Stream<DeviceOrientationChangedEvent> onDeviceOrientationChanged() =>
+      _orientationController.stream;
+
+  @override
+  Future<void> initializeCamera(
+    int cameraId, {
+    ImageFormatGroup imageFormatGroup = ImageFormatGroup.unknown,
+  }) async {
+    _initializedControllers[cameraId]!.add(
+      CameraInitializedEvent(
+        cameraId,
+        640,
+        480,
+        ExposureMode.auto,
+        false,
+        FocusMode.auto,
+        false,
+      ),
+    );
+  }
+
+  @override
+  Future<void> lockCaptureOrientation(
+    int cameraId,
+    DeviceOrientation orientation,
+  ) async {
+    if (_failLockForCameraIds.contains(cameraId)) {
+      throw PlatformException(code: 'orientation-failed');
+    }
+  }
+
+  @override
+  Future<void> dispose(int cameraId) async {
+    disposedCameraIds.add(cameraId);
+  }
 }
 
 class _TestLifecycleNotifier extends AppLifecycleNotifier {
