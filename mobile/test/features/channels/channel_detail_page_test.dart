@@ -7329,6 +7329,63 @@ void main() {
       );
     });
 
+    testWidgets('renders name_changed system event', (tester) async {
+      final messages = [
+        _systemMsg(
+          id: 'sys1',
+          payload: {
+            'type': 'name_changed',
+            'actor': 'alice',
+            'previous_name': 'old-name',
+            'name': 'new-name',
+          },
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Alice renamed the channel from "old-name" to "new-name"'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('renders name_changed without a previous name', (tester) async {
+      final messages = [
+        _systemMsg(
+          id: 'sys1',
+          payload: {
+            'type': 'name_changed',
+            'actor': 'alice',
+            'name': 'new-name',
+          },
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Alice renamed the channel to "new-name"'),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('system message breaks author grouping', (tester) async {
       final messages = [
         _textMsg(
