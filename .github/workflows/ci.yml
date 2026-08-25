@@ -511,6 +511,36 @@ jobs:
           PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
           ./bin/pgschema apply --file schema/schema.sql --auto-approve
+          # pgschema omits this named CHECK when it creates workflow_runs from scratch.
+          docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
+            psql -U buzz -d buzz -v ON_ERROR_STOP=1 <<'SQL'
+          ALTER TABLE workflow_runs
+              ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
+                  CHECK (
+                      (
+                          webhook_idempotency_key_hash IS NULL
+                          AND webhook_payload_hash IS NULL
+                          AND webhook_execution_claimed_at IS NULL
+                          AND webhook_execution_claim_token IS NULL
+                      )
+                      OR (
+                          webhook_idempotency_key_hash IS NOT NULL
+                          AND webhook_payload_hash IS NOT NULL
+                          AND octet_length(webhook_idempotency_key_hash) = 32
+                          AND octet_length(webhook_payload_hash) = 32
+                          AND (
+                              (
+                                  webhook_execution_claimed_at IS NULL
+                                  AND webhook_execution_claim_token IS NULL
+                              )
+                              OR (
+                                  webhook_execution_claimed_at IS NOT NULL
+                                  AND webhook_execution_claim_token IS NOT NULL
+                              )
+                          )
+                      )
+                  );
+          SQL
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
           docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
@@ -671,6 +701,36 @@ jobs:
           PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
           ./bin/pgschema apply --file schema/schema.sql --auto-approve
+          # pgschema omits this named CHECK when it creates workflow_runs from scratch.
+          docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
+            psql -U buzz -d buzz -v ON_ERROR_STOP=1 <<'SQL'
+          ALTER TABLE workflow_runs
+              ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
+                  CHECK (
+                      (
+                          webhook_idempotency_key_hash IS NULL
+                          AND webhook_payload_hash IS NULL
+                          AND webhook_execution_claimed_at IS NULL
+                          AND webhook_execution_claim_token IS NULL
+                      )
+                      OR (
+                          webhook_idempotency_key_hash IS NOT NULL
+                          AND webhook_payload_hash IS NOT NULL
+                          AND octet_length(webhook_idempotency_key_hash) = 32
+                          AND octet_length(webhook_payload_hash) = 32
+                          AND (
+                              (
+                                  webhook_execution_claimed_at IS NULL
+                                  AND webhook_execution_claim_token IS NULL
+                              )
+                              OR (
+                                  webhook_execution_claimed_at IS NOT NULL
+                                  AND webhook_execution_claim_token IS NOT NULL
+                              )
+                          )
+                      )
+                  );
+          SQL
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
           docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
