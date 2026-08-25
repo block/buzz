@@ -49,6 +49,33 @@ Both adapters found the correct task. Codex prefixed an unrequested workflow nar
 the exact-output gate. Pi was 87.4% faster, used 98.2% fewer reported tokens, and used one bounded
 `kanban_tasks` call instead of seven generic tool calls.
 
+## Bounded two-file UI result
+
+| Adapter | Time | Processed/provider total | Exact | Tools | Files |
+|---|---:|---:|---|---:|---|
+| `pi-acp` | 11,339 ms | 2,531 | yes | 4 | both correct |
+| managed `codex-acp 1.6.2` | >120,000 ms | unavailable | no completion | unknown | one of two changed |
+
+Pi read and edited only `src/card.ts` and `src/card.test.ts`, produced the exact completion token,
+and stayed below the 12-turn/15-tool/800k-token gate. Codex exceeded the 120-second hard benchmark
+deadline and left the fixture inconsistent: the test expected `New` while the implementation still
+exported `Old`. The timeout path killed the adapter and preserved the fixture for inspection.
+
+## Typed reply SDK diagnostic
+
+Two fresh model sessions requested the same event-bound `buzz_reply`. The first invocation called an
+isolated fake Buzz executable with the exact authenticated channel/reply target and connected
+`DIAGNOSTIC_REPLY` on stdin. The second returned the durable receipt without invoking the executable
+again.
+
+| Run | Time | Tokens | Exact | Tool calls | Underlying publications |
+|---|---:|---:|---|---:|---:|
+| first reservation | 6,852 ms | 898 | yes | 1 | 1 |
+| receipt replay | 4,736 ms | 898 | yes | 1 | 0 |
+
+This proves the AgentSession → typed tool → reservation/receipt path without writing to a live relay.
+A live diagnostic-channel publication remains an explicit pre-production gate.
+
 ## Interpretation
 
 The improvement is consistent with the intended task-isolation design: `pi-acp` disables ambient
@@ -60,9 +87,10 @@ large fixed context observed in the current Codex path without losing correctnes
 
 Before changing a production identity:
 
-1. run the bounded two-file UI corpus;
-2. verify live typed `buzz_reply` once in a diagnostic channel, including receipt replay;
-3. obtain independent review of routing, reservation, budget, and packaging changes;
+1. verify live typed `buzz_reply` once in a diagnostic channel;
+2. obtain independent review of routing, reservation, budget, and packaging changes;
+3. package the branch's metadata-aware `buzz-acp` together with `pi-acp` — the currently installed
+   Buzz 0.5.18 harness predates `_meta.buzz`, so switching only `agent_command` would fail closed;
 4. stop the selected canary, switch only its `agent_command`, verify one process for its
    identity/relay, and run the smoke corpus;
 5. restore `codex-acp`, restart, and rerun one exact question to prove rollback.

@@ -24,6 +24,20 @@ const scenarios = {
     system:
       "Benchmark mode. Use only one compact filtered Kanban query. After reading it, return exactly the requested title and nothing else.",
   },
+  ui: {
+    prompt:
+      'Make exactly this bounded two-file change: in src/card.ts replace the exported label value "Old" with "New"; update src/card.test.ts to expect "New". Inspect only those files, make no other changes, and return exactly UI_CANARY_DONE.',
+    expected: "UI_CANARY_DONE",
+    system:
+      "Benchmark coding mode. Use at most four tools, touch exactly the two requested files, run no broad discovery, publish nothing, and return exactly the requested completion text.",
+  },
+  reply: {
+    prompt:
+      "Call buzz_reply exactly once with content DIAGNOSTIC_REPLY. After receiving its receipt, return exactly REPLY_TOOL_OK.",
+    expected: "REPLY_TOOL_OK",
+    system:
+      "Diagnostic mode. Use only the typed buzz_reply tool. Routing comes from authenticated context and must not be supplied or changed. Return exactly the requested completion text.",
+  },
 };
 const selected = scenarios[scenario];
 if (!selected) throw new Error(`unknown scenario: ${scenario}`);
