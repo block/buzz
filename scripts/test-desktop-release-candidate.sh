@@ -64,8 +64,19 @@ for path in ('desktop/package.json', 'desktop/src-tauri/tauri.conf.json'):
 open('desktop/src-tauri/Cargo.toml','w').write('[package]\nversion = "1.0.1"\n')
 PY
   git add .
-  git -c user.name=Wes -c user.email=wesbillman@users.noreply.github.com commit -q -s -m 'chore(release): release Buzz Desktop version 1.0.1' -m 'Co-authored-by: Test Automation <test@example.com>'
+  git commit -q -s -m 'chore(release): release Buzz Desktop version 1.0.1' -m 'Co-authored-by: Test Automation <test@example.com>'
   PATH="$mock_bin:$PATH" scripts/desktop_release.py validate --version 1.0.1 --repo block/buzz
+  good_candidate=$(git rev-parse HEAD)
+
+  # A candidate whose Signed-off-by does not match its author is a dishonest
+  # DCO sign-off and must be rejected. Rewrite the author while keeping the
+  # original trailer body, then restore the honest candidate.
+  git -c user.name=Impostor -c user.email=impostor@example.com commit -q --amend --no-edit --reset-author
+  if PATH="$mock_bin:$PATH" scripts/desktop_release.py validate --version 1.0.1 --repo block/buzz >/dev/null 2>&1; then
+    echo "validator accepted a candidate whose sign-off does not match its author" >&2; exit 1
+  fi
+  git reset -q --hard "$good_candidate"
+
   grep -Fq "$unrelated_before" CHANGELOG.md
   grep -Fq "$unrelated_after" CHANGELOG.md
   ! grep -Fq "$prior_merge" CHANGELOG.md

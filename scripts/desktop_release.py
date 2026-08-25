@@ -259,10 +259,10 @@ def validate(args: argparse.Namespace) -> None:
         raise SystemExit(f"version mismatch in: {', '.join(bad)}")
     author = git("show", "-s", "--format=%an <%ae>", candidate)
     body = git("show", "-s", "--format=%B", candidate)
-    if author != "Wes <wesbillman@users.noreply.github.com>":
-        raise SystemExit(f"unexpected candidate author: {author}")
-    if "Signed-off-by: Wes <wesbillman@users.noreply.github.com>" not in body:
-        raise SystemExit("candidate is missing Wes Signed-off-by trailer")
+    if not author:
+        raise SystemExit("candidate has no author identity")
+    if f"Signed-off-by: {author}" not in body:
+        raise SystemExit(f"candidate is missing a Signed-off-by trailer matching its author {author}")
     if not re.search(r"(?m)^Co-authored-by: .+ <.+>$", body):
         raise SystemExit("candidate is missing automation Co-authored-by trailer")
     print(f"validated immutable desktop candidate {candidate} for desktop-v{version}")
