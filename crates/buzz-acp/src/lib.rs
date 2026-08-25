@@ -5030,6 +5030,44 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Write the signing key where only this user can read it, and return
+/// the path.
+///
+/// Keyed by process id so two agents never share a file, and truncated on every
+/// write so a restarted agent cannot read a previous identity. Permissions are
+/// set as the file is created — creating it world-readable and tightening
+/// afterwards leaves a window, however short.
+///
+/// Returns `None` on any failure; the caller falls back to the inline value
+/// rather than leaving the agent without a key.
+fn write_secret_file(secret: &str) -> Option<String> {
+    use std::io::Write;
+
+    // No new dependency for this: the fork keeps `crates/` as close to upstream
+    // as it can, and one directory lookup does not justify pulling `dirs` in.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let dir = match home {
+        Some(home) => home.join(".buzz").join("agent-keys"),
+        None => std::env::temp_dir().join("buzz-agent-keys"),
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{}.nsec", std::process::id()));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).ok()?;
+    file.write_all(secret.as_bytes()).ok()?;
+    file.flush().ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
@@ -5048,18 +5086,39 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     name: "BUZZ_RELAY_URL".into(),
                     value: config.relay_url.clone(),
                 },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
             ];
+            // The signing key travels as a file path, not a value.
+            //
+            // This list is sent over ACP and the adapter renders it into
+            // `claude --mcp-config '{…"env":{…}}'` — an argv, which every process
+            // running as this user can read. Measured live: `ps aux | grep nsec1`
+            // returned six lines, one per agent, each a complete identity. Nobody
+            // was looking for it; it turned up while checking which binary ran.
+            //
+            // An nsec is the whole identity — whoever reads it can post as that
+            // agent, open work records, sign events. So the value goes into a 0600
+            // file and only the path is advertised; the aggregator reads the file
+            // and hands the key to its children through *their* environment, which
+            // argv never shows.
+            //
+            // Fail-safe on purpose: if the file cannot be written, the inline value
+            // is used exactly as before. A key in the process table is bad; an agent
+            // that will not start is worse.
+            let secret = config
+                .keys
+                .secret_key()
+                .to_bech32()
+                .expect("secret key bech32 encoding should never fail");
+            match write_secret_file(&secret) {
+                Some(path) => env.push(EnvVar {
+                    name: "BUZZ_PRIVATE_KEY_FILE".into(),
+                    value: path,
+                }),
+                None => env.push(EnvVar {
+                    name: "BUZZ_PRIVATE_KEY".into(),
+                    value: secret,
+                }),
+            }
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
             if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
@@ -5512,6 +5571,43 @@ mod author_gate_tests {
             .await,
             "respond_to=anyone must still drop non-owner authors inside a DM"
         );
+    }
+
+    // The signing key must not be advertised by value — the adapter
+    // renders the advertised env into an argv.
+    mod secret_file_tests {
+        #[test]
+        fn the_key_file_is_written_readable_only_by_its_owner() {
+            let secret = "nsec1testtesttesttesttesttesttesttesttesttesttesttest";
+            let path = super::super::write_secret_file(secret)
+                .expect("writing under HOME should succeed in a test environment");
+
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("readable by us"),
+                secret,
+                "the aggregator has to be able to read it back"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+                assert_eq!(
+                    mode & 0o077,
+                    0,
+                    "group and other must have no access — mode was {:o}",
+                    mode
+                );
+            }
+
+            // Truncation matters: a restarted agent must not be able to read a
+            // previous identity out of a longer file left behind.
+            let shorter = "nsec1short";
+            let again = super::super::write_secret_file(shorter).expect("second write");
+            assert_eq!(std::fs::read_to_string(&again).expect("readable"), shorter);
+
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[tokio::test]
@@ -6814,9 +6910,15 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_RELAY_URL"),
             "missing BUZZ_RELAY_URL; got {names:?}"
         );
+        // The key may arrive by value or by path. It is normally the
+        // path — the advertised env becomes an argv downstream, and a value
+        // there puts every agent's identity in the process table. The by-value
+        // form remains the fallback for when the file cannot be written, so
+        // both spellings satisfy the contract this test guards: the MCP server
+        // is told how to authenticate.
         assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
+            names.contains(&"BUZZ_PRIVATE_KEY") || names.contains(&"BUZZ_PRIVATE_KEY_FILE"),
+            "the key reaches the MCP server by neither value nor path; got {names:?}"
         );
     }
 
