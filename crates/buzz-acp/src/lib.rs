@@ -1892,6 +1892,26 @@ mod idle_pool_sleep_tests {
     }
 }
 
+/// Read the persisted newest-event timestamp. An absent file, an unreadable
+/// file, or non-numeric content all mean "no watermark": the harness starts
+/// live-only, exactly as it did before persistence existed.
+fn read_seen_state(path: Option<&std::path::Path>) -> Option<u64> {
+    let text = std::fs::read_to_string(path?).ok()?;
+    text.trim().parse::<u64>().ok()
+}
+
+/// Persist the newest received event timestamp, atomically (tmp + rename), so
+/// a crash mid-write can never leave a corrupt watermark behind.
+fn write_seen_state(path: &std::path::Path, ts: u64) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, ts.to_string())
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .is_err()
+    {
+        tracing::warn!(path = %path.display(), "failed to persist seen-state watermark");
+    }
+}
+
 pub fn run() -> Result<()> {
     config::propagate_legacy_env_vars();
     tokio_main()
@@ -1989,10 +2009,24 @@ async fn tokio_main() -> Result<()> {
     // the initial subscribe_since for channels discovered at startup. The Subscribe
     // handler falls back to subscribe_since when last_seen is None, closing the
     // blind spot between "agents ready" and "first REQ sent".
-    let startup_watermark: u64 = std::time::SystemTime::now()
+    let now_secs: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    // When a seen-state file holds the newest timestamp a previous process
+    // received, resume replay just after it instead of from now: mentions
+    // posted while the process was down or hung are re-delivered by the
+    // relay's `since` replay instead of being lost forever. `+1` skips the
+    // boundary event the previous process already handled; `min(now)` guards
+    // against a future timestamp from a skewed clock or corrupt file.
+    let startup_watermark: u64 = match read_seen_state(config.seen_state_file.as_deref()) {
+        Some(saved) => {
+            tracing::info!(saved, "resuming event replay after persisted watermark");
+            (saved + 1).min(now_secs)
+        }
+        None => now_secs,
+    };
+    let mut newest_seen: u64 = 0;
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -2628,6 +2662,16 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
+                            // Persist the newest event timestamp so a future
+                            // process resumes replay from here instead of
+                            // losing whatever arrives while it is down.
+                            if let Some(path) = config.seen_state_file.as_deref() {
+                                let ts = buzz_event.event.created_at.as_secs();
+                                if ts > newest_seen {
+                                    newest_seen = ts;
+                                    write_seen_state(path, ts);
+                                }
+                            }
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -6776,6 +6820,7 @@ mod build_mcp_servers_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            seen_state_file: None,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -7000,6 +7045,7 @@ mod error_outcome_emission_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            seen_state_file: None,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -8709,5 +8755,27 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+
+    #[test]
+    fn seen_state_round_trips_and_survives_rewrite() {
+        let path =
+            std::env::temp_dir().join(format!("acp-seen-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read_seen_state(Some(&path)), None, "absent file = no watermark");
+        write_seen_state(&path, 1_787_415_033);
+        assert_eq!(read_seen_state(Some(&path)), Some(1_787_415_033));
+        write_seen_state(&path, 1_787_415_100);
+        assert_eq!(read_seen_state(Some(&path)), Some(1_787_415_100));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn seen_state_ignores_garbage_and_unset_path() {
+        let path = std::env::temp_dir().join(format!("acp-seen-garbage-{}", std::process::id()));
+        std::fs::write(&path, "not a number\n").unwrap();
+        assert_eq!(read_seen_state(Some(&path)), None, "corrupt file = no watermark");
+        assert_eq!(read_seen_state(None), None, "unconfigured = no watermark");
+        let _ = std::fs::remove_file(&path);
     }
 }

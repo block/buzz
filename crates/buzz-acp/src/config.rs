@@ -424,6 +424,14 @@ pub struct CliArgs {
     )]
     pub base_prompt_file: Option<PathBuf>,
 
+    /// Path where the harness persists the newest event timestamp it has
+    /// received. On startup, event replay resumes just after this timestamp,
+    /// so mentions posted while the process was down or hung are delivered
+    /// instead of silently lost. Unset = no persistence (live-only delivery,
+    /// the prior behavior).
+    #[arg(long, env = "BUZZ_ACP_SEEN_STATE_FILE")]
+    pub seen_state_file: Option<PathBuf>,
+
     /// Desired LLM model ID. Applied to every new ACP session after creation.
     /// Use `buzz-acp models` to discover available model IDs.
     #[arg(long, env = "BUZZ_ACP_MODEL")]
@@ -541,6 +549,8 @@ pub struct Config {
     pub kinds_override: Option<Vec<u32>>,
     pub channels_override: Option<Vec<String>>,
     pub no_mention_filter: bool,
+    /// See `Args::seen_state_file`. `None` disables watermark persistence.
+    pub seen_state_file: Option<PathBuf>,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
@@ -1118,6 +1128,7 @@ impl Config {
             kinds_override: args.kinds,
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
+            seen_state_file: args.seen_state_file,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
@@ -1494,6 +1505,7 @@ mod tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            seen_state_file: None,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
