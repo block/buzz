@@ -264,14 +264,19 @@ const MediaAttachmentItem = React.forwardRef<
   const [mode, setMode] = React.useState<"view" | "edit">("view");
 
   const hash = shortHash(attachment.sha256);
+  const isVideo = attachment.type.startsWith("video/");
   // One accessible name for every control/label in this item. Provider media
-  // (e.g. KLIPY GIFs) carries a `displayLabel` but no filename or hash; ordinary
-  // uploads keep their historical `Attachment <hash>` name.
+  // (e.g. KLIPY GIFs) carries a `displayLabel` but no content hash; ordinary
+  // uploads keep their historical type-aware `Attachment <hash>` /
+  // `Video attachment <hash>` name; only genuinely hashless non-provider media
+  // falls back to a filename.
   const mediaLabel =
     attachment.displayLabel?.trim() ||
-    attachment.filename?.trim() ||
-    `Attachment ${hash}`;
-  const isVideo = attachment.type.startsWith("video/");
+    (attachment.sha256
+      ? isVideo
+        ? `Video attachment ${hash}`
+        : `Attachment ${hash}`
+      : attachment.filename?.trim() || `Attachment ${hash}`);
   const thumbUrl = attachment.thumb
     ? rewriteRelayUrl(attachment.thumb)
     : rewriteRelayUrl(attachment.url);
@@ -431,7 +436,7 @@ const MediaAttachmentItem = React.forwardRef<
                 />
               ) : (
                 <img
-                  alt={mediaLabel}
+                  alt=""
                   className={cn(
                     "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
                     isSpoilered && "blur-2xl brightness-75",
