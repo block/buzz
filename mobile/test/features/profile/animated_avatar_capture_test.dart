@@ -104,6 +104,59 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('animated capture waits for disposal before lifecycle resume', (
+    tester,
+  ) async {
+    final platform = _TestCameraPlatform(blockDisposeForCameraIds: {1});
+    final previousPlatform = CameraPlatform.instance;
+    CameraPlatform.instance = platform;
+    addTearDown(() => CameraPlatform.instance = previousPlatform);
+    final lifecycle = _TestLifecycleNotifier();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appLifecycleProvider.overrideWith(() => lifecycle)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: SizedBox(
+              height: 600,
+              child: AnimatedAvatarCapture(
+                height: 600,
+                onPrepareChanged: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(platform.createdCameraIds, [1]);
+
+    lifecycle.setLifecycle(AppLifecycleState.paused);
+    await tester.pump();
+    expect(platform.disposedCameraIds, [1]);
+
+    lifecycle.setLifecycle(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+    expect(platform.createdCameraIds, [1]);
+
+    platform.failDispose(1);
+    await tester.pump();
+    await tester.pump();
+
+    expect(platform.createdCameraIds, [1, 2]);
+    final record = tester.widget<InkWell>(
+      find.byKey(const ValueKey('animated-avatar-record')),
+    );
+    expect(record.onTap, isNotNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
+
   testWidgets('completed review frames survive lifecycle changes', (
     tester,
   ) async {
@@ -306,10 +359,15 @@ double _greenCenterX(Uint8List bytes) {
 }
 
 class _TestCameraPlatform extends CameraPlatform {
-  _TestCameraPlatform({Set<int>? failLockForCameraIds})
-    : _failLockForCameraIds = failLockForCameraIds ?? const {};
+  _TestCameraPlatform({
+    Set<int>? failLockForCameraIds,
+    Set<int>? blockDisposeForCameraIds,
+  }) : _failLockForCameraIds = failLockForCameraIds ?? const {},
+       _blockDisposeForCameraIds = blockDisposeForCameraIds ?? const {};
 
   final Set<int> _failLockForCameraIds;
+  final Set<int> _blockDisposeForCameraIds;
+  final _disposeCompleters = <int, Completer<void>>{};
   final _initializedControllers =
       <int, StreamController<CameraInitializedEvent>>{};
   final _errorControllers = <int, StreamController<CameraErrorEvent>>{};
@@ -383,8 +441,20 @@ class _TestCameraPlatform extends CameraPlatform {
   }
 
   @override
+  Widget buildPreview(int cameraId) => const SizedBox.expand();
+
+  @override
   Future<void> dispose(int cameraId) async {
     disposedCameraIds.add(cameraId);
+    if (_blockDisposeForCameraIds.contains(cameraId)) {
+      await (_disposeCompleters[cameraId] ??= Completer<void>()).future;
+    }
+  }
+
+  void failDispose(int cameraId) {
+    _disposeCompleters[cameraId]!.completeError(
+      PlatformException(code: 'dispose-failed'),
+    );
   }
 }
 
