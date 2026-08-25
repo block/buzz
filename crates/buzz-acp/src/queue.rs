@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use crate::audit;
 use crate::config::DedupMode;
 
 /// Maximum events queued per channel before oldest events are dropped.
@@ -227,7 +228,27 @@ impl EventQueue {
     /// silently discarded (debug-logged).
     ///
     /// Returns `true` if the event was accepted, `false` if dropped.
+    ///
+    /// Phase B B6 QUEUE_DECISION: emits one record per actual queue-state
+    /// transition — `DroppedInFlight`, `CapEvicted` (for the evicted event,
+    /// not the incoming one), and/or `Accepted`. A single call can
+    /// legitimately emit both `CapEvicted` and `Accepted`. `attempt` is
+    /// read from `self.retry_counts` once, up front, before `self.queues`
+    /// is mutably borrowed — the two borrows would otherwise conflict.
     pub fn push(&mut self, event: QueuedEvent) -> bool {
+        let audit_enabled = audit::is_enabled();
+        // `retry_counts` is keyed by channel_id, so this single read is
+        // equally authoritative for the incoming event and, on cap
+        // eviction, the evicted event below: both necessarily share the
+        // same channel_id, since `EventQueue` is strictly per-channel.
+        // `None` means "no retry recorded for this channel" — a real fact
+        // from the map, never fabricated as 0.
+        let attempt: Option<u32> = if audit_enabled {
+            self.retry_counts.get(&event.channel_id).copied()
+        } else {
+            None
+        };
+
         if matches!(self.dedup_mode, DedupMode::Drop)
             && self.in_flight_channels.contains(&event.channel_id)
         {
@@ -235,19 +256,54 @@ impl EventQueue {
                 channel_id = %event.channel_id,
                 "dropping event for in-flight channel (drop mode)"
             );
+            if audit_enabled {
+                audit::record(
+                    audit::EventType::QueueDecision,
+                    build_queue_audit_fields(&event, attempt),
+                    audit::EventDetail::QueueDecision {
+                        outcome: audit::QueueOutcome::DroppedInFlight,
+                    },
+                );
+            }
             return false;
         }
+
+        // Precompute Accepted-outcome fields now, while `event` is still
+        // owned here — `push_back` below consumes it, and the Accepted
+        // record must only be emitted once the enqueue has actually
+        // happened (see below).
+        let accepted_fields = audit_enabled.then(|| build_queue_audit_fields(&event, attempt));
+
         let queue = self.queues.entry(event.channel_id).or_default();
         // Enforce per-channel depth cap: drop oldest to make room.
         if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
-            tracing::warn!(
-                channel_id = %event.channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "queue depth cap reached — dropped oldest event"
-            );
+            if let Some(evicted) = queue.pop_front() {
+                tracing::warn!(
+                    channel_id = %event.channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "queue depth cap reached — dropped oldest event"
+                );
+                if audit_enabled {
+                    audit::record(
+                        audit::EventType::QueueDecision,
+                        build_queue_audit_fields(&evicted, attempt),
+                        audit::EventDetail::QueueDecision {
+                            outcome: audit::QueueOutcome::CapEvicted,
+                        },
+                    );
+                }
+            }
         }
         queue.push_back(event);
+        if let Some(fields) = accepted_fields {
+            audit::record(
+                audit::EventType::QueueDecision,
+                fields,
+                audit::EventDetail::QueueDecision {
+                    outcome: audit::QueueOutcome::Accepted,
+                },
+            );
+        }
         true
     }
 
@@ -904,6 +960,31 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
         root_event_id,
         parent_event_id,
         mentioned_pubkeys: mentions,
+    }
+}
+
+/// Phase B B6 QUEUE_DECISION metadata for one queued event — reused for
+/// both the incoming event and, on cap eviction, the evicted event.
+/// `attempt` is passed in verbatim from the caller's `retry_counts` read;
+/// this function never fabricates or defaults it.
+fn build_queue_audit_fields(qe: &QueuedEvent, attempt: Option<u32>) -> audit::AuditFields {
+    let tags = parse_thread_tags(&qe.event);
+    let event_id = qe.event.id.to_hex();
+    let correlation_id = tags
+        .root_event_id
+        .clone()
+        .unwrap_or_else(|| event_id.clone());
+    audit::AuditFields {
+        event_id: Some(event_id),
+        direct_parent_event_id: tags.parent_event_id,
+        thread_root_event_id: tags.root_event_id,
+        correlation_id: Some(correlation_id),
+        workflow_id: audit::workflow_id_for(&qe.event),
+        sender_pubkey: Some(qe.event.pubkey.to_hex()),
+        target_pubkey: audit::first_mentioned_pubkey(&qe.event),
+        channel_id: Some(qe.channel_id.to_string()),
+        attempt,
+        ..Default::default()
     }
 }
 
