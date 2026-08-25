@@ -25,6 +25,7 @@ quickstart: false
 image:
   repository: ghcr.io/block/buzz
   tag: ""                        # empty → .Chart.AppVersion
+  digest: ""                     # optional sha256:...; when set, overrides tag
   pullPolicy: IfNotPresent
   pullSecrets: []
 

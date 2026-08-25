@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.7 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.8 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -28,6 +28,15 @@ its bucket created by a post-install Job) — and composes the relay's
 intent marker surfaced in NOTES.txt; the bundled services are opted in via the
 four `*.enabled` flags above (see `ci/quickstart-values.yaml` for the exact set
 CI installs). Eval-only: every bundled service is a single replica with no HA.
+
+For immutable delivery, pin the OCI digest instead of a tag. `image.digest`
+overrides `image.tag` when both are present:
+
+```yaml
+image:
+  repository: ghcr.io/block/buzz
+  digest: sha256:<64-lowercase-hex-characters>
+```
 
 ## Production (GitOps)
 
