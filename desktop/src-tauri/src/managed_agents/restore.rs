@@ -1,30 +1,178 @@
 use super::{
     find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, load_personas,
     save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
-    ManagedAgentProcess,
 };
 use crate::app_state::AppState;
 use crate::util;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tauri::Manager;
 
-/// Outcome of a Phase B spawn attempt for one restore candidate.
+const RESTORE_SPAWN_STAGGER: Duration = Duration::from_secs(1);
+const RESTORE_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Pace restore candidates without blocking a Tokio worker.
 ///
-/// `Skipped` covers the case where a concurrently-running startup reconcile
-/// already spawned and tracked this exact pair during the Phase A window (the
-/// transition lock is only held from Phase B onward). Restore must then leave
-/// that live child alone rather than terminate-and-respawn it — mirroring the
-/// live-child guard in `start_pair` (`runtime_commands.rs`). Without this,
-/// restore would kill reconcile's lazy child by its receipt and replace it with
-/// an eager one, flipping the pair's laziness on a startup race.
-enum SpawnOutcome {
-    /// Boxed: the spawned process carries its full spawn-config snapshot, so an
-    /// inline variant would make every `Skipped`/`Failed` outcome pay for it.
-    Spawned(super::ManagedAgentRuntimeKey, Box<ManagedAgentProcess>),
-    Skipped,
-    Failed(String),
+/// The spawn closure owns the heavyweight AppHandle/relay/process work. Keeping
+/// only ordering, pacing, and shutdown policy here makes the scheduler directly
+/// testable and ensures no synchronous runtime-transition guard crosses an
+/// await point.
+async fn run_serial_restore_schedule<T, R, E, Shutdown, Spawn, SpawnFuture>(
+    candidates: &[T],
+    stagger: Duration,
+    mut shutdown_started: Shutdown,
+    mut spawn: Spawn,
+) -> Result<Vec<R>, E>
+where
+    Shutdown: FnMut() -> bool,
+    Spawn: FnMut(&T) -> SpawnFuture,
+    SpawnFuture: Future<Output = Result<R, E>>,
+{
+    let mut results = Vec::with_capacity(candidates.len());
+
+    for (position, candidate) in candidates.iter().enumerate() {
+        if shutdown_started() {
+            break;
+        }
+
+        if position > 0 {
+            let deadline = tokio::time::Instant::now() + stagger;
+            loop {
+                if shutdown_started() {
+                    return Ok(results);
+                }
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                tokio::time::sleep(
+                    deadline
+                        .saturating_duration_since(now)
+                        .min(RESTORE_SHUTDOWN_POLL_INTERVAL),
+                )
+                .await;
+            }
+            if shutdown_started() {
+                break;
+            }
+        }
+
+        results.push(spawn(candidate).await?);
+    }
+
+    Ok(results)
 }
-type AgentSpawnResult = (String, SpawnOutcome);
+
+/// Spawn and register one restore candidate as a single synchronous runtime
+/// transition. The scheduler awaits only between calls, so shutdown can never
+/// observe a spawned-but-untracked child.
+fn restore_one_candidate(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    candidate: &super::ManagedAgentRecord,
+    owner_hex: Option<&str>,
+    shutdown_started: &AtomicBool,
+) -> Result<Option<(String, String)>, String> {
+    let _restore_transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if shutdown_started.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    // Phase A is only a launch-order snapshot. Reload under the same locks used
+    // by record mutations and runtime transitions so a user disabling,
+    // deleting, or manually starting this agent during a stagger wins over the
+    // stale candidate. Keep the store lock through spawn and registration,
+    // matching `start_pair`, so the revalidated record cannot change midway.
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let Some(record_index) = records
+        .iter()
+        .position(|record| record.pubkey == candidate.pubkey)
+    else {
+        return Ok(None);
+    };
+    let record = records[record_index].clone();
+    if !record.start_on_app_launch || record.backend != BackendKind::Local {
+        return Ok(None);
+    }
+    if record.runtime_pid.is_some_and(super::process_is_running) {
+        return Ok(None);
+    }
+
+    let workspace_relay = crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
+    let relay_url = crate::relay::effective_agent_relay_url(&record.relay_url, &workspace_relay);
+    let key = match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url) {
+        Ok(key) => key,
+        Err(error) => {
+            records[record_index].updated_at = util::now_iso();
+            records[record_index].last_error = Some(error);
+            save_managed_agents(app, &records)?;
+            return Ok(None);
+        }
+    };
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if runtimes
+        .get_mut(&key)
+        .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+    {
+        return Ok(None);
+    }
+    runtimes.remove(&key);
+
+    let mut process = match super::terminate_untracked_pair_runtime(app, &key).and_then(|()| {
+        // Restore spawns lazy, matching reconcile and manual start. Eager
+        // restore would silently reintroduce N idle brains on every launch.
+        spawn_agent_child(app, &record, &key.relay_url, true, owner_hex)
+    }) {
+        Ok(process) => process,
+        Err(error) => {
+            records[record_index].updated_at = util::now_iso();
+            records[record_index].last_error = Some(error);
+            save_managed_agents(app, &records)?;
+            return Ok(None);
+        }
+    };
+
+    let now = util::now_iso();
+    let receipt = super::ManagedAgentRuntimeReceipt {
+        key: key.clone(),
+        pid: process.child.id(),
+        desktop_instance_id: super::current_instance_id(app),
+        started_at: now.clone(),
+    };
+    if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
+        let _ = super::terminate_process(process.child.id());
+        let _ = process.child.wait();
+        records[record_index].updated_at = now;
+        records[record_index].last_error = Some(error);
+        save_managed_agents(app, &records)?;
+        return Ok(None);
+    }
+
+    let stored_record = &mut records[record_index];
+    stored_record.updated_at = now.clone();
+    stored_record.runtime_pid = None;
+    stored_record.last_started_at = Some(now);
+    stored_record.last_stopped_at = None;
+    stored_record.last_exit_code = None;
+    stored_record.last_error = None;
+    runtimes.insert(
+        key.clone(),
+        super::ManagedAgentPairRuntime::starting(process),
+    );
+    save_managed_agents(app, &records)?;
+    Ok(Some((record.pubkey, key.relay_url)))
+}
 
 /// Backfill the pinned persona snapshot for pre-existing agents created before
 /// the record became the spawn source of truth. Runs once at launch, before
@@ -87,10 +235,11 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
 
 /// Restore managed agents that were running before the app was closed.
 ///
-/// Split into three phases to minimise lock contention with the frontend:
-///   A (under lock): sync process state, cleanup, collect agents to start
-///   B (no store/runtime locks): resolve commands and spawn processes serially
-///   C (re-lock):    write back PIDs and status to records on disk
+/// Split into three phases to keep pacing asynchronous without sacrificing
+/// runtime atomicity:
+///   A (under lock): snapshot eligible restore candidates
+///   B (paced):      revalidate, spawn, and register each candidate atomically
+///   C (under lock): collect profile reconciliation data
 pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
@@ -206,15 +355,15 @@ pub async fn restore_managed_agents_on_launch(
             };
             let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
                 // Orphaned: no current persona to re-snapshot from. Leave the
-                // record as-is — `spawn_agent_child` (Phase B below) refuses to
-                // spawn it and Phase C persists the refusal to `last_error`.
+                // record as-is — Phase B revalidates and `spawn_agent_child`
+                // persists any refusal to `last_error`.
                 continue;
             };
             super::persona_events::apply_persona_snapshot(record, persona);
             record.updated_at = util::now_iso();
             changed = true;
         }
-        // Re-collect to_start from the updated records so Phase B spawns the refreshed config.
+        // Re-collect to_start so Phase B receives the refreshed config snapshot.
         agents_to_start = records
             .iter()
             .filter(|r| agents_to_start.iter().any(|s| s.pubkey == r.pubkey))
@@ -231,7 +380,7 @@ pub async fn restore_managed_agents_on_launch(
     }
 
     // Snapshot the workspace owner pubkey once for the legacy auth_tag fallback.
-    // Read outside the per-agent spawn loop so all parallel spawns see the same
+    // Read outside the per-agent spawn loop so every serial spawn sees the same
     // value and we don't lock `state.keys` repeatedly.
     let owner_hex: Option<String> = state
         .keys
@@ -276,19 +425,7 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // Serialize spawning and runtime registration with shutdown cleanup. The
-    // shutdown flag is rechecked after taking the lock so shutdown either
-    // prevents this transition or waits until every child is tracked and can
-    // be terminated.
-    let restore_transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|error| error.to_string())?;
-    if shutdown_started.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-
-    // ── Phase B (transition lock held): resolve and spawn serially ────────────
+    // ── Phase B: pace serial spawn-and-register transactions ────────────────
     // Launch restore previously spawned every harness concurrently. Even though
     // restored harnesses are lazy, their first wakes can cluster and reproduce
     // the same MCP-heavy initialization contention. Keep one deterministic
@@ -297,122 +434,35 @@ pub async fn restore_managed_agents_on_launch(
     // safety net; this stagger simply avoids creating the burst in the first
     // place.
     let owner_hex_ref = owner_hex.as_deref();
-    let mut spawn_results: Vec<AgentSpawnResult> = Vec::with_capacity(agents_to_start.len());
-    for (position, record) in agents_to_start.iter().enumerate() {
-        if shutdown_started.load(Ordering::SeqCst) {
-            break;
-        }
-        if position > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if shutdown_started.load(Ordering::SeqCst) {
-                break;
-            }
-        }
+    let successfully_spawned = run_serial_restore_schedule(
+        &agents_to_start,
+        RESTORE_SPAWN_STAGGER,
+        || shutdown_started.load(Ordering::SeqCst),
+        |record| {
+            std::future::ready(restore_one_candidate(
+                app,
+                &state,
+                record,
+                owner_hex_ref,
+                shutdown_started,
+            ))
+        },
+    )
+    .await?
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
 
-        let workspace_relay =
-            crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-        let relay_url =
-            crate::relay::effective_agent_relay_url(&record.relay_url, &workspace_relay);
-        let outcome = match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url) {
-            Ok(key) => {
-                // F2: if a concurrent startup reconcile already tracked a live
-                // child for this exact pair during the Phase A window, leave it
-                // alone. Mirrors the live-child guard in `start_pair`.
-                let already_live = app
-                    .state::<AppState>()
-                    .managed_agent_processes
-                    .lock()
-                    .ok()
-                    .and_then(|mut runtimes| {
-                        runtimes
-                            .get_mut(&key)
-                            .map(|runtime| runtime.child.try_wait().ok().flatten().is_none())
-                    })
-                    .unwrap_or(false);
-                if already_live {
-                    SpawnOutcome::Skipped
-                } else {
-                    match super::terminate_untracked_pair_runtime(app, &key).and_then(|()| {
-                        // F1: restore spawns lazy, matching reconcile and manual
-                        // start. Eager restore would silently reintroduce N idle
-                        // brains on every launch.
-                        spawn_agent_child(app, record, &key.relay_url, true, owner_hex_ref)
-                    }) {
-                        Ok(process) => SpawnOutcome::Spawned(key, Box::new(process)),
-                        Err(error) => SpawnOutcome::Failed(error),
-                    }
-                }
-            }
-            Err(error) => SpawnOutcome::Failed(error),
-        };
-        spawn_results.push((record.pubkey.clone(), outcome));
-    }
-
-    if spawn_results.is_empty() {
+    if successfully_spawned.is_empty() {
         return Ok(());
     }
 
-    // ── Phase C (re-acquire lock): write back PIDs and status to records ──
+    // ── Phase C: collect profile reconciliation data ────────────────────────
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
-
-    let mut successfully_spawned: Vec<(String, String)> = Vec::new();
-
-    for (pubkey, outcome) in spawn_results {
-        match outcome {
-            // Skipped means a concurrent reconcile already owns a live child for
-            // this pair; leave its runtime and record state untouched.
-            SpawnOutcome::Skipped => continue,
-            SpawnOutcome::Spawned(key, mut process) => {
-                let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
-                    continue;
-                };
-                let now = util::now_iso();
-                let receipt = super::ManagedAgentRuntimeReceipt {
-                    key: key.clone(),
-                    pid: process.child.id(),
-                    desktop_instance_id: super::current_instance_id(app),
-                    started_at: now.clone(),
-                };
-                if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
-                    let _ = super::terminate_process(process.child.id());
-                    let _ = process.child.wait();
-                    record.updated_at = now;
-                    record.last_error = Some(error);
-                    continue;
-                }
-                record.updated_at = now.clone();
-                record.runtime_pid = None;
-                record.last_started_at = Some(now);
-                record.last_stopped_at = None;
-                record.last_exit_code = None;
-                record.last_error = None;
-                runtimes.insert(
-                    key.clone(),
-                    super::ManagedAgentPairRuntime::starting(*process),
-                );
-                // Carry the spawn key's relay into profile reconciliation so
-                // the background task queries/publishes on the relay this
-                // spawn was actually keyed to — not whatever workspace is
-                // active when the task eventually executes.
-                successfully_spawned.push((pubkey, key.relay_url.clone()));
-            }
-            SpawnOutcome::Failed(error) => {
-                let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
-                    continue;
-                };
-                record.updated_at = util::now_iso();
-                record.last_error = Some(error);
-            }
-        }
-    }
+    let records = load_managed_agents(app)?;
 
     // Collect profile reconciliation data for successfully spawned agents before
     // releasing the lock. This mirrors the fire-and-forget pattern in
@@ -449,10 +499,7 @@ pub async fn restore_managed_agents_on_launch(
             })
             .collect();
 
-    save_managed_agents(app, &records)?;
-    drop(runtimes);
     drop(_store_guard);
-    drop(restore_transition);
 
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
     // Spawn background tasks to ensure each restored agent's kind:0 profile is
@@ -521,6 +568,80 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
                 ),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod restore_schedule_tests {
+    use super::run_serial_restore_schedule;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn preserves_input_order_and_awaits_exactly_n_minus_one_staggers() {
+        let candidates = [3u8, 1, 2];
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_by_spawn = Arc::clone(&observed);
+        let started = tokio::time::Instant::now();
+
+        let results = run_serial_restore_schedule(
+            &candidates,
+            Duration::from_millis(10),
+            || false,
+            move |candidate| {
+                observed_by_spawn.lock().unwrap().push(*candidate);
+                std::future::ready(Ok::<u8, ()>(*candidate))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results, candidates);
+        assert_eq!(*observed.lock().unwrap(), candidates);
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            Duration::from_millis(20),
+            "three candidates require two awaited staggers and no leading delay"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn shutdown_before_scheduling_spawns_nothing() {
+        let shutdown = AtomicBool::new(true);
+        let results = run_serial_restore_schedule(
+            &[1u8, 2, 3],
+            Duration::from_millis(10),
+            || shutdown.load(Ordering::SeqCst),
+            |candidate| std::future::ready(Ok::<u8, ()>(*candidate)),
+        )
+        .await
+        .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn shutdown_during_stagger_leaves_remaining_candidates_unspawned() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_task = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            shutdown_for_task.store(true, Ordering::SeqCst);
+        });
+
+        let results = run_serial_restore_schedule(
+            &[1u8, 2, 3],
+            Duration::from_millis(10),
+            || shutdown.load(Ordering::SeqCst),
+            |candidate| std::future::ready(Ok::<u8, ()>(*candidate)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results, [1]);
     }
 }
 

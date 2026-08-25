@@ -4609,6 +4609,18 @@ async fn shutdown_agent_pool(pool: &mut AgentPool) {
     }
 }
 
+fn initialization_timeout_site(
+    error: &acp::AcpError,
+    last_request_timeout_site: Option<&'static str>,
+) -> &'static str {
+    match error {
+        acp::AcpError::Timeout(_) | acp::AcpError::WriteTimeout(_) => {
+            last_request_timeout_site.unwrap_or("initialize_budget")
+        }
+        _ => "not_a_timeout",
+    }
+}
+
 struct PoolStartup {
     agents: u32,
     init_timeout: Duration,
@@ -4746,12 +4758,8 @@ async fn initialize_agent_pool(
                     break;
                 }
                 Err(error) => {
-                    let timeout_site = match &error {
-                        acp::AcpError::Timeout(_) | acp::AcpError::WriteTimeout(_) => acp
-                            .last_request_timeout_site()
-                            .unwrap_or("initialize_budget"),
-                        _ => "agent_response",
-                    };
+                    let timeout_site =
+                        initialization_timeout_site(&error, acp.last_request_timeout_site());
                     let retryable = matches!(
                         &error,
                         acp::AcpError::Timeout(_) | acp::AcpError::WriteTimeout(_)
@@ -4865,6 +4873,33 @@ sleep 1"#
         );
         shutdown_agent_pool(&mut pool).await;
     }
+
+    #[tokio::test]
+    async fn json_rpc_initialize_error_is_not_labeled_as_a_timeout_phase() {
+        let args = vec![
+            "-c".to_string(),
+            r#"read _request
+echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32600,"message":"bad initialize"}}'
+sleep 1"#
+                .to_string(),
+        ];
+        let mut acp = AcpClient::spawn("bash", &args, &[], false)
+            .await
+            .expect("JSON-RPC error fixture should spawn");
+
+        let error = acp
+            .initialize_with_timeout(Duration::from_secs(1))
+            .await
+            .expect_err("fixture initialize must return its JSON-RPC error");
+        assert!(matches!(
+            &error,
+            acp::AcpError::AgentError { code: -32600, .. }
+        ));
+        let timeout_site = initialization_timeout_site(&error, acp.last_request_timeout_site());
+        assert_eq!(timeout_site, "not_a_timeout");
+        assert!(!["stdin_write", "stdin_write_budget", "agent_response"].contains(&timeout_site));
+        acp.shutdown().await;
+    }
 }
 
 // ── spawn_and_init ────────────────────────────────────────────────────────────
@@ -4910,12 +4945,7 @@ async fn spawn_and_init(
         }
         Err(e) => {
             let init_duration = init_started.elapsed();
-            let timeout_site = match &e {
-                acp::AcpError::Timeout(_) | acp::AcpError::WriteTimeout(_) => acp
-                    .last_request_timeout_site()
-                    .unwrap_or("initialize_budget"),
-                _ => "agent_response",
-            };
+            let timeout_site = initialization_timeout_site(&e, acp.last_request_timeout_site());
             tracing::error!(
                 agent = agent_index,
                 init_duration_ms = init_duration.as_millis() as u64,
