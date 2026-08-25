@@ -10,12 +10,9 @@ surface at template time regardless of which manifest helm renders first.
   {{- fail "relayUrl is required: set --set relayUrl=wss://your.domain" -}}
 {{- end -}}
 
-{{/* Multiple replicas require Redis, whether fixed or autoscaled. */}}
-{{- $minimumReplicas := include "buzz.minimumReplicas" . | int -}}
-{{- if gt $minimumReplicas 1 -}}
-  {{- if and (not .Values.redis.enabled) (not .Values.externalRedis.url) (not .Values.secrets.existingSecret) -}}
-    {{- fail (printf "minimum replica count %d requires Redis for buzz-pubsub. Enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." $minimumReplicas) -}}
-  {{- end -}}
+{{/* Redis is required for buzz-pubsub, even at a single replica. */}}
+{{- if not (or .Values.redis.enabled .Values.externalRedis.url .Values.secrets.existingSecret) -}}
+  {{- fail "Redis source missing: enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." -}}
 {{- end -}}
 
 {{/* Multiple replicas do NOT require ReadWriteMany git storage.
@@ -30,8 +27,8 @@ surface at template time regardless of which manifest helm renders first.
 
      The prior hard-fail requiring persistence.git.accessMode=ReadWriteMany was
      removed here: its stated reason ("git on-disk state must be shared across
-     replicas") is no longer true. Redis (validated above) remains the real
-     multi-pod requirement for buzz-pubsub. */}}
+     replicas") is no longer true. Redis is required for every relay process;
+     in HA it additionally supplies cross-pod buzz-pubsub fan-out. */}}
 
 {{/* Autoscaling bounds must be coherent. */}}
 {{- if .Values.autoscaling.enabled -}}

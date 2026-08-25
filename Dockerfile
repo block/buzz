@@ -144,7 +144,6 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
-        openssl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1000 buzz \
     && useradd  --system --uid 1000 --gid 1000 --home-dir /var/lib/buzz \

@@ -1914,6 +1914,7 @@ async fn handle_bridge_search(
             page: search_page,
             per_page: limit,
             mode: search_mode,
+            cursor: None,
         };
 
         let search_result = state

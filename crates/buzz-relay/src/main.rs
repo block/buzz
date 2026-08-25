@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Read, Write};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use zeroize::Zeroizing;
 
 fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
     EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
@@ -83,8 +87,74 @@ impl EmissionScope {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
+const HOOK_HMAC_COMMAND: &str = "hook-hmac";
+
+struct MacWriter<'a>(&'a mut Hmac<Sha256>);
+
+impl Write for MacWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_hook_hmac<R: Read, K: Read, W: Write>(
+    mut payload: R,
+    mut secret: K,
+    mut output: W,
+) -> anyhow::Result<()> {
+    let mut secret_bytes = Zeroizing::new(Vec::new());
+    secret
+        .read_to_end(&mut secret_bytes)
+        .map_err(|error| anyhow::anyhow!("failed to read hook HMAC secret: {error}"))?;
+
+    while secret_bytes
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        secret_bytes.pop();
+    }
+    if secret_bytes.is_empty() {
+        anyhow::bail!("hook HMAC secret is empty");
+    }
+
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&secret_bytes)
+        .expect("HMAC accepts keys of any size");
+    io::copy(&mut payload, &mut MacWriter(&mut mac))
+        .map_err(|error| anyhow::anyhow!("failed to read hook HMAC payload: {error}"))?;
+    writeln!(output, "{}", hex::encode(mac.finalize().into_bytes()))
+        .map_err(|error| anyhow::anyhow!("failed to write hook HMAC: {error}"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_hook_hmac_from_fd() -> anyhow::Result<()> {
+    let secret = std::fs::File::open("/dev/fd/3")
+        .map_err(|error| anyhow::anyhow!("failed to open hook HMAC secret fd 3: {error}"))?;
+    run_hook_hmac(io::stdin().lock(), secret, io::stdout().lock())
+}
+
+#[cfg(not(unix))]
+fn run_hook_hmac_from_fd() -> anyhow::Result<()> {
+    anyhow::bail!("hook-hmac is supported only on Unix")
+}
+
+fn is_hook_hmac_invocation() -> bool {
+    let mut args = std::env::args_os();
+    let _executable = args.next();
+    args.next().is_some_and(|arg| arg == HOOK_HMAC_COMMAND) && args.next().is_none()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if is_hook_hmac_invocation() {
+        return run_hook_hmac_from_fd();
+    }
+
     // Install the ring CryptoProvider for rustls. Required before any rustls
     // TLS connection (rediss:// to ElastiCache, wss://, S3 over TLS): both
     // aws-lc-rs and ring are compiled in transitively, so rustls can't
@@ -1521,6 +1591,20 @@ fn refresh_legacy_active_gauge_recency() {
     metrics::gauge!("buzz_subscriptions_active").increment(0.0);
 }
 
+/// Refresh the exporter recency for startup-only configuration gauges.
+///
+/// These are written once during boot, so without a refresh the idle-timeout
+/// pruner drops them mid-run and the scrape silently loses the relay's own
+/// configuration. `increment(0.0)` advances the recorder generation the
+/// recency policy reads without disturbing the value, exactly as
+/// [`refresh_legacy_active_gauge_recency`] does for lifecycle gauges.
+///
+/// Dynamic per-community gauges are deliberately excluded: their pruning is
+/// what keeps departed communities out of the scrape.
+fn refresh_static_config_gauge_recency() {
+    metrics::gauge!("buzz_audit_enabled").increment(0.0);
+}
+
 /// Emit pod-local gauges and zero only label keys that disappeared since the
 /// preceding tick. The key stores the resolved host label so a removed or
 /// renamed community can still receive its final zero.
@@ -1540,6 +1624,7 @@ fn emit_in_memory_usage_metrics(
     metrics::gauge!("buzz_total_users_online_pod").set(users_online.values().sum::<u64>() as f64);
     metrics::gauge!("buzz_total_subscriptions").set(total_subscriptions as f64);
     refresh_legacy_active_gauge_recency();
+    refresh_static_config_gauge_recency();
 
     let Some(host_map) = host_map else {
         return;
@@ -2037,14 +2122,37 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, refresh_static_config_gauge_recency, run_hook_hmac,
+        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
     };
     use metrics::GaugeFn;
     use metrics_util::{
         debugging::DebugValue,
         registry::{GenerationalAtomicStorage, Registry},
     };
+
+    #[test]
+    fn hook_hmac_reads_secret_separately_from_payload() {
+        let mut output = Vec::new();
+        run_hook_hmac(
+            b"hello payload".as_slice(),
+            b"cross-boundary-test-secret-key-1234\n".as_slice(),
+            &mut output,
+        )
+        .expect("hook HMAC helper");
+
+        assert_eq!(
+            String::from_utf8(output).expect("hex output"),
+            "009763fb8bdc5cb2a31b937a854a139d87fcfd5ec56acfd6523b0266e8024a1c\n"
+        );
+    }
+
+    #[test]
+    fn hook_hmac_rejects_an_empty_secret() {
+        let error = run_hook_hmac(b"payload".as_slice(), b"\n".as_slice(), Vec::new())
+            .expect_err("empty secret must fail closed");
+        assert_eq!(error.to_string(), "hook HMAC secret is empty");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn periodic_loop_exits_immediately_on_cancellation() {
@@ -2151,6 +2259,64 @@ mod tests {
         gauge.increment(0.0);
 
         assert!(gauge.get_generation() > generation_before);
+    }
+
+    #[test]
+    fn test_static_config_gauge_recency_refresh_preserves_value() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            metrics::gauge!("buzz_audit_enabled").set(1.0);
+            refresh_static_config_gauge_recency();
+        });
+
+        let values = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, _, _, value)| {
+                let DebugValue::Gauge(value) = value else {
+                    panic!("{} must be a gauge", key.key().name());
+                };
+                (key.key().name().to_owned(), value.into_inner())
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(values.get("buzz_audit_enabled"), Some(&1.0));
+    }
+
+    #[test]
+    fn test_static_config_refresh_retains_only_the_static_gauge() {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+        use metrics_util::MetricKindMask;
+
+        let recorder = PrometheusBuilder::new()
+            .idle_timeout(MetricKindMask::GAUGE, Some(Duration::from_millis(40)))
+            .build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            metrics::gauge!("buzz_audit_enabled").set(1.0);
+            metrics::gauge!("buzz_community_ws_connections", "community" => "gone.example")
+                .set(3.0);
+        });
+        let initial = handle.render();
+        assert!(initial.contains("buzz_audit_enabled 1"));
+        assert!(initial.contains("buzz_community_ws_connections"));
+
+        std::thread::sleep(Duration::from_millis(60));
+        metrics::with_local_recorder(&recorder, refresh_static_config_gauge_recency);
+        let after_timeout = handle.render();
+
+        assert!(
+            after_timeout.contains("buzz_audit_enabled 1"),
+            "startup gauge must survive the exporter idle timeout: {after_timeout}"
+        );
+        assert!(
+            !after_timeout.contains("buzz_community_ws_connections"),
+            "unrefreshed dynamic gauges must still be pruned: {after_timeout}"
+        );
     }
 
     #[test]

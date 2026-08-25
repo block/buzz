@@ -72,6 +72,7 @@ serde_yaml      = { workspace = true }
 sha2            = { workspace = true }
 hmac            = { workspace = true }
 subtle          = { workspace = true }
+zeroize         = { workspace = true }
 rand            = { workspace = true }
 hex             = { workspace = true }
 url             = { workspace = true }

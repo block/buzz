@@ -12962,7 +12962,7 @@ export function maybeInstallE2eTauriMocks() {
         // Return a minimal preview — no writes performed.
         return {
           displayName: "Imported Agent",
-          isBuiltIn: true,
+          isBuiltin: true,
           model: "claude-opus-4-5",
           runtime: "goose",
           systemPrompt: null,

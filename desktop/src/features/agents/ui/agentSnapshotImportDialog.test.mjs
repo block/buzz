@@ -74,6 +74,9 @@ function makeResult(overrides = {}) {
 function makePreview(overrides = {}) {
   return {
     displayName: "TestBot",
+    isBuiltin: true,
+    model: "claude-opus-4-5",
+    runtime: "goose",
     systemPrompt: "Inspect every boundary before changing code.",
     avatarUrl: null,
     memoryLevel: "none",
@@ -112,6 +115,26 @@ test("preview_body_discloses_prompt_allowlist_and_full_manifest", () => {
     ).length,
     1,
   );
+});
+
+test("preview_body_passes_serialized_builtin_metadata", () => {
+  const preview = makePreview();
+  const element = PreviewBody({
+    preview,
+    hasMemory: false,
+    memoryLevelLabel: "none",
+    keepAllowlist: false,
+    onKeepAllowlistChange: () => {},
+  });
+  const [metadata] = findAll(
+    element,
+    (node) =>
+      node.props?.model === preview.model &&
+      node.props?.runtime === preview.runtime,
+  );
+
+  assert.ok(metadata);
+  assert.equal(metadata.props.isBuiltIn, true);
 });
 
 // ── locked-card provenance notice ─────────────────────────────────────────────

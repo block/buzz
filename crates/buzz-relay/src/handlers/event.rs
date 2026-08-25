@@ -23,6 +23,7 @@ use nostr::{Event, PublicKey};
 use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+use crate::subscription::{ConnId, SubId};
 
 use super::ingest::{reject_with_transport, IngestAuth, IngestError};
 
@@ -202,23 +203,34 @@ pub async fn filter_fanout_by_access(
         }
     }
 
-    let mut allowed = Vec::with_capacity(matches.len());
+    // Collect (conn_id, sub_id, pubkey) for connections with a known pubkey.
+    // Skip connections without one — they cannot match the access gate.
+    let mut candidates: Vec<(ConnId, SubId, Vec<u8>)> = Vec::with_capacity(matches.len());
     for (conn_id, sub_id) in matches {
         let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
             continue;
         };
-        match state
-            .is_member_cached(community_id, channel_id, &pubkey)
-            .await
-        {
-            Ok(true) => allowed.push((conn_id, sub_id)),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
-            }
-        }
+        candidates.push((conn_id, sub_id, pubkey.to_vec()));
     }
-    allowed
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let pubkeys: Vec<Vec<u8>> = candidates.iter().map(|(_, _, pk)| pk.clone()).collect();
+    let allowed_pubkeys = match state
+        .membership_pairs_cached(community_id, channel_id, &pubkeys)
+        .await
+    {
+        Ok(set) => set,
+        Err(e) => {
+            warn!(%channel_id, "fan-out access filter: batched membership lookup failed: {e}");
+            return Vec::new();
+        }
+    };
+    candidates
+        .into_iter()
+        .filter(|(_, _, pk)| allowed_pubkeys.contains(pk))
+        .map(|(conn_id, sub_id, _)| (conn_id, sub_id))
+        .collect()
 }
 
 /// Deliver one event to this relay's local subscribers through the access gate.
@@ -250,7 +262,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
         return;
     }
 
-    let event_json = match serde_json::to_string(&stored.event) {
+    let event_json = match state.cached_event_json(stored) {
         Ok(json) => json,
         Err(e) => {
             error!(event_id = %stored.event.id.to_hex(), "Failed to serialize event for fan-out: {e}");
@@ -310,7 +322,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
         return;
     }
 
-    let event_json = match serde_json::to_string(&stored.event) {
+    let event_json = match state.cached_event_json(&stored) {
         Ok(json) => json,
         Err(e) => {
             tracing::error!("Failed to serialize event for multi-node fan-out: {e}");
@@ -445,7 +457,7 @@ async fn dispatch_persistent_event_inner(
         "Fan-out"
     );
 
-    let event_json = match serde_json::to_string(&stored_event.event) {
+    let event_json = match state.cached_event_json(stored_event) {
         Ok(json) => json,
         Err(e) => {
             error!(event_id = %event_id_hex, "Failed to serialize event for fan-out: {e}");

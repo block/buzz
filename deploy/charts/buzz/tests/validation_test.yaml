@@ -26,6 +26,7 @@ tests:
       relayUrl: wss://buzz.example.com
       ownerPubkey: ""
       externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
     asserts:
       - failedTemplate:
           errorPattern: "ownerPubkey is required when relay.requireRelayMembership=true"
@@ -35,11 +36,12 @@ tests:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "NOTAHEX"
       externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
     asserts:
       - failedTemplate:
           errorPattern: "ownerPubkey: Does not match pattern"
 
-  - it: fails when replicaCount>1 without Redis
+  - it: fails when Redis source is missing for multiple replicas
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -47,13 +49,27 @@ tests:
       replicaCount: 3
     asserts:
       - failedTemplate:
-          errorPattern: "minimum replica count 3 requires Redis"
+          errorPattern: "Redis source missing"
+
+  - it: fails when Redis source is missing for a single replica
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 1
+    asserts:
+      - failedTemplate:
+          errorPattern: "Redis source missing"
 
   - it: fails when ingress and httproute both enabled
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
       ingress.enabled: true
       httproute.enabled: true
     asserts:
@@ -64,6 +80,7 @@ tests:
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalRedis.url: redis://h:6379
     asserts:
       - failedTemplate:
           errorPattern: "Postgres source missing"
@@ -73,6 +90,7 @@ tests:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
       s3.endpoint: http://minio:9000
       s3.addressingStyle: auto
     asserts:
@@ -84,6 +102,7 @@ tests:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
     asserts:
       - failedTemplate:
           errorPattern: "S3/object-storage source missing"

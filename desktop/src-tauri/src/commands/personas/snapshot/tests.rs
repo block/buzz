@@ -571,6 +571,10 @@ fn import_preview_includes_exported_definition_metadata() {
     assert!(preview.is_builtin);
     assert_eq!(preview.model.as_deref(), Some("claude-opus-4-5"));
     assert_eq!(preview.runtime.as_deref(), Some("goose"));
+
+    let wire = serde_json::to_value(&preview).unwrap();
+    assert_eq!(wire.get("isBuiltin"), Some(&serde_json::Value::Bool(true)));
+    assert!(wire.get("isBuiltIn").is_none());
 }
 
 // ── Import: resolve_snapshot_import_behavior — the production selection path

@@ -11,6 +11,9 @@
 //! - Fail-closed: curl failure, timeout, non-200 → exit 1
 //! - Quarantine vars inherited for ancestry checks
 //! - HMAC binds callback to specific push operation
+//! - The HMAC key never appears in a child process's argv: it is handed to
+//!   `buzz-relay hook-hmac` on file descriptor 3, so a same-UID process
+//!   reading `/proc/<pid>/cmdline` or `ps` cannot recover it
 
 use std::path::Path;
 
@@ -21,7 +24,9 @@ use tracing::{error, info};
 ///
 /// Environment variables set by the relay before spawning git receive-pack:
 /// - `BUZZ_HOOK_URL` — internal policy endpoint (http://127.0.0.1:{port}/internal/git/policy)
-/// - `BUZZ_HOOK_SECRET` — per-push HMAC secret
+/// - `BUZZ_HOOK_SECRET` — deployment-wide HMAC secret (`git_hook_hmac_secret`,
+///   injected by `transport.rs`; shared by every push and every replica, so it
+///   must never reach a child process's argv — see the signing step below)
 /// - `BUZZ_REPO_ID` — repo identifier (d-tag)
 /// - `BUZZ_COMMUNITY_ID` — server-resolved community UUID for the git HTTP request
 /// - `BUZZ_PUSHER_PUBKEY` — authenticated pusher's hex pubkey
@@ -112,7 +117,10 @@ if [ -f "$HMAC_FILE" ]; then
 fi
 HMAC_INPUT="${HMAC_INPUT}|${TIMESTAMP}"
 
-SIGNATURE=$(printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "$BUZZ_HOOK_SECRET" -hex 2>/dev/null | sed 's/.*= //')
+# Feed the secret over fd 3, never as an openssl command-line argument. The
+# helper is the same Rust binary as the relay, selected by argv[1]; using a
+# dedicated fd leaves stdin available for the canonical payload.
+SIGNATURE=$(printf '%s' "$HMAC_INPUT" | /usr/local/bin/buzz-relay hook-hmac 3<<<"$BUZZ_HOOK_SECRET" 2>/dev/null)
 if [ -z "$SIGNATURE" ]; then
     echo "error: failed to compute HMAC signature" >&2
     exit 1
@@ -182,26 +190,34 @@ mod tests {
     use super::PRE_RECEIVE_HOOK;
 
     #[test]
-    fn runtime_image_installs_pre_receive_hook_tools() {
+    fn hook_uses_in_image_tools_and_keeps_hmac_secret_off_argv() {
         let dockerfile = include_str!("../../../../../Dockerfile");
         let runtime_stage = dockerfile
-            .split("FROM debian:${DEBIAN_VERSION}-slim AS runtime")
+            .split("FROM debian:${DEBIAN_VERSION}-slim AS runtime-base")
             .nth(1)
-            .expect("Dockerfile should have a runtime stage");
+            .expect("Dockerfile should have a runtime-base stage");
         let runtime_setup = runtime_stage
-            .split("COPY --from=builder")
+            .split("COPY --from=web-builder")
             .next()
             .expect("runtime stage should copy built artifacts after package setup");
 
-        for tool in ["curl", "openssl"] {
-            assert!(
-                PRE_RECEIVE_HOOK.contains(tool),
-                "test setup expected the pre-receive hook to invoke {tool}"
-            );
-            assert!(
-                runtime_setup.contains(&format!("\n        {tool} \\")),
-                "relay runtime image must install {tool}; the git pre-receive hook uses it and fails closed without it"
-            );
-        }
+        assert!(PRE_RECEIVE_HOOK.contains("curl"));
+        assert!(
+            runtime_setup.contains("\n        curl \\"),
+            "relay runtime image must install curl; the git hook fails closed without it"
+        );
+        assert!(
+            PRE_RECEIVE_HOOK
+                .contains("/usr/local/bin/buzz-relay hook-hmac 3<<<\"$BUZZ_HOOK_SECRET\""),
+            "the hook must pass its HMAC secret over a dedicated fd"
+        );
+        assert!(
+            !PRE_RECEIVE_HOOK.contains("-hmac \"$BUZZ_HOOK_SECRET\""),
+            "the hook secret must not be exposed in process argv"
+        );
+        assert!(
+            !runtime_setup.contains("\n        openssl \\"),
+            "the hook no longer needs the openssl CLI in the runtime image"
+        );
     }
 }

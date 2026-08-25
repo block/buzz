@@ -340,6 +340,9 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # buzz-relay --lib: 906 unit tests; the Postgres/Redis-backed paths
+        # are #[ignore]d or runtime-skipped, so this stays infra-free.
+        cargo nextest run -p buzz-relay --lib
     else
         ./scripts/run-tests.sh unit
     fi
