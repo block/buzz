@@ -5,6 +5,8 @@ import 'dart:ui' show SemanticsAction;
 import 'package:camera_platform_interface/camera_platform_interface.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
 import 'package:buzz/features/profile/animated_avatar_orientation.dart';
+import 'package:buzz/features/profile/camera_disposal_barrier.dart';
+import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -99,6 +101,10 @@ void main() {
     expect(platform.createdCameraIds, [1]);
     expect(platform.disposedCameraIds, [1]);
     expect(find.text('Could not access the camera.'), findsOneWidget);
+    final error = find.byWidgetPredicate(
+      (widget) => widget is Semantics && widget.properties.liveRegion == true,
+    );
+    expect(error, findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
@@ -155,6 +161,68 @@ void main() {
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
+  });
+
+  testWidgets('shared disposal serializes camera-mode switches', (
+    tester,
+  ) async {
+    for (final startsAnimated in [false, true]) {
+      final platform = _TestCameraPlatform(blockDisposeForCameraIds: {1});
+      final previousPlatform = CameraPlatform.instance;
+      CameraPlatform.instance = platform;
+      final barrier = CameraDisposalBarrier();
+      var animated = startsAnimated;
+      late StateSetter setMode;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Scaffold(
+              body: StatefulBuilder(
+                builder: (context, setState) {
+                  setMode = setState;
+                  return SizedBox(
+                    height: 600,
+                    child: animated
+                        ? AnimatedAvatarCapture(
+                            height: 600,
+                            onPrepareChanged: (_) {},
+                            disposalBarrier: barrier,
+                          )
+                        : ImageAvatarCapture(
+                            height: 600,
+                            onAccepted: (_) {},
+                            onClosed: () {},
+                            loadCameras: platform.availableCameras,
+                            disposalBarrier: barrier,
+                          ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(platform.createdCameraIds, [1]);
+
+      setMode(() => animated = !animated);
+      await tester.pump();
+      await tester.pump();
+      expect(platform.disposedCameraIds, [1]);
+      expect(platform.createdCameraIds, [1]);
+
+      platform.completeDispose(1);
+      await tester.pump();
+      await tester.pump();
+      expect(platform.createdCameraIds, [1, 2]);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+      CameraPlatform.instance = previousPlatform;
+    }
   });
 
   testWidgets('completed review frames survive lifecycle changes', (
@@ -455,6 +523,10 @@ class _TestCameraPlatform extends CameraPlatform {
     _disposeCompleters[cameraId]!.completeError(
       PlatformException(code: 'dispose-failed'),
     );
+  }
+
+  void completeDispose(int cameraId) {
+    _disposeCompleters[cameraId]!.complete();
   }
 }
 

@@ -28,6 +28,7 @@ import 'profile_avatar_draft.dart';
 part 'animated_avatar_capture/review_controls.dart';
 part 'animated_avatar_capture/capture_controls.dart';
 part 'animated_avatar_capture/frame_processing.dart';
+part 'animated_avatar_capture/error_text.dart';
 
 const _captureDuration = Duration(seconds: 3);
 const _captureFrameInterval = Duration(milliseconds: 125);
@@ -44,6 +45,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     required this.height,
     required this.onPrepareChanged,
     this.initialFrames = const [],
+    this.disposalBarrier,
   });
 
   /// The vertical space available to the capture surface.
@@ -55,11 +57,18 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
   /// Seeds processed frames in lifecycle-focused widget tests.
   @visibleForTesting
   final List<Uint8List> initialFrames;
+
+  /// Serializes ownership release with another profile capture surface.
+  final CameraDisposalBarrier? disposalBarrier;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
-    final controllerDisposal = useRef(CameraDisposalBarrier());
+    final controllerDisposal = useRef(
+      disposalBarrier ?? CameraDisposalBarrier(),
+    );
+    final candidateRef = useRef<CameraController?>(null);
     final captureEpoch = useRef(0);
     final cameraGeneration = useState(0);
     final isInitializing = useState(true);
@@ -138,6 +147,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
 
       Future<void> initialize() async {
         CameraController? next;
+        CameraDisposalReservation? reservation;
         var installed = false;
         try {
           await controllerDisposal.value.settled;
@@ -156,17 +166,33 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                 ? ImageFormatGroup.bgra8888
                 : ImageFormatGroup.yuv420,
           );
+          reservation = controllerDisposal.value.reserve();
+          candidateRef.value = next;
+          await reservation.ready;
+          if (disposed) {
+            if (identical(candidateRef.value, next)) candidateRef.value = null;
+            await reservation.dispose(next.dispose);
+            return;
+          }
           await next.initialize();
           await next.lockCaptureOrientation(DeviceOrientation.portraitUp);
           if (disposed) {
-            await releaseController(next);
+            if (identical(candidateRef.value, next)) candidateRef.value = null;
+            await reservation.dispose(next.dispose);
             return;
           }
+          candidateRef.value = null;
+          reservation.complete();
           controllerRef.value = next;
           controller.value = next;
           installed = true;
         } catch (_) {
-          if (!installed && next != null) await releaseController(next);
+          if (!installed &&
+              next != null &&
+              identical(candidateRef.value, next)) {
+            candidateRef.value = null;
+            await reservation?.dispose(next.dispose);
+          }
           if (!disposed) error.value = 'Could not access the camera.';
         } finally {
           if (!disposed) isInitializing.value = false;
@@ -652,29 +678,6 @@ List<Uint8List> _resampleCapturedFrames(
     final sourceIndex = (progress * (frames.length - 1)).round();
     return frames[sourceIndex];
   }, growable: false);
-}
-
-class _ErrorText extends StatelessWidget {
-  const _ErrorText(this.message);
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: Grid.xs),
-    child: Text(
-      message,
-      textAlign: TextAlign.center,
-      style: context.textTheme.bodySmall?.copyWith(color: context.colors.error),
-    ),
-  );
-}
-
-Color _personOutlineColor(int backdropColor) {
-  final color = Color(backdropColor);
-  return color.computeLuminance() > 0.74
-      ? const Color(0xFF111111)
-      : Colors.white;
 }
 
 @immutable

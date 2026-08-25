@@ -239,6 +239,8 @@ class ProfileEditPage extends HookConsumerWidget {
                   poster: nextDraft.poster,
                 ),
               );
+        } else {
+          ref.read(profileAvatarHandoffProvider.notifier).clearAny();
         }
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
       } on ProfileCommunityChangedException {

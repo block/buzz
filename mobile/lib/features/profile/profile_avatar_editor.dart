@@ -22,6 +22,7 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_native_skin_tone_control.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'animated_avatar_capture.dart';
+import 'camera_disposal_barrier.dart';
 import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
 import 'emoji_avatar_tile.dart';
@@ -139,6 +140,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
     final isCapturingImage = useState(false);
+    final cameraDisposal = useRef(CameraDisposalBarrier());
     final imageSelectionGeneration = useRef(0);
     final currentMode = useRef(mode)..value = mode;
     final error = useState<String?>(null);
@@ -378,6 +380,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                   initialPreview: fixedPreview,
                   onAccepted: acceptCameraImage,
                   onClosed: closeImageCamera,
+                  disposalBarrier: cameraDisposal.value,
                 ),
           ),
           ProfileAvatarMode.image => _ImageMode(
@@ -420,6 +423,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 AnimatedAvatarCapture(
                   height: modeHeight,
                   onPrepareChanged: onAnimatedPrepareChanged,
+                  disposalBarrier: cameraDisposal.value,
                 ),
           ),
         };
@@ -561,11 +565,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 left: Grid.gutter,
                 right: Grid.gutter,
                 bottom: _editorControlsBottom + _editorRailHeight,
-                child: Text(
-                  error.value!,
-                  textAlign: TextAlign.center,
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.error,
+                child: Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    error.value!,
+                    textAlign: TextAlign.center,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.error,
+                    ),
                   ),
                 ),
               ),

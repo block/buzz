@@ -54,6 +54,9 @@ class ProfileAvatarHandoffNotifier extends Notifier<ProfileAvatarHandoff?> {
   void clear(String avatarUrl) {
     if (state?.avatarUrl == avatarUrl) state = null;
   }
+
+  /// Clears a handoff superseded by a non-animated avatar save.
+  void clearAny() => state = null;
 }
 
 /// The freshly saved local animated avatar, while its remote copy warms up.

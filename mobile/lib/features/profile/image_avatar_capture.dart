@@ -51,6 +51,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
     this.initialPreview,
     this.initialCapturedBytes,
     this.loadCameras = availableCameras,
+    this.disposalBarrier,
   });
 
   /// The vertical space available to the camera and its controls.
@@ -73,13 +74,19 @@ class ImageAvatarCapture extends HookConsumerWidget {
   @visibleForTesting
   final Future<List<CameraDescription>> Function() loadCameras;
 
+  /// Serializes ownership release with another profile capture surface.
+  final CameraDisposalBarrier? disposalBarrier;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final lifecycle = ref.watch(appLifecycleProvider);
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
-    final controllerDisposal = useRef(CameraDisposalBarrier());
+    final controllerDisposal = useRef(
+      disposalBarrier ?? CameraDisposalBarrier(),
+    );
+    final candidateRef = useRef<CameraController?>(null);
     final cameras = useState<List<CameraDescription>>(const []);
     final selectedLens = useState(CameraLensDirection.front);
     final cameraGeneration = useState(0);
@@ -137,6 +144,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
 
       Future<void> initialize() async {
         CameraController? next;
+        CameraDisposalReservation? reservation;
         var installed = false;
         try {
           await controllerDisposal.value.settled;
@@ -160,12 +168,23 @@ class ImageAvatarCapture extends HookConsumerWidget {
             ResolutionPreset.high,
             enableAudio: false,
           );
+          reservation = controllerDisposal.value.reserve();
+          candidateRef.value = next;
+          await reservation.ready;
+          if (disposed) {
+            if (identical(candidateRef.value, next)) candidateRef.value = null;
+            await reservation.dispose(next.dispose);
+            return;
+          }
           await next.initialize();
           await next.lockCaptureOrientation(DeviceOrientation.portraitUp);
           if (disposed || generation != cameraGeneration.value) {
-            await next.dispose();
+            if (identical(candidateRef.value, next)) candidateRef.value = null;
+            await reservation.dispose(next.dispose);
             return;
           }
+          candidateRef.value = null;
+          reservation.complete();
           final previous = controllerRef.value;
           controllerRef.value = next;
           controller.value = next;
@@ -174,7 +193,13 @@ class ImageAvatarCapture extends HookConsumerWidget {
             unawaited(releaseController(previous));
           }
         } catch (_) {
-          if (!installed && next != null) await releaseController(next);
+          if (!installed && next != null) {
+            final activeCandidate = identical(candidateRef.value, next);
+            if (activeCandidate) candidateRef.value = null;
+            if (activeCandidate) {
+              await reservation?.dispose(next.dispose);
+            }
+          }
           if (!disposed && generation == cameraGeneration.value) {
             final active = controllerRef.value;
             if (active != null) {
