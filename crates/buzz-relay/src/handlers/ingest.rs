@@ -3952,6 +3952,24 @@ mod tests {
     }
 
     #[test]
+    fn handler_info_is_global_only_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert!(
+            is_global_only_kind(KIND_HANDLER_INFO),
+            "kind:31990 (NIP-89 handler-info) must be global-only (no h tag)"
+        );
+        assert!(
+            !requires_h_channel_scope(KIND_HANDLER_INFO),
+            "kind:31990 must not require an h-tag"
+        );
+        assert_eq!(
+            required_scope_for_kind(KIND_HANDLER_INFO, &dummy).unwrap(),
+            Scope::UsersWrite,
+            "kind:31990 requires UsersWrite scope, same as kind:0 and the NIP-65 relay list"
+        );
+    }
+
+    #[test]
     fn nip51_and_nip65_lists_are_global_only() {
         for kind in [
             KIND_MUTE_LIST,
