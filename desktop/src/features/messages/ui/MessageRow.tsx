@@ -55,6 +55,7 @@ import {
   MessageMetaSegments,
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { ROUTE_TARGET_HIGHLIGHT_CLASS } from "./routeTargetHighlight";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -892,9 +893,7 @@ export const MessageRow = React.memo(
             "flex gap-2.5",
             isDisplayedAsContinuation ? "items-center" : "items-start",
             hasActiveReminder ? "bg-blue-500/10" : "",
-            highlighted
-              ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
-              : "",
+            highlighted ? ROUTE_TARGET_HIGHLIGHT_CLASS : "",
           )}
           data-message-id={message.id}
           data-testid="message-row"

@@ -8,6 +8,17 @@ import {
   shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
 } from "./anchoredScrollPolicy";
+import {
+  getTargetRowCenterOffset,
+  isTargetRowCentered,
+  targetRowNeedsCenterCorrection,
+} from "./targetRowCentering";
+import type {
+  AnchorState,
+  ScrollToMessageResult,
+  UseAnchoredScrollOptions,
+  UseAnchoredScrollResult,
+} from "./anchoredScrollTypes";
 import { useVirtualizedViewportResize } from "./useVirtualizedViewportResize";
 
 /**
@@ -17,77 +28,6 @@ import { useVirtualizedViewportResize } from "./useVirtualizedViewportResize";
  * rounding from the layout engine.
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
-
-type AnchorState =
-  | { kind: "at-bottom" }
-  | { kind: "message"; messageId: string; topOffset: number }
-  | { kind: "pinned-center"; messageId: string; contentTop: number };
-
-type UseAnchoredScrollOptions = {
-  /** Scroll container. Owned by the parent so external refs still compose. */
-  scrollContainerRef: React.RefObject<HTMLDivElement | null>;
-  /** Inner content element — must wrap every renderable row, including the
-   *  sentinel and bottom anchor. Used to schedule layout work on resize. */
-  contentRef: React.RefObject<HTMLDivElement | null>;
-  /** Resets when changed; lets us drop anchor + scroll state across channels. */
-  channelId?: string | null;
-  /** Suppresses initial scroll-to-bottom while a skeleton is showing. */
-  isLoading: boolean;
-  /** Source of truth for the rendered list. Used to detect new-at-bottom
-   *  arrivals and to seed/refresh the anchor pre-render. */
-  messages: Array<{ id: string }>;
-  splitPanelOpen?: boolean;
-
-  /** When set, scroll to this message on mount and on change. */
-  targetMessageId?: string | null;
-  /** Whether a targeted message should pulse after scrolling to it. */
-  highlightTargetMessage?: boolean;
-  /** Keeps a targeted message centered until the user deliberately scrolls. */
-  pinTargetCentered?: boolean;
-  onTargetReached?: (messageId: string) => void;
-  /** Reports a pinned target after resize correction and one paint frame. */
-  onTargetSettled?: (messageId: string) => void;
-  virtualCancelBottomIntent?: () => void;
-  virtualScrollToMessage?: (
-    messageId: string,
-    options?: { behavior?: ScrollBehavior },
-  ) => boolean;
-  /** Imperative virtualizer-owned bottom jump, used only when virtualizer mode is active. */
-  virtualScrollToBottom?: (behavior?: ScrollBehavior) => void;
-  virtualSettleAtBottom?: () => void;
-  /** When active, the virtualizer owns prepend compensation and bottom-state synchronization. */
-  virtualizerOwnsPrependAnchoring?: boolean;
-  /** Bumps when a virtualized range changes, so pending target/search retries can re-check newly mounted DOM. */
-  virtualizerRenderVersion?: number;
-};
-
-type UseAnchoredScrollResult = {
-  /** Pass through to the scroll container's `onScroll`. */
-  onScroll: () => void;
-  /** True when the user is within `AT_BOTTOM_THRESHOLD_PX` of the bottom. */
-  isAtBottom: boolean;
-  /** Number of new messages that have arrived while the user is not at the
-   *  bottom. Cleared when the user returns to the bottom. */
-  newMessageCount: number;
-  /** Message id that should pulse a highlight (target/active-search). */
-  highlightedMessageId: string | null;
-  /** Imperative: scroll to bottom. */
-  scrollToBottom: (behavior?: ScrollBehavior) => void;
-  /** Re-pins after a layout owner changes trailing geometry. Returns true when
-   *  the hook handled the settlement, including a preserved pinned target. */
-  settleAtBottomAfterLayout: () => boolean;
-  /** Arm a one-shot scroll-to-bottom that fires on the next appended message
-   *  (used by the composer's send flow). */
-  scrollToBottomOnNextUpdate: () => void;
-  /** Imperative: scroll a specific message into view; optionally pulse it.
-   *  Returns true if the row was found and scrolled, false otherwise. */
-  scrollToMessage: (
-    messageId: string,
-    options?: { highlight?: boolean; behavior?: ScrollBehavior },
-  ) => boolean;
-  /** Syncs the hook's bottom affordances from a virtualizer-owned scroller. */
-  onVirtualizerAtBottomStateChange: (atBottom: boolean) => void;
-};
 
 function isAtBottomNow(
   container: Pick<
@@ -158,9 +98,11 @@ export function useAnchoredScroll({
   targetMessageId = null,
   highlightTargetMessage = true,
   pinTargetCentered = false,
+  topBoundaryReached = false,
   onTargetReached,
   onTargetSettled,
   virtualCancelBottomIntent,
+  virtualScrollBy,
   virtualScrollToMessage,
   virtualScrollToBottom,
   virtualSettleAtBottom,
@@ -209,6 +151,14 @@ export function useAnchoredScroll({
   const isWritingScrollRef = React.useRef(false);
   const programmaticScrollRafRef = React.useRef<number | null>(null);
   const targetSettleRafRef = React.useRef<number | null>(null);
+  const targetRetryRafRef = React.useRef<number | null>(null);
+  const virtualTargetJumpRef = React.useRef<{
+    messageId: string;
+    messageCount: number;
+  } | null>(null);
+  const virtualTargetCorrectionAppliedRef = React.useRef(false);
+  const targetCorrectionRafRef = React.useRef<number | null>(null);
+  const [targetRetryVersion, setTargetRetryVersion] = React.useState(0);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -238,6 +188,16 @@ export function useAnchoredScroll({
       cancelAnimationFrame(targetSettleRafRef.current);
       targetSettleRafRef.current = null;
     }
+    if (targetRetryRafRef.current !== null) {
+      cancelAnimationFrame(targetRetryRafRef.current);
+      targetRetryRafRef.current = null;
+    }
+    if (targetCorrectionRafRef.current !== null) {
+      cancelAnimationFrame(targetCorrectionRafRef.current);
+      targetCorrectionRafRef.current = null;
+    }
+    virtualTargetJumpRef.current = null;
+    virtualTargetCorrectionAppliedRef.current = false;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
@@ -432,55 +392,115 @@ export function useAnchoredScroll({
     (
       messageId: string,
       options: { highlight?: boolean; behavior?: ScrollBehavior } = {},
-    ): boolean => {
+    ): ScrollToMessageResult => {
       const container = scrollContainerRef.current;
-      if (!container) return false;
+      if (!container) return "missing";
       const el = container.querySelector<HTMLElement>(
         `[data-message-id="${messageId}"]`,
       );
+      if (virtualizerOwnsPrependAnchoring && !virtualScrollToMessage)
+        return "pending"; // Wait for Virtua's imperative API.
       if (virtualizerOwnsPrependAnchoring && virtualScrollToMessage) {
-        // Target navigation owns the viewport before any movement strategy is
-        // chosen. The already-mounted fast path centers the DOM node directly
-        // and would otherwise leave durable bottom intent armed.
+        // Virtua is the sole scroll writer; a new jump cancels its initial
+        // bottom settle and the cancel call prevents later re-pinning.
         virtualCancelBottomIntent?.();
-        if (el) {
-          const rect = el.getBoundingClientRect();
-          const containerRect = container.getBoundingClientRect();
-          const isInViewport =
-            rect.top >= containerRect.top &&
-            rect.bottom <= containerRect.bottom;
-          if (!isInViewport) {
-            if (!virtualScrollToMessage(messageId, { behavior: "auto" })) {
-              return false;
-            }
-            anchorRef.current = { kind: "message", messageId, topOffset: 0 };
-            setIsAtBottom(false);
-            return false;
+        const virtualScrollBehavior = el
+          ? (options.behavior ?? "auto")
+          : "auto";
+        const rowIsVisible = el
+          ? (() => {
+              const rowRect = el.getBoundingClientRect();
+              const containerRect = container.getBoundingClientRect();
+              return (
+                rowRect.bottom > containerRect.top &&
+                rowRect.top < containerRect.bottom
+              );
+            })()
+          : false;
+        const jumpMatchesCurrentModel =
+          virtualTargetJumpRef.current?.messageId === messageId &&
+          virtualTargetJumpRef.current.messageCount === messages.length;
+        if (!jumpMatchesCurrentModel) {
+          if (
+            !virtualScrollToMessage(messageId, {
+              behavior: virtualScrollBehavior,
+            })
+          ) {
+            return "missing";
           }
-          const centeredTop = (container.clientHeight - rect.height) / 2;
-          container.scrollTo({
-            top: Math.max(
-              0,
-              container.scrollTop +
-                (rect.top - containerRect.top) -
-                centeredTop,
-            ),
-            behavior: options.behavior ?? "auto",
-          });
-        } else if (
-          !virtualScrollToMessage(messageId, {
-            behavior: options.behavior ?? "auto",
-          })
+          virtualTargetJumpRef.current = {
+            messageId,
+            messageCount: messages.length,
+          };
+          virtualTargetCorrectionAppliedRef.current = false;
+        }
+        if (
+          rowIsVisible &&
+          !virtualTargetCorrectionAppliedRef.current &&
+          targetCorrectionRafRef.current === null
         ) {
-          return false;
+          // Virtua first realizes and centers by index. Once the target row is
+          // rendered, wait one more frame for its measured geometry to land,
+          // then compensate for chrome that overlays the usable viewport.
+          targetCorrectionRafRef.current = requestAnimationFrame(() => {
+            targetCorrectionRafRef.current = null;
+            const settledContainer = scrollContainerRef.current;
+            const settledRow = settledContainer?.querySelector<HTMLElement>(
+              `[data-message-id="${CSS.escape(messageId)}"]`,
+            );
+            if (!settledContainer || !settledRow) return;
+            const rowRect = settledRow.getBoundingClientRect();
+            const containerRect = settledContainer.getBoundingClientRect();
+            // Virtua may mount the requested row before its indexed jump has
+            // placed that row in the viewport. Do not turn that transient,
+            // offscreen geometry into a multi-thousand-pixel correction.
+            if (
+              rowRect.bottom <= containerRect.top ||
+              rowRect.top >= containerRect.bottom
+            ) {
+              setTargetRetryVersion((version) => version + 1);
+              return;
+            }
+            const correction = getTargetRowCenterOffset(
+              settledRow,
+              settledContainer,
+            );
+            if (targetRowNeedsCenterCorrection(correction)) {
+              virtualScrollBy?.(correction);
+            }
+            virtualTargetCorrectionAppliedRef.current = true;
+            setTargetRetryVersion((version) => version + 1);
+          });
         }
         anchorRef.current = { kind: "message", messageId, topOffset: 0 };
-        setIsAtBottom(false);
-        if (el && options.highlight) highlightMessage(messageId);
-        return el !== null;
+        // Completion requires midpoint alignment or a confirmed boundary.
+        const targetIndex = messages.findIndex(
+          (message) => message.id === messageId,
+        );
+        const targetBoundary =
+          targetIndex === 0 && topBoundaryReached
+            ? "top"
+            : targetIndex === messages.length - 1
+              ? "bottom"
+              : "none";
+        if (
+          !el ||
+          !isTargetRowCentered(el, container, targetBoundary, isAtBottomNow)
+        ) {
+          virtualizerAtBottomRef.current = false;
+          setIsAtBottom(false);
+          return "pending";
+        }
+        const atBottom = isAtBottomNow(container);
+        virtualizerAtBottomRef.current = atBottom;
+        setIsAtBottom(atBottom);
+        if (options.highlight) highlightMessage(messageId);
+        virtualTargetJumpRef.current = null;
+        virtualTargetCorrectionAppliedRef.current = false;
+        return "centered";
       }
 
-      if (!el) return false;
+      if (!el) return "missing";
 
       const rect = el.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
@@ -532,13 +552,16 @@ export function useAnchoredScroll({
       }
 
       if (options.highlight) highlightMessage(messageId);
-      return true;
+      return "centered";
     },
     [
       highlightMessage,
+      messages,
       pinTargetCentered,
+      topBoundaryReached,
       scrollContainerRef,
       virtualCancelBottomIntent,
+      virtualScrollBy,
       virtualizerOwnsPrependAnchoring,
       writePinnedCenterScroll,
       virtualScrollToMessage,
@@ -630,19 +653,21 @@ export function useAnchoredScroll({
         });
       };
       if (targetMessageId) {
-        // A cold deep-link target may not be in the DOM on this first
-        // commit — the route screen fetches it by id and splices it in a
-        // render or two later. If centering fails now, leave the timeline at
-        // its default position and let the post-mount target effect (keyed on
-        // `messages`) retry once the row lands, rather than marking it handled.
-        if (
-          scrollToMessageImperative(targetMessageId, {
-            highlight: highlightTargetMessage,
-          })
-        ) {
+        // A cold deep-link target is rarely in the DOM on this first commit:
+        // a virtualized list renders only a window, and a target outside the
+        // loaded history is fetched by id and spliced in a render or two
+        // later. Either way the post-mount target effect (keyed on `messages`
+        // and the rendered range) finishes the job — it is not handled yet.
+        // Only fall back to the bottom pin when the row is genuinely absent;
+        // pinning while the virtualizer is mid-jump re-arms durable bottom
+        // intent and strands the view at the floor with no highlight.
+        const result = scrollToMessageImperative(targetMessageId, {
+          highlight: highlightTargetMessage,
+        });
+        if (result === "centered") {
           handledTargetIdRef.current = targetMessageId;
           onTargetReached?.(targetMessageId);
-        } else {
+        } else if (result === "missing") {
           pinToBottomOnMount();
         }
       } else {
@@ -876,7 +901,7 @@ export function useAnchoredScroll({
   // *without* marking the target handled until its row actually exists — each
   // subsequent message commit re-runs the effect and retries the centering.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` and `virtualizerRenderVersion` are intentional retry triggers, not values read by the effect body — the effect reads the DOM (querySelector), and we need it to re-run each time the message list or virtualized rendered range changes so a target spliced into older history gets centered once its row commits.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` and `virtualizerRenderVersion` are intentional retry triggers, not values read by the effect body — `scrollToMessageImperative` reads the DOM, and we need the effect to re-run each time the message list or virtualized rendered range changes so a target spliced into older history (or windowed out of the DOM) gets centered once its row commits.
   React.useEffect(() => {
     if (!targetMessageId) {
       handledTargetIdRef.current = null;
@@ -893,43 +918,37 @@ export function useAnchoredScroll({
     if (!hasInitializedRef.current) return; // initial-mount path will handle.
 
     void virtualizerRenderVersion;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const el = container.querySelector<HTMLElement>(
-      `[data-message-id="${targetMessageId}"]`,
-    );
-    if (!el && virtualizerOwnsPrependAnchoring) {
-      if (
-        scrollToMessageImperative(targetMessageId, {
-          highlight: highlightTargetMessage,
-        })
-      ) {
-        handledTargetIdRef.current = targetMessageId;
-        onTargetReached?.(targetMessageId);
-      }
-      return;
-    }
-    if (!el) {
-      // Row not in the DOM yet. A cold deep-link target is fetched by id and
-      // spliced into `messages` a render or two later; this effect re-runs on
-      // each `messages` commit and retries until the row exists.
-      return;
-    }
-    handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, {
+    // `pending` (virtualizer mid-jump) and `missing` (row not spliced in yet)
+    // both leave the target unhandled; the next `messages` or rendered-range
+    // commit re-runs this effect and retries until the row is centered.
+    const result = scrollToMessageImperative(targetMessageId, {
       highlight: highlightTargetMessage,
     });
-    onTargetReached?.(targetMessageId);
+    if (result === "centered") {
+      if (targetRetryRafRef.current !== null) {
+        cancelAnimationFrame(targetRetryRafRef.current);
+        targetRetryRafRef.current = null;
+      }
+      handledTargetIdRef.current = targetMessageId;
+      onTargetReached?.(targetMessageId);
+    } else if (result === "pending" && targetRetryRafRef.current === null) {
+      // Virtua can finish correcting measured row offsets without changing its
+      // rendered range. Retry on the next frame so completion observes the
+      // final geometry rather than depending on an unrelated React render.
+      targetRetryRafRef.current = requestAnimationFrame(() => {
+        targetRetryRafRef.current = null;
+        setTargetRetryVersion((version) => version + 1);
+      });
+    }
   }, [
     highlightTargetMessage,
     isLoading,
     messages,
     onTargetReached,
     releasePinnedCenter,
-    scrollContainerRef,
     scrollToMessageImperative,
     targetMessageId,
-    virtualizerOwnsPrependAnchoring,
+    targetRetryVersion,
     virtualizerRenderVersion,
   ]);
 
@@ -943,6 +962,12 @@ export function useAnchoredScroll({
       }
       if (targetSettleRafRef.current !== null) {
         cancelAnimationFrame(targetSettleRafRef.current);
+      }
+      if (targetRetryRafRef.current !== null) {
+        cancelAnimationFrame(targetRetryRafRef.current);
+      }
+      if (targetCorrectionRafRef.current !== null) {
+        cancelAnimationFrame(targetCorrectionRafRef.current);
       }
     };
   }, []);

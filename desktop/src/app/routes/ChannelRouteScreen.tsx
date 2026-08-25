@@ -45,14 +45,47 @@ function getReplyParentId(event: RelayEvent): string | null {
   return getThreadReference(event.tags).parentId;
 }
 
+export function isRouteEventForChannel(
+  event: RelayEvent,
+  channelId: string,
+): boolean {
+  return event.tags.some((tag) => tag[0] === "h" && tag[1] === channelId);
+}
+
+export function getValidatedRouteThreadRootId(
+  targetEvent: RelayEvent,
+  targetThreadRootId: string | null,
+): string | null {
+  const targetThreadRef = getThreadReference(targetEvent.tags);
+  if (getReplyParentId(targetEvent) === null) {
+    return targetThreadRootId === targetEvent.id ? targetThreadRootId : null;
+  }
+  const derivedRootId = targetThreadRef.rootId ?? null;
+  return targetThreadRootId === null || targetThreadRootId === derivedRootId
+    ? derivedRootId
+    : null;
+}
+
+export function hasValidRouteThreadIntent(
+  targetEvent: RelayEvent,
+  targetThreadRootId: string | null,
+): boolean {
+  return (
+    getReplyParentId(targetEvent) === null ||
+    targetThreadRootId === null ||
+    getValidatedRouteThreadRootId(targetEvent, targetThreadRootId) !== null
+  );
+}
+
 async function fetchRouteTargetEvents(
+  channelId: string,
   eventIds: string[],
   targetMessageId: string | null,
   targetThreadRootId: string | null,
 ): Promise<RelayEvent[]> {
   const eventsById = new Map<string, RelayEvent>();
   const addEvent = (event: RelayEvent | null) => {
-    if (event) {
+    if (event && isRouteEventForChannel(event, channelId)) {
       eventsById.set(event.id, event);
     }
   };
@@ -66,12 +99,17 @@ async function fetchRouteTargetEvents(
   const targetEvent = targetMessageId
     ? (eventsById.get(targetMessageId) ?? null)
     : null;
-  if (!targetEvent) {
+  if (
+    !targetEvent ||
+    !hasValidRouteThreadIntent(targetEvent, targetThreadRootId)
+  ) {
     return [...eventsById.values()];
   }
 
-  const targetThreadRef = getThreadReference(targetEvent.tags);
-  const threadRootId = targetThreadRootId ?? targetThreadRef.rootId ?? null;
+  const threadRootId = getValidatedRouteThreadRootId(
+    targetEvent,
+    targetThreadRootId,
+  );
   if (threadRootId && !eventsById.has(threadRootId)) {
     addEvent(await fetchRouteEvent(threadRootId));
   }
@@ -85,7 +123,7 @@ async function fetchRouteTargetEvents(
   ) {
     const parentEvent =
       eventsById.get(parentId) ?? (await fetchRouteEvent(parentId));
-    if (!parentEvent) {
+    if (!parentEvent || !isRouteEventForChannel(parentEvent, channelId)) {
       break;
     }
 
@@ -130,7 +168,9 @@ export function ChannelRouteScreen({
     RelayEvent[]
   >(() => {
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
-    return cachedTarget ? [cachedTarget] : [];
+    return cachedTarget && isRouteEventForChannel(cachedTarget, channelId)
+      ? [cachedTarget]
+      : [];
   });
 
   // Reset spliced target events when the channel context changes (channel
@@ -166,7 +206,7 @@ export function ChannelRouteScreen({
     }
 
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
-    if (cachedTarget) {
+    if (cachedTarget && isRouteEventForChannel(cachedTarget, channelId)) {
       setTargetMessageEvents((currentEvents) =>
         currentEvents.some((event) => event.id === cachedTarget.id)
           ? currentEvents
@@ -174,14 +214,17 @@ export function ChannelRouteScreen({
       );
     }
 
-    const eventIds = [
-      targetMessageId,
-      targetThreadRootId && targetThreadRootId !== targetMessageId
-        ? targetThreadRootId
-        : null,
-    ].filter((eventId): eventId is string => eventId !== null);
+    // The selected message is authoritative. Load it first so the helper can
+    // validate any supplied thread relationship before fetching another event.
+    // A thread-only route has no selected message to validate against.
+    const eventIds = targetMessageId
+      ? [targetMessageId]
+      : targetThreadRootId
+        ? [targetThreadRootId]
+        : [];
 
     void fetchRouteTargetEvents(
+      channelId,
       eventIds,
       targetMessageId,
       targetThreadRootId,
@@ -200,7 +243,7 @@ export function ChannelRouteScreen({
     return () => {
       isCancelled = true;
     };
-  }, [selectedPostId, targetMessageId, targetThreadRootId]);
+  }, [channelId, selectedPostId, targetMessageId, targetThreadRootId]);
 
   if (
     !activeChannel &&
@@ -234,6 +277,7 @@ export function ChannelRouteScreen({
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
+      targetThreadRootId={targetThreadRootId}
     />
   );
 }

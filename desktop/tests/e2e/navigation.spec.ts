@@ -8,8 +8,16 @@ const WATERCOLOR_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
 const FORUM_POST_ID = "mock-forum-release-thread";
 const FORUM_REPLY_ID = "mock-forum-release-reply";
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+const DM_DEEP_LINK_HISTORY_TEST =
+  "cold deep link to a top-level DM message stays in the timeline";
+
+test.beforeEach(async ({ page }, testInfo) => {
+  await installMockBridge(
+    page,
+    testInfo.title === DM_DEEP_LINK_HISTORY_TEST
+      ? { aliceTylerHistoryMessageCount: 80 }
+      : undefined,
+  );
 });
 
 /**
@@ -643,7 +651,7 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
   ).toBeGreaterThan(1);
 });
 
-test("message links to visible root messages open the thread panel", async ({
+test("message links to visible root messages highlight them in the main timeline", async ({
   page,
 }) => {
   await page.goto("/");
@@ -833,16 +841,139 @@ test("message links to visible root messages open the thread panel", async ({
       }),
     )
     .toBe(link);
+});
 
-  await rootThreadLink.click({ button: "right" });
-  await linkMenu.getByRole("button", { name: "Open link" }).click();
+// Cold deep links arrive from outside the channel (Home inbox "Open in
+// channel", search, notifications): the timeline mounts *with* the target
+// already in the route. `#deep-history` is long enough that the virtualizer
+// only renders the newest rows on first commit, so the target row is in the
+// loaded window but not yet in the DOM — the state the in-channel link tests
+// above never reach.
+const DEEP_HISTORY_CHANNEL_ID = "feedf00d-0000-4000-8000-000000000007";
 
-  const threadPanel = page.getByTestId("message-thread-panel");
-  await expect(threadPanel).toBeVisible();
-  await expect(page).toHaveURL(/thread=mock-general-welcome/);
-  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to general",
+async function expectColdDeepLinkLandsOnTarget(
+  page: import("@playwright/test").Page,
+  messageId: string,
+  { expectCentered = true }: { expectCentered?: boolean } = {},
+) {
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+
+  // Same-document hash navigation — the route the Home inbox / search hand
+  // off to, without reloading the app shell.
+  await page.goto(
+    `/#/channels/${DEEP_HISTORY_CHANNEL_ID}?messageId=${messageId}`,
   );
+  await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+
+  const timeline = page.getByTestId("message-timeline");
+  const targetRow = timeline.locator(`[data-message-id="${messageId}"]`);
+  // The highlight is applied only once the hook has seen the row settled in
+  // the viewport, so it is the strongest signal that the jump completed. It
+  // fades after 2s — assert it before anything that can wait on layout.
+  if (expectCentered) {
+    await expect
+      .poll(() =>
+        targetRow.evaluate((row) => {
+          const timeline = row.closest('[data-testid="message-timeline"]');
+          if (!timeline) return Number.POSITIVE_INFINITY;
+          const rowRect = row.getBoundingClientRect();
+          const timelineRect = timeline.getBoundingClientRect();
+          const styles = getComputedStyle(timeline);
+          const rootFontSize = Number.parseFloat(
+            getComputedStyle(document.documentElement).fontSize,
+          );
+          const resolveLength = (value: string) => {
+            const parsed = Number.parseFloat(value);
+            if (!Number.isFinite(parsed)) return 0;
+            return value.trim().endsWith("rem")
+              ? parsed * rootFontSize
+              : parsed;
+          };
+          const topInset = resolveLength(
+            styles.getPropertyValue("--channel-top-chrome-height"),
+          );
+          const bottomInset = resolveLength(
+            styles.getPropertyValue("--composer-overlay-height"),
+          );
+          return Math.abs(
+            (rowRect.top + rowRect.bottom) / 2 -
+              (timelineRect.top +
+                topInset +
+                timelineRect.bottom -
+                bottomInset) /
+                2,
+          );
+        }),
+      )
+      .toBeLessThanOrEqual(2);
+  }
+  await expect(targetRow).toHaveClass(/route-target-highlight-fade/);
+  await expect(targetRow).toBeInViewport();
+  // Top-level targets resolve in the main timeline only.
+  await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+  // Reaching the target consumes the route param so a later channel visit
+  // doesn't re-scroll to stale history.
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${DEEP_HISTORY_CHANNEL_ID}$`),
+  );
+  // The target must still be in view once the route param is cleared — the
+  // list's first-commit bottom settle and the mount-time resize pass must not
+  // win over the target jump.
+  await page.waitForTimeout(500);
+  await expect(targetRow).toBeInViewport();
+  return targetRow;
+}
+
+test("cold deep link to a message in virtualized history scrolls to and highlights it", async ({
+  page,
+}) => {
+  // Index 500 is inside the cold-load window and ~100 rows above the bottom,
+  // so it is neither initially rendered nor boundary-clamped. The jump must
+  // win over the list's own first-commit bottom settle and land at midpoint.
+  await expectColdDeepLinkLandsOnTarget(page, "mock-deep-history-500");
+});
+
+test("cold deep link to a top-level DM message stays in the timeline", async ({
+  page,
+}) => {
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  const messageId = "mock-alice-tyler-40";
+  await page.goto(`/#/channels/${dmChannelId}`);
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  const seededTarget = await page.evaluate(async (eventId) => {
+    const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) return null;
+    const eventJson = await invoke("get_event", { eventId });
+    return typeof eventJson === "string" ? JSON.parse(eventJson) : eventJson;
+  }, messageId);
+  expect(seededTarget).toMatchObject({
+    id: messageId,
+    content: "Alice and Tyler message #40",
+  });
+
+  await page.goto(`/#/channels/${dmChannelId}?messageId=${messageId}`);
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const targetRow = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${messageId}"]`);
+  // Positive control: prove the opt-in fixture supplied the intended target
+  // before asserting the route-specific highlight and panel behavior.
+  await expect(targetRow).toContainText("Alice and Tyler message #40");
+  await expect(targetRow).toHaveClass(/route-target-highlight-fade/);
+  await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`#/channels/${dmChannelId}$`));
+});
+
+test("cold deep link to the newest message highlights it at the bottom", async ({
+  page,
+}) => {
+  // The boundary-clamped case: the target is the last message. It must still
+  // highlight, and the view stays at the floor instead of centering.
+  await expectColdDeepLinkLandsOnTarget(page, "mock-deep-history-599", {
+    expectCentered: false,
+  });
 });
 
 test("direct-message tooltip metadata stays on one physical line", async ({
@@ -940,7 +1071,7 @@ test("message links explain when preview metadata is unavailable", async ({
   await expect(unavailableTooltip).toHaveCount(0);
 });
 
-test("message links reopen a closed thread when the same messageId is already in the URL", async ({
+test("root message links re-target the main timeline when the same messageId was already in the URL", async ({
   page,
 }) => {
   await page.goto(
@@ -948,14 +1079,20 @@ test("message links reopen a closed thread when the same messageId is already in
   );
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
+  // A top-level deep link never opens the reply panel — the message is shown
+  // highlighted in its own context instead.
   const threadPanel = page.getByTestId("message-thread-panel");
-  await expect(threadPanel).toBeVisible();
-  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to general",
-  );
-
-  await threadPanel.getByRole("button", { name: "Close panel" }).click();
   await expect(threadPanel).not.toBeVisible();
+  const welcomeRow = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-general-welcome"]');
+  await expect(welcomeRow).toBeVisible();
+  await expect(welcomeRow).toHaveClass(/route-target-highlight-fade/);
+
+  // Once the target is reached the messageId param clears; re-activating a
+  // link to the same root must route again instead of being swallowed
+  // (regression guard from the original reopen-a-closed-thread test).
+  await expect(page).not.toHaveURL(/messageId=/);
 
   const link =
     "buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=mock-general-welcome";
@@ -975,24 +1112,30 @@ test("message links reopen a closed thread when the same messageId is already in
   await expect(rootThreadLink).toHaveText("general");
   await rootThreadLink.click();
 
-  await expect(threadPanel).toBeVisible();
-  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to general",
-  );
+  await expect(threadPanel).not.toBeVisible();
+  await expect(welcomeRow).toHaveClass(/route-target-highlight-fade/);
 });
 
 test("message deep links survive reload", async ({ page }) => {
-  await page.goto(
-    `/#/channels/${ENGINEERING_CHANNEL_ID}?messageId=mock-engineering-shipped`,
-  );
+  const deepLinkUrl = `/#/channels/${ENGINEERING_CHANNEL_ID}?messageId=mock-engineering-shipped`;
+  await page.goto(deepLinkUrl);
 
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Engineering shipped the desktop build.",
   );
 
+  // Once the target is centered the messageId param is consumed (cleared via
+  // onTargetReached so re-activating the same link is never swallowed), and a
+  // top-level target no longer pins a `thread` param either — so a bare
+  // reload lands on the plain channel.
+  await expect(page).not.toHaveURL(/messageId=/);
   await page.reload();
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
 
+  // The deep-link URL itself stays valid: loading it again cold re-resolves
+  // and re-splices the target message.
+  await page.goto(deepLinkUrl);
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Engineering shipped the desktop build.",

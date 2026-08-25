@@ -22,4 +22,11 @@ export type ChannelScreenProps = {
   targetForumReplyId: string | null;
   targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;
+  /**
+   * Thread root requested by the navigation source (`?threadRootId`, or the
+   * `?thread` panel param on deep links). Deciding input for top-level route
+   * targets: present → open the thread panel at that root; absent → the
+   * target is shown in the main timeline only.
+   */
+  targetThreadRootId: string | null;
 };

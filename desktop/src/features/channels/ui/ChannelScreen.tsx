@@ -89,6 +89,7 @@ import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 import { GuardedChannelPane } from "./GuardedChannelPane";
 import { useNavigationGuard } from "./useNavigationGuard";
+
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
   activeChannel,
@@ -101,6 +102,7 @@ export function ChannelScreen({
   targetForumReplyId,
   targetMessageEvents,
   targetMessageId,
+  ...routeTargets
 }: ChannelScreenProps) {
   const queryClient = useQueryClient();
   const { goHome } = useAppNavigation();
@@ -632,9 +634,6 @@ export function ChannelScreen({
         isPlaceholderData: messagesQuery.isPlaceholderData,
         dataLength: messagesQuery.data?.length ?? null,
       },
-      // A persisted head only counts as hydrated when it has rows to paint
-      // (channelHeadCache.ts), so this bypass never settles onto an empty
-      // placeholder while the authoritative refresh is still in flight.
       hasSettledThisChannel ||
         (activeChannelId !== null &&
           hasPersistedHydratedChannel(queryClient, activeChannelId)),
@@ -672,6 +671,7 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
     targetMessageId,
+    targetThreadRootId: routeTargets.targetThreadRootId,
     timelineMessages,
   });
   useThreadTargetSync({

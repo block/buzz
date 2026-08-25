@@ -345,6 +345,8 @@ type E2eConfig = {
     honorChannelsKnownHash?: boolean;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
+    /** Opt-in numbered history for the alice-tyler deep-link scenario. */
+    aliceTylerHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
@@ -4506,24 +4508,42 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                   sig: "mocksig".repeat(20).slice(0, 128),
                 })),
             ]
-          : channelId === "feedf00d-0000-4000-8000-000000000007"
+          : channelId === "f48efb06-0c93-5025-aac9-2e646bb6bfa8" &&
+              (getConfig()?.mock?.aliceTylerHistoryMessageCount ?? 0) > 0
             ? (() => {
-                const count = getConfig()?.mock?.deepHistoryMessageCount ?? 600;
+                const count =
+                  getConfig()?.mock?.aliceTylerHistoryMessageCount ?? 0;
                 return Array.from({ length: count }, (_, index) => ({
-                  id: `mock-deep-history-${index}`,
+                  id: `mock-alice-tyler-${index}`,
                   pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
                   created_at:
                     Math.floor(Date.now() / 1000) - (count - index) * 60,
                   kind: 9,
                   tags: [["h", channelId]],
-                  content:
-                    count > 600
-                      ? `Deep history message #${index}\n${"variable wrapped history ".repeat((index % 12) + 1)}`
-                      : `Deep history message #${index}`,
+                  content: `Alice and Tyler message #${index}`,
                   sig: "mocksig".repeat(20).slice(0, 128),
                 }));
               })()
-            : [];
+            : channelId === "feedf00d-0000-4000-8000-000000000007"
+              ? (() => {
+                  const count =
+                    getConfig()?.mock?.deepHistoryMessageCount ?? 600;
+                  return Array.from({ length: count }, (_, index) => ({
+                    id: `mock-deep-history-${index}`,
+                    pubkey:
+                      index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                    created_at:
+                      Math.floor(Date.now() / 1000) - (count - index) * 60,
+                    kind: 9,
+                    tags: [["h", channelId]],
+                    content:
+                      count > 600
+                        ? `Deep history message #${index}\n${"variable wrapped history ".repeat((index % 12) + 1)}`
+                        : `Deep history message #${index}`,
+                    sig: "mocksig".repeat(20).slice(0, 128),
+                  }));
+                })()
+              : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;

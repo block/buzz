@@ -277,6 +277,8 @@ type MockBridgeOptions = {
   honorChannelsKnownHash?: boolean;
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
+  /** Opt-in numbered history for the alice-tyler deep-link scenario. */
+  aliceTylerHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */

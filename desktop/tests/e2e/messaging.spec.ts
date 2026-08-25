@@ -3668,12 +3668,8 @@ test("a refused message deep link retries after the thread edit is canceled", as
   const routedDestination = page
     .getByTestId("message-timeline")
     .locator(`[data-message-id="${destinationId}"]`);
-  await expect(threadPanel).toBeVisible();
-  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    destinationRoot,
-  );
+  await expect(threadPanel).not.toBeVisible();
   await expect(routedDestination).toBeVisible();
-  await expect(routedDestination).toHaveClass(/route-target-highlight-fade/);
 });
 
 test("a refused sent-from-thread link preserves the edit and retries after cancel", async ({
@@ -3828,10 +3824,12 @@ test("a refused search result preserves the edit and retries after cancel", asyn
   await page.getByTestId("search-dialog-input").fill(destinationRoot);
   await destinationResult.click();
   await expect(page).not.toHaveURL(threadUrl);
-  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    destinationRoot,
+  const routedDestination = timeline.locator(
+    `[data-message-id="${destinationRootId}"]`,
   );
-  await expect(page).toHaveURL(new RegExp(`thread=${destinationRootId}`));
+  await expect(threadPanel).not.toBeVisible();
+  await expect(routedDestination).toBeVisible();
+  await expect(routedDestination).toHaveClass(/route-target-highlight-fade/);
 });
 
 test("a refused forum search result preserves the edit and retries after cancel", async ({

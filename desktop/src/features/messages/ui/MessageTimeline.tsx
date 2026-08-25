@@ -361,7 +361,9 @@ const MessageTimelineBase = React.forwardRef<
     scrollContainerRef: activeScrollContainerRef,
     splitPanelOpen: splitThreadPanelOpen,
     targetMessageId,
+    topBoundaryReached: renderedHistoryExhausted,
     virtualCancelBottomIntent: timelineVirtualizerApi?.cancelBottomIntent,
+    virtualScrollBy: timelineVirtualizerApi?.scrollBy,
     virtualScrollToMessage: timelineVirtualizerApi?.scrollToMessage,
     virtualScrollToBottom: timelineVirtualizerApi?.scrollToBottom,
     virtualSettleAtBottom: timelineVirtualizerApi?.settleAtBottom,
@@ -473,8 +475,9 @@ const MessageTimelineBase = React.forwardRef<
     [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
   );
 
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
+  // Jump-to-message reports `centered` once the row is in the DOM and placed;
+  // `pending` means the virtualizer accepted the jump and the row commits on a
+  // later render, so callers retry on range change rather than re-querying.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
       return scrollToMessage(messageId, { highlight: true, ...options });
@@ -535,28 +538,19 @@ const MessageTimelineBase = React.forwardRef<
     }
     pendingSearchTargetRef.current = null;
     prevSearchActiveRef.current = searchActiveMessageId;
-    if (!jumpToMessage(searchActiveMessageId, { behavior: "smooth" })) {
+    if (
+      jumpToMessage(searchActiveMessageId, { behavior: "smooth" }) !==
+      "centered"
+    ) {
       pendingSearchTargetRef.current = searchActiveMessageId;
     }
   }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, and in virtualized mode a phase-1 index jump only realizes the row; retry when the rendered range changes so the DOM-visible path can center and highlight it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously (`missing`), and in virtualized mode an index jump only realizes the row (`pending`); retry when the rendered range changes so the DOM path can center and highlight it.
   React.useEffect(() => {
     const target = pendingSearchTargetRef.current;
     if (!target || showTimelineSkeleton) return;
-    if (
-      useTimelineVirtualizer &&
-      !activeScrollContainerRef.current?.querySelector(
-        `[data-message-id="${CSS.escape(target)}"]`,
-      )
-    ) {
-      // Phase 1: ask the virtualizer to realize the match's index. The retry effect
-      // runs again on range change and the DOM-visible path does the actual
-      // center + highlight once the row exists.
-      void jumpToMessage(target, { behavior: "auto" });
-      return;
-    }
-    if (jumpToMessage(target, { behavior: "auto" })) {
+    if (jumpToMessage(target, { behavior: "auto" }) === "centered") {
       pendingSearchTargetRef.current = null;
     }
   }, [

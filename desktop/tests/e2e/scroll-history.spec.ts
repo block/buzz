@@ -933,15 +933,17 @@ test("unified channel search opens rows regardless of history position", async (
 
   // Poll for the row matching `needle` to settle inside the timeline
   // viewport, then return its placement + className. Polling is required
-  // because the find-bar -> active-match -> scrollIntoView path is async
-  // (state update, then a smooth scroll). Locator `toBeVisible` only
-  // checks DOM-visible (display/visibility), not in-viewport, so it
-  // can't be used as the wait condition for "the scroll completed".
+  // because the find-bar -> active-match -> virtualizer path is async
+  // (state update, then an indexed jump that may need to render the row).
+  // Locator `toBeVisible` only checks DOM-visible (display/visibility), not
+  // in-viewport, so it can't be used as the wait condition for "the scroll
+  // completed".
   //
-  // Tolerance: 1px on each edge for sub-pixel rounding. The 5s budget
-  // accommodates browsers honoring smooth-scroll over long distances
-  // (initial scroll position is the bottom of a 200-message channel;
-  // the ALPHA row is ~180 rows up).
+  // Tolerance: 1px on each edge for sub-pixel rounding. The 5s budget leaves
+  // room for the virtualizer to realize and measure the distant ALPHA row
+  // (~180 rows above the initial bottom position). Distant unrendered search
+  // targets intentionally jump instantly; only already-rendered targets keep
+  // smooth scrolling for spatial context.
   const waitForRowInViewport = async (needle: string) =>
     timeline.evaluate((timelineEl, n) => {
       return new Promise<{
