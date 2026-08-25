@@ -13,7 +13,8 @@ import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRunti
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
-import { setCanvas } from "@/shared/api/tauri";
+import { channelMembersQueryKey } from "@/features/channels/rosterFreshness";
+import { addChannelMembers, setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
 
 /**
@@ -153,5 +154,63 @@ export function useApplyTemplate() {
     }
   }
 
-  return { applyCanvas, applyAgents };
+  async function applyMembers(
+    templateId: string | undefined,
+    channelId: string,
+  ) {
+    if (!templateId) return;
+    const template = channelTemplatesQuery.data?.find(
+      (candidate) => candidate.id === templateId,
+    );
+    if (!template || template.members.length === 0) return;
+
+    const membersByRole = new Map<
+      ChannelTemplate["members"][number]["role"],
+      string[]
+    >();
+    const seenPubkeys = new Set<string>();
+    for (const member of template.members) {
+      const normalizedPubkey = member.pubkey.trim().toLowerCase();
+      if (!normalizedPubkey || seenPubkeys.has(normalizedPubkey)) continue;
+      seenPubkeys.add(normalizedPubkey);
+      const pubkeys = membersByRole.get(member.role) ?? [];
+      pubkeys.push(normalizedPubkey);
+      membersByRole.set(member.role, pubkeys);
+    }
+
+    const failures: string[] = [];
+    for (const [role, pubkeys] of membersByRole) {
+      try {
+        const result = await addChannelMembers({
+          channelId,
+          pubkeys,
+          role,
+        });
+        failures.push(...result.errors.map((error) => error.pubkey));
+      } catch {
+        failures.push(...pubkeys);
+      }
+    }
+
+    if (failures.length > 0) {
+      const { toast } = await import("sonner");
+      toast.warning(
+        failures.length === 1
+          ? "1 member from the template could not be added"
+          : `${failures.length} members from the template could not be added`,
+      );
+    }
+
+    await Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: channelMembersQueryKey(channelId),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["channels"],
+        refetchType: "none",
+      }),
+    ]);
+  }
+
+  return { applyCanvas, applyAgents, applyMembers };
 }

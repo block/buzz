@@ -1,10 +1,12 @@
 import {
   Bot,
+  Check,
   Copy,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Plus,
+  Search,
   Trash2,
   Users,
 } from "lucide-react";
@@ -16,6 +18,7 @@ import {
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
+import { useRelayMembersQuery } from "@/features/community-members/hooks";
 import {
   useChannelTemplatesQuery,
   useCreateChannelTemplateMutation,
@@ -24,7 +27,9 @@ import {
   useUpdateChannelTemplateMutation,
 } from "@/features/channel-templates/hooks";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -34,6 +39,7 @@ import type {
   UpdateChannelTemplateInput,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { SettingsOptionGroup } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import {
@@ -208,6 +214,7 @@ function TemplateRow({
 }) {
   const personaCount = template.agents.personas.length;
   const teamCount = template.agents.teams.length;
+  const memberCount = template.members.length;
 
   return (
     <div className="group flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-muted/50">
@@ -242,6 +249,12 @@ function TemplateRow({
             <span className="flex items-center gap-1">
               <Users className="h-4 w-4" />
               {teamCount} {teamCount === 1 ? "team" : "teams"}
+            </span>
+          ) : null}
+          {memberCount > 0 ? (
+            <span className="flex items-center gap-1">
+              <Users className="h-4 w-4" />
+              {memberCount} {memberCount === 1 ? "member" : "members"}
             </span>
           ) : null}
           {template.canvasTemplate ? (
@@ -305,6 +318,16 @@ export function TemplateFormDialog({
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const providersQuery = useAvailableAcpRuntimes();
+  const relayMembersQuery = useRelayMembersQuery(open);
+  const identityQuery = useIdentityQuery();
+  const relayMembers = React.useMemo(
+    () => relayMembersQuery.data ?? [],
+    [relayMembersQuery.data],
+  );
+  const memberProfilesQuery = useUsersBatchQuery(
+    relayMembers.map((member) => member.pubkey),
+    { enabled: open && relayMembers.length > 0 },
+  );
   const runtimes = providersQuery.data ?? [];
 
   const [name, setName] = React.useState("");
@@ -314,6 +337,9 @@ export function TemplateFormDialog({
     [],
   );
   const [selectedTeamIds, setSelectedTeamIds] = React.useState<string[]>([]);
+  const [selectedMemberPubkeys, setSelectedMemberPubkeys] = React.useState<
+    string[]
+  >([]);
   const [personaRuntimes, setPersonaRuntimes] = React.useState<
     Record<string, string>
   >({});
@@ -331,6 +357,7 @@ export function TemplateFormDialog({
       setCanvasTemplate(template.canvasTemplate ?? "");
       setSelectedPersonaIds(template.agents.personas.map((p) => p.personaId));
       setSelectedTeamIds(template.agents.teams.map((t) => t.teamId));
+      setSelectedMemberPubkeys(template.members.map((member) => member.pubkey));
       const pRuntimes: Record<string, string> = {};
       for (const p of template.agents.personas) {
         if (p.runtime) pRuntimes[p.personaId] = p.runtime;
@@ -347,6 +374,7 @@ export function TemplateFormDialog({
       setCanvasTemplate("");
       setSelectedPersonaIds([]);
       setSelectedTeamIds([]);
+      setSelectedMemberPubkeys([]);
       setPersonaRuntimes({});
       setTeamRuntimes({});
     }
@@ -372,6 +400,16 @@ export function TemplateFormDialog({
         backend: null,
       })),
     };
+    const existingMemberRoles = new Map(
+      template?.members.map((member) => [
+        normalizePubkey(member.pubkey),
+        member.role,
+      ]),
+    );
+    const members = selectedMemberPubkeys.map((pubkey) => ({
+      pubkey,
+      role: existingMemberRoles.get(normalizePubkey(pubkey)) ?? "member",
+    }));
 
     if (isEditing) {
       const input: UpdateChannelTemplateInput = {
@@ -380,6 +418,7 @@ export function TemplateFormDialog({
         description: description.trim() || undefined,
         canvasTemplate: canvasTemplate.trim() || undefined,
         agents,
+        members,
       };
 
       updateMutation.mutate(input, {
@@ -399,6 +438,7 @@ export function TemplateFormDialog({
         description: description.trim() || undefined,
         canvasTemplate: canvasTemplate.trim() || undefined,
         agents,
+        members,
       };
 
       createMutation.mutate(input, {
@@ -443,6 +483,36 @@ export function TemplateFormDialog({
       return [...prev, teamId];
     });
   }
+
+  function handleToggleMember(pubkey: string) {
+    const normalizedPubkey = normalizePubkey(pubkey);
+    setSelectedMemberPubkeys((current) =>
+      current.some(
+        (candidate) => normalizePubkey(candidate) === normalizedPubkey,
+      )
+        ? current.filter(
+            (candidate) => normalizePubkey(candidate) !== normalizedPubkey,
+          )
+        : [...current, normalizedPubkey],
+    );
+  }
+
+  const currentPubkey = identityQuery.data?.pubkey
+    ? normalizePubkey(identityQuery.data.pubkey)
+    : null;
+  const memberProfiles = memberProfilesQuery.data?.profiles;
+  const memberOptions = relayMembers
+    .filter((member) => normalizePubkey(member.pubkey) !== currentPubkey)
+    .map((member) => {
+      const profile = memberProfiles?.[normalizePubkey(member.pubkey)];
+      return {
+        avatarUrl: profile?.avatarUrl ?? null,
+        displayName:
+          profile?.displayName?.trim() || truncatePubkey(member.pubkey),
+        pubkey: normalizePubkey(member.pubkey),
+      };
+    })
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -570,6 +640,19 @@ export function TemplateFormDialog({
             isLoading={teamsQuery.isLoading}
           />
 
+          <TemplateMemberSelector
+            errorMessage={
+              relayMembersQuery.error instanceof Error
+                ? relayMembersQuery.error.message
+                : null
+            }
+            isLoading={relayMembersQuery.isLoading}
+            isPending={isPending}
+            members={memberOptions}
+            onToggleMember={handleToggleMember}
+            selectedMemberPubkeys={selectedMemberPubkeys}
+          />
+
           {/* Runtime assignments */}
           <RuntimeAssignments
             isPending={isPending}
@@ -654,6 +737,128 @@ function TemplateTeamSelector({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function TemplateMemberSelector({
+  errorMessage,
+  isLoading,
+  isPending,
+  members,
+  onToggleMember,
+  selectedMemberPubkeys,
+}: {
+  errorMessage: string | null;
+  isLoading: boolean;
+  isPending: boolean;
+  members: Array<{
+    avatarUrl: string | null;
+    displayName: string;
+    pubkey: string;
+  }>;
+  onToggleMember: (pubkey: string) => void;
+  selectedMemberPubkeys: readonly string[];
+}) {
+  const [search, setSearch] = React.useState("");
+  const normalizedSelection = new Set(
+    selectedMemberPubkeys.map(normalizePubkey),
+  );
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredMembers = normalizedSearch
+    ? members.filter(
+        (member) =>
+          member.displayName.toLowerCase().includes(normalizedSearch) ||
+          member.pubkey.includes(normalizedSearch),
+      )
+    : members;
+
+  return (
+    <div className="space-y-3" data-testid="template-member-selector">
+      <div>
+        <div className="text-sm font-medium">Members</div>
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          Add selected community members whenever this template is used.
+        </p>
+      </div>
+
+      {errorMessage ? (
+        <p className="text-sm text-destructive">{errorMessage}</p>
+      ) : isLoading ? (
+        <p className="text-sm text-muted-foreground">
+          Loading community members…
+        </p>
+      ) : members.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No other community members are available.
+        </p>
+      ) : (
+        <>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="pl-9"
+              data-testid="template-member-search"
+              disabled={isPending}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search community members"
+              value={search}
+            />
+          </div>
+          <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-border/80 p-1">
+            {filteredMembers.length === 0 ? (
+              <p className="px-3 py-4 text-center text-sm text-muted-foreground">
+                No members match your search.
+              </p>
+            ) : (
+              filteredMembers.map((member) => {
+                const isSelected = normalizedSelection.has(member.pubkey);
+                return (
+                  <button
+                    aria-pressed={isSelected}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                      isSelected
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-accent/60",
+                      isPending && "cursor-not-allowed opacity-50",
+                    )}
+                    data-testid={`template-member-${member.pubkey}`}
+                    disabled={isPending}
+                    key={member.pubkey}
+                    onClick={() => onToggleMember(member.pubkey)}
+                    type="button"
+                  >
+                    <ProfileAvatar
+                      avatarUrl={member.avatarUrl}
+                      className="h-8 w-8 shrink-0 text-xs"
+                      iconClassName="h-4 w-4"
+                      label={member.displayName}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                      {member.displayName}
+                    </span>
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "flex h-5 w-5 shrink-0 items-center justify-center rounded border",
+                        isSelected
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background",
+                      )}
+                    >
+                      {isSelected ? <Check className="h-4 w-4" /> : null}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
