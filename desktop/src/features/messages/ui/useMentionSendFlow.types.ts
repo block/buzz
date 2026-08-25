@@ -26,10 +26,6 @@ export type UseMentionSendFlowOptions = {
     pubkeys: readonly string[],
     newlyPinnedPubkeys: readonly string[],
   ) => void;
-  onInlineAgentMentionsSent?: (promotion: {
-    expectedRevision: number;
-    pubkeys: readonly string[];
-  }) => void;
   onSendRef: React.MutableRefObject<
     (
       content: string,

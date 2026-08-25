@@ -57,6 +57,7 @@ export function useAgentAddressLockPicker({
   audience,
   audienceScope,
   mentions,
+  onAddressAgentMention,
   onAutoPinAgentMention,
   onPulseAddressLock,
   profiles,
@@ -66,6 +67,7 @@ export function useAgentAddressLockPicker({
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
+  onAddressAgentMention?: (suggestion: MentionSuggestion) => void;
   onAutoPinAgentMention?: (suggestion: MentionSuggestion) => void;
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
@@ -204,9 +206,13 @@ export function useAgentAddressLockPicker({
             preserveSelection: true,
           });
         }
-        audience.addPubkey(pubkey);
         trackMentionAddressedAgent(pubkey);
-        onPulseAddressLock(pubkey);
+        if (onAddressAgentMention) {
+          onAddressAgentMention(suggestion);
+        } else {
+          audience.addPubkey(pubkey);
+          onPulseAddressLock(pubkey);
+        }
         setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
       }
 
@@ -240,6 +246,7 @@ export function useAgentAddressLockPicker({
       mentions.mentionStartIndex,
       mentions.openMentionPicker,
       mentions.registerMentionPubkey,
+      onAddressAgentMention,
       onPulseAddressLock,
       removeAddressedAgentMentions,
       richText.getPlainTextAndCursor,
@@ -266,10 +273,16 @@ export function useAgentAddressLockPicker({
         applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
         if (!lockedAgentPubkeys.has(pubkey)) {
           trackMentionAddressedAgent(pubkey);
-          audience.addPubkey(pubkey);
+          if (onAddressAgentMention) {
+            onAddressAgentMention(suggestion);
+          } else {
+            audience.addPubkey(pubkey);
+            onPulseAddressLock(pubkey);
+          }
           setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
+        } else {
+          onPulseAddressLock(pubkey);
         }
-        onPulseAddressLock(pubkey);
         return;
       }
 
@@ -283,6 +296,7 @@ export function useAgentAddressLockPicker({
       lockedAgentPubkeys,
       mentions.isInlineMentionSelection,
       mentions.insertMention,
+      onAddressAgentMention,
       onAutoPinAgentMention,
       onPulseAddressLock,
       richText.getPlainTextAndCursor,

@@ -227,6 +227,9 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
 
   await expect(input).toHaveText("@alice draft text");
   await expect(input.locator(".agent-mention-highlight")).toHaveText("alice");
+  await expect(
+    page.getByTestId("composer-auto-pin-confirmation"),
+  ).toContainText("alice will be mentioned automatically");
   await pressPrimaryShift(page, "M");
   await expect(input).toHaveText("draft text");
   await pressPrimaryShift(page, "M");
@@ -497,6 +500,47 @@ test("a manually mentioned agent becomes selected immediately", async ({
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible();
 
+  const autoPinConfirmation = page.getByTestId(
+    "composer-auto-pin-confirmation",
+  );
+  await expect(autoPinConfirmation).toContainText(
+    "Morgarita will be mentioned automatically",
+  );
+  await expect(autoPinConfirmation).not.toContainText(
+    "Future messages in this channel will include this agent.",
+  );
+  await expect(autoPinConfirmation).toHaveAttribute("data-side", "right");
+  await expect(autoPinConfirmation.locator("span")).toHaveCSS(
+    "white-space",
+    "nowrap",
+  );
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Morgarita will be mentioned automatically" }),
+  ).toHaveCount(0);
+  const addressControlBox = await composer
+    .getByTestId("composer-address-locks")
+    .locator("..")
+    .boundingBox();
+  const confirmationBox = await autoPinConfirmation.boundingBox();
+  expect(addressControlBox).not.toBeNull();
+  expect(confirmationBox).not.toBeNull();
+  if (!addressControlBox || !confirmationBox) {
+    throw new Error("Automatic mention confirmation is not laid out");
+  }
+  expect(confirmationBox.x).toBeGreaterThan(
+    addressControlBox.x + addressControlBox.width,
+  );
+  const turnOffAction = autoPinConfirmation.getByRole("button", {
+    name: "Turn off",
+  });
+  await expect(turnOffAction).toHaveRole("button");
+  await expect(turnOffAction).toHaveText("Turn off");
+
+  await input.press("Escape");
+  await expect(autoPinConfirmation).toHaveCount(0);
+
   await input.type("hello");
   await input.press("Enter");
 
@@ -506,15 +550,7 @@ test("a manually mentioned agent becomes selected immediately", async ({
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible({ timeout: 2_500 });
-  const autoPinToast = page
-    .locator("[data-sonner-toast][data-removed='false']")
-    .filter({ hasText: "Morgarita will be mentioned automatically" });
-  await expect(autoPinToast).not.toContainText(
-    "Future messages in this channel will include this agent.",
-  );
-  const undoAction = autoPinToast.locator("[data-action]");
-  await expect(undoAction).toHaveRole("button");
-  await expect(undoAction).toHaveText("Undo");
+  await expect(autoPinConfirmation).toHaveCount(0);
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita hello"))
     .toContain(AGENT_A);
@@ -529,7 +565,7 @@ test("a manually mentioned agent becomes selected immediately", async ({
     .not.toContain(AGENT_A);
 });
 
-test("the auto-pin toast can undo and the picker can restore the agent", async ({
+test("the auto-pin popover can turn off automatic agent mentions", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
@@ -541,29 +577,29 @@ test("the auto-pin toast can undo and the picker can restore the agent", async (
   await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
   await input.press("Tab");
   await expect(input).toHaveText("@Morgarita ");
-  await input.press("Space");
-  await input.type("undo me");
-  await input.press("Enter");
 
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible();
-  const autoPinToast = page
-    .locator("[data-sonner-toast][data-removed='false']")
-    .filter({ hasText: "Morgarita will be mentioned automatically" });
-  await autoPinToast.locator("[data-action]").click();
+  const autoPinConfirmation = page.getByTestId(
+    "composer-auto-pin-confirmation",
+  );
+  await expect(autoPinConfirmation).toContainText(
+    "Morgarita will be mentioned automatically",
+  );
+  await autoPinConfirmation.getByRole("button", { name: "Turn off" }).click();
 
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
+  await expect(autoPinConfirmation).toHaveCount(0);
+
+  await composer.getByTestId("message-insert-mention").click();
   await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
-  await expect(composer.getByTestId("mention-options-trigger")).toHaveAttribute(
-    "aria-expanded",
-    "true",
-  );
+  await composer.getByTestId("mention-options-trigger").click();
   await expect(
     composer.getByTestId("mention-keep-agents-pinned-toggle"),
-  ).toBeVisible();
+  ).toHaveAttribute("data-state", "unchecked");
 
   await input.press("Escape");
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
@@ -650,4 +686,46 @@ test("the mention-button placement fits the narrow composer", async ({
   ).toBeVisible();
   await waitForAnimations(page);
   await composer.screenshot({ path: `${SHOTS}/narrow-mention-button.png` });
+});
+
+test("captures the lightweight auto-pin popover", async ({ page }) => {
+  await seedTheme(page, "buzz-dark");
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("draft text");
+  await pressPrimaryShift(page, "M");
+  await expect(input).toHaveText("@alice draft text");
+
+  const addressControl = composer
+    .getByTestId("composer-address-locks")
+    .locator("..");
+  const confirmation = page.getByTestId("composer-auto-pin-confirmation");
+  await expect(confirmation).toContainText(
+    "alice will be mentioned automatically",
+  );
+  await waitForAnimations(page);
+
+  const addressBox = await addressControl.boundingBox();
+  const confirmationBox = await confirmation.boundingBox();
+  expect(addressBox).not.toBeNull();
+  expect(confirmationBox).not.toBeNull();
+  if (!addressBox || !confirmationBox) {
+    throw new Error("Popover is not laid out");
+  }
+
+  const left = addressBox.x - 14;
+  const top = Math.min(addressBox.y, confirmationBox.y) - 14;
+  const right = confirmationBox.x + confirmationBox.width + 14;
+  const bottom =
+    Math.max(
+      addressBox.y + addressBox.height,
+      confirmationBox.y + confirmationBox.height,
+    ) + 14;
+  await page.screenshot({
+    path: `${SHOTS}/auto-pin-popover-dark.png`,
+    clip: { x: left, y: top, width: right - left, height: bottom - top },
+  });
 });

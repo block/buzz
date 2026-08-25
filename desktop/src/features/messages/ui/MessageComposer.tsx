@@ -28,7 +28,6 @@ import {
 } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
-  getPersistentAgentAudienceRevision,
   getPersistentAgentAudienceScope,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
@@ -118,8 +117,6 @@ function MessageComposerImpl({
   } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
-  const [mentionOptionsOpenRequest, setMentionOptionsOpenRequest] =
-    React.useState(0);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
     Set<string>
   >(() => new Set());
@@ -300,13 +297,18 @@ function MessageComposerImpl({
   const persistentAudience = usePersistentAgentAudience(audienceScope);
   const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
-  const openMentionOptionsRef = React.useRef<() => void>(() => {});
-  const addInlineAgentMentionsToAudience = useAutoPinMentionedAgents({
+  const {
+    confirmationTitle: autoPinConfirmationTitle,
+    dismissConfirmation: dismissAutoPinConfirmation,
+    promoteExplicitlyAddressedAgents,
+    promoteMentionedAgents,
+    turnOffConfirmation: turnOffAutoPinConfirmation,
+  } = useAutoPinMentionedAgents({
     audienceScope,
     enabled: keepMentionedAgentsPinned,
     getDisplayName: mentions.getMentionDisplayName,
-    onOpenOptions: () => openMentionOptionsRef.current(),
     onPulse: addressPulse.pulseOne,
+    onTurnOff: () => setKeepMentionedAgentsPinned(false),
   });
   const restoreAddressedAgentMentionsRef = React.useRef<
     (
@@ -354,7 +356,6 @@ function MessageComposerImpl({
         },
       );
     },
-    onInlineAgentMentionsSent: addInlineAgentMentionsToAudience,
     onPrepareSendChannel,
     onSendRef,
     richText,
@@ -446,15 +447,17 @@ function MessageComposerImpl({
     selectMentionSuggestion,
     syncAddressedAgentsFromText,
     toggleAlwaysAddressAgent,
-    trackMentionAddressedAgent,
   } = useAgentAddressLockPicker({
     applyAutocompleteEdit,
     audience: persistentAudience,
     audienceScope,
     mentions,
+    onAddressAgentMention: (suggestion) =>
+      promoteExplicitlyAddressedAgents({
+        pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
+      }),
     onAutoPinAgentMention: (suggestion) => {
-      if (suggestion.pubkey) trackMentionAddressedAgent(suggestion.pubkey);
-      addInlineAgentMentionsToAudience({
+      promoteMentionedAgents({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       });
     },
@@ -531,11 +534,6 @@ function MessageComposerImpl({
     () => openMentionPicker(false),
     [openMentionPicker],
   );
-  const openMentionOptions = React.useCallback(() => {
-    openMentionSettings();
-    setMentionOptionsOpenRequest((request) => request + 1);
-  }, [openMentionSettings]);
-  openMentionOptionsRef.current = openMentionOptions;
   const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
     enabled: Boolean(audienceScope && editTarget == null),
     lockedAgent: lockedAgents[0],
@@ -622,9 +620,6 @@ function MessageComposerImpl({
         : prepareBackgroundLinkPreviews(getLiveLinkPreviewCandidates());
       await mentionSendFlow.sendMessageWithMentionFlow({
         addressedAgentPubkeys: persistentAudience.pubkeys,
-        audienceRevision: audienceScope
-          ? getPersistentAgentAudienceRevision(audienceScope)
-          : 0,
         capturedChannelId: channelId,
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
@@ -667,7 +662,6 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
-    audienceScope,
     persistentAudience.pubkeys,
     isEditSubmissionLocked,
     effectiveDraftKey,
@@ -894,7 +888,6 @@ function MessageComposerImpl({
                   ? setKeepMentionedAgentsPinned
                   : undefined
               }
-              openOptionsRequest={mentionOptionsOpenRequest}
               onToggleAlwaysAddressAgent={
                 audienceScope && editTarget == null
                   ? toggleAlwaysAddressAgent
@@ -963,6 +956,7 @@ function MessageComposerImpl({
             </div>
             <ComposerDockToolbar
               addressedAgents={editTarget == null ? lockedAgents : []}
+              autoPinConfirmationTitle={autoPinConfirmationTitle}
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}
               editor={richText.editor}
@@ -973,6 +967,8 @@ function MessageComposerImpl({
               isSending={isSending || mentionSendFlow.isPreparingMentionSend}
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
+              onAutoPinConfirmationDismiss={dismissAutoPinConfirmation}
+              onAutoPinConfirmationTurnOff={turnOffAutoPinConfirmation}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}
               onFormattingToggle={handleFormattingToggle}

@@ -26,6 +26,7 @@ const ignoreAddressRemoval = () => {};
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
     addressedAgents = NO_ADDRESSED_AGENTS,
+    autoPinConfirmationTitle,
     composerDisabled,
     editor,
     extraActions,
@@ -35,6 +36,8 @@ export const MessageComposerToolbar = React.memo(
     isSending,
     isUploading,
     onCaptureSelection,
+    onAutoPinConfirmationDismiss,
+    onAutoPinConfirmationTurnOff,
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
@@ -47,6 +50,7 @@ export const MessageComposerToolbar = React.memo(
     shakeVersionByPubkey,
   }: {
     addressedAgents?: readonly ComposerAddressAgent[];
+    autoPinConfirmationTitle?: string | null;
     composerDisabled: boolean;
     editor: Editor | null;
     extraActions?: React.ReactNode;
@@ -56,6 +60,8 @@ export const MessageComposerToolbar = React.memo(
     isSending: boolean;
     isUploading: boolean;
     onCaptureSelection: () => void;
+    onAutoPinConfirmationDismiss?: () => void;
+    onAutoPinConfirmationTurnOff?: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
@@ -175,7 +181,10 @@ export const MessageComposerToolbar = React.memo(
               >
                 <ComposerMentionButton
                   agents={addressedAgents}
+                  confirmationTitle={autoPinConfirmationTitle}
                   disabled={composerDisabled}
+                  onConfirmationDismiss={onAutoPinConfirmationDismiss}
+                  onConfirmationTurnOff={onAutoPinConfirmationTurnOff}
                   onCaptureSelection={onCaptureSelection}
                   onOpen={onOpenMentionPicker}
                   onRemove={onRemoveAddressedAgent}

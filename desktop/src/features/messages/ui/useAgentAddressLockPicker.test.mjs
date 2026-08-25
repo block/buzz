@@ -93,6 +93,49 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
   );
 });
 
+test("always addressing a new agent delegates the first add for immediate confirmation", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const addressedSuggestions = [];
+  const addedPubkeys = [];
+  const pulsedPubkeys = [];
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: () => {},
+      audience: {
+        pubkeys: [],
+        addPubkey: (pubkey) => addedPubkeys.push(pubkey),
+      },
+      audienceScope: "channel-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "Agent Ada",
+        isInlineMentionSelection: () => false,
+        isMentionOpen: false,
+        registerMentionPubkey: () => {},
+      },
+      onAddressAgentMention: (value) => addressedSuggestions.push(value),
+      onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
+      richText: {
+        getPlainTextAndCursor: () => ({ text: "@Agent Ada ", cursor: 11 }),
+      },
+    }),
+  );
+
+  act(() => result.current.toggleAlwaysAddressAgent(suggestion));
+
+  assert.deepEqual(addressedSuggestions, [suggestion]);
+  assert.deepEqual(addedPubkeys, []);
+  assert.deepEqual(pulsedPubkeys, []);
+});
+
 test("toggling an addressed agent keeps autocomplete open and removes the lock", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
