@@ -68,9 +68,9 @@ Hooks are **off by default**. The operator must explicitly opt in via
 ### Not a hook: the reply guard
 
 `buzz-agent` has one in-process objection at the `_Stop` gate that is **not** an
-MCP hook and exposes no hook tool: the reply guard
-(`BUZZ_AGENT_REQUIRE_REPLY=1`), which reminds the model to publish when a turn is
-about to end with nothing posted to Buzz. There is no `_ReplyGuard` tool to
+MCP hook and exposes no hook tool: the reply guard, which reminds the model to
+publish when a turn is about to end with nothing posted to Buzz. It is on by
+default; `BUZZ_AGENT_REQUIRE_REPLY=0` opts out. There is no `_ReplyGuard` tool to
 implement and no server to allowlist — the env var and the recognition contract
 are documented in
 [crates/buzz-agent/README.md](../crates/buzz-agent/README.md#reply-guard).
