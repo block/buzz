@@ -13,6 +13,12 @@ use tracing::warn;
 /// NIP-44 encryption overhead.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
 
+/// Default NIP-11 relay name, used when `BUZZ_RELAY_NAME` is unset.
+pub const DEFAULT_RELAY_NAME: &str = "Buzz Relay";
+
+/// Default NIP-11 relay description, used when `BUZZ_RELAY_DESCRIPTION` is unset.
+pub const DEFAULT_RELAY_DESCRIPTION: &str = "Buzz — private team communication relay";
+
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -101,6 +107,13 @@ pub struct Config {
     pub db_read_pool_size: Option<u32>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
+    /// Human-readable relay name advertised in the NIP-11 `name` field.
+    /// Set via `BUZZ_RELAY_NAME`; defaults to [`DEFAULT_RELAY_NAME`].
+    pub relay_name: String,
+    /// Human-readable relay description advertised in the NIP-11 `description`
+    /// field. Set via `BUZZ_RELAY_DESCRIPTION`; defaults to
+    /// [`DEFAULT_RELAY_DESCRIPTION`].
+    pub relay_description: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
@@ -533,6 +546,18 @@ impl Config {
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+
+        let relay_name = std::env::var("BUZZ_RELAY_NAME")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_RELAY_NAME.to_string());
+
+        let relay_description = std::env::var("BUZZ_RELAY_DESCRIPTION")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_RELAY_DESCRIPTION.to_string());
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -997,6 +1022,8 @@ impl Config {
             db_pool_size,
             db_read_pool_size,
             relay_url,
+            relay_name,
+            relay_description,
             pairing_relay_url,
             max_connections,
             max_concurrent_handlers,
@@ -1156,6 +1183,45 @@ mod tests {
         assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+        );
+        assert_eq!(config.relay_name, DEFAULT_RELAY_NAME);
+        assert_eq!(config.relay_description, DEFAULT_RELAY_DESCRIPTION);
+    }
+
+    #[test]
+    fn relay_name_and_description_env_override_and_blank_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_name = std::env::var_os("BUZZ_RELAY_NAME");
+        let previous_description = std::env::var_os("BUZZ_RELAY_DESCRIPTION");
+
+        std::env::set_var("BUZZ_RELAY_NAME", "  Acme Chat  ");
+        std::env::set_var("BUZZ_RELAY_DESCRIPTION", "Acme's private relay");
+        let overridden = Config::from_env().expect("config");
+
+        std::env::set_var("BUZZ_RELAY_NAME", "   ");
+        std::env::set_var("BUZZ_RELAY_DESCRIPTION", "");
+        let blank = Config::from_env().expect("config");
+
+        for (name, value) in [
+            ("BUZZ_RELAY_NAME", previous_name),
+            ("BUZZ_RELAY_DESCRIPTION", previous_description),
+        ] {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+
+        assert_eq!(overridden.relay_name, "Acme Chat", "value must be trimmed");
+        assert_eq!(overridden.relay_description, "Acme's private relay");
+        assert_eq!(
+            blank.relay_name, DEFAULT_RELAY_NAME,
+            "blank value must fall back to the default"
+        );
+        assert_eq!(
+            blank.relay_description, DEFAULT_RELAY_DESCRIPTION,
+            "blank value must fall back to the default"
         );
     }
 
