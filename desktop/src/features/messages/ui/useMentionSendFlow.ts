@@ -578,12 +578,18 @@ export function useMentionSendFlow({
           }
         };
         if (preparedUpload) {
+          let settleUpload!: () => void;
+          const uploadSettled = new Promise<void>((resolve) => {
+            settleUpload = resolve;
+          });
           uploadStarted = preparedUpload.start({
             onComplete: async (uploaded, signal) => {
               try {
                 await finishSend(uploaded, signal);
               } catch {
                 restoreComposerAfterFailure();
+              } finally {
+                settleUpload();
               }
             },
             onError: (error) => {
@@ -591,14 +597,18 @@ export function useMentionSendFlow({
               toast.error(
                 `Upload failed: ${getErrorMessage(error, "Unknown error")}`,
               );
+              settleUpload();
             },
             onCancel: () => {
               restoreComposerAfterFailure();
+              settleUpload();
             },
           });
           if (!uploadStarted) {
+            settleUpload();
             return restoreComposerAfterFailure();
           }
+          await uploadSettled;
         }
         if (!preparedUpload) {
           try {

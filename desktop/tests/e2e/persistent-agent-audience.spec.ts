@@ -142,8 +142,18 @@ async function emitMockMessage(
 async function installAudienceFixtures(
   page: Page,
   options: {
+    deferredComposerUploads?: boolean;
     sendMessageDelayMs?: number;
     sendMessageErrors?: string[];
+    uploadDelayMs?: number;
+    uploadDescriptors?: Array<{
+      filename: string;
+      sha256: string;
+      size: number;
+      type: string;
+      uploaded: number;
+      url: string;
+    }>;
     usersBatchDelayMs?: number;
   } = {},
 ) {
@@ -165,6 +175,69 @@ async function installAudienceFixtures(
     ],
   });
 }
+
+test("keeps a queued-attachment send locked until upload settlement", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page, {
+    deferredComposerUploads: true,
+    uploadDelayMs: 3_000,
+    uploadDescriptors: [
+      {
+        filename: "delayed-video.mp4",
+        sha256: "d".repeat(64),
+        size: 16,
+        type: "video/mp4",
+        uploaded: 1,
+        url: `https://mock.relay/media/${"d".repeat(64)}.mp4`,
+      },
+    ],
+  });
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("@Mor");
+  await input.press("Tab");
+  await input.type(" delayed upload");
+
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    composer.getByRole("button", { name: "Attach file" }).click(),
+  ]);
+  await chooser.setFiles({
+    buffer: Buffer.from("delayed video"),
+    mimeType: "video/mp4",
+    name: "delayed-video.mp4",
+  });
+
+  const outgoingCountBefore = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__?.length ?? 0,
+  );
+  await input.press("Enter");
+  await expect(composer.getByTestId("composer-upload-progress")).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(composer.getByTestId("send-message")).toBeDisabled();
+  await input.press("Enter");
+  await input.press("Enter");
+
+  await expect(composer.getByTestId("composer-upload-progress")).toHaveCount(
+    0,
+    {
+      timeout: 5_000,
+    },
+  );
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          (before) => (window.__BUZZ_E2E_SIGNED_EVENTS__?.length ?? 0) - before,
+          outgoingCountBefore,
+        ),
+      { timeout: 5_000 },
+    )
+    .toBe(1);
+});
 
 test("automatically mentions multiple agents from the mention picker", async ({
   page,
