@@ -35,6 +35,18 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
     ],
   },
   {
+    title: "媒体与 Agent 分享",
+    items: [
+      "支持竖屏视频通过分辨率校验。",
+      "Agent 分享头像会自动压缩，减少分享卡片体积。",
+      "分享失败时显示更具体的错误原因。",
+    ],
+  },
+  {
+    title: "开发工具",
+    items: ["MCP 文件工具支持使用 `~` 指向用户主目录，也兼容 MSYS 路径。"],
+  },
+  {
     title: "构建体验",
     items: ["Windows 安装包构建现在会复用 Cargo 增量缓存，减少重复编译时间。"],
   },
