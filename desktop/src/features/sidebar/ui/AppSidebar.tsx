@@ -33,7 +33,11 @@ import {
   AppSidebarPinnedHeader,
   AppSidebarPrimaryMenu,
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
-import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
+import {
+  MoreUnreadButton,
+  preferredUnreadTarget,
+} from "@/features/sidebar/ui/MoreUnreadButton";
+import { unreadChannelCountLabel } from "@/shared/ui/UnreadPill";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
   ChannelGroupSection,
@@ -148,7 +152,7 @@ export function AppSidebar({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
   // biome-ignore format: keep compact to stay within file size limit
-  const { scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
+  const { scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -390,6 +394,31 @@ export function AppSidebar({
       ),
     [directMessages, dmChannelLabels, sortModeFor],
   );
+  const unreadDmPreviewsBelow = React.useMemo(
+    () =>
+      unreadBelowChannelIds.flatMap((channelId) => {
+        const channel = directMessages.find(
+          (candidate) => candidate.id === channelId,
+        );
+        const participant = dmParticipantsByChannelId[channelId]?.[0];
+        if (!channel || !participant) return [];
+        return [
+          {
+            accessibleLabel: participant.label,
+            avatarUrl: participant.avatarUrl,
+            channelId,
+            label: dmChannelLabels[channelId] ?? participant.label,
+          },
+        ];
+      }),
+    [
+      directMessages,
+      dmChannelLabels,
+      dmParticipantsByChannelId,
+      unreadBelowChannelIds,
+    ],
+  );
+  const nextUnreadDmBelowId = preferredUnreadTarget(unreadDmPreviewsBelow);
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeCommunityId: activeCommunity?.id,
     currentPubkey,
@@ -487,7 +516,9 @@ export function AppSidebar({
           {unreadAboveCount > 0 ? (
             <MoreUnreadButton
               count={unreadAboveCount}
-              label={unreadAboveLabel}
+              label={
+                unreadAboveLabel ?? unreadChannelCountLabel(unreadAboveCount)
+              }
               onClick={scrollToNextAbove}
               position="top"
               testId="sidebar-more-unread-above"
@@ -760,8 +791,15 @@ export function AppSidebar({
             <MoreUnreadButton
               bottomClassName="bottom-full"
               count={unreadBelowCount}
-              label={unreadBelowLabel}
-              onClick={scrollToNextBelow}
+              dmPreviews={unreadDmPreviewsBelow}
+              label={
+                unreadBelowLabel ?? unreadChannelCountLabel(unreadBelowCount)
+              }
+              onClick={() =>
+                nextUnreadDmBelowId
+                  ? scrollToChannel(nextUnreadDmBelowId)
+                  : scrollToNextBelow()
+              }
               position="bottom"
               testId="sidebar-more-unread-below"
             />
