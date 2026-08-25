@@ -1,0 +1,13 @@
+[package]
+name = "buzz-kinds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Declarative event-kind registry for Buzz: the base write-scope, NIP-29 channel-scoping classification, and read-side sensitivity of every event kind, in one place"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-auth = { workspace = true }
+nostr = { workspace = true }
