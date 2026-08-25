@@ -12,7 +12,6 @@ import type {
   AddChannelMembersResult,
   BackendProviderCandidate,
   BackendProviderProbeResult,
-  CanvasResponse,
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
@@ -25,8 +24,6 @@ import type {
   RelayEvent,
   SearchMessagesInput,
   SearchMessagesResponse,
-  SetCanvasInput,
-  SetCanvasResult,
   ThreadCursor,
   ThreadRepliesResponse,
   CreateManagedAgentInput,
@@ -42,6 +39,11 @@ import type {
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
+export {
+  getCanvas,
+  getCanvasHistory,
+  setCanvas,
+} from "@/shared/api/tauriCanvas";
 export { sendChannelMessage } from "@/shared/api/tauriMessages";
 export { getEventById, getEventsByIds } from "@/shared/api/tauriEvents";
 
@@ -234,17 +236,6 @@ type RawListRelayMembersResponse = {
   members: RawRelayMember[];
 };
 
-type RawCanvasResponse = {
-  content: string | null;
-  updated_at: number | null;
-  author: string | null;
-};
-
-type RawSetCanvasResult = {
-  ok: boolean;
-  event_id: string;
-};
-
 /** Error normalized from a rejected Tauri invocation with its wire payload. */
 export class TauriInvokeError extends Error {
   readonly payload: unknown;
@@ -399,33 +390,6 @@ export async function joinChannel(channelId: string): Promise<void> {
 
 export async function leaveChannel(channelId: string): Promise<void> {
   await invokeTauri("leave_channel", { channelId });
-}
-
-export async function getCanvas(channelId: string): Promise<CanvasResponse> {
-  const response = await invokeTauri<RawCanvasResponse>("get_canvas", {
-    channelId,
-  });
-  return {
-    content: response.content,
-    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
-    // "no canvas yet", and `undefined !== null` would make every fresh
-    // channel look already-seeded.
-    updatedAt: response.updated_at ?? null,
-    author: response.author ?? null,
-  };
-}
-
-export async function setCanvas(
-  input: SetCanvasInput,
-): Promise<SetCanvasResult> {
-  const response = await invokeTauri<RawSetCanvasResult>("set_canvas", {
-    channelId: input.channelId,
-    content: input.content,
-  });
-  return {
-    ok: response.ok,
-    eventId: response.event_id,
-  };
 }
 
 export async function getHomeFeed(

@@ -3,6 +3,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
+    managed_agents::persona_events::monotonic_created_at,
     relay::{query_relay, submit_event},
 };
 
@@ -46,15 +47,125 @@ pub async fn get_canvas(
 pub async fn set_canvas(
     channel_id: String,
     content: String,
+    expected_revision: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
-    let builder = events::build_set_canvas(uuid, &content)?;
+
+    // Writer discipline (contract v3): sign `created_at = max(now, head + 1)`
+    // so an accepted tagged write always sorts strictly ahead of the head it
+    // asserts (`created_at DESC, id ASC`). Without this, a same-second or
+    // behind-clock writer could satisfy the precondition yet lose the relay's
+    // tiebreak, "succeeding" without changing the visible canvas. Only a real
+    // head id has a timestamp to clear; `none`/absent asserts no prior head.
+    let prior_head_created_at = match expected_revision.as_deref() {
+        Some(rev) if rev.len() == 64 && rev.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            asserted_head_created_at(&state, &channel_id, rev).await?
+        }
+        _ => None,
+    };
+
+    let builder = events::build_set_canvas(uuid, &content, expected_revision.as_deref())?
+        .custom_created_at(monotonic_created_at(prior_head_created_at));
     let result = submit_event(builder, &state).await?;
 
     Ok(serde_json::json!({
         "ok": true,
         "event_id": result.event_id,
+    }))
+}
+
+/// `created_at` of the asserted head, or `None` if the relay no longer holds
+/// that revision. An id-scoped query is immutable, so the answer cannot shift
+/// under a concurrent write; a missing head lets the relay surface the
+/// `conflict: canvas revision does not exist` reject on submit rather than
+/// masking it with a stale floor here.
+async fn asserted_head_created_at(
+    state: &AppState,
+    channel_id: &str,
+    revision: &str,
+) -> Result<Option<i64>, String> {
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [40100],
+            "#h": [channel_id],
+            "ids": [revision],
+            "limit": 1
+        })],
+    )
+    .await?;
+    Ok(events
+        .first()
+        .map(|event| event.created_at.as_secs() as i64))
+}
+
+/// One page of a channel canvas's revision stream (kind:40100), newest first.
+/// Each 40100 write is a regular signed event the relay retains, so the
+/// standard query surface holds the complete history. The composite
+/// `(until, before_id)` cursor mirrors the relay read order
+/// (`created_at DESC, id ASC`) so paging never skips or repeats a revision when
+/// several share the same second. `next_cursor` is present only when a full
+/// page came back, i.e. older revisions may remain.
+#[tauri::command]
+pub async fn get_canvas_history(
+    channel_id: String,
+    limit: Option<usize>,
+    until: Option<u64>,
+    before_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    if before_id.is_some() && until.is_none() {
+        return Err("before_id requires until".to_string());
+    }
+    let page_size = limit.unwrap_or(100).max(1);
+
+    let mut filter = serde_json::json!({
+        "kinds": [40100],
+        "#h": [channel_id],
+        "limit": page_size,
+    });
+    if let Some(value) = until {
+        filter["until"] = serde_json::json!(value);
+    }
+    if let Some(ref value) = before_id {
+        if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("before_id must be a 64-character hex event id".to_string());
+        }
+        filter["before_id"] = serde_json::json!(value);
+    }
+
+    let events = query_relay(&state, &[filter]).await?;
+
+    let revisions: Vec<serde_json::Value> = events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "event_id": event.id.to_hex(),
+                "content": event.content,
+                "created_at": event.created_at.as_secs(),
+                "author": event.pubkey.to_hex(),
+            })
+        })
+        .collect();
+
+    // A full page means the relay may hold older revisions; hand back the
+    // last event as the cursor for the next "Load older" request. A short page
+    // is the tail, so there is no next cursor.
+    let next_cursor = if events.len() == page_size {
+        events.last().map(|last| {
+            serde_json::json!({
+                "created_at": last.created_at.as_secs(),
+                "event_id": last.id.to_hex(),
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(serde_json::json!({
+        "revisions": revisions,
+        "next_cursor": next_cursor,
     }))
 }

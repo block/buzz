@@ -1,4 +1,4 @@
-import { Pencil, Save, X } from "lucide-react";
+import { History, Pencil, Save, X } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -13,6 +13,12 @@ import {
   isRelayUnreachableError,
   RELAY_UNREACHABLE_SHORT,
 } from "@/shared/lib/relayError";
+import {
+  CANVAS_CONFLICT_MESSAGE,
+  CANVAS_EXPECTED_REVISION_NONE,
+  isCanvasConflictError,
+} from "@/features/channels/canvasConflict";
+import { CanvasHistoryPanel } from "./CanvasHistoryPanel";
 
 type ChannelCanvasProps = {
   channelId: string | null;
@@ -33,15 +39,25 @@ export function ChannelCanvas({
     [channels],
   );
   const [isEditing, setIsEditing] = React.useState(false);
+  const [showHistory, setShowHistory] = React.useState(false);
   const [draft, setDraft] = React.useState("");
+  // Head event id captured at edit-start. A background canvas refetch can move
+  // the live head mid-edit; the save must assert against what the editor
+  // actually loaded, not the latest head. `null` means "no canvas existed when
+  // I started" and maps to the `none` create-race sentinel below.
+  const [editBaseRevision, setEditBaseRevision] = React.useState<string | null>(
+    null,
+  );
 
   const canvasContent = canvasQuery.data?.content ?? null;
+  const canvasRevision = canvasQuery.data?.eventId ?? null;
   // Defer the single large Markdown parse so opening the canvas commits the
   // surrounding chrome immediately and the heavy render reconciles after.
   const deferredCanvasContent = React.useDeferredValue(canvasContent);
 
   function handleStartEditing() {
     setDraft(canvasContent ?? "");
+    setEditBaseRevision(canvasRevision);
     setIsEditing(true);
   }
 
@@ -51,7 +67,14 @@ export function ChannelCanvas({
   }
 
   async function handleSave() {
-    await setCanvasMutation.mutateAsync(draft);
+    // Assert against the head snapshotted at edit-start, not the live head —
+    // a refetch may have moved `canvasRevision` while the editor was open.
+    // A null snapshot means no canvas existed then, so send the `none`
+    // sentinel to close the concurrent-first-creation race.
+    await setCanvasMutation.mutateAsync({
+      content: draft,
+      expectedRevision: editBaseRevision ?? CANVAS_EXPECTED_REVISION_NONE,
+    });
     setIsEditing(false);
   }
 
@@ -110,7 +133,9 @@ export function ChannelCanvas({
         </div>
         {setCanvasMutation.error instanceof Error ? (
           <p className="text-sm text-destructive">
-            {setCanvasMutation.error.message}
+            {isCanvasConflictError(setCanvasMutation.error)
+              ? CANVAS_CONFLICT_MESSAGE
+              : setCanvasMutation.error.message}
           </p>
         ) : null}
       </div>
@@ -145,6 +170,29 @@ export function ChannelCanvas({
           <Pencil className="h-4 w-4" />
           {canvasContent ? "Edit canvas" : "Create canvas"}
         </Button>
+      ) : null}
+      {canvasContent ? (
+        <>
+          <Button
+            aria-expanded={showHistory}
+            data-testid="channel-canvas-history-toggle"
+            onClick={() => setShowHistory((open) => !open)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <History className="h-4 w-4" />
+            {showHistory ? "Hide history" : "History"}
+          </Button>
+          {showHistory && channelId ? (
+            <CanvasHistoryPanel
+              canRestore={canEdit && !isArchived}
+              channelId={channelId}
+              currentContent={canvasContent}
+              currentRevision={canvasRevision}
+            />
+          ) : null}
+        </>
       ) : null}
     </div>
   );

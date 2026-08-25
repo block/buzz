@@ -279,6 +279,13 @@ type MockBridgeOptions = {
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Seed canvas revisions (oldest first); see e2eBridge mock config. */
+  canvasRevisions?: Array<{
+    content: string;
+    createdAt?: number;
+    eventId?: string;
+    author?: string;
+  }>;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   /** Reject `clear_pending_navigation_deep_links` with this message. */

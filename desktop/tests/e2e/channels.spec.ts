@@ -3037,6 +3037,84 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
 });
 
+test("canvas history, save-conflict, and restore journey", async ({ page }) => {
+  // Seed a two-revision canvas so the history panel has an older revision to
+  // diff and restore, and the head is the newer one.
+  await installMockBridge(page, {
+    canvasRevisions: [
+      { content: "# Kickoff\n\nfirst draft", createdAt: 1_700_000_000 },
+      { content: "# Kickoff\n\nsecond draft", createdAt: 1_700_000_100 },
+    ],
+  });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const section = page.getByTestId("channel-canvas-section");
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "second draft",
+  );
+
+  // History lists both revisions, newest first with the head marked Current.
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  const historyItems = section.getByTestId("channel-canvas-history-item");
+  await expect(historyItems).toHaveCount(2);
+  await expect(historyItems.first()).toContainText("Current");
+
+  // Expanding the older revision shows a diff against the current content.
+  await historyItems.nth(1).getByRole("button").first().click();
+  await expect(section.getByTestId("channel-canvas-diff")).toContainText(
+    "first draft",
+  );
+
+  // Save-conflict: open the editor (snapshots head), move the head via a
+  // concurrent save through the bridge, then save — the frozen relay reject
+  // must surface as the reload-required conflict copy, not a raw error.
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  await section.getByTestId("channel-canvas-edit").click();
+  await page.evaluate((channelId) => {
+    return (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (cmd: string, args: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__.invoke("set_canvas", {
+      channelId,
+      content: "# Kickoff\n\nconcurrent edit",
+      expectedRevision: null,
+    });
+  }, GENERAL_CHANNEL_ID);
+  await section.getByTestId("channel-canvas-editor").fill("# Kickoff\n\nmine");
+  await section.getByTestId("channel-canvas-save").click();
+  await expect(section).toContainText(
+    "This canvas changed since you loaded it",
+  );
+
+  // Cancel, reload the head (reopen the sheet → fresh get_canvas), and restore
+  // the oldest revision — restore must publish a new head (not mutate history),
+  // so the count grows.
+  await section.getByTestId("channel-canvas-cancel").click();
+  await closeChannelManagement(page);
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "concurrent edit",
+  );
+
+  await section.getByTestId("channel-canvas-history-toggle").click();
+  const items = section.getByTestId("channel-canvas-history-item");
+  await expect(items).toHaveCount(3);
+  await items.last().getByRole("button").first().click();
+  await section.getByTestId("channel-canvas-restore").click();
+  await expect(section.getByTestId("channel-canvas-content")).toContainText(
+    "first draft",
+  );
+  await expect(section.getByTestId("channel-canvas-history-item")).toHaveCount(
+    4,
+  );
+});
+
 test("channel settings hides workflows and skips its query when the experiment is disabled", async ({
   page,
 }) => {
