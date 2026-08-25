@@ -58,14 +58,22 @@ void main() {
     expect(first.path, isNot(second.path));
   });
 
-  test('normalizes the fixed portrait camera sensor correction', () {
+  test('accounts for device orientation and lens direction', () {
     expect(
-      animatedAvatarPortraitFrameRotationDegrees(sensorOrientation: 270),
-      270,
+      animatedAvatarFrameRotationDegrees(
+        sensorOrientation: 270,
+        deviceOrientation: DeviceOrientation.landscapeRight,
+        lensDirection: CameraLensDirection.front,
+      ),
+      180,
     );
     expect(
-      animatedAvatarPortraitFrameRotationDegrees(sensorOrientation: 450),
-      90,
+      animatedAvatarFrameRotationDegrees(
+        sensorOrientation: 270,
+        deviceOrientation: DeviceOrientation.landscapeRight,
+        lensDirection: CameraLensDirection.back,
+      ),
+      0,
     );
   });
 
