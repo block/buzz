@@ -6,7 +6,7 @@ reject mock at startup; there is no fallback from production to fixtures.
 
 ## Request behavior
 
-- fixed `POST /v1/read/{tool}` routes only;
+- fixed `POST /v1/read/{tool}` and six `POST /v1/write/{tool}` routes only;
 - shared-secret reference authentication plus exact service audience;
 - opaque Agent Delegation consumed only at the Gateway, never sent upstream;
 - enterprise user, binding, delegation, Agent/Turn, used-call and Trace context
@@ -16,6 +16,10 @@ reject mock at startup; there is no fallback from production to fixtures.
   retried;
 - 128 KiB default response cap and at most 100 rows/Findings;
 - strict schema, decimal, Trace, Rule Version, Evidence and `biz://` validation.
+
+Draft writes retry only with a server-derived idempotency key. They terminate
+at fixed Business Core `/v1/agent-drafts/*` endpoints and must return `draft`;
+the adapter exposes no confirmation, approval or execution route.
 
 The reference shared-secret mode is a deployment baseline, not the preferred
 long-term workload identity. A production owner should replace it with mTLS or

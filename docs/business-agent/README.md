@@ -1,22 +1,22 @@
-# Business Agent V5
+# Business Agent
 
-V5 extends the dedicated, read-only business query path with a Production
-Adapter contract and deterministic cross-domain anomaly analysis. It does not
-change Nostr kinds, Relay behavior, Business Dock authentication, or the
-Business System write surface.
+Business Agent provides a dedicated query path plus six fixed draft-creation
+commands. It does not change Nostr kinds, Relay behavior, or Business Dock
+authentication. Confirm, approve, reverse, allocate, post and payment-execution
+operations remain unavailable to the Agent.
 
 ```text
-trusted Buzz event -> active identity binding -> short AgentReadDelegation
--> business-read-mcp -> Production Adapter -> Business Read API final authorization
--> structured minimal result -> Buzz answer -> biz:// link -> Business Dock
+trusted Buzz event -> active identity binding -> short turn delegation
+-> business-read-mcp -> Production Adapter -> Business API final authorization
+-> Business Core user permission/scope check -> result -> Buzz answer -> biz:// link
 ```
 
 This repository still has no customer ERP credentials or authoritative
 production endpoint. It now includes an independently runnable reference
 Business Read API backed by a versioned, explicitly desensitized acceptance
-snapshot. That path exercises service authentication, final delegation checks,
+snapshot for anomaly acceptance. The live draft path exercises service authentication, final delegation checks,
 formal multi-dimensional scope intersection, V4 reads, V5 rules, Trace and
-`biz://` links. It must not be described as real production data access.
+`biz://` links, while Business Core remains authoritative for every write.
 
 Start with [architecture.md](architecture.md), then
 [real-business-api-integration.md](real-business-api-integration.md),

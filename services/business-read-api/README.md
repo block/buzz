@@ -1,4 +1,4 @@
-# Business Read API
+# Business Agent API
 
 Production B2-B4/S1 reads for sales, purchasing, inventory, operational
 receivables/payables, profit, management reports, the operating dashboard and
@@ -17,6 +17,9 @@ Required runtime configuration is documented in
 and Business Core's own actor permission/scope checks are mandatory; there is
 no authorization or fixture bypass in a normal build.
 
-The fixed route is `POST /v1/read/{tool}`. Fourteen authoritative read tools,
-eight anomaly tools and six action-lifecycle reads form a fixed allowlist. The
-process never exposes generic SQL, HTTP, arbitrary resource routes or writes.
+The fixed routes are `POST /v1/read/{tool}` and `POST /v1/write/{tool}`.
+Fourteen authoritative reads, eight anomaly reads, six action-lifecycle reads
+and six draft creates form the allowlist. Drafts pass through Business Core's
+current-user permission and scope checks with a server-derived idempotency key.
+The process never exposes generic SQL, HTTP, arbitrary resources, confirmation,
+approval, reversal, posting or payment execution.

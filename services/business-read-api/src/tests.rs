@@ -288,3 +288,126 @@ async fn in_process_acceptance_cross_domain_p95_is_below_target() {
     eprintln!("desensitized in-process cross-domain p95: {p95:?}");
     assert!(p95 < Duration::from_secs(10));
 }
+
+#[test]
+fn draft_write_allowlist_uses_create_capabilities_only() {
+    let expected = [
+        ("create_sales_order_draft", "sales_order:create"),
+        ("create_shipment_draft", "shipment:create"),
+        ("create_purchase_order_draft", "purchase_order:create"),
+        ("create_goods_receipt_draft", "goods_receipt:create"),
+        ("create_customer_receipt_draft", "customer_receipt:create"),
+        ("create_supplier_payment_draft", "supplier_payment:create"),
+    ];
+    for (tool, capability) in expected {
+        assert!(WRITE_TOOLS.contains(&tool));
+        assert_eq!(required_capability(tool), Some(capability));
+    }
+    assert_eq!(WRITE_TOOLS.len(), 6);
+    assert_eq!(required_capability("confirm_sales_order"), None);
+    assert_eq!(required_capability("execute_payment"), None);
+}
+
+#[test]
+fn draft_write_inputs_are_strict_and_typed() {
+    let valid = json!({
+        "legalEntityId": Uuid::new_v4(),
+        "customerId": Uuid::new_v4(),
+        "businessUnitId": Uuid::new_v4(),
+        "currency": "CNY",
+        "orderDate": "2026-08-26",
+        "lines": [{
+            "skuId": Uuid::new_v4(),
+            "warehouseId": Uuid::new_v4(),
+            "unitOfMeasureId": Uuid::new_v4(),
+            "quantity": "2.5",
+            "unitPrice": "99.00"
+        }]
+    });
+    assert!(valid_write_input("create_sales_order_draft", &valid));
+    let mut generic = valid.clone();
+    generic["url"] = json!("https://example.invalid/write");
+    assert!(!valid_write_input("create_sales_order_draft", &generic));
+    let mut missing = valid;
+    missing
+        .as_object_mut()
+        .expect("object")
+        .remove("customerId");
+    assert!(!valid_write_input("create_sales_order_draft", &missing));
+}
+
+#[tokio::test]
+async fn draft_forwarding_uses_fixed_route_actor_and_server_idempotency() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let delegation_id = Uuid::new_v4();
+    let enterprise_user_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4();
+    let document_id = Uuid::new_v4();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut bytes = vec![0; 16 * 1024];
+        let read = stream.read(&mut bytes).await.expect("read");
+        let request = String::from_utf8_lossy(&bytes[..read]);
+        assert!(request.starts_with("POST /v1/agent-drafts/sales-orders "));
+        assert!(request.contains(&format!("x-enterprise-user-id: {enterprise_user_id}")));
+        assert!(request.contains(&format!("x-trace-id: {trace_id}")));
+        assert!(request.contains(&format!(
+            "idempotency-key: agent:{delegation_id}:create_sales_order_draft"
+        )));
+        assert!(request.contains("x-service-audience: business-core"));
+        let body = json!({
+            "id": document_id,
+            "number": "SO-TEST",
+            "status": "draft",
+            "version": 1,
+            "traceId": trace_id,
+            "idempotentReplay": false
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.expect("write");
+    });
+    let core = CoreClient {
+        client: reqwest::Client::new(),
+        base_url: Url::parse(&format!("http://{address}/")).expect("url"),
+        credential: "c".repeat(32),
+    };
+    let context = RequestContext {
+        enterprise_user_id,
+        identity_binding_id: Uuid::new_v4(),
+        delegation_id,
+        agent_id: "business-agent".into(),
+        agent_turn_id: "turn-1".into(),
+        trace_id,
+        used_calls: 1,
+        required_scope: "sales_order:create".into(),
+    };
+    let response = forward_draft_write(
+        &core,
+        "create_sales_order_draft",
+        json!({"strict":"input"}),
+        &context,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body"),
+    )
+    .expect("json");
+    assert_eq!(body["item"]["status"], "draft");
+    assert_eq!(
+        body["resourceRefs"][0]["bizUri"],
+        format!("biz://sales-order/{document_id}")
+    );
+    server.await.expect("server");
+}

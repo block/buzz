@@ -10,12 +10,12 @@ audience, effective capability/data-scope list, Trace id, expiry, and call budge
 - audience: exactly `business-read-mcp`;
 - default/max TTL: 300/900 seconds;
 - default call limit: 20;
-- scopes: a Business IAM-approved subset of the fixed read capability catalog;
+- scopes: a Business IAM-approved subset of the fixed read and draft-create catalog;
 - issuance idempotency: unique `(source_buzz_event_id, agent_id)`;
 - state: `active`, `expired`, `revoked`, or `exhausted`.
 
 The issue endpoint verifies the Nostr id/signature, author, `h` channel tag,
-active binding, active user, requested read scopes, and per-user rate limit,
+active binding, active user, requested fixed scopes, and per-user rate limit,
 then evaluates Business IAM. Unregistered Agents and empty effective permission
 intersections are rejected.
 

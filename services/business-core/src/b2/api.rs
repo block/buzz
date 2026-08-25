@@ -189,6 +189,9 @@ fn default_limit() -> i64 {
 
 pub fn service_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/agent-drafts/sales-orders", post(create_order))
+        .route("/v1/agent-drafts/shipments", post(create_shipment))
+        .route("/v1/agent-drafts/customer-receipts", post(create_receipt))
         .route("/v1/sales-orders", get(list_orders))
         .route("/v1/inventory-balances", get(list_inventory))
         .route("/v1/inventory-openings", get(list_openings))

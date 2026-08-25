@@ -16,7 +16,7 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-const READ_SCOPES: [&str; 8] = [
+const AGENT_SCOPES: [&str; 14] = [
     "sales_order:read",
     "purchase_order:read",
     "inventory:read",
@@ -25,6 +25,12 @@ const READ_SCOPES: [&str; 8] = [
     "order_profit:read",
     "business_anomaly:read",
     "business_action:read",
+    "sales_order:create",
+    "shipment:create",
+    "purchase_order:create",
+    "goods_receipt:create",
+    "customer_receipt:create",
+    "supplier_payment:create",
 ];
 
 #[derive(Clone)]
@@ -410,7 +416,7 @@ impl BusinessAgentHostConfig {
                 "sourceChannelId": source_channel_id.to_string(),
                 "agentId": agent_id,
                 "agentTurnId": agent_turn_id,
-                "scopes": READ_SCOPES,
+                "scopes": AGENT_SCOPES,
             }))
             .send()
             .await
@@ -435,11 +441,11 @@ impl BusinessAgentHostConfig {
             || issued.audience != "business-read-mcp"
             || issued.token.len() != 43
             || issued.scopes.is_empty()
-            || issued.scopes.len() > READ_SCOPES.len()
+            || issued.scopes.len() > AGENT_SCOPES.len()
             || issued
                 .scopes
                 .iter()
-                .any(|scope| !READ_SCOPES.contains(&scope.as_str()))
+                .any(|scope| !AGENT_SCOPES.contains(&scope.as_str()))
             || issued
                 .scopes
                 .iter()
@@ -534,11 +540,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_scope_allowlist_has_no_write_capability() {
-        assert_eq!(READ_SCOPES.len(), 8);
-        assert!(READ_SCOPES.iter().all(|scope| scope.ends_with(":read")));
-        assert!(READ_SCOPES.contains(&"business_anomaly:read"));
-        assert!(READ_SCOPES.contains(&"business_action:read"));
+    fn agent_scope_allowlist_has_only_draft_writes() {
+        assert_eq!(AGENT_SCOPES.len(), 14);
+        assert!(AGENT_SCOPES.contains(&"business_anomaly:read"));
+        assert!(AGENT_SCOPES.contains(&"sales_order:create"));
+        assert!(!AGENT_SCOPES.contains(&"sales_order:confirm"));
+        assert!(!AGENT_SCOPES.contains(&"payment:execute"));
     }
 
     #[test]
@@ -568,8 +575,18 @@ mod tests {
     }
 
     #[test]
-    fn prompt_routes_data_entry_to_human_business_forms() {
+    fn prompt_limits_writes_to_six_draft_tools_and_keeps_form_fallbacks() {
         let prompt = include_str!("business_agent_prompt.md");
+        for tool in [
+            "create_sales_order_draft",
+            "create_shipment_draft",
+            "create_purchase_order_draft",
+            "create_goods_receipt_draft",
+            "create_customer_receipt_draft",
+            "create_supplier_payment_draft",
+        ] {
+            assert!(prompt.contains(tool), "missing draft tool: {tool}");
+        }
         for reference in [
             "biz://sales-order-entry",
             "biz://shipment-entry",
@@ -583,7 +600,10 @@ mod tests {
                 "missing entry link: {reference}"
             );
         }
-        assert!(prompt.contains("Do not claim that the form is prefilled or saved"));
-        assert!(prompt.contains("verify the fields, and submit there"));
+        assert!(prompt.contains("Never guess identifiers"));
+        assert!(prompt.contains("When required fields are missing"));
+        assert!(
+            prompt.contains("confirmations, reversals, allocations, posting, payment execution")
+        );
     }
 }

@@ -1019,6 +1019,7 @@ dependencies = [
  "axum",
  "business-analytics",
  "business-anomaly-contracts",
+ "business-core",
  "business-iam",
  "business-query-contracts",
  "chrono",

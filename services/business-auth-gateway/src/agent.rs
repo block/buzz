@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
 
-const READ_SCOPES: [&str; 8] = [
+const AGENT_SCOPES: [&str; 14] = [
     "sales_order:read",
     "purchase_order:read",
     "inventory:read",
@@ -21,6 +21,12 @@ const READ_SCOPES: [&str; 8] = [
     "order_profit:read",
     "business_anomaly:read",
     "business_action:read",
+    "sales_order:create",
+    "shipment:create",
+    "purchase_order:create",
+    "goods_receipt:create",
+    "customer_receipt:create",
+    "supplier_payment:create",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -209,11 +215,11 @@ impl Store {
             && safe_id(&request.agent_turn_id)
             && security::safe_text(&request.source_channel_id, 1, 200);
         let valid_scopes = !request.scopes.is_empty()
-            && request.scopes.len() <= READ_SCOPES.len()
+            && request.scopes.len() <= AGENT_SCOPES.len()
             && request
                 .scopes
                 .iter()
-                .all(|scope| READ_SCOPES.contains(&scope.as_str()));
+                .all(|scope| AGENT_SCOPES.contains(&scope.as_str()));
         if !valid_source || !valid_ids || !valid_scopes {
             let mut audit = Audit::event("AGENT_TURN_REJECTED", "failure", facts);
             audit.reason = Some(if !valid_source {
@@ -387,7 +393,7 @@ impl Store {
             || !safe_id(&request.tool_name)
             || !safe_id(&request.agent_id)
             || !safe_id(&request.agent_turn_id)
-            || !READ_SCOPES.contains(&request.required_scope.as_str())
+            || !AGENT_SCOPES.contains(&request.required_scope.as_str())
         {
             return Err(Rejection::Unauthorized("delegation_invalid"));
         }
@@ -432,6 +438,7 @@ impl Store {
             let denied_event = match request.required_scope.as_str() {
                 "business_anomaly:read" => "BUSINESS_ANOMALY_AUTHORIZATION_DENIED",
                 "business_action:read" => "BUSINESS_ACTION_AUTHORIZATION_DENIED",
+                scope if scope.ends_with(":create") => "BUSINESS_WRITE_AUTHORIZATION_DENIED",
                 _ => "BUSINESS_READ_AUTHORIZATION_DENIED",
             };
             let mut audit = Audit::event(denied_event, "failure", facts);
@@ -504,7 +511,7 @@ impl Store {
             || !safe_id(&request.agent_turn_id)
             || request.trace_id != facts.trace_id
             || request.used_calls <= 0
-            || !READ_SCOPES.contains(&request.required_scope.as_str())
+            || !AGENT_SCOPES.contains(&request.required_scope.as_str())
         {
             return Err(Rejection::Forbidden("delegation_context_rejected"));
         }
@@ -535,7 +542,12 @@ impl Store {
             effective_grant(row.get("effective_grants"), &request.required_scope)
                 .ok_or(Rejection::Database)
         } else {
-            let mut audit = Audit::event("BUSINESS_READ_AUTHORIZATION_DENIED", "failure", facts);
+            let denied_event = if request.required_scope.ends_with(":create") {
+                "BUSINESS_WRITE_AUTHORIZATION_DENIED"
+            } else {
+                "BUSINESS_READ_AUTHORIZATION_DENIED"
+            };
+            let mut audit = Audit::event(denied_event, "failure", facts);
             audit.reason = Some("delegation_changed_or_revoked_before_response");
             audit.delegation_id = Some(request.delegation_id);
             audit.agent_id = Some(request.agent_id);
@@ -677,8 +689,10 @@ mod tests {
     }
 
     #[test]
-    fn only_fixed_read_scopes_are_accepted() {
-        assert!(READ_SCOPES.contains(&"inventory:read"));
-        assert!(!READ_SCOPES.contains(&"sales_order:write"));
+    fn only_fixed_agent_scopes_are_accepted() {
+        assert!(AGENT_SCOPES.contains(&"inventory:read"));
+        assert!(AGENT_SCOPES.contains(&"sales_order:create"));
+        assert!(!AGENT_SCOPES.contains(&"sales_order:confirm"));
+        assert!(!AGENT_SCOPES.contains(&"payment:execute"));
     }
 }

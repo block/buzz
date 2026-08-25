@@ -1,7 +1,8 @@
 # Business Read MCP
 
 `services/business-read-mcp` uses the repository's `rmcp` stdio stack. It has no
-network listener and registers a fixed set of 28 read-only tools. The 14
+network listener and registers 28 read tools plus six fixed draft-creation
+tools. The 14
 authoritative Business Core reads are:
 
 1. `get_sales_order`
@@ -19,11 +20,13 @@ authoritative Business Core reads are:
 13. `get_operating_dashboard`
 14. `get_business_data_quality`
 
-The remaining fixed tools are eight deterministic anomaly reads and six
-action-lifecycle reads. None can create, approve, execute, mutate or repair.
+The remaining read tools are eight deterministic anomaly reads and six
+action-lifecycle reads. The write allowlist contains only sales order, shipment,
+purchase order, goods receipt, customer receipt and supplier payment draft
+creation. It cannot confirm, approve, execute, allocate, post, reverse or edit.
 
 There is no SQL, arbitrary URL/path, generic API, Shell, filesystem, browser, or
-write tool. Every call follows:
+generic write tool. Every call follows:
 
 ```text
 strict input validation
@@ -33,6 +36,10 @@ strict input validation
 -> allowlisted biz:// link validation
 -> success/partial/failure audit
 ```
+
+Draft writes additionally receive a server-generated idempotency key derived
+from the delegation and tool name, then pass through Business Core's existing
+user permission, data-scope, validation, idempotency and domain-audit checks.
 
 Default tool timeout is 10 seconds, result limit 100, payload limit 128 KiB.
 The API client has no direct database access and does not forward Workbench,

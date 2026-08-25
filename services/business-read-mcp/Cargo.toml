@@ -1,6 +1,6 @@
 [package]
 name = "business-read-mcp"
-description = "Fixed-surface read-only MCP server for Business Agent queries"
+description = "Fixed-surface MCP server for Business Agent reads and draft creation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

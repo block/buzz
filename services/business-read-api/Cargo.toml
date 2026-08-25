@@ -11,6 +11,7 @@ repository.workspace = true
 axum = { workspace = true }
 business-analytics = { path = "../business-analytics" }
 business-anomaly-contracts = { path = "../../crates/business-anomaly-contracts" }
+business-core = { path = "../business-core" }
 business-iam = { path = "../../crates/business-iam" }
 business-query-contracts = { path = "../../crates/business-query-contracts" }
 chrono = { workspace = true }

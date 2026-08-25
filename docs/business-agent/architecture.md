@@ -9,11 +9,12 @@
 - `business-auth-gateway` resolves the event author through an active
   `BuzzIdentityBinding` to an active `EnterpriseUser`. It owns issuance,
   atomic call consumption, revocation, expiry, rate limit, and security audit.
-- `business-read-mcp` exposes exactly eight read tools, validates inputs,
+- `business-read-mcp` exposes a fixed set of 28 reads and six draft creates, validates inputs,
   consumes one call, invokes the API with service identity, validates the
   response, and emits sanitized audit facts.
-- The Business System remains authoritative for roles and data scope. It must
-  intersect requested and authorized scope on every call.
+- The Business System remains authoritative for roles and data scope. It
+  rechecks the current user and domain scope on every call; draft writes also
+  use server-derived idempotency keys and the existing domain audit log.
 - Business Dock independently uses its existing Business Session. A `biz://`
   link is navigation, never authorization.
 
