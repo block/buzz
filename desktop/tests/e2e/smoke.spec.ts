@@ -418,6 +418,27 @@ test("ordinary same-channel activation clears a prior search highlight", async (
   await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
 });
 
+test("ordinary rendered channel link clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("welcome");
+  await page.getByTestId("search-result-mock-general-welcome").click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-general-welcome"]');
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "Welcome",
+  );
+
+  await message.locator('[data-channel-link=""]').click();
+
+  await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
 test("ordinary same-forum activation clears a prior search highlight", async ({
   page,
 }) => {

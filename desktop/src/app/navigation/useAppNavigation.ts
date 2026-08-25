@@ -275,8 +275,9 @@ export function useAppNavigation() {
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
         messageId?: string;
-        /** Transient context for highlighting the selected search result. */
-        searchHighlight?: SearchHighlightNavigation | null;
+        /** Preserve an active search highlight; ordinary navigation clears it. */
+        preserveSearchHighlight?: boolean;
+        searchHighlight?: SearchHighlightNavigation;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
         thread?: string;
@@ -302,14 +303,12 @@ export function useAppNavigation() {
             ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
-          state:
-            options?.searchHighlight !== undefined
-              ? (previousState: Record<string, unknown>) => {
-                  const nextState = { ...previousState };
-                  nextState.searchHighlight = options.searchHighlight;
-                  return nextState;
-                }
-              : undefined,
+          state: options?.preserveSearchHighlight
+            ? undefined
+            : (previousState: Record<string, unknown>) => ({
+                ...previousState,
+                searchHighlight: options?.searchHighlight ?? null,
+              }),
         },
         {
           force: options?.force,
@@ -349,8 +348,9 @@ export function useAppNavigation() {
         force?: boolean;
         replace?: boolean;
         replyId?: string;
-        /** Transient context for highlighting the selected search result. */
-        searchHighlight?: SearchHighlightNavigation | null;
+        /** Preserve an active search highlight; ordinary navigation clears it. */
+        preserveSearchHighlight?: boolean;
+        searchHighlight?: SearchHighlightNavigation;
       },
     ) => {
       return commitNavigation(
@@ -363,14 +363,12 @@ export function useAppNavigation() {
           search: {
             ...(options?.replyId ? { replyId: options.replyId } : {}),
           },
-          state:
-            options?.searchHighlight !== undefined
-              ? (previousState: Record<string, unknown>) => {
-                  const nextState = { ...previousState };
-                  nextState.searchHighlight = options.searchHighlight;
-                  return nextState;
-                }
-              : undefined,
+          state: options?.preserveSearchHighlight
+            ? undefined
+            : (previousState: Record<string, unknown>) => ({
+                ...previousState,
+                searchHighlight: options?.searchHighlight ?? null,
+              }),
         },
         {
           force: options?.force,

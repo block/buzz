@@ -275,7 +275,7 @@ export function ChannelRouteScreen({
         void closeForumPost(channelId);
       }}
       onSelectForumPost={(postId) => {
-        void goForumPost(channelId, postId, { searchHighlight: null });
+        void goForumPost(channelId, postId);
       }}
       selectedForumPostId={selectedPostId}
       targetForumReplyId={targetReplyId}
