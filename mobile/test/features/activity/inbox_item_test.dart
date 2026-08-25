@@ -49,6 +49,33 @@ void main() {
     test('falls back to the event id for top-level messages', () {
       expect(inboxConversationId(const [], 'ev1'), 'ev1');
     });
+
+    test('keeps a top-level kind:9 agent reply as its own activity row', () {
+      final rows = buildInboxItems([
+        item(
+          id: 'agent-top-level-reply',
+          kind: 9,
+          category: 'activity',
+          pubkey: 'agent-pubkey',
+          tags: const [
+            ['h', 'ch1'],
+          ],
+        ),
+      ]);
+
+      expect(rows, hasLength(1));
+      expect(rows.single.conversationId, 'agent-top-level-reply');
+      expect(rows.single.threadRootId, isNull);
+      expect(
+        inboxTypeLabel(
+          rows.single,
+          channelName: 'general',
+          isDm: false,
+          senderLabel: 'Agent',
+        ).text,
+        'Channel update in',
+      );
+    });
   });
 
   group('isThreadReply', () {
