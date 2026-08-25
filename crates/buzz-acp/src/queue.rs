@@ -1140,6 +1140,36 @@ pub(crate) fn format_event_block(
         block.push_str(&format!("\nTags: {tags_str}"));
     }
 
+    // Attachments surface as their own labeled line: an image a person attached is
+    // evidence addressed to the reader, and buried in the tags JSON above it was
+    // ignored by every agent that ever received one.
+    let attachment_urls: Vec<String> = be
+        .event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(|k| k == "imeta").unwrap_or(false) {
+                Some(
+                    s[1..]
+                        .iter()
+                        .filter_map(|f| f.strip_prefix("url ").map(str::to_string))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+    if !attachment_urls.is_empty() {
+        block.push_str(&format!(
+            "\nAttachments ({}): {}",
+            attachment_urls.len(),
+            attachment_urls.join(" ")
+        ));
+    }
+
     // Parsed structural fields.
     let thread = parse_thread_tags(&be.event);
     let mut parsed_parts = Vec::new();
@@ -3846,6 +3876,34 @@ mod tests {
         assert!(
             !prompt.contains("buzz messages thread"),
             "DM non-reply should NOT mention `buzz messages thread`"
+        );
+    }
+
+    #[test]
+    fn test_format_event_block_lists_imeta_attachments() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "look at my screenshot",
+            vec![vec![
+                "imeta".into(),
+                "url https://relay.example/media/shot.png".into(),
+                "m image/png".into(),
+            ]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains("Attachments (1): https://relay.example/media/shot.png"),
+            "an imeta url must surface as a first-class Attachments line, not stay buried in the tags JSON"
         );
     }
 
