@@ -30,19 +30,50 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final responseHasStarted = useState(false);
     final responseResetTimer = useRef<Timer?>(null);
+    // Tracks the previous working signal so we can detect its edges, and
+    // whether the working signal has cleared since audio latched the response.
+    // A completed working cycle distinguishes a genuinely new turn from late
+    // typing that merely trails the turn already spoken.
+    final wasPreparing = useRef(false);
+    final workingCycleCompleted = useRef(false);
     useEffect(() {
+      final preparingStarted = preparingResponse && !wasPreparing.value;
+      final preparingCleared = !preparingResponse && wasPreparing.value;
+      wasPreparing.value = preparingResponse;
       if (active) {
+        // Audio for the current turn latches that a response has begun and
+        // starts a fresh turn, so any prior working cycle no longer applies.
         responseResetTimer.value?.cancel();
         responseResetTimer.value = null;
         responseHasStarted.value = true;
+        workingCycleCompleted.value = false;
+      } else if (preparingStarted &&
+          responseHasStarted.value &&
+          workingCycleCompleted.value) {
+        // A new working turn began after the previous turn's working signal
+        // already cleared, so the "already spoke" suppression no longer
+        // applies — allow the preparing indicator to show again.
+        responseResetTimer.value?.cancel();
+        responseResetTimer.value = null;
+        responseHasStarted.value = false;
+        workingCycleCompleted.value = false;
       } else if (preparingResponse) {
+        // Working signal (including late typing for the turn just spoken) holds
+        // the suppression alive; keep the reset timer cancelled.
         responseResetTimer.value?.cancel();
         responseResetTimer.value = null;
       } else if (responseHasStarted.value && responseResetTimer.value == null) {
         responseResetTimer.value = Timer(_huddleAgentResponseResetDelay, () {
           responseResetTimer.value = null;
           responseHasStarted.value = false;
+          workingCycleCompleted.value = false;
         });
+      }
+      // Record that this turn's working signal has completed a cycle once it
+      // clears after audio latched, so the next working turn is not mistaken
+      // for trailing typing.
+      if (preparingCleared && responseHasStarted.value) {
+        workingCycleCompleted.value = true;
       }
       return null;
     }, [active, preparingResponse, responseHasStarted.value]);
