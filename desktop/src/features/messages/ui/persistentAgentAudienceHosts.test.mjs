@@ -7,16 +7,15 @@ async function source(relativePath) {
 }
 
 test("supported conversation hosts opt into explicit audience contexts", async () => {
-  const [channelPane, threadPanel, newMessage, inboxDetail] = await Promise.all(
-    [
-      source("../../channels/ui/ChannelPane.tsx"),
+  const [channelComposer, threadPanel, newMessage, inboxDetail] =
+    await Promise.all([
+      source("../../channels/ui/ChannelMainComposerDock.tsx"),
       source("./MessageThreadPanel.tsx"),
       source("./NewMessageScreen.tsx"),
       source("../../home/ui/InboxDetailPane.tsx"),
-    ],
-  );
+    ]);
 
-  assert.match(channelPane, /audienceContext=\{\{ type: "channel" \}\}/);
+  assert.match(channelComposer, /audienceContext=\{\{ type: "channel" \}\}/);
   assert.doesNotMatch(newMessage, /audienceContext=/);
   assert.match(threadPanel, /audienceContext=\{\{ type: "thread" \}\}/);
   assert.match(inboxDetail, /type: "thread"/);
