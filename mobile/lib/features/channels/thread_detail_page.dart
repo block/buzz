@@ -341,20 +341,18 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     bool jumpActiveScrollPositionToTail() {
       final position = activeThreadScrollPosition.value;
-      if (position == null || !position.hasContentDimensions) return false;
-      // Move the one active viewport to its exact end. Unlike indexed
-      // jumpTo/scrollTo, this does not reset or cross-fade through a second
-      // list, so iOS never exposes the intermediate top-of-thread frame.
-      position.jumpTo(position.maxScrollExtent);
-      return true;
+      if (position == null) return false;
+      // Indexed jumpTo/scrollTo can cross-fade a second list and flash the
+      // thread head. Directly moving this position does not.
+      return _jumpThreadScrollPositionToTail(position);
     }
 
     Future<bool> animateActiveScrollPositionToTail() async {
       final position = activeThreadScrollPosition.value;
       if (position == null || !position.hasContentDimensions) return false;
-      if (MediaQuery.disableAnimationsOf(context)) {
-        position.jumpTo(position.maxScrollExtent);
-        return true;
+      if (threadScrollPositionIsAtTail(position.extentAfter) ||
+          MediaQuery.disableAnimationsOf(context)) {
+        return _jumpThreadScrollPositionToTail(position);
       }
       // Match the channel's visible Latest glide while moving only the active
       // thread viewport. The indexed-list animation path can create a temporary
@@ -384,7 +382,13 @@ class ThreadDetailPage extends HookConsumerWidget {
         isAtThreadTail.value = threadTailIsVisible();
         return;
       }
-      final reachedTail = threadTailIsVisible();
+      final position = activeThreadScrollPosition.value;
+      final reachedTail = threadTailCorrectionReachedEnd(
+        tailIsVisible: threadTailIsVisible(),
+        extentAfter: position != null && position.hasContentDimensions
+            ? position.extentAfter
+            : null,
+      );
       // Lazy children can revise maxScrollExtent for several frames. Keep
       // moving the same active position until the measured tail is visible;
       // the cap only guards pathological layouts that never stabilize.
@@ -403,17 +407,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       tailCorrectionInProgress.value = false;
       isNavigatingToThreadTail.value = false;
       if (revealViewport) initialViewportReady.value = true;
-      // Item positions can trail the ScrollPosition by a frame after an
-      // animated jump. Once the bounded lazy-layout correction is exhausted,
-      // trust an exact end-of-scroll position too: there is nowhere further
-      // for Latest to navigate, so leaving the control visible is misleading.
-      final position = activeThreadScrollPosition.value;
-      isAtThreadTail.value = threadTailCorrectionReachedEnd(
-        tailIsVisible: reachedTail,
-        extentAfter: position != null && position.hasContentDimensions
-            ? position.extentAfter
-            : null,
-      );
+      isAtThreadTail.value = reachedTail;
     }
 
     void correctThreadTailInstantly() {
@@ -752,6 +746,12 @@ class ThreadDetailPage extends HookConsumerWidget {
                       0.005 ||
                   (headIsVisible &&
                       anchorPosition.itemLeadingEdge < targetAlignment))) {
+            return;
+          }
+          final scrollPosition = activeThreadScrollPosition.value;
+          if (scrollPosition != null &&
+              scrollPosition.hasContentDimensions &&
+              threadScrollPositionIsAtTail(scrollPosition.extentAfter)) {
             return;
           }
           // This runs once after Android's frame-by-frame IME metrics settle.

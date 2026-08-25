@@ -10823,6 +10823,93 @@ void main() {
       );
     });
 
+    testWidgets(
+      'short thread does not rubber-band after idle layout and viewport jitter',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'A short thread',
+          createdAt: 1000,
+        );
+        final replyEvent = _textMsg(
+          id: 'reply-0',
+          pubkey: 'bob',
+          content: 'Short reply',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent, replyEvent],
+            threadReplies: {
+              'thread-root': [replyEvent],
+            },
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: formatTimeline([rootEvent, replyEvent]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final head = find.byKey(
+          const ValueKey('thread-message-group-thread-root'),
+        );
+        final list = find.descendant(
+          of: find.byKey(const ValueKey('thread-message-list')),
+          matching: find.byType(Scrollable),
+        );
+        final initialHeadY = tester.getTopLeft(head).dy;
+        final scrollable = tester.state<ScrollableState>(list.first);
+        final initialPixels = scrollable.position.pixels;
+        expect(scrollable.position.extentAfter, lessThanOrEqualTo(0.5));
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 1);
+        await tester.pump();
+        tester.view.viewInsets = FakeViewPadding.zero;
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pump(const Duration(milliseconds: 250));
+
+        expect(
+          tester.getTopLeft(head).dy,
+          closeTo(initialHeadY, 1),
+          reason:
+              'Idle layout and inset jitter must not restart rubber-banding '
+              'on a short thread already at its tail.',
+        );
+        expect(
+          scrollable.position.pixels,
+          closeTo(initialPixels, 0.5),
+          reason: 'Already-at-tail jumpTo must be a no-op.',
+        );
+        expect(scrollable.position.isScrollingNotifier.value, isFalse);
+      },
+    );
+
     for (final replyCount in [0, 1]) {
       testWidgets(
         'cached writable $replyCount-reply thread defers dock correction until measured',
@@ -12994,6 +13081,10 @@ void main() {
           threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 1),
           isFalse,
         );
+        expect(threadScrollPositionIsAtTail(0), isTrue);
+        expect(threadScrollPositionIsAtTail(0.5), isTrue);
+        expect(threadScrollPositionIsAtTail(0.51), isFalse);
+        expect(threadScrollPositionIsAtTail(null), isFalse);
       },
     );
 
