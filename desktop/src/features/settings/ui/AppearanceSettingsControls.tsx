@@ -733,7 +733,7 @@ export function ThreadRepliesInChannelSetting() {
           data-settings-subcopy
         >
           {canManage
-            ? "Projects every thread reply into the channel timeline with a link back to the original thread."
+            ? "Shows every thread reply in the channel timeline for everyone, with a link back to the original thread."
             : "Community owners and admins can change this for everyone."}
         </p>
       </div>
