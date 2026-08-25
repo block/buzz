@@ -207,6 +207,7 @@ function MessageComposerImpl({
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
   const isSubmitLockedRef = React.useRef(false);
+  const [isSubmitLocked, setIsSubmitLocked] = React.useState(false);
   const onSendRef = React.useRef(onSend);
   const onEditSaveRef = React.useRef(onEditSave);
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
@@ -611,6 +612,7 @@ function MessageComposerImpl({
       return;
     }
     isSubmitLockedRef.current = true;
+    setIsSubmitLocked(true);
     onPreparingMentionSendChange?.(true);
     try {
       const preparedLinkPreviews = getReadyLinkPreviewTags().some(
@@ -636,6 +638,7 @@ function MessageComposerImpl({
       });
     } finally {
       isSubmitLockedRef.current = false;
+      setIsSubmitLocked(false);
       onPreparingMentionSendChange?.(false);
     }
   }, [
@@ -842,6 +845,7 @@ function MessageComposerImpl({
               layoutMode === "standalone" &&
                 "backdrop-blur-md dark:backdrop-blur-xl",
             )}
+            data-submit-locked={isSubmitLocked ? "true" : "false"}
             data-testid="message-composer"
             onDragEnter={ownsDropZone ? media.handleDragEnter : undefined}
             onDragLeave={ownsDropZone ? media.handleDragLeave : undefined}

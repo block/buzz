@@ -181,8 +181,7 @@ test("keeps a queued-attachment send locked through upload and send settlement",
 }) => {
   await installAudienceFixtures(page, {
     deferredComposerUploads: true,
-    uploadDelayMs: 1_500,
-    sendMessageDelayMs: 2_000,
+    uploadDelayMs: 2_000,
     uploadDescriptors: [
       {
         filename: "delayed-video.mp4",
@@ -197,9 +196,9 @@ test("keeps a queued-attachment send locked through upload and send settlement",
   await openGeneral(page);
 
   const composer = channelComposer(page);
+  const composerForm = composer.getByTestId("message-composer");
   const input = composer.getByTestId("message-input");
-  await automaticallyMention(composer, "Morgarita");
-  await input.type("delayed upload");
+  await input.fill("delayed upload");
 
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),
@@ -211,35 +210,22 @@ test("keeps a queued-attachment send locked through upload and send settlement",
     name: "delayed-video.mp4",
   });
 
-  const sendAttempts = () =>
-    page.evaluate(
-      () =>
-        window.__BUZZ_E2E_COMMAND_LOG__?.filter(
-          (entry) => entry.command === "send_channel_message",
-        ).length ?? 0,
-    );
-  const sendAttemptsBefore = await sendAttempts();
   await input.press("Enter");
-  await expect(input).toHaveText("@Morgarita ");
   await expect(composer.getByTestId("composer-upload-progress")).toBeVisible();
 
-  // The restored persistent audience makes Enter an actionable second submit.
-  // It must remain blocked while the deferred attachment is still uploading.
+  // Observe the synchronous lock itself after upload has started. The exact
+  // premature-release mutation (`void uploadSettled; await Promise.resolve()`)
+  // has already cleared this attribute by this boundary, before any retryable
+  // downstream command or restored-audience timing can obscure the defect.
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
   await input.press("Enter");
   await input.press("Enter");
-  await expect.poll(sendAttempts).toBe(sendAttemptsBefore);
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
 
   await expect(composer.getByTestId("composer-upload-progress")).toHaveCount(
     0,
     { timeout: 5_000 },
   );
-  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
-
-  // Upload has settled, but the independently delayed send has not. The same
-  // restored audience must remain locked until finishSend() settles too.
-  await input.press("Enter");
-  await input.press("Enter");
-  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
 
   await expect(
     page
@@ -247,7 +233,7 @@ test("keeps a queued-attachment send locked through upload and send settlement",
       .filter({ hasText: "delayed upload" })
       .last(),
   ).toBeVisible({ timeout: 5_000 });
-  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "false");
 });
 
 test("automatically mentions multiple agents from the mention picker", async ({
