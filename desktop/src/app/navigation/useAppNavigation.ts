@@ -6,6 +6,7 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 
+import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
 import {
   allowNavigation,
@@ -32,14 +33,23 @@ export function useAppNavigation() {
         to: string;
         params?: Record<string, string>;
         search?: Record<string, string | undefined>;
-        state?: Record<string, unknown>;
+        state?:
+          | Record<string, unknown>
+          | ((
+              previousState: Record<string, unknown>,
+            ) => Record<string, unknown>);
       },
       behavior: NavigationBehavior = {},
       guardedTarget?: GuardedNavigation,
     ) => {
       const nextLocation = router.buildLocation(next as never);
+      const hasStateUpdate = next.state !== undefined;
 
-      if (location.href === nextLocation.href && !behavior.force) {
+      if (
+        location.href === nextLocation.href &&
+        !behavior.force &&
+        !hasStateUpdate
+      ) {
         return false;
       }
 
@@ -265,6 +275,9 @@ export function useAppNavigation() {
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
         messageId?: string;
+        /** Preserve an active search highlight; ordinary navigation clears it. */
+        preserveSearchHighlight?: boolean;
+        searchHighlight?: SearchHighlightNavigation;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
         thread?: string;
@@ -290,6 +303,12 @@ export function useAppNavigation() {
             ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
+          state: options?.preserveSearchHighlight
+            ? undefined
+            : (previousState: Record<string, unknown>) => ({
+                ...previousState,
+                searchHighlight: options?.searchHighlight ?? null,
+              }),
         },
         {
           force: options?.force,
@@ -329,6 +348,9 @@ export function useAppNavigation() {
         force?: boolean;
         replace?: boolean;
         replyId?: string;
+        /** Preserve an active search highlight; ordinary navigation clears it. */
+        preserveSearchHighlight?: boolean;
+        searchHighlight?: SearchHighlightNavigation;
       },
     ) => {
       return commitNavigation(
@@ -338,7 +360,15 @@ export function useAppNavigation() {
             channelId,
             postId,
           },
-          search: options?.replyId ? { replyId: options.replyId } : {},
+          search: {
+            ...(options?.replyId ? { replyId: options.replyId } : {}),
+          },
+          state: options?.preserveSearchHighlight
+            ? undefined
+            : (previousState: Record<string, unknown>) => ({
+                ...previousState,
+                searchHighlight: options?.searchHighlight ?? null,
+              }),
         },
         {
           force: options?.force,
@@ -406,6 +436,8 @@ export function useAppNavigation() {
          * Used by desktop-notification activation so a click is never
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
+        /** Search text to highlight after opening this result. */
+        query?: string;
         /** Stop notification-driven routing when its owning lifecycle ends. */
         signal?: AbortSignal;
       },
@@ -414,6 +446,7 @@ export function useAppNavigation() {
         force: behavior?.force,
         goChannel,
         goForumPost,
+        query: behavior?.query,
         signal: behavior?.signal,
       }),
     [goChannel, goForumPost],

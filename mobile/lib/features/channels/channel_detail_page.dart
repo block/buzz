@@ -19,6 +19,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/bouncing_dots_indicator.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -107,17 +108,99 @@ Future<void> _loadDeepLinkEvents(
 }
 
 /// Fetch channel members and preload their profiles into the user cache.
-Future<void> _preloadMembers(WidgetRef ref, String channelId) async {
+/// One-to-one DMs additionally refresh participant profiles for identity gates.
+/// Returns whether identity resolution completed successfully.
+Future<bool> _preloadMembers(
+  WidgetRef ref,
+  String channelId,
+  List<String> participantPubkeys, {
+  required bool refreshDmParticipants,
+}) async {
   // Capture references before async gap to avoid using disposed ref.
   final notifier = ref.read(userCacheProvider.notifier);
   try {
     final members = await ref.read(channelMembersProvider(channelId).future);
-    final pubkeys = members.map((m) => m.pubkey).toList();
-    if (pubkeys.isNotEmpty) {
-      notifier.preload(pubkeys);
+    await notifier.preload(members.map((member) => member.pubkey).toList());
+    if (refreshDmParticipants) {
+      return notifier.refresh(participantPubkeys);
     }
+    return true;
   } catch (_) {
-    // Non-fatal — mentions will just fall back to cache from messages.
+    // Identity remains unresolved, so agent-only actions stay hidden.
+    return false;
+  }
+}
+
+Future<void Function()> _subscribeToDmIdentityUpdates(
+  WidgetRef ref,
+  List<String> participantPubkeys, {
+  required ValueChanged<bool> onReadyChanged,
+  required ValueChanged<Set<String>> onAgentPubkeysChanged,
+  required VoidCallback onFailure,
+}) async {
+  final session = ref.read(relaySessionProvider.notifier);
+  var subscriptionStatus = RelaySubscriptionStatus.retrying;
+  var directLookupComplete = false;
+  final agentPubkeys = <String>{};
+
+  void publishAgentPubkeys() {
+    onAgentPubkeysChanged(Set.unmodifiable(agentPubkeys));
+  }
+
+  void handleEvent(NostrEvent event) {
+    if (event.kind == 0) {
+      try {
+        ref.read(userCacheProvider.notifier).cacheProfileEvent(event);
+      } catch (error) {
+        debugPrint('[DmIdentity] invalid live profile: $error');
+        onFailure();
+      }
+    } else if (event.kind == 10100) {
+      agentPubkeys.add(event.pubkey.toLowerCase());
+      publishAgentPubkeys();
+      ref.invalidate(agentDirectoryProvider);
+      ref.invalidate(agentOwnersProvider);
+    }
+  }
+
+  final unsubscribe = await session.subscribeWithStatus(
+    NostrFilter(
+      kinds: const [0, 10100],
+      authors: participantPubkeys,
+      limit: 100,
+    ).copyWithSince(DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5),
+    handleEvent,
+    onClosed: (_) => onFailure(),
+    onStatusChanged: (status) {
+      subscriptionStatus = status;
+      if (status == RelaySubscriptionStatus.retrying) {
+        onReadyChanged(false);
+      } else if (directLookupComplete) {
+        onReadyChanged(true);
+      }
+    },
+  );
+
+  try {
+    final profiles = await session.fetchHistory(
+      NostrFilter(
+        kinds: const [10100],
+        authors: participantPubkeys,
+        limit: participantPubkeys.length,
+      ),
+    );
+    for (final profile in profiles) {
+      if (profile.kind == 10100) {
+        agentPubkeys.add(profile.pubkey.toLowerCase());
+      }
+    }
+    publishAgentPubkeys();
+    directLookupComplete = true;
+    onReadyChanged(subscriptionStatus == RelaySubscriptionStatus.ready);
+    return unsubscribe;
+  } catch (_) {
+    unsubscribe();
+    rethrow;
   }
 }
 
@@ -144,6 +227,16 @@ int? _channelReadTimestamp({
   }
 
   return dateTimeToUnixSeconds(channel.lastMessageAt);
+}
+
+bool _isOneToOneAgentDm(Channel channel, Set<String> agentPubkeys) {
+  final participants = channel.participantPubkeys
+      .map((pubkey) => pubkey.trim().toLowerCase())
+      .where((pubkey) => pubkey.isNotEmpty)
+      .toSet();
+  return channel.isDm &&
+      participants.length == 2 &&
+      participants.any(agentPubkeys.contains);
 }
 
 /// Controls how a hydrated initial thread is added to the navigation stack.
@@ -256,10 +349,147 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final participantCount = resolvedChannel.participantPubkeys
+        .map((pubkey) => pubkey.trim().toLowerCase())
+        .where((pubkey) => pubkey.isNotEmpty)
+        .toSet()
+        .length;
+    final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
+    final memberProfilesPreload = useMemoized(
+      () => _preloadMembers(
+        ref,
+        resolvedChannel.id,
+        resolvedChannel.participantPubkeys,
+        refreshDmParticipants: isOneToOneDm,
+      ),
+      [
+        resolvedChannel.id,
+        sessionStatus,
+        isOneToOneDm,
+        Object.hashAll(resolvedChannel.participantPubkeys),
+      ],
+    );
+    final memberProfilesPreloadState = useFuture(memberProfilesPreload);
     final showsComposer =
         !resolvedChannel.isForum &&
         resolvedChannel.isMember &&
         !resolvedChannel.isArchived;
+    final profileOwnedAgentPubkeys = <String>[];
+    for (final participantPubkey in resolvedChannel.participantPubkeys) {
+      final normalized = participantPubkey.trim().toLowerCase();
+      final isProfileOwnedAgent = ref.watch(
+        userCacheProvider.select(
+          (cache) => cache[normalized]?.ownerPubkey != null,
+        ),
+      );
+      if (isProfileOwnedAgent) profileOwnedAgentPubkeys.add(normalized);
+    }
+    final agentDirectoryState = ref.watch(agentDirectoryProvider);
+    final agentOwnersState = ref.watch(agentOwnersProvider);
+    final channelMembershipUpdateState = isOneToOneDm
+        ? ref.watch(channelMembershipUpdateProvider(resolvedChannel.id))
+        : const ChannelMembershipUpdateState(isReady: true);
+    final channelBotPubkeysState = ref.watch(
+      channelBotPubkeysProvider(resolvedChannel.id),
+    );
+    final identitySubscriptionPubkeys = isOneToOneDm
+        ? (resolvedChannel.participantPubkeys
+              .map((pubkey) => pubkey.trim().toLowerCase())
+              .where((pubkey) => pubkey.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort())
+        : const <String>[];
+    final identitySubscriptionKey = Object.hashAll(identitySubscriptionPubkeys);
+    final identitySubscriptionReady = useValueNotifier(false, [
+      sessionStatus,
+      resolvedChannel.id,
+      identitySubscriptionKey,
+    ]);
+    final directlyResolvedAgentPubkeys = useValueNotifier(<String>{}, [
+      sessionStatus,
+      resolvedChannel.id,
+      identitySubscriptionKey,
+    ]);
+    final isIdentitySubscriptionReady = useValueListenable(
+      identitySubscriptionReady,
+    );
+    final directAgentPubkeys = useValueListenable(directlyResolvedAgentPubkeys);
+    final agentPubkeys = agentPubkeysWithChannelBots(
+      knownAgentPubkeys: agentPubkeysWithProfileOwners(
+        knownAgentPubkeys: {
+          ...ref.watch(knownAgentPubkeysProvider),
+          ...directAgentPubkeys,
+        },
+        profileOwnedAgentPubkeys: profileOwnedAgentPubkeys,
+      ),
+      channelBotPubkeys:
+          channelBotPubkeysState.asData?.value ?? const <String>{},
+    );
+    useEffect(() {
+      if (sessionStatus != SessionStatus.connected ||
+          identitySubscriptionPubkeys.isEmpty) {
+        return null;
+      }
+      var disposed = false;
+      var subscriptionFailed = false;
+      void markFailed() {
+        subscriptionFailed = true;
+        if (!disposed) identitySubscriptionReady.value = false;
+      }
+
+      void Function()? unsubscribe;
+      Future.microtask(() async {
+        try {
+          final cleanup = await _subscribeToDmIdentityUpdates(
+            ref,
+            identitySubscriptionPubkeys,
+            onReadyChanged: (isReady) {
+              if (!disposed && !subscriptionFailed) {
+                identitySubscriptionReady.value = isReady;
+              }
+            },
+            onAgentPubkeysChanged: (pubkeys) {
+              if (!disposed) directlyResolvedAgentPubkeys.value = pubkeys;
+            },
+            onFailure: markFailed,
+          );
+          if (disposed) {
+            cleanup();
+          } else {
+            unsubscribe = cleanup;
+          }
+        } catch (error) {
+          if (!disposed) {
+            debugPrint('[DmIdentity] live subscription failed: $error');
+            markFailed();
+          }
+        }
+      });
+      return () {
+        disposed = true;
+        unsubscribe?.call();
+      };
+    }, [sessionStatus, resolvedChannel.id, identitySubscriptionKey]);
+    final isAgentIdentityUnresolved =
+        isOneToOneDm &&
+        (sessionStatus != SessionStatus.connected ||
+            !isIdentitySubscriptionReady ||
+            agentDirectoryState.isLoading ||
+            agentDirectoryState.hasError ||
+            agentOwnersState.isLoading ||
+            agentOwnersState.hasError ||
+            !channelMembershipUpdateState.isReady ||
+            channelMembershipUpdateState.error != null ||
+            channelBotPubkeysState.isLoading ||
+            channelBotPubkeysState.hasError ||
+            memberProfilesPreloadState.connectionState !=
+                ConnectionState.done ||
+            memberProfilesPreloadState.data != true);
+    final showsHuddleAction =
+        showsComposer &&
+        !isAgentIdentityUnresolved &&
+        !_isOneToOneAgentDm(resolvedChannel, agentPubkeys);
     final messagesNotifier = ref.read(
       channelMessagesProvider(channel.id).notifier,
     );
@@ -299,12 +529,6 @@ class ChannelDetailPage extends HookConsumerWidget {
     useEffect(() {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channel.id);
-    }, [channel.id]);
-
-    // Preload channel member profiles so @mentions resolve correctly.
-    useEffect(() {
-      _preloadMembers(ref, channel.id);
-      return null;
     }, [channel.id]);
 
     useEffect(
@@ -394,7 +618,7 @@ class ChannelDetailPage extends HookConsumerWidget {
         ),
         actions: resolvedChannel.isDm
             ? [
-                if (showsComposer)
+                if (showsHuddleAction)
                   _HuddleButton(
                     channel: resolvedChannel,
                     events: [

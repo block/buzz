@@ -40,6 +40,7 @@ class _HuddleParticipantCluster extends HookWidget {
     required this.fallbackLabels,
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
+    required this.workingAgentPubkeys,
     required this.movementDuration,
     required this.entryDuration,
     required this.exitDuration,
@@ -52,6 +53,7 @@ class _HuddleParticipantCluster extends HookWidget {
   final Map<String, String> fallbackLabels;
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
+  final Set<String> workingAgentPubkeys;
   final Duration movementDuration;
   final Duration entryDuration;
   final Duration exitDuration;
@@ -139,6 +141,7 @@ class _HuddleParticipantCluster extends HookWidget {
                 fallbackLabel: fallbackLabels[pubkey],
                 active: activeSpeakerPubkeys.contains(pubkey),
                 speakerLevel: speakerLevels[pubkey] ?? 0,
+                preparingResponse: workingAgentPubkeys.contains(pubkey),
                 slot: lastSlots[pubkey]!,
                 present: visiblePubkeySet.contains(pubkey),
                 movementDuration: movementDuration,
@@ -173,6 +176,7 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
     required this.fallbackLabel,
     required this.active,
     required this.speakerLevel,
+    required this.preparingResponse,
     required this.slot,
     required this.present,
     required this.movementDuration,
@@ -186,6 +190,7 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
   final String? fallbackLabel;
   final bool active;
   final double speakerLevel;
+  final bool preparingResponse;
   final _HuddleClusterSlot slot;
   final bool present;
   final Duration movementDuration;
@@ -237,6 +242,7 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
             fallbackLabel: fallbackLabel,
             active: active,
             speakerLevel: speakerLevel,
+            preparingResponse: preparingResponse,
             frameSize: frameSize,
             onTap: onTap,
           ),

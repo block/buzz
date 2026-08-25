@@ -49,6 +49,7 @@ import {
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
+import { useSearchHighlightProps } from "@/features/channels/ui/useSearchHighlightProps";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
@@ -152,6 +153,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelTab,
   profilePanelView,
   targetMessageId,
+  targetSearchMessageId,
+  targetSearchQuery,
   threadAllMessages,
   threadHeadMessage,
   threadMessages,
@@ -176,6 +179,10 @@ export const ChannelPane = React.memo(function ChannelPane({
     currentPubkey,
   );
   const mainComposerMedia = useMediaUpload({ deferUploadsUntilSend: true });
+  const searchHighlightProps = useSearchHighlightProps(
+    targetSearchMessageId,
+    targetSearchQuery,
+  );
   const [isMainDeferredEditPending, setMainDeferredEditPending] =
     React.useState(false);
   const isNonMemberView =
@@ -194,8 +201,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       channelPaneMountedRef.current = false;
     };
   }, []);
-  // Clear only the auto-send key so thread state survives deferred submission;
-  // older wrappers fall back to goChannel to prevent back-navigation replay.
   const handleAutoSubmitComplete = React.useCallback(() => {
     if (onAutoSendComplete) {
       onAutoSendComplete();
@@ -252,9 +257,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
 
   const timeoutState = useTimeoutState();
-  // A moderation DM (1:1 with the relay identity) is read-only for the member;
-  // only DMs pay for the NIP-11 `self` lookup. Fails open: no `relaySelf` →
-  // ordinary DM, composer enabled.
   const relaySelfQuery = useRelaySelfQuery(activeChannel?.channelType === "dm");
   const isModerationDmChannel = isModerationDm(
     activeChannel ?? null,
@@ -339,10 +341,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isMainDeferredEditPending &&
     !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
-  // Unified working set for the composer bar: observer-derived turns primary,
-  // bot typing fallback (both folded together by agentWorkingSignal). This is
-  // what makes the bar show for an agent whose observer stream is live but
-  // whose typing signal never arrives — and vice versa.
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
@@ -696,6 +694,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               }
               onTargetReached={onTargetReached}
               onToggleReaction={onToggleReaction}
+              {...searchHighlightProps.timeline}
               targetMessageId={targetMessageId}
               splitThreadPanelOpen={
                 useSplitAuxiliaryPane &&
@@ -894,6 +893,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
+                {...searchHighlightProps.thread}
                 threadHead={threadHeadMessage}
                 videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}
@@ -940,10 +940,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           })()
         ) : activeChannel && selectedAgent ? (
           (() => {
-            // When the panel was opened from a different channel than the
-            // currently active one, re-scope it to the active channel so
-            // that both the content/header AND channel-backed actions (e.g.
-            // Stop current turn) operate on the same channel object.
             const effectiveAgentSessionChannelId =
               openAgentSessionChannelId &&
               activeChannel.id !== openAgentSessionChannelId

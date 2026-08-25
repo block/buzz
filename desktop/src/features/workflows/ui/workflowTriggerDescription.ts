@@ -66,6 +66,53 @@ function textConditionDescription(
   }
 }
 
+export type WorkflowAuthorDescriptionSegments = {
+  prefix: string;
+  suffix: string;
+};
+
+/** Locate the generated author attribution without matching quoted user copy. */
+export function splitWorkflowAuthorDescription(
+  description: string,
+  label: string,
+): WorkflowAuthorDescriptionSegments | null {
+  const markers = [` by anyone except ${label}`, ` by ${label}`];
+
+  for (const marker of markers) {
+    let insideQuote = false;
+    for (
+      let index = 0;
+      index <= description.length - marker.length;
+      index += 1
+    ) {
+      const character = description[index];
+      if (character === "“") insideQuote = true;
+      if (character === "”") insideQuote = false;
+      if (!insideQuote && description.startsWith(marker, index)) {
+        const labelIndex = index + marker.length - label.length;
+        return {
+          prefix: description.slice(0, labelIndex).trimEnd(),
+          suffix: description.slice(labelIndex + label.length).trimStart(),
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/** Remove a reaction value from compact copy when the node icon already shows it. */
+export function compactWorkflowTriggerDescription(
+  description: string,
+  triggerEmoji?: string,
+): string {
+  if (!triggerEmoji) return description;
+  const emojiPrefix = `${triggerEmoji} reaction added`;
+  return description.startsWith(emojiPrefix)
+    ? `Reaction added${description.slice(emojiPrefix.length)}`
+    : description;
+}
+
 /** Build the concise trigger summary rendered on the workflow canvas. */
 export function workflowTriggerDescription(
   trigger: TriggerConfig,

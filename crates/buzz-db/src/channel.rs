@@ -478,14 +478,17 @@ async fn acquire_channel_membership_lock(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
-            community_id.as_uuid(),
-            channel_id
-        ))
-        .execute(&mut **tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Membership,
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
+                community_id.as_uuid(),
+                channel_id
+            ))
+            .execute(&mut **tx),
+    )
+    .await?;
     Ok(())
 }
 
@@ -625,16 +628,19 @@ pub async fn lock_member_snapshot(
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
     // duplicate heads without introducing a lock-order inversion.
-    let replacement_lock = crate::event_replacement_lock_key(
+    let replacement_lock = crate::replaceable::event_replacement_lock_key(
         community_id,
         39002,
         relay_pubkey,
         Some(channel_id.as_bytes()),
     );
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(replacement_lock)
-        .execute(&mut *tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(replacement_lock)
+            .execute(&mut *tx),
+    )
+    .await?;
     acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
     let rows = sqlx::query(
         r#"

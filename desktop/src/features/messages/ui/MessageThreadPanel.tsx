@@ -81,6 +81,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onScrollTargetResolved: () => void;
   onScrollTargetSettled?: (messageId: string) => void;
   scrollTargetHighlights?: boolean;
+  searchMessageId?: string | null;
+  searchQuery?: string;
   onSelectReplyTarget: (message: TimelineMessage) => void;
   onSend: (
     content: string,
@@ -185,6 +187,8 @@ export function MessageThreadPanel({
   replyTargetMessage,
   scrollTargetId,
   scrollTargetHighlights = true,
+  searchMessageId,
+  searchQuery,
   threadHead,
   videoReviewPresentation,
   threadReplies,
@@ -506,8 +510,12 @@ export function MessageThreadPanel({
       tabIndex={-1}
       ref={threadBodyRef}
     >
+      {/* The gallery is intentionally DOM-scoped: only media currently rendered
+          in this open thread participates. Collapsed or unloaded descendants
+          join only after the thread UI renders them. */}
       <div
         className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
+        data-image-gallery-scope="thread"
         ref={threadContentRef}
         style={
           hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
@@ -562,6 +570,9 @@ export function MessageThreadPanel({
                   onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
                 }
                 profiles={profiles}
+                searchQuery={
+                  searchMessageId === threadHead.id ? searchQuery : undefined
+                }
                 showDepthGuides={shouldShowThreadBranchGuides}
                 videoReviewCommentRootId={videoReviewPresentation?.commentRootIdsByMessageId.get(
                   threadHead.id,
@@ -725,6 +736,11 @@ export function MessageThreadPanel({
                           onSendToChannel={stableSendToChannel}
                           onToggleReaction={onToggleReaction}
                           profiles={profiles}
+                          searchQuery={
+                            searchMessageId === entry.message.id
+                              ? searchQuery
+                              : undefined
+                          }
                           showDepthGuides={shouldShowThreadBranchGuides}
                           videoReviewCommentRootId={videoReviewPresentation?.commentRootIdsByMessageId.get(
                             entry.message.id,

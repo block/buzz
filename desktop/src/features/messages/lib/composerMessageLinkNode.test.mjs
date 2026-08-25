@@ -19,6 +19,7 @@ const CHANNEL_MESSAGE_ID = "a".repeat(64);
 const CHANNEL_MESSAGE_HREF = `buzz://channel/${CHANNEL_ID}/${CHANNEL_MESSAGE_ID}`;
 const OWNER = "a".repeat(64);
 const REPO_HREF = `buzz://repo?owner=${OWNER}&d=buzz-world`;
+const PROJECT_HREF = `buzz://project?owner=${OWNER}&d=buzz-world`;
 const ISSUE_ID = "b".repeat(64);
 const ISSUE_HREF = `buzz://issue?id=${ISSUE_ID}&owner=${OWNER}&d=buzz-world`;
 const PR_ID = "c".repeat(64);
@@ -188,6 +189,10 @@ test("markdown parsing stops message links before emphasis delimiters", () => {
   assert.deepEqual(token.meta, { channelName: "general", href: HREF });
 });
 
+function renderedChipLabel(rendered) {
+  return `${rendered[2][2]}${rendered[3]}`;
+}
+
 test("composer node uses the sent-message chip presentation", () => {
   const node = {
     attrs: { channelName: "general", href: HREF },
@@ -209,7 +214,44 @@ test("composer node uses the sent-message chip presentation", () => {
   assert.equal(rendered[1]["data-buzz-link"], "");
   // Channel label only — no event hash, so the chip does not change width when
   // the draft is sent and the rendered chip resolves its metadata.
-  assert.equal(rendered[2], "general");
+  assert.match(rendered[1].class, /wrapping-inline-chip/);
+  assert.match(rendered[2][1].class, /inline-chip-leading-fragment/);
+  assert.equal(renderedChipLabel(rendered), "general");
+});
+
+test("composer node truncates and preserves grapheme-safe leading fragments", () => {
+  const render = ComposerMessageLinkNode.configure({
+    resolveChannelName: () => undefined,
+  }).config.renderHTML;
+  assert.ok(render);
+
+  const longName = `relay-${"observability".repeat(5)}`;
+  const longRendered = render.call(
+    { options: { resolveChannelName: () => undefined } },
+    {
+      node: { attrs: { channelName: longName, href: HREF } },
+      HTMLAttributes: {},
+    },
+  );
+  assert.equal(renderedChipLabel(longRendered), `${longName.slice(0, 47)}…`);
+
+  for (const [label, expectedLeading] of [
+    ["🇺🇸channel", "🇺🇸chan"],
+    ["e\u0301quipe", "e\u0301quip"],
+    ["relaytoolsobservabilityconsole-main", "relay"],
+    [" leading-space", ""],
+  ]) {
+    const rendered = render.call(
+      { options: { resolveChannelName: () => undefined } },
+      {
+        node: { attrs: { channelName: label, href: HREF } },
+        HTMLAttributes: {},
+      },
+    );
+    assert.equal(rendered[2][2], expectedLeading);
+    assert.match(rendered[2][1].class, /inline-chip-with-icon/);
+    assert.equal(renderedChipLabel(rendered), label);
+  }
 });
 
 test("composer node renders channel and entity chip presentations", () => {
@@ -227,24 +269,29 @@ test("composer node renders channel and entity chip presentations", () => {
   const channel = render(CHANNEL_HREF);
   assert.equal(channel[1]["data-channel-deep-link"], "");
   assert.match(channel[1].class, /inline-chip-icon-channel/);
-  assert.equal(channel[2], "general");
+  assert.equal(renderedChipLabel(channel), "general");
 
   const repo = render(REPO_HREF);
   assert.equal(repo[1]["data-buzz-link-kind"], "repo");
   assert.match(repo[1].class, /inline-chip-icon-repo/);
-  assert.equal(repo[2], "buzz-world");
+  assert.equal(renderedChipLabel(repo), "buzz-world");
+
+  const project = render(PROJECT_HREF);
+  assert.equal(project[1]["data-buzz-link-kind"], "project");
+  assert.match(project[1].class, /inline-chip-icon-project/);
+  assert.equal(renderedChipLabel(project), "buzz-world");
 
   const issue = render(ISSUE_HREF);
   assert.equal(issue[1]["data-buzz-link-kind"], "issue");
   assert.match(issue[1].class, /inline-chip-icon-issue/);
   // Repository name only — the rendered chip never widens into the issue
   // title, so the composer must not widen into the event hash either.
-  assert.equal(issue[2], "buzz-world");
+  assert.equal(renderedChipLabel(issue), "buzz-world");
 
   const pullRequest = render(PR_HREF);
   assert.equal(pullRequest[1]["data-buzz-link-kind"], "pr");
   assert.match(pullRequest[1].class, /inline-chip-icon-pr/);
-  assert.equal(pullRequest[2], "buzz-world");
+  assert.equal(renderedChipLabel(pullRequest), "buzz-world");
 });
 
 test("markdown rendering stores identity in attributes, not visible id text", () => {

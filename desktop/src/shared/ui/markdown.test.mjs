@@ -1121,7 +1121,7 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
   assert.equal((html.match(/data-channel-deep-link=""/g) ?? []).length, 1);
   assert.match(html, /inline-chip-icon-channel/);
   assert.match(html, /wrapping-inline-chip/);
-  assert.match(html, /inline-chip-leading-fragment[^>]*>e</);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>engin</);
   assert.match(html, /inline-chip-icon-pr/);
   assert.match(html, /inline-chip-icon-issue/);
   assert.match(html, /inline-chip-icon-repo/);
@@ -1299,7 +1299,7 @@ test("bare Buzz permalinks shorten unavailable channel identifiers", () => {
   );
 
   assert.equal(
-    (html.match(/inline-chip-leading-fragment[^>]*>5<\/span>80ca78b/g) ?? [])
+    (html.match(/inline-chip-leading-fragment[^>]*>580ca<\/span>78b/g) ?? [])
       .length,
     2,
   );
@@ -1332,7 +1332,7 @@ test("channel references replace the authored hash with the channel icon", () =>
 
   assert.match(html, /inline-chip-icon-channel/);
   assert.match(html, /wrapping-inline-chip/);
-  assert.match(html, /inline-chip-leading-fragment[^>]*>e</);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>engin</);
   assert.match(html.replace(/<[^>]+>/g, ""), /engineering/);
   assert.doesNotMatch(html, />#engineering</);
 });

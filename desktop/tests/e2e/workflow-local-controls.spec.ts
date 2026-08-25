@@ -4,6 +4,15 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
+declare global {
+  interface Window {
+    __BUZZ_WORKFLOW_BATCH_CALLS__?: {
+      eventBatches: number[];
+      userBatches: number[];
+    };
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -419,6 +428,173 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   ).toBeLessThan(0.5);
 });
 
+test("Escape closes a filter picker, restores disclosure focus, then closes its inspector", async ({
+  page,
+}) => {
+  for (const width of [760, 1280]) {
+    await page.setViewportSize({ width, height: 820 });
+    await page.goto(
+      "/#/workflows?view=create&channel=94a444a4-c0a3-5966-ab05-530c6ddc2301&pane=trigger",
+    );
+
+    const dialog = page.getByRole("dialog", { name: "Create workflow" });
+    const inspector = dialog.getByTestId("workflow-node-inspector");
+    await selectTrigger(page, dialog, "Reaction Added");
+    for (const field of [
+      {
+        label: "Author",
+        picker: "workflow-author-picker",
+        search: "Search authors or paste a public key",
+      },
+      {
+        label: "Message",
+        picker: "workflow-message-picker",
+        search: "Search messages or paste a message ID",
+      },
+    ]) {
+      const disclosure = dialog
+        .getByText(field.label, { exact: true })
+        .locator("..");
+      await disclosure.click();
+      const picker = dialog.getByTestId(field.picker);
+      const search = dialog.getByRole("combobox", { name: field.search });
+      await expect(picker).toBeVisible();
+
+      await search.press("Escape");
+      await expect(picker).toBeHidden();
+      await expect(disclosure).toBeFocused();
+      await expect(inspector).toBeVisible();
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(inspector).toBeHidden();
+    await expect(dialog).toBeVisible();
+  }
+});
+
+test("workflow grid batches card author and message presentation reads", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__TAURI_INTERNALS__?.invoke === "function",
+  );
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    if (!invoke) throw new Error("mock invoke bridge unavailable");
+    for (let index = 0; index < 40; index += 1) {
+      const messageId = (index + 1).toString(16).padStart(64, "0");
+      const author = (index + 101).toString(16).padStart(64, "0");
+      await invoke("create_workflow", {
+        channelId: "94a444a4-c0a3-5966-ab05-530c6ddc2301",
+        yamlDefinition: JSON.stringify({
+          name: `batched_card_${index}`,
+          trigger: {
+            on: "reaction_added",
+            filter: `trigger_author == "${author}" && trigger_message_id == "${messageId}"`,
+          },
+          steps: [],
+        }),
+      });
+    }
+
+    const calls = { eventBatches: [], userBatches: [] };
+    window.__BUZZ_WORKFLOW_BATCH_CALLS__ = calls;
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "get_events") {
+        calls.eventBatches.push(
+          (args?.eventIds as unknown[] | undefined)?.length ?? 0,
+        );
+      }
+      if (command === "get_users_batch") {
+        calls.userBatches.push(
+          (args?.pubkeys as unknown[] | undefined)?.length ?? 0,
+        );
+      }
+      return invoke(command, args);
+    };
+  });
+
+  await page.getByTestId("open-workflows-view").click();
+  await expect(
+    page.locator('[data-testid^="workflow-card-mock-wf-"]'),
+  ).toHaveCount(40);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const calls = window.__BUZZ_WORKFLOW_BATCH_CALLS__;
+        return {
+          eventBatchCount: calls?.eventBatches.filter((size) => size === 40)
+            .length,
+          userBatchCount: calls?.userBatches.filter((size) => size === 40)
+            .length,
+        };
+      }),
+    )
+    .toEqual({ eventBatchCount: 1, userBatchCount: 1 });
+});
+
+test("does not select stale picker results when Enter outruns deferred filtering", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "agents",
+      content: "Deferred message candidate",
+      id: "d".repeat(64),
+    });
+  });
+  await page.getByTestId("open-workflows-view").click();
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
+  const channelList = page.getByTestId("channel-combobox-list");
+  if (!(await channelList.isVisible())) {
+    await dialog.getByRole("combobox", { name: "Channel" }).click();
+  }
+  await channelList
+    .getByRole("option", { name: "agents", exact: true })
+    .click();
+  await selectTrigger(page, dialog, "Reaction Added");
+
+  await dialog.getByText("Author", { exact: true }).locator("..").click();
+  const authorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await expect(dialog.getByRole("option").first()).toBeVisible();
+  await authorSearch.evaluate((input: HTMLInputElement) => {
+    input.value = "no-such-author";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+    );
+  });
+
+  await dialog.getByText("Message", { exact: true }).locator("..").click();
+  const messageSearch = dialog.getByRole("combobox", {
+    name: "Search messages or paste a message ID",
+  });
+  await expect(
+    dialog.getByRole("option", { name: /Deferred message/ }),
+  ).toBeVisible();
+  await messageSearch.evaluate((input: HTMLInputElement) => {
+    input.value = "no-such-message";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+    );
+  });
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const definition = parseYaml(
+    await dialog.getByRole("textbox", { name: "Workflow YAML" }).inputValue(),
+  );
+  expect(definition.trigger.filter).toBeUndefined();
+});
+
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
   page,
 }) => {
@@ -431,26 +607,46 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await dialog.getByRole("button", { name: /^Trigger:/ }).click();
   await openTriggerInspector(dialog);
 
-  await dialog.getByRole("button", { name: "Author pubkey" }).click();
-  await dialog.getByLabel("Author pubkey").fill("not-hex");
-  await expect(
-    dialog.getByText("Enter a 64-character hex pubkey."),
-  ).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
+  await dialog.getByText("Author", { exact: true }).locator("..").click();
+  const authorResults = dialog.getByTestId("workflow-author-picker-results");
   await expect
     .poll(() =>
-      page.evaluate(
-        () =>
-          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
-            (call) => call.command === "create_workflow",
-          ).length,
-      ),
+      authorResults.evaluate((results) => {
+        const template = results.querySelector<HTMLElement>("[role=option]");
+        if (!template) return false;
+        for (let index = 0; index < 20; index += 1) {
+          const clone = template.cloneNode(true) as HTMLElement;
+          clone.dataset.scrollFixture = "true";
+          clone.removeAttribute("id");
+          results.append(clone);
+        }
+        return results.scrollHeight > results.clientHeight;
+      }),
     )
-    .toBe(0);
-  await dialog.getByLabel("Author pubkey").fill(author);
+    .toBe(true);
+  await authorResults.hover();
+  await page.mouse.wheel(0, 240);
+  await expect
+    .poll(() => authorResults.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  await authorResults.evaluate((results) => {
+    for (const fixture of results.querySelectorAll("[data-scroll-fixture]")) {
+      fixture.remove();
+    }
+    results.scrollTop = 0;
+  });
+  const authorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await authorSearch.fill(author);
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toBeVisible();
+  await authorSearch.press("Enter");
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
-  await dialog.getByLabel("Author pubkey").fill("still-not-hex");
-  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const correctionEditor = dialog.getByRole("textbox", {
     name: "Workflow YAML",
@@ -461,16 +657,29 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
-  await dialog.getByRole("button", { name: "Author pubkey" }).click();
-  await expect(dialog.getByLabel("Author pubkey")).toHaveValue("");
-  await dialog.getByLabel("Author pubkey").fill(author);
+  await dialog.getByText("Author", { exact: true }).locator("..").click();
+  const correctedAuthorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await correctedAuthorSearch.fill(author);
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toBeVisible();
+  await correctedAuthorSearch.press("Enter");
   await dialog
     .getByRole("group", { name: "Match" })
     .getByRole("button", { name: "is not", exact: true })
     .click();
 
-  await dialog.getByRole("button", { name: "Message event ID" }).click();
-  await dialog.getByLabel("Message event ID").fill(messageId);
+  await dialog.getByText("Message", { exact: true }).locator("..").click();
+  const messageSearch = dialog.getByRole("combobox", {
+    name: "Search messages or paste a message ID",
+  });
+  await messageSearch.fill(messageId);
+  await messageSearch.press("Enter");
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(messageId.slice(0, 12)) }),
+  ).toHaveAttribute("aria-selected", "true");
 
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
@@ -486,15 +695,111 @@ test("round-trips manual author and reaction message IDs through save and reopen
 
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
-  await reopened.getByRole("button", { name: "Author pubkey" }).click();
-  await expect(reopened.getByLabel("Author pubkey")).toHaveValue(author);
-  await reopened.getByRole("button", { name: "Message event ID" }).click();
-  await expect(reopened.getByLabel("Message event ID")).toHaveValue(messageId);
+  await reopened.getByText("Author", { exact: true }).locator("..").click();
+  await expect(
+    reopened.getByRole("option", { name: new RegExp(author.slice(0, 8)) }),
+  ).toHaveAttribute("aria-selected", "true");
+  await reopened.getByText("Message", { exact: true }).locator("..").click();
+  await expect(
+    reopened.getByRole("option", {
+      name: new RegExp(messageId.slice(0, 12)),
+    }),
+  ).toHaveAttribute("aria-selected", "true");
   await reopened.getByRole("tab", { name: "YAML" }).click();
   definition = parseYaml(
     await reopened.getByRole("textbox", { name: "Workflow YAML" }).inputValue(),
   );
   expect(definition.trigger.filter).toContain(messageId);
+});
+
+test("toggles selected author and message filters while preserving sibling conditions", async ({
+  page,
+}) => {
+  const author = "a".repeat(64);
+  const replacementAuthor = "c".repeat(64);
+  const messageId = "b".repeat(64);
+  const dialog = await openCreateWorkflow(
+    page,
+    `toggle_trigger_ids_${Date.now()}`,
+  );
+  await selectTrigger(page, dialog, "Reaction Added");
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+  const definition = parseYaml(await yamlEditor.inputValue());
+  definition.trigger.filter =
+    `trigger_emoji == "👍" && trigger_author == "${author.toUpperCase()}" && ` +
+    `trigger_message_id == "${messageId.toUpperCase()}"`;
+  await yamlEditor.fill(stringifyYaml(definition));
+  await dialog.getByRole("tab", { name: "Form" }).click();
+  await openTriggerInspector(dialog);
+  const authorField = dialog
+    .getByText("Author", { exact: true })
+    .locator("..")
+    .locator("..");
+  await authorField.getByText("Author", { exact: true }).locator("..").click();
+  const authorOption = dialog.getByRole("option", {
+    name: new RegExp(author.slice(0, 8)),
+  });
+  await expect(authorOption).toHaveAttribute("aria-selected", "true");
+  await expect(
+    authorField.getByRole("button", { name: "Clear filter" }),
+  ).toHaveCount(0);
+  await authorOption.click();
+
+  const authorSearch = dialog.getByRole("combobox", {
+    name: "Search authors or paste a public key",
+  });
+  await authorSearch.fill(replacementAuthor);
+  const replacementAuthorOption = dialog.getByRole("option", {
+    name: new RegExp(replacementAuthor.slice(0, 8)),
+  });
+  await expect(replacementAuthorOption).toBeVisible();
+  await authorSearch.press("Enter");
+  await expect(replacementAuthorOption).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(authorSearch).toHaveValue(replacementAuthor);
+  await authorSearch.press("Enter");
+  await expect(authorSearch).toHaveValue(replacementAuthor);
+
+  const messageField = dialog
+    .getByText("Message", { exact: true })
+    .locator("..")
+    .locator("..");
+  await messageField
+    .getByText("Message", { exact: true })
+    .locator("..")
+    .click();
+  const messageSearch = dialog.getByRole("combobox", {
+    name: "Search messages or paste a message ID",
+  });
+  await expect(
+    dialog.getByRole("option", { name: new RegExp(messageId.slice(0, 12)) }),
+  ).toHaveAttribute("aria-selected", "true");
+  await expect(
+    messageField.getByRole("button", { name: "Clear filter" }),
+  ).toHaveCount(0);
+  await messageSearch.fill(messageId);
+  await messageSearch.press("Enter");
+  await expect(messageSearch).toHaveValue(messageId);
+  await messageSearch.press("Enter");
+  const selectedMessage = dialog.getByRole("option", {
+    name: new RegExp(messageId.slice(0, 12)),
+  });
+  await expect(selectedMessage).toHaveAttribute("aria-selected", "true");
+  await selectedMessage.click();
+  await expect(messageSearch).toHaveValue(messageId);
+
+  await dialog.getByRole("button", { name: "Reaction emoji" }).click();
+  await expect(
+    dialog.getByRole("button", { name: "Clear filter" }),
+  ).toBeVisible();
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  expect(parseYaml(await yamlEditor.inputValue()).trigger.filter).toBe(
+    'trigger_emoji == "👍"',
+  );
 });
 
 test("hides and clears message-text step conditions for schedule triggers", async ({
