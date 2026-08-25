@@ -9,9 +9,9 @@ import {
   createHostedCommunity,
   deleteBuilderlabIdentity,
   getBuilderlabAuth,
-  HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
+  hostedCommunityLimitReachedMessage,
   hostedCommunityRelayUrl,
   type BuilderlabAuth,
   type HostedCommunity,
@@ -20,6 +20,7 @@ import {
   startBuilderlabLogin,
   VALID_HOSTED_COMMUNITY_NAME,
 } from "@/features/communities/hostedCommunityApi";
+import { useHostedCommunityLimit } from "@/features/communities/useHostedCommunityLimit";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
@@ -45,6 +46,8 @@ export function HostedCommunityCreateFlow({
     null,
   );
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const { communityLimit, applyFromAccount, adoptFromResponse } =
+    useHostedCommunityLimit();
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
   const [checkingName, setCheckingName] = React.useState(false);
@@ -58,7 +61,8 @@ export function HostedCommunityCreateFlow({
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
-  }, []);
+    applyFromAccount(account);
+  }, [applyFromAccount]);
 
   React.useEffect(() => {
     let active = true;
@@ -189,7 +193,7 @@ export function HostedCommunityCreateFlow({
   const validName =
     normalizedName.length <= 63 &&
     VALID_HOSTED_COMMUNITY_NAME.test(normalizedName);
-  const atCommunityLimit = communities.length >= HOSTED_COMMUNITY_LIMIT;
+  const atCommunityLimit = communities.length >= communityLimit;
   const ready = Boolean(auth && identity && !identityMismatch);
 
   React.useEffect(() => {
@@ -237,11 +241,16 @@ export function HostedCommunityCreateFlow({
       }
       const response = await createHostedCommunity(normalizedName);
       if (response.error || !response.community) {
+        // A rejection carries the relay's effective limit; adopt it so the copy
+        // and the gate reflect the server rather than whatever was current at
+        // load time.
+        const limit = adoptFromResponse(response);
         throw new Error(
           hostedCommunityErrorMessage(
             response.error,
             response.correlation_id,
             "Could not create the community.",
+            { communityLimit: limit },
           ),
         );
       }
@@ -372,7 +381,7 @@ export function HostedCommunityCreateFlow({
   }
 
   const feedback = atCommunityLimit
-    ? `You’ve reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`
+    ? hostedCommunityLimitReachedMessage(communityLimit)
     : name && !validName
       ? "Use lowercase letters, numbers, and single hyphens."
       : checkingName

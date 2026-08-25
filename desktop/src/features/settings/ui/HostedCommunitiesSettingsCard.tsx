@@ -15,13 +15,13 @@ import {
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
-  HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
+  hostedCommunityLimitReachedMessage as limitReachedMessage,
   hostedCommunityRelayUrl as relayUrl,
+  loadHostedCommunityAccount,
   type BuilderlabAuth,
   type HostedCommunityAvailabilityResponse as AvailabilityResponse,
-  type HostedCommunitiesResponse as CommunitiesResponse,
   type HostedCommunity,
   type HostedCommunityMutationResponse as CommunityMutationResponse,
   type HostedIdentityResponse as IdentityResponse,
@@ -30,6 +30,7 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { useHostedCommunityLimit } from "@/features/communities/useHostedCommunityLimit";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
@@ -69,6 +70,8 @@ export function HostedCommunitiesSettingsCard() {
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const { communityLimit, applyFromAccount, adoptFromResponse } =
+    useHostedCommunityLimit();
   const [identity, setIdentity] = React.useState<NostrIdentity | null>(null);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
@@ -79,38 +82,11 @@ export function HostedCommunitiesSettingsCard() {
 
   const loadAccount = React.useCallback(async () => {
     setError(null);
-    const [identityResponse, communitiesResponse] = await Promise.all([
-      invoke<IdentityResponse>("get_builderlab_nostr_identity"),
-      invoke<CommunitiesResponse>("list_builderlab_communities"),
-    ]);
-    if (
-      identityResponse.error &&
-      identityResponse.error.code !== "unauthorized" &&
-      // `missing_mapping` (setup_needed) just means this account hasn't linked a
-      // Buzz identity yet — that's the connect-card empty state, not an error to
-      // surface at the top of the page.
-      !identityResponse.error.setup_needed
-    ) {
-      throw new Error(
-        errorMessage(
-          identityResponse.error,
-          identityResponse.correlation_id,
-          "Could not load the connected Buzz identity.",
-        ),
-      );
-    }
-    if (communitiesResponse.error && !communitiesResponse.error.setup_needed) {
-      throw new Error(
-        errorMessage(
-          communitiesResponse.error,
-          communitiesResponse.correlation_id,
-          "Could not load communities.",
-        ),
-      );
-    }
-    setIdentity(identityResponse.identity ?? null);
-    setCommunities(communitiesResponse.communities ?? []);
-  }, []);
+    const account = await loadHostedCommunityAccount();
+    setIdentity(account.identity);
+    setCommunities(account.communities);
+    applyFromAccount(account);
+  }, [applyFromAccount]);
 
   React.useEffect(() => {
     let active = true;
@@ -304,11 +280,17 @@ export function HostedCommunitiesSettingsCard() {
         { communityId: community.id, transfereeNpub: npub },
       );
       if (response.error) {
+        // A rejection carries the relay's effective limit; adopt it so the copy
+        // and the gate reflect the server rather than whatever was current at
+        // load time. The relay rejects a transfer on the *recipient's* quota,
+        // so the copy has to name them and not the owner giving it away.
+        const limit = adoptFromResponse(response);
         throw new Error(
           errorMessage(
             response.error,
             response.correlation_id,
             "Could not transfer ownership.",
+            { communityLimit: limit, limitSubject: "transferee" },
           ),
         );
       }
@@ -360,7 +342,7 @@ export function HostedCommunitiesSettingsCard() {
       !validName ||
       !identity ||
       identityMismatch ||
-      communities.length >= MAX_COMMUNITIES
+      communities.length >= communityLimit
     )
       return;
     void run("Creating community…", async () => {
@@ -383,11 +365,13 @@ export function HostedCommunitiesSettingsCard() {
         { name: normalizedName },
       );
       if (response.error || !response.community) {
+        const limit = adoptFromResponse(response);
         throw new Error(
           errorMessage(
             response.error,
             response.correlation_id,
             "Could not create the community.",
+            { communityLimit: limit },
           ),
         );
       }
@@ -412,7 +396,7 @@ export function HostedCommunitiesSettingsCard() {
   };
 
   const busy = action != null;
-  const atCommunityLimit = communities.length >= MAX_COMMUNITIES;
+  const atCommunityLimit = communities.length >= communityLimit;
 
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">
@@ -564,7 +548,7 @@ export function HostedCommunitiesSettingsCard() {
               <h3 className="font-medium">
                 Your communities
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
-                  {communities.length} of {MAX_COMMUNITIES} used
+                  {communities.length} of {communityLimit} used
                 </span>
               </h3>
               <Button
@@ -631,9 +615,8 @@ export function HostedCommunitiesSettingsCard() {
             </div>
             {atCommunityLimit ? (
               <p className="text-sm text-muted-foreground">
-                You&apos;ve reached the limit of {MAX_COMMUNITIES} hosted
-                communities. Transfer one to free up a slot before creating
-                another.
+                {limitReachedMessage(communityLimit)} Transfer one to free up a
+                slot before creating another.
               </p>
             ) : null}
             <div className="flex max-w-xl items-center gap-2">
