@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -205,7 +206,7 @@ Widget _buildTestable({
   bool watchChannelMembershipUpdates = false,
   Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
   Future<Map<String, String>> Function()? loadAgentOwners,
-  _FakeUserCacheNotifier? userCacheNotifier,
+  UserCacheNotifier? userCacheNotifier,
   List<ChannelMember> members = const [],
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
@@ -707,6 +708,76 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(userCache.state['agent']?.ownerPubkey, 'owner');
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('keeps Huddle hidden when live owner profile beats refresh', (
+      tester,
+    ) async {
+      final owner = nostr.Keys.generate();
+      final agent = nostr.Keys.generate();
+      final profileRefresh = Completer<List<NostrEvent>>();
+      final relaySession = _IdentityUpdateRelaySession(
+        profileRefresh: profileRefresh.future,
+      );
+      final userCache = UserCacheNotifier();
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Agent DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: ['self', agent.public],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          userCacheNotifier: userCache,
+          relaySessionNotifier: relaySession,
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: agent.public,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      expect(find.byTooltip('Start Huddle'), findsNothing);
+
+      relaySession.emitProfile(
+        _profileEvent(
+          id: 'newer-agent',
+          pubkey: agent.public,
+          createdAt: 2,
+          name: 'Agent',
+          tags: [_authTag(owner, agent.public)],
+        ),
+      );
+      profileRefresh.complete([
+        _profileEvent(
+          id: 'older-human',
+          pubkey: agent.public,
+          createdAt: 1,
+          name: 'Human',
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(userCache.state[agent.public]?.ownerPubkey, owner.public);
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });
 
@@ -13143,6 +13214,9 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 }
 
 class _IdentityUpdateRelaySession extends RelaySessionNotifier {
+  _IdentityUpdateRelaySession({this.profileRefresh});
+
+  final Future<List<NostrEvent>>? profileRefresh;
   NostrFilter? identityFilter;
   NostrFilter? directIdentityFilter;
   List<NostrEvent> directIdentityProfiles = const [];
@@ -13161,6 +13235,9 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filter.kinds.length == 1 && filter.kinds.single == 0) {
+      return profileRefresh ?? const [];
+    }
     if (filter.kinds.contains(10100) && filter.kinds.length == 1) {
       directIdentityFilter = filter;
       return directIdentityProfiles;
@@ -13217,6 +13294,10 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
         _identityClosedListener = null;
       }
     };
+  }
+
+  void emitProfile(NostrEvent event) {
+    _identityListener?.call(event);
   }
 
   void emitAgentProfile({required String pubkey}) {
@@ -13408,6 +13489,39 @@ class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
       version: state.version + 1,
     );
   }
+}
+
+NostrEvent _profileEvent({
+  required String id,
+  required String pubkey,
+  required int createdAt,
+  required String name,
+  List<List<String>> tags = const [],
+}) => NostrEvent(
+  id: id,
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: 0,
+  tags: tags,
+  content: jsonEncode({'name': name}),
+  sig: 'sig',
+);
+
+List<String> _authTag(nostr.Keys owner, String agentPubkey) {
+  final digest = SHA256Digest().process(
+    Uint8List.fromList(
+      utf8.encode('nostr:agent-auth:${agentPubkey.toLowerCase()}:'),
+    ),
+  );
+  final message = digest
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+  return [
+    'auth',
+    owner.public,
+    '',
+    nostr.Schnorr.sign(secretKey: owner.secret, message: message),
+  ];
 }
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {

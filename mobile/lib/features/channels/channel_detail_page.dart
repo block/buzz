@@ -107,22 +107,21 @@ Future<void> _loadDeepLinkEvents(
 }
 
 /// Fetch channel members and preload their profiles into the user cache.
+/// One-to-one DMs additionally refresh participant profiles for identity gates.
 /// Returns whether identity resolution completed successfully.
 Future<bool> _preloadMembers(
   WidgetRef ref,
   String channelId,
-  List<String> participantPubkeys,
-) async {
+  List<String> participantPubkeys, {
+  required bool refreshDmParticipants,
+}) async {
   // Capture references before async gap to avoid using disposed ref.
   final notifier = ref.read(userCacheProvider.notifier);
   try {
     final members = await ref.read(channelMembersProvider(channelId).future);
-    final pubkeys = {
-      ...members.map((member) => member.pubkey),
-      ...participantPubkeys,
-    }.toList();
-    if (pubkeys.isNotEmpty) {
-      return notifier.refresh(pubkeys);
+    await notifier.preload(members.map((member) => member.pubkey).toList());
+    if (refreshDmParticipants) {
+      return notifier.refresh(participantPubkeys);
     }
     return true;
   } catch (_) {
@@ -349,15 +348,23 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final participantCount = resolvedChannel.participantPubkeys
+        .map((pubkey) => pubkey.trim().toLowerCase())
+        .where((pubkey) => pubkey.isNotEmpty)
+        .toSet()
+        .length;
+    final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
     final memberProfilesPreload = useMemoized(
       () => _preloadMembers(
         ref,
         resolvedChannel.id,
         resolvedChannel.participantPubkeys,
+        refreshDmParticipants: isOneToOneDm,
       ),
       [
         resolvedChannel.id,
         sessionStatus,
+        isOneToOneDm,
         Object.hashAll(resolvedChannel.participantPubkeys),
       ],
     );
@@ -378,12 +385,6 @@ class ChannelDetailPage extends HookConsumerWidget {
     }
     final agentDirectoryState = ref.watch(agentDirectoryProvider);
     final agentOwnersState = ref.watch(agentOwnersProvider);
-    final participantCount = resolvedChannel.participantPubkeys
-        .map((pubkey) => pubkey.trim().toLowerCase())
-        .where((pubkey) => pubkey.isNotEmpty)
-        .toSet()
-        .length;
-    final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
     final channelMembershipUpdateState = isOneToOneDm
         ? ref.watch(channelMembershipUpdateProvider(resolvedChannel.id))
         : const ChannelMembershipUpdateState(isReady: true);
