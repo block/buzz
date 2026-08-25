@@ -13881,8 +13881,9 @@ export function maybeInstallE2eTauriMocks() {
         };
         const stream = mockCanvasRevisions.get(req.channelId) ?? [];
         const head = stream[0] ?? null;
-        // Mirror the relay's optimistic-concurrency check: the frozen reject
-        // strings must survive intact so canvasConflict.ts recognizes them.
+        // Mirror the desktop command's client-side advisory check: read the
+        // live head, compare locally, and fail with the frozen conflict
+        // strings so canvasConflict.ts recognizes them.
         const expected = req.expectedRevision;
         if (expected !== undefined && expected !== null) {
           if (expected === "none" && head) {

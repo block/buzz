@@ -53,18 +53,20 @@ pub async fn set_canvas(
     let uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
 
-    // Writer discipline (contract v3): sign `created_at = max(now, head + 1)`
-    // so an accepted tagged write always sorts strictly ahead of the head it
-    // asserts (`created_at DESC, id ASC`). Without this, a same-second or
-    // behind-clock writer could satisfy the precondition yet lose the relay's
-    // tiebreak, "succeeding" without changing the visible canvas. Only a real
-    // head id has a timestamp to clear; `none`/absent asserts no prior head.
-    let prior_head_created_at = match expected_revision.as_deref() {
-        Some(rev) if rev.len() == 64 && rev.bytes().all(|b| b.is_ascii_hexdigit()) => {
-            asserted_head_created_at(&state, &channel_id, rev).await?
-        }
-        _ => None,
-    };
+    // Advisory optimistic-concurrency check (client-side). A conflict-checked
+    // save asserts the revision the editor loaded; we read the live head once
+    // and compare locally, returning one of the frozen conflict markers so
+    // `canvasConflict.ts` renders the reload state. This catches the realistic
+    // stale-edit case (head moved minutes ago). It cannot close the
+    // millisecond race between this read and the write — that would need relay
+    // enforcement — but the day-to-day protection and conflict UX are intact.
+    //
+    // `head` is `None` when the channel has no canvas yet. The head's
+    // `created_at` doubles as the floor for writer discipline below: an
+    // accepted save signs `created_at = max(now, head + 1)` so it sorts
+    // strictly ahead of the head it read under `created_at DESC, id ASC`.
+    let head = current_canvas_head(&state, &channel_id).await?;
+    let prior_head_created_at = check_canvas_precondition(expected_revision.as_deref(), head)?;
 
     let builder = events::build_set_canvas(uuid, &content, expected_revision.as_deref())?
         .custom_created_at(monotonic_created_at(prior_head_created_at));
@@ -76,29 +78,65 @@ pub async fn set_canvas(
     }))
 }
 
-/// `created_at` of the asserted head, or `None` if the relay no longer holds
-/// that revision. An id-scoped query is immutable, so the answer cannot shift
-/// under a concurrent write; a missing head lets the relay surface the
-/// `conflict: canvas revision does not exist` reject on submit rather than
-/// masking it with a stale floor here.
-async fn asserted_head_created_at(
+/// Frozen conflict markers the desktop TypeScript layer (`canvasConflict.ts`)
+/// matches to render the "canvas changed — reload" state. The advisory check
+/// in [`set_canvas`] produces these directly; keep them byte-identical to the
+/// `CANVAS_CONFLICT_MARKERS` list on the TS side.
+const CANVAS_CHANGED: &str = "conflict: canvas changed since it was loaded";
+const CANVAS_REVISION_MISSING: &str = "conflict: canvas revision does not exist";
+
+/// Pure advisory precondition: compare the revision the editor asserts against
+/// the live `head` (`(event_id, created_at)` or `None` when no canvas exists),
+/// returning the head `created_at` floor for writer discipline on success or a
+/// frozen conflict marker on mismatch.
+///
+/// - `None` asserts nothing (unconditional append) — no floor.
+/// - `Some("none")` asserts no canvas yet — a present head is a conflict.
+/// - `Some(id)` asserts that head — a missing head is `revision does not
+///   exist`, a different head is `changed since it was loaded`, a match returns
+///   its `created_at` as the floor.
+fn check_canvas_precondition(
+    expected_revision: Option<&str>,
+    head: Option<(String, i64)>,
+) -> Result<Option<i64>, String> {
+    match expected_revision {
+        None => Ok(None),
+        Some("none") => {
+            if head.is_some() {
+                Err(CANVAS_CHANGED.to_string())
+            } else {
+                Ok(None)
+            }
+        }
+        Some(revision) => match head {
+            None => Err(CANVAS_REVISION_MISSING.to_string()),
+            Some((head_id, _)) if !head_id.eq_ignore_ascii_case(revision) => {
+                Err(CANVAS_CHANGED.to_string())
+            }
+            Some((_, created_at)) => Ok(Some(created_at)),
+        },
+    }
+}
+
+/// Read the live canvas head as `(event_id, created_at)`, or `None` when the
+/// channel has no canvas yet. The relay orders `created_at DESC, id ASC`, so a
+/// `limit: 1` query returns exactly the head every surface agrees on.
+async fn current_canvas_head(
     state: &AppState,
     channel_id: &str,
-    revision: &str,
-) -> Result<Option<i64>, String> {
+) -> Result<Option<(String, i64)>, String> {
     let events = query_relay(
         state,
         &[serde_json::json!({
             "kinds": [40100],
             "#h": [channel_id],
-            "ids": [revision],
             "limit": 1
         })],
     )
     .await?;
     Ok(events
         .first()
-        .map(|event| event.created_at.as_secs() as i64))
+        .map(|event| (event.id.to_hex(), event.created_at.as_secs() as i64)))
 }
 
 /// One page of a channel canvas's revision stream (kind:40100), newest first.
@@ -188,7 +226,56 @@ fn resolve_history_page_size(limit: Option<usize>) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_history_page_size;
+    use super::{check_canvas_precondition, resolve_history_page_size};
+
+    const HEAD_ID: &str = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44";
+
+    #[test]
+    fn precondition_none_assertion_is_unconditional_append() {
+        // No asserted revision: append regardless of head, no floor.
+        assert_eq!(check_canvas_precondition(None, None), Ok(None));
+        assert_eq!(
+            check_canvas_precondition(None, Some((HEAD_ID.to_string(), 100))),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn precondition_expect_none_conflicts_when_a_head_exists() {
+        // First-creation race: expected no canvas but one now exists.
+        assert_eq!(check_canvas_precondition(Some("none"), None), Ok(None));
+        assert_eq!(
+            check_canvas_precondition(Some("none"), Some((HEAD_ID.to_string(), 100))),
+            Err(super::CANVAS_CHANGED.to_string())
+        );
+    }
+
+    #[test]
+    fn precondition_expect_head_returns_floor_or_conflict() {
+        // Matching head returns its created_at as the writer-discipline floor.
+        assert_eq!(
+            check_canvas_precondition(Some(HEAD_ID), Some((HEAD_ID.to_string(), 100))),
+            Ok(Some(100))
+        );
+        // Case-insensitive id match still resolves.
+        assert_eq!(
+            check_canvas_precondition(
+                Some(&HEAD_ID.to_uppercase()),
+                Some((HEAD_ID.to_string(), 100))
+            ),
+            Ok(Some(100))
+        );
+        // Head moved to a different revision since load.
+        assert_eq!(
+            check_canvas_precondition(Some(HEAD_ID), Some(("ff".repeat(32), 100))),
+            Err(super::CANVAS_CHANGED.to_string())
+        );
+        // Asserted a head but the canvas no longer has one.
+        assert_eq!(
+            check_canvas_precondition(Some(HEAD_ID), None),
+            Err(super::CANVAS_REVISION_MISSING.to_string())
+        );
+    }
 
     #[test]
     fn defaults_to_100_when_unset() {

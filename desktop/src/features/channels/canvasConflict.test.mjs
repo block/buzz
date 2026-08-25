@@ -6,12 +6,12 @@ import {
   isCanvasConflictError,
 } from "./canvasConflict.ts";
 
-// The three frozen relay reject strings are all conflicts from the user's
-// perspective: the head moved, the revision the client expected no longer
-// exists, or the write does not sort strictly ahead of the current head
-// (contract v3). The helper must recognize each whether it arrives as an Error
-// or a raw string (the Tauri IPC layer hands back either), and must not misfire
-// on unrelated errors.
+// The two frozen conflict strings are both conflicts from the user's
+// perspective: the head moved, or the revision the client expected no longer
+// exists. The desktop `set_canvas` command produces these client-side. The
+// helper must recognize each whether it arrives as an Error or a raw string
+// (the Tauri IPC layer hands back either), and must not misfire on unrelated
+// errors.
 
 test("head-moved reject is a conflict as Error and as raw string", () => {
   const message = "conflict: canvas changed since it was loaded";
@@ -21,12 +21,6 @@ test("head-moved reject is a conflict as Error and as raw string", () => {
 
 test("revision-does-not-exist reject is a conflict as Error and as raw string", () => {
   const message = "conflict: canvas revision does not exist";
-  assert.equal(isCanvasConflictError(new Error(message)), true);
-  assert.equal(isCanvasConflictError(message), true);
-});
-
-test("does-not-supersede reject is a conflict as Error and as raw string", () => {
-  const message = "conflict: canvas write does not supersede the current head";
   assert.equal(isCanvasConflictError(new Error(message)), true);
   assert.equal(isCanvasConflictError(message), true);
 });

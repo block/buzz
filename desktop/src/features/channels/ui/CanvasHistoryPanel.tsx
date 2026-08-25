@@ -68,8 +68,8 @@ export function CanvasHistoryPanel({
 
   async function handleRestore(revision: CanvasRevision) {
     // Restore is a conflict-checked publish against the live head: if the
-    // canvas moved since this panel loaded, the relay rejects and we surface
-    // the same reload state as a normal save.
+    // canvas moved since this panel loaded, the save command's advisory check
+    // fails and we surface the same reload state as a normal save.
     await restoreMutation.mutateAsync({
       content: revision.content,
       expectedRevision: currentRevision ?? CANVAS_EXPECTED_REVISION_NONE,

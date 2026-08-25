@@ -538,10 +538,14 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 
 /// Build a canvas update event (kind 40100).
 ///
-/// When `expected_revision` is set, the relay applies it as an optimistic
-/// concurrency precondition on the channel's live canvas head: a 64-hex event
-/// ID requires the head to match, and the literal `none` requires no head to
-/// exist yet. Omit it for an unconditional append (backward compatible).
+/// When `expected_revision` is set, an `["expected-revision", …]` tag is
+/// attached documenting the head the write was composed against: a 64-hex
+/// event ID names the head it expects, and the literal `none` asserts no head
+/// exists yet. Concurrency enforcement is **client-side** (the CLI/Desktop
+/// compare against a freshly read head before publishing); the relay does not
+/// interpret this tag today, so it is advisory/documentary and preserves the
+/// option to add relay enforcement later with zero client change. Omit it for
+/// an unconditional append (backward compatible).
 pub fn build_set_canvas(
     channel_id: Uuid,
     content: &str,
@@ -563,16 +567,16 @@ pub fn build_set_canvas(
 }
 
 /// Build a canvas write (kind 40100) that edits or restores against a known
-/// head, applying contract-v3 writer discipline in one place.
+/// head, applying writer discipline in one place.
 ///
 /// Sets the `expected-revision` precondition to `head_id` and stamps
 /// `created_at = max(now, head_created_at + 1)` so the event sorts strictly
-/// ahead of the head it asserts under `created_at DESC, id ASC`. This is what
-/// keeps the relay's head-advancement guard
-/// (`conflict: canvas write does not supersede the current head`) unreachable
-/// for a legitimate first-party write whose local clock lags the head. First-party
-/// signers (CLI restore, Desktop save/restore) MUST route disciplined canvas
-/// writes through this helper rather than re-deriving the timestamp.
+/// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
+/// legitimate first-party restore/edit whose local clock lags the head from
+/// landing behind that head in read order (which would "succeed" without
+/// changing the visible canvas). First-party signers (CLI restore, Desktop
+/// save/restore) MUST route disciplined canvas writes through this helper
+/// rather than re-deriving the timestamp.
 pub fn build_set_canvas_after_head(
     channel_id: Uuid,
     content: &str,

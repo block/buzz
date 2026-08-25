@@ -365,15 +365,18 @@ pub async fn cmd_canvas_history(
     Ok(())
 }
 
-/// Restore the canvas to a previous revision by re-publishing its content with
-/// an `expected-revision` precondition pinned to the current head.
+/// Restore the canvas to a previous revision by re-publishing its content.
 ///
 /// The target revision is fetched by an ID-scoped query (resolves any age) and
-/// the head by a separate `limit: 1` query — neither scans the full stream. The
-/// republished event is built via [`buzz_sdk::build_set_canvas_after_head`],
-/// which applies contract-v3 writer discipline (`created_at = max(now,
-/// head.created_at + 1)`) so it sorts strictly ahead of the asserted head and
-/// the relay's head-advancement guard is not tripped.
+/// the head by a separate `limit: 1` query — neither scans the full stream.
+/// Fetching the head immediately before the write is the advisory
+/// concurrency check: a missing target revision or absent head fails here, and
+/// restoring the current head is short-circuited so history never grows a
+/// redundant revision. The republished event is built via
+/// [`buzz_sdk::build_set_canvas_after_head`], which applies writer discipline
+/// (`created_at = max(now, head.created_at + 1)`) so the restore sorts strictly
+/// ahead of the head it read; the `expected-revision` tag it carries is
+/// advisory (no relay enforcement).
 pub async fn cmd_restore_canvas(
     client: &BuzzClient,
     channel_id: &str,
@@ -415,16 +418,9 @@ pub async fn cmd_restore_canvas(
         buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
             .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
     let event = client.sign_event(builder)?;
-    match client.submit_event(event).await {
-        Ok(resp) => {
-            println!("{}", normalize_write_response(&resp));
-            Ok(())
-        }
-        Err(CliError::Relay { body, .. }) if body.starts_with("conflict:") => {
-            Err(CliError::Conflict(body))
-        }
-        Err(e) => Err(e),
-    }
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
 }
 
 pub async fn cmd_create_channel(

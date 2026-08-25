@@ -3068,8 +3068,9 @@ test("canvas history, save-conflict, and restore journey", async ({ page }) => {
   );
 
   // Save-conflict: open the editor (snapshots head), move the head via a
-  // concurrent save through the bridge, then save — the frozen relay reject
-  // must surface as the reload-required conflict copy, not a raw error.
+  // concurrent save through the bridge, then save — the save command's
+  // advisory check must surface the frozen conflict string as the
+  // reload-required conflict copy, not a raw error.
   await section.getByTestId("channel-canvas-history-toggle").click();
   await section.getByTestId("channel-canvas-edit").click();
   await page.evaluate((channelId) => {
