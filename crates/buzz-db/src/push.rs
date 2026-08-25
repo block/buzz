@@ -223,11 +223,13 @@ pub async fn accept_lease_event(
     max_active_leases: i64,
 ) -> Result<AcceptLeaseOutcome> {
     let author = event.pubkey.as_bytes();
-    let (mut tx, mut transaction_timer) = crate::observability::begin_transaction(
+    let (mut tx, transaction_timer) = crate::observability::begin_transaction(
         pool,
         crate::observability::TransactionOperation::AcceptPushLeaseEvent,
     )
     .await?;
+    transaction_timer
+        .observe(async {
     let mut address_lock = Vec::with_capacity(16 + author.len() + installation_id.len());
     address_lock.extend_from_slice(community.as_uuid().as_bytes());
     address_lock.extend_from_slice(author);
@@ -269,10 +271,8 @@ pub async fn accept_lease_event(
         let existing_author: Vec<u8> = row.try_get("author")?;
         let existing_installation: String = row.try_get("installation_id")?;
         if existing_author.as_slice() != author || existing_installation != installation_id {
-            transaction_timer.mark_success();
             return Ok(AcceptLeaseOutcome::SourceEventCollision);
         }
-        transaction_timer.mark_success();
         return Ok(AcceptLeaseOutcome::StaleEvent);
     }
 
@@ -292,11 +292,9 @@ pub async fn accept_lease_event(
             || (version.source_created_at == current_created_at
                 && version.source_event_id < current_event_id.as_slice());
         if !wins_event {
-            transaction_timer.mark_success();
             return Ok(AcceptLeaseOutcome::StaleEvent);
         }
         if version.generation <= current_generation {
-            transaction_timer.mark_success();
             return Ok(AcceptLeaseOutcome::StaleGeneration);
         }
     }
@@ -324,7 +322,6 @@ pub async fn accept_lease_event(
         .fetch_one(&mut *tx)
         .await?;
         if active_count >= max_active_leases {
-            transaction_timer.mark_success();
             return Ok(AcceptLeaseOutcome::LeaseQuotaExceeded);
         }
         let duplicate: bool = sqlx::query_scalar(
@@ -338,7 +335,6 @@ pub async fn accept_lease_event(
         .fetch_one(&mut *tx)
         .await?;
         if duplicate {
-            transaction_timer.mark_success();
             return Ok(AcceptLeaseOutcome::EndpointAlreadyLeased);
         }
     }
@@ -368,7 +364,6 @@ pub async fn accept_lease_event(
     .await
     {
         if let Some(outcome) = constraint_acceptance_outcome(&error) {
-            transaction_timer.mark_success();
             return Ok(outcome);
         }
         return Err(error.into());
@@ -403,7 +398,6 @@ pub async fn accept_lease_event(
     .execute(&mut *tx).await
     {
         if let Some(outcome) = constraint_acceptance_outcome(&error) {
-            transaction_timer.mark_success();
             return Ok(outcome);
         }
         return Err(error.into());
@@ -412,8 +406,9 @@ pub async fn accept_lease_event(
         backfill_push_match_jobs(&mut tx, community).await?;
     }
     tx.commit().await?;
-    transaction_timer.mark_success();
     Ok(AcceptLeaseOutcome::Accepted)
+        })
+        .await
 }
 
 fn constraint_acceptance_outcome(error: &sqlx::Error) -> Option<AcceptLeaseOutcome> {

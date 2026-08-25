@@ -195,8 +195,15 @@ impl TransactionTimer {
         }
     }
 
-    pub(crate) fn mark_success(&mut self) {
-        self.outcome = Outcome::Success;
+    pub(crate) async fn observe<T, E, F>(mut self, future: F) -> Result<T, E>
+    where
+        F: Future<Output = Result<T, E>>,
+    {
+        let result = future.await;
+        if result.is_ok() {
+            self.outcome = Outcome::Success;
+        }
+        result
     }
 }
 
@@ -252,6 +259,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn transaction_timer_observe_classifies_result_outcomes() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let success = TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent)
+            .observe(async { Ok::<_, &str>("committed") })
+            .await;
+        assert_eq!(success, Ok("committed"));
+
+        let error = TransactionTimer::start(TransactionOperation::AcceptPushLeaseEvent)
+            .observe(async { Err::<(), _>("rollback") })
+            .await;
+        assert_eq!(error, Err("rollback"));
+
+        let keys = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, ..)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect::<BTreeMap<_, _>>();
+                (key.key().name().to_owned(), labels)
+            })
+            .collect::<BTreeSet<_>>();
+
+        for (operation, outcome) in [
+            ("replace_parameterized_event", "success"),
+            ("accept_push_lease_event", "error"),
+        ] {
+            assert!(keys.contains(&(
+                "buzz_db_transaction_duration_seconds".to_owned(),
+                [
+                    ("operation".to_owned(), operation.to_owned()),
+                    ("outcome".to_owned(), outcome.to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            )));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn primitives_record_fixed_success_error_and_timeout_labels() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -275,13 +328,16 @@ mod tests {
                 .await;
         assert!(lock_error.is_err());
 
-        let mut committed =
-            TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
-        committed.mark_success();
-        drop(committed);
-        drop(TransactionTimer::start(
-            TransactionOperation::AcceptPushLeaseEvent,
-        ));
+        let committed: Result<(), ()> =
+            TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent)
+                .observe(async { Ok(()) })
+                .await;
+        assert!(committed.is_ok());
+        let rolled_back: Result<(), ()> =
+            TransactionTimer::start(TransactionOperation::AcceptPushLeaseEvent)
+                .observe(async { Err(()) })
+                .await;
+        assert!(rolled_back.is_err());
 
         let snapshot = snapshotter.snapshot().into_vec();
         let keys = snapshot

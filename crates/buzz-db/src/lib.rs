@@ -4355,11 +4355,13 @@ impl Db {
             channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
         );
 
-        let (mut tx, mut transaction_timer) = observability::begin_transaction(
+        let (mut tx, transaction_timer) = observability::begin_transaction(
             &self.pool,
             observability::TransactionOperation::ReplaceAddressableEvent,
         )
         .await?;
+        transaction_timer
+            .observe(async {
 
         // Serialize all writers for the same (kind, pubkey, channel_id) tuple.
         // Advisory lock is transaction-scoped — released on commit/rollback.
@@ -4397,7 +4399,6 @@ impl Db {
             if dominated {
                 tx.rollback().await?;
                 let received_at = chrono::Utc::now();
-                transaction_timer.mark_success();
                 return Ok((
                     StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
                     false,
@@ -4449,7 +4450,6 @@ impl Db {
             // ON CONFLICT fired — the event ID already exists. Rollback the
             // soft-delete so we don't lose the previous replaceable event.
             tx.rollback().await?;
-            transaction_timer.mark_success();
             return Ok((
                 StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
                 false,
@@ -4462,12 +4462,13 @@ impl Db {
         crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
 
         tx.commit().await?;
-        transaction_timer.mark_success();
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
             true,
         ))
+            })
+            .await
     }
 
     /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
@@ -4548,11 +4549,13 @@ impl Db {
             None,
         );
 
-        let (mut tx, mut transaction_timer) = observability::begin_transaction(
+        let (mut tx, transaction_timer) = observability::begin_transaction(
             &self.pool,
             observability::TransactionOperation::PublishNip43MembershipLocked,
         )
         .await?;
+        let (event, received_at, was_inserted, member_count) = transaction_timer
+            .observe(async {
 
         // Acquire the per-community snapshot lock BEFORE reading members.
         // This serializes the entire read-build-write cycle: a concurrent
@@ -4639,27 +4642,24 @@ impl Db {
         .await?;
 
         let was_inserted = insert_result.rows_affected() > 0;
-        if !was_inserted {
+        if was_inserted {
+            tx.commit().await?;
+        } else {
             tx.rollback().await?;
-            transaction_timer.mark_success();
-            return Ok((
-                StoredEvent::with_received_at(event, received_at, None, false),
-                false,
-                member_count,
-            ));
         }
+        Ok::<_, DbError>((event, received_at, was_inserted, member_count))
+            })
+            .await?;
 
-        tx.commit().await?;
-        transaction_timer.mark_success();
-        drop(transaction_timer);
-
-        if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
-            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        if was_inserted {
+            if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
         }
 
         Ok((
-            StoredEvent::with_received_at(event, received_at, None, true),
-            true,
+            StoredEvent::with_received_at(event, received_at, None, was_inserted),
+            was_inserted,
             member_count,
         ))
     }

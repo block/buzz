@@ -399,28 +399,31 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let (mut tx, mut transaction_timer) = observability::begin_transaction(
+        let (mut tx, transaction_timer) = observability::begin_transaction(
             &self.pool,
             TransactionOperation::ReplaceParameterizedEvent,
         )
         .await?;
-        let result = self
-            .replace_parameterized_event_in_transaction(
-                &mut tx,
-                community_id,
-                event,
-                d_tag,
-                channel_id,
-                ParameterizedReplacePrecondition::Unconditional,
-            )
-            .await?;
-        let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
-        if was_inserted {
-            tx.commit().await?;
-        } else {
-            tx.rollback().await?;
-        }
-        transaction_timer.mark_success();
-        Ok((result.event, was_inserted))
+        transaction_timer
+            .observe(async {
+                let result = self
+                    .replace_parameterized_event_in_transaction(
+                        &mut tx,
+                        community_id,
+                        event,
+                        d_tag,
+                        channel_id,
+                        ParameterizedReplacePrecondition::Unconditional,
+                    )
+                    .await?;
+                let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
+                if was_inserted {
+                    tx.commit().await?;
+                } else {
+                    tx.rollback().await?;
+                }
+                Ok((result.event, was_inserted))
+            })
+            .await
     }
 }

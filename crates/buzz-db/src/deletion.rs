@@ -1121,11 +1121,13 @@ impl DeletionStore {
     /// Already-acquired leases remain renewable, verifiable, and releasable so
     /// admitted remote effects retain their exclusion proof until completion.
     pub async fn begin_quiescing(&self, token: &LeaseToken) -> Result<()> {
-        let (mut tx, mut transaction_timer) = crate::observability::begin_transaction(
+        let (mut tx, transaction_timer) = crate::observability::begin_transaction(
             &self.pool,
             crate::observability::TransactionOperation::BeginCommunityDeletionQuiescing,
         )
         .await?;
+        transaction_timer
+            .observe(async {
         verify_lease(&mut tx, token, DeletionStage::Approved).await?;
         lock_community_deletion(&mut tx, token.community_id).await?;
         verify_lease(&mut tx, token, DeletionStage::Approved).await?;
@@ -1170,17 +1172,20 @@ impl DeletionStore {
         )
         .await?;
         tx.commit().await?;
-        transaction_timer.mark_success();
         Ok(())
+            })
+            .await
     }
 
     /// Acquire the universal durable fence after all pre-quiesce serving leases drain.
     pub async fn fence(&self, token: &LeaseToken) -> Result<i64> {
-        let (mut tx, mut transaction_timer) = crate::observability::begin_transaction(
+        let (mut tx, transaction_timer) = crate::observability::begin_transaction(
             &self.pool,
             crate::observability::TransactionOperation::FenceCommunityDeletion,
         )
         .await?;
+        transaction_timer
+            .observe(async {
         verify_lease(&mut tx, token, DeletionStage::Approved).await?;
         lock_community_deletion(&mut tx, token.community_id).await?;
         verify_lease(&mut tx, token, DeletionStage::Approved).await?;
@@ -1244,8 +1249,9 @@ impl DeletionStore {
         )
         .await?;
         tx.commit().await?;
-        transaction_timer.mark_success();
         Ok(generation)
+            })
+            .await
     }
 
     /// Freeze the exact post-fence storage binding manifest.
