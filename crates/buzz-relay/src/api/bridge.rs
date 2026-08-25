@@ -1981,6 +1981,75 @@ pub struct WebhookQuery {
     pub secret: Option<String>,
 }
 
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookExecutionPlan {
+    SpawnWithoutClaim,
+    ClaimThenSpawn,
+    DoNotSpawn,
+    PayloadConflict,
+}
+
+fn webhook_execution_plan(
+    keyed: bool,
+    reservation: &buzz_db::workflow::WorkflowWebhookRunReservation,
+) -> WebhookExecutionPlan {
+    use buzz_db::workflow::{RunStatus, WorkflowWebhookRunReservation as Reservation};
+
+    match (keyed, reservation) {
+        (_, Reservation::PayloadConflict) => WebhookExecutionPlan::PayloadConflict,
+        (false, Reservation::Created(_)) => WebhookExecutionPlan::SpawnWithoutClaim,
+        (true, Reservation::Created(_))
+        | (
+            _,
+            Reservation::Replayed {
+                status: RunStatus::Pending,
+                ..
+            },
+        ) => WebhookExecutionPlan::ClaimThenSpawn,
+        (_, Reservation::Replayed { .. }) => WebhookExecutionPlan::DoNotSpawn,
+    }
+}
+
+fn require_webhook_execution_claim(
+    claim_token: Option<uuid::Uuid>,
+) -> Result<uuid::Uuid, (StatusCode, Json<Value>)> {
+    if let Some(claim_token) = claim_token {
+        return Ok(claim_token);
+    }
+    Err(api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "workflow run is pending execution; retry required",
+    ))
+}
+
+fn webhook_idempotency_key(headers: &HeaderMap) -> Result<Option<&str>, (StatusCode, Json<Value>)> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid idempotency key",
+        ));
+    }
+    let key = value
+        .to_str()
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid idempotency key"))?;
+    if key.is_empty()
+        || key.len() > MAX_IDEMPOTENCY_KEY_BYTES
+        || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid idempotency key",
+        ));
+    }
+    Ok(Some(key))
+}
+
 /// Webhook trigger endpoint. No user auth — the webhook secret authenticates the caller.
 ///
 /// Prefers `X-Webhook-Secret` header over `?secret=` query param (headers aren't logged
@@ -2051,6 +2120,8 @@ pub async fn workflow_webhook(
         }
     }
 
+    let idempotency_key = webhook_idempotency_key(&headers)?;
+
     // Parse optional JSON body as trigger context.
     let body_json: Option<Value> =
         if body.is_empty() {
@@ -2100,63 +2171,131 @@ pub async fn workflow_webhook(
         .await
         .map_err(|_| not_found("workflow not found"))?;
 
-    let run_id = state
-        .db
-        .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())
-        .await
-        .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
+    let reservation = match idempotency_key {
+        Some(key) => {
+            state
+                .db
+                .reserve_workflow_webhook_run(
+                    community_id,
+                    id,
+                    trigger_ctx_json.as_ref(),
+                    key,
+                    &body,
+                )
+                .await
+        }
+        None => state
+            .db
+            .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())
+            .await
+            .map(buzz_db::workflow::WorkflowWebhookRunReservation::Created),
+    }
+    .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
 
-    // Spawn workflow execution asynchronously.
-    let engine = Arc::clone(&state.workflow_engine);
-    let db = state.db.clone();
-    let def_value = workflow.definition.clone();
-    let trigger_ctx_clone = trigger_ctx.clone();
-    tokio::spawn(async move {
-        let def: buzz_workflow::WorkflowDef = match serde_json::from_value(def_value) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("webhook: failed to parse definition: {e}");
-                if let Err(db_err) = db
-                    .update_workflow_run(
+    let execution_plan = webhook_execution_plan(idempotency_key.is_some(), &reservation);
+
+    let (run_id, status, replay) = match reservation {
+        buzz_db::workflow::WorkflowWebhookRunReservation::Created(run_id) => {
+            (run_id, "pending".to_owned(), false)
+        }
+        buzz_db::workflow::WorkflowWebhookRunReservation::Replayed { run_id, status } => {
+            (run_id, status.to_string(), true)
+        }
+        buzz_db::workflow::WorkflowWebhookRunReservation::PayloadConflict => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "idempotency key already used with a different payload",
+            ));
+        }
+    };
+
+    let (should_spawn, claim_token) = match execution_plan {
+        WebhookExecutionPlan::SpawnWithoutClaim => (true, None),
+        WebhookExecutionPlan::ClaimThenSpawn => {
+            let claim_token = state
+                .db
+                .claim_workflow_webhook_run(community_id, run_id)
+                .await
+                .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
+            (true, Some(require_webhook_execution_claim(claim_token)?))
+        }
+        WebhookExecutionPlan::DoNotSpawn => (false, None),
+        WebhookExecutionPlan::PayloadConflict => (false, None),
+    };
+
+    if should_spawn {
+        // Keyed runs spawn only after winning the execution claim.
+        let engine = Arc::clone(&state.workflow_engine);
+        let db = state.db.clone();
+        let def_value = workflow.definition.clone();
+        let trigger_ctx_clone = trigger_ctx.clone();
+        tokio::spawn(async move {
+            let def: buzz_workflow::WorkflowDef = match serde_json::from_value(def_value) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("webhook: failed to parse definition: {e}");
+                    if let Err(db_err) = db
+                        .update_workflow_run(
+                            community_id,
+                            run_id,
+                            buzz_db::workflow::RunStatus::Failed,
+                            0,
+                            &serde_json::json!([]),
+                            Some(buzz_db::workflow::WorkflowRunFailure {
+                                code: "invalid_definition",
+                                message: &format!("definition parse error: {e}"),
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::error!("webhook: failed to mark run as failed: {db_err}");
+                    }
+                    return;
+                }
+            };
+
+            let result = match claim_token {
+                Some(claim_token) => {
+                    let Some(result) = buzz_workflow::executor::execute_claimed_run(
+                        &engine,
                         community_id,
                         run_id,
-                        buzz_db::workflow::RunStatus::Failed,
-                        0,
-                        &serde_json::json!([]),
-                        Some(buzz_db::workflow::WorkflowRunFailure {
-                            code: "invalid_definition",
-                            message: &format!("definition parse error: {e}"),
-                        }),
+                        claim_token,
+                        &def,
+                        &trigger_ctx_clone,
                     )
                     .await
-                {
-                    tracing::error!("webhook: failed to mark run as failed: {db_err}");
+                    else {
+                        return;
+                    };
+                    result
                 }
-                return;
-            }
-        };
-
-        let result = buzz_workflow::executor::execute_from_step(
-            &engine,
-            community_id,
-            run_id,
-            &def,
-            &trigger_ctx_clone,
-            0,
-            None,
-        )
-        .await;
-        engine
-            .finalize_run(community_id, run_id, result, None)
-            .await;
-    });
+                None => {
+                    buzz_workflow::executor::execute_from_step(
+                        &engine,
+                        community_id,
+                        run_id,
+                        &def,
+                        &trigger_ctx_clone,
+                        0,
+                        None,
+                    )
+                    .await
+                }
+            };
+            engine
+                .finalize_run(community_id, run_id, result, None)
+                .await;
+        });
+    }
 
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "run_id": run_id.to_string(),
             "workflow_id": id.to_string(),
-            "status": "pending",
+            "status": status,
+            "replay": replay,
         })),
     ))
 }
@@ -2456,6 +2595,98 @@ mod tests {
             .expect("sign auth event")
             .id
             .to_bytes()
+    }
+
+    #[test]
+    fn webhook_idempotency_key_accepts_absent_and_visible_ascii_values() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(webhook_idempotency_key(&headers).expect("absent key"), None);
+
+        headers.insert("idempotency-key", "ticket-123_ABC".parse().expect("header"));
+        assert_eq!(
+            webhook_idempotency_key(&headers).expect("valid key"),
+            Some("ticket-123_ABC")
+        );
+
+        let boundary = "a".repeat(MAX_IDEMPOTENCY_KEY_BYTES);
+        headers.insert(
+            "idempotency-key",
+            boundary.parse().expect("boundary header"),
+        );
+        assert_eq!(
+            webhook_idempotency_key(&headers).expect("boundary key"),
+            Some(boundary.as_str())
+        );
+    }
+
+    #[test]
+    fn webhook_idempotency_key_rejects_invalid_values() {
+        for invalid in [String::new(), "contains space".to_owned(), "a".repeat(257)] {
+            let mut headers = HeaderMap::new();
+            headers.insert("idempotency-key", invalid.parse().expect("header value"));
+            let (status, _) = webhook_idempotency_key(&headers).expect_err("invalid key");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append("idempotency-key", "first".parse().expect("first header"));
+        duplicate.append("idempotency-key", "second".parse().expect("second header"));
+        let (status, _) = webhook_idempotency_key(&duplicate).expect_err("duplicate key");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let mut opaque = HeaderMap::new();
+        opaque.insert(
+            "idempotency-key",
+            axum::http::HeaderValue::from_bytes(&[0xff]).expect("opaque header"),
+        );
+        let (status, _) = webhook_idempotency_key(&opaque).expect_err("non-ASCII key");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn webhook_handler_claims_created_and_pending_replay_before_spawning() {
+        use buzz_db::workflow::{RunStatus, WorkflowWebhookRunReservation as Reservation};
+
+        let run_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            webhook_execution_plan(true, &Reservation::Created(run_id)),
+            WebhookExecutionPlan::ClaimThenSpawn
+        );
+        assert_eq!(
+            webhook_execution_plan(false, &Reservation::Created(run_id)),
+            WebhookExecutionPlan::SpawnWithoutClaim
+        );
+        assert_eq!(
+            webhook_execution_plan(
+                true,
+                &Reservation::Replayed {
+                    run_id,
+                    status: RunStatus::Pending,
+                },
+            ),
+            WebhookExecutionPlan::ClaimThenSpawn
+        );
+    }
+
+    #[test]
+    fn webhook_handler_retries_unclaimed_pending_and_never_resumes_running_or_done() {
+        use buzz_db::workflow::{RunStatus, WorkflowWebhookRunReservation as Reservation};
+
+        let (status, _) = require_webhook_execution_claim(None).expect_err("claim is required");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let claim_token = uuid::Uuid::new_v4();
+        assert_eq!(
+            require_webhook_execution_claim(Some(claim_token)).expect("claim token"),
+            claim_token
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        for status in [RunStatus::Running, RunStatus::Completed, RunStatus::Failed] {
+            assert_eq!(
+                webhook_execution_plan(true, &Reservation::Replayed { run_id, status }),
+                WebhookExecutionPlan::DoNotSpawn
+            );
+        }
     }
 
     #[test]

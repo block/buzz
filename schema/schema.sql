@@ -397,14 +397,45 @@ CREATE TABLE workflow_runs (
     completed_at        TIMESTAMPTZ,
     error_message       TEXT,
     error_code          TEXT,
+    webhook_idempotency_key_hash BYTEA,
+    webhook_payload_hash BYTEA,
+    webhook_execution_claimed_at TIMESTAMPTZ,
+    webhook_execution_claim_token UUID,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (community_id, id),
+    CONSTRAINT workflow_runs_webhook_idempotency_hashes CHECK (
+        (
+            webhook_idempotency_key_hash IS NULL
+            AND webhook_payload_hash IS NULL
+            AND webhook_execution_claimed_at IS NULL
+            AND webhook_execution_claim_token IS NULL
+        )
+        OR (
+            webhook_idempotency_key_hash IS NOT NULL
+            AND webhook_payload_hash IS NOT NULL
+            AND octet_length(webhook_idempotency_key_hash) = 32
+            AND octet_length(webhook_payload_hash) = 32
+            AND (
+                (
+                    webhook_execution_claimed_at IS NULL
+                    AND webhook_execution_claim_token IS NULL
+                )
+                OR (
+                    webhook_execution_claimed_at IS NOT NULL
+                    AND webhook_execution_claim_token IS NOT NULL
+                )
+            )
+        )
+    ),
     FOREIGN KEY (community_id, workflow_id)
         REFERENCES workflows (community_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_workflow_runs_workflow ON workflow_runs (community_id, workflow_id);
 CREATE INDEX idx_workflow_runs_status ON workflow_runs (community_id, status);
+CREATE UNIQUE INDEX idx_workflow_runs_webhook_idempotency
+    ON workflow_runs (community_id, workflow_id, webhook_idempotency_key_hash)
+    WHERE webhook_idempotency_key_hash IS NOT NULL;
 
 -- ── Workflow approvals ────────────────────────────────────────────────────────
 -- token-hash lookup scoped: approval token grants cannot act on another

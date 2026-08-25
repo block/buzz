@@ -640,7 +640,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1102,6 +1102,55 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+    }
+
+    #[test]
+    fn workflow_webhook_idempotency_is_hashed_and_tenant_scoped() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 33)
+            .expect("embedded migration 0033");
+        let sql = migration.sql.as_str();
+
+        assert!(sql.contains("webhook_idempotency_key_hash BYTEA"));
+        assert!(sql.contains("webhook_payload_hash BYTEA"));
+        assert!(sql.contains("webhook_execution_claimed_at TIMESTAMPTZ"));
+        assert!(sql.contains("webhook_execution_claim_token UUID"));
+        let empty_hash_pair = "webhook_idempotency_key_hash is null \
+            and webhook_payload_hash is null \
+            and webhook_execution_claimed_at is null \
+            and webhook_execution_claim_token is null";
+        assert!(normalize_sql(sql).contains(empty_hash_pair));
+        let complete_hash_pair = "or ( webhook_idempotency_key_hash is not null \
+            and webhook_payload_hash is not null \
+            and octet_length(webhook_idempotency_key_hash) = 32 \
+            and octet_length(webhook_payload_hash) = 32";
+        let complete_claim = "webhook_execution_claimed_at is null \
+            and webhook_execution_claim_token is null ) or ( \
+            webhook_execution_claimed_at is not null \
+            and webhook_execution_claim_token is not null";
+        let normalized_migration = normalize_sql(sql);
+        assert!(normalized_migration.contains(complete_hash_pair));
+        assert!(normalized_migration.contains(complete_claim));
+        assert!(sql.contains(
+            "ON workflow_runs (community_id, workflow_id, webhook_idempotency_key_hash)"
+        ));
+        assert!(sql.contains("WHERE webhook_idempotency_key_hash IS NOT NULL"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("webhook_idempotency_key_hash BYTEA"));
+        assert!(desired_schema.contains("webhook_payload_hash BYTEA"));
+        assert!(desired_schema.contains("webhook_execution_claimed_at TIMESTAMPTZ"));
+        assert!(desired_schema.contains("webhook_execution_claim_token UUID"));
+        assert!(desired_schema.contains("workflow_runs_webhook_idempotency_hashes CHECK"));
+        let normalized_schema = normalize_sql(desired_schema);
+        assert!(normalized_schema.contains(empty_hash_pair));
+        assert!(normalized_schema.contains(complete_hash_pair));
+        assert!(normalized_schema.contains(complete_claim));
+        assert!(desired_schema.contains(
+            "ON workflow_runs (community_id, workflow_id, webhook_idempotency_key_hash)"
+        ));
+        assert!(desired_schema.contains("WHERE webhook_idempotency_key_hash IS NOT NULL"));
     }
 
     #[test]

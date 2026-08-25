@@ -684,7 +684,7 @@ jobs:
         # replaceable-event store seam. These tests require real Postgres and
         # are ignored by the infrastructure-free unit-test job.
         run: |
-          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)'
+          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_|webhook_reservation_)/)'
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E "${filter}" \

@@ -225,6 +225,22 @@ pub struct WorkflowRunRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Outcome of atomically reserving a keyed workflow webhook run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowWebhookRunReservation {
+    /// This request created the run and is responsible for executing it.
+    Created(Uuid),
+    /// An identical request already owns this key; do not execute it again.
+    Replayed {
+        /// UUID of the run created by the first request.
+        run_id: Uuid,
+        /// Current status of that run.
+        status: RunStatus,
+    },
+    /// The key was already used with a different request payload.
+    PayloadConflict,
+}
+
 /// A winning scheduled workflow fire claim.
 ///
 /// The primary identity is `(workflow_id, scheduled_for)`. `community_id` is
@@ -823,6 +839,119 @@ pub async fn create_workflow_run(
     .await?;
 
     Ok(id)
+}
+
+/// Atomically reserve one workflow run for a webhook idempotency key.
+///
+/// Only SHA-256 digests reach Postgres. The conflict update is intentionally
+/// a no-op: it makes concurrent callers wait for and return the winning row in
+/// one statement. Equality with the caller-generated UUID distinguishes the
+/// insert winner without relying on PostgreSQL system columns.
+pub async fn reserve_workflow_webhook_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    trigger_context: Option<&serde_json::Value>,
+    idempotency_key: &str,
+    payload: &[u8],
+) -> Result<WorkflowWebhookRunReservation> {
+    let proposed_id = Uuid::new_v4();
+    let key_hash = Sha256::digest(idempotency_key.as_bytes()).to_vec();
+    let payload_hash = Sha256::digest(payload).to_vec();
+    let row = sqlx::query(
+        r#"
+        INSERT INTO workflow_runs
+            (community_id, id, workflow_id, status, current_step, execution_trace,
+             trigger_context, webhook_idempotency_key_hash, webhook_payload_hash)
+        VALUES ($1, $2, $3, 'pending', 0, '[]', $4, $5, $6)
+        ON CONFLICT (community_id, workflow_id, webhook_idempotency_key_hash)
+            WHERE webhook_idempotency_key_hash IS NOT NULL
+        DO UPDATE SET webhook_idempotency_key_hash = EXCLUDED.webhook_idempotency_key_hash
+        RETURNING id, status::text AS status, webhook_payload_hash
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(proposed_id)
+    .bind(workflow_id)
+    .bind(trigger_context)
+    .bind(key_hash)
+    .bind(&payload_hash)
+    .fetch_one(pool)
+    .await?;
+
+    let run_id: Uuid = row.try_get("id")?;
+    if run_id == proposed_id {
+        return Ok(WorkflowWebhookRunReservation::Created(run_id));
+    }
+    let stored_payload_hash: Vec<u8> = row.try_get("webhook_payload_hash")?;
+    if stored_payload_hash != payload_hash {
+        return Ok(WorkflowWebhookRunReservation::PayloadConflict);
+    }
+    let status = row.try_get::<String, _>("status")?.parse()?;
+    Ok(WorkflowWebhookRunReservation::Replayed { run_id, status })
+}
+
+/// Claim a pending idempotent webhook run and return its fencing token.
+///
+/// The two-second lease only covers the gap before the executor changes the
+/// status to `running`. A process crash in that gap becomes recoverable by the
+/// next webhook retry, while concurrent requests still produce one winner.
+pub async fn claim_workflow_webhook_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+) -> Result<Option<Uuid>> {
+    let claim_token = Uuid::new_v4();
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE workflow_runs
+        SET webhook_execution_claimed_at = NOW(),
+            webhook_execution_claim_token = $3
+        WHERE community_id = $1 AND id = $2
+          AND webhook_idempotency_key_hash IS NOT NULL
+          AND status = 'pending'
+          AND (
+              webhook_execution_claimed_at IS NULL
+              OR webhook_execution_claimed_at < NOW() - INTERVAL '2 seconds'
+          )
+        RETURNING webhook_execution_claim_token
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(claim_token)
+    .fetch_optional(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Start a claimed webhook run only if the caller still owns its fencing token.
+pub async fn start_claimed_workflow_webhook_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    claim_token: Uuid,
+) -> Result<bool> {
+    let started = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'running',
+            started_at = COALESCE(started_at, NOW()),
+            webhook_execution_claimed_at = NULL,
+            webhook_execution_claim_token = NULL
+        WHERE community_id = $1 AND id = $2
+          AND status = 'pending'
+          AND webhook_execution_claim_token = $3
+        RETURNING id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(claim_token)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(started.is_some())
 }
 
 /// Fetch a single workflow run by ID, scoped to its community.
@@ -2003,6 +2132,407 @@ mod tests {
             !reattached,
             "attach must not overwrite an already-linked claim row"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_creates_once_and_replays_same_payload() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+
+        let created = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "request-123",
+            br#"{"ticket":"T-1"}"#,
+        )
+        .await
+        .expect("reserve first webhook run");
+        let WorkflowWebhookRunReservation::Created(run_id) = created else {
+            panic!("first request must create a run: {created:?}");
+        };
+
+        let replay = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "request-123",
+            br#"{"ticket":"T-1"}"#,
+        )
+        .await
+        .expect("replay webhook run");
+        assert_eq!(
+            replay,
+            WorkflowWebhookRunReservation::Replayed {
+                run_id,
+                status: RunStatus::Pending,
+            }
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count workflow runs");
+        assert_eq!(count, 1);
+
+        let (key_hash, payload_hash): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+            "SELECT webhook_idempotency_key_hash, webhook_payload_hash \
+             FROM workflow_runs WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read stored webhook hashes");
+        assert_eq!(key_hash, Sha256::digest(b"request-123").as_slice());
+        assert_eq!(
+            payload_hash,
+            Sha256::digest(br#"{"ticket":"T-1"}"#).as_slice()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_rejects_same_key_with_different_payload() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+
+        reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "request-456",
+            br#"{"ticket":"T-1"}"#,
+        )
+        .await
+        .expect("reserve first webhook run");
+        let conflict = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "request-456",
+            br#"{"ticket":"T-2"}"#,
+        )
+        .await
+        .expect("detect payload conflict");
+
+        assert_eq!(conflict, WorkflowWebhookRunReservation::PayloadConflict);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_concurrent_requests_return_one_run() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+
+        const REQUESTS: usize = 8;
+        let mut handles = Vec::with_capacity(REQUESTS);
+        for _ in 0..REQUESTS {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                reserve_workflow_webhook_run(
+                    &pool,
+                    community,
+                    workflow_id,
+                    None,
+                    "concurrent-request",
+                    br#"{"ticket":"T-3"}"#,
+                )
+                .await
+            }));
+        }
+
+        let mut created = 0;
+        let mut run_ids = std::collections::HashSet::new();
+        for handle in handles {
+            match handle
+                .await
+                .expect("reservation task")
+                .expect("reservation")
+            {
+                WorkflowWebhookRunReservation::Created(run_id) => {
+                    created += 1;
+                    run_ids.insert(run_id);
+                }
+                WorkflowWebhookRunReservation::Replayed { run_id, .. } => {
+                    run_ids.insert(run_id);
+                }
+                WorkflowWebhookRunReservation::PayloadConflict => {
+                    panic!("identical concurrent payloads must not conflict");
+                }
+            }
+        }
+
+        assert_eq!(created, 1);
+        assert_eq!(run_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_claim_has_one_concurrent_winner() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let reservation = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "claim-concurrent",
+            br#"{"ticket":"T-5"}"#,
+        )
+        .await
+        .expect("reserve webhook run");
+        let WorkflowWebhookRunReservation::Created(run_id) = reservation else {
+            panic!("first reservation must create");
+        };
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                claim_workflow_webhook_run(&pool, community, run_id).await
+            }));
+        }
+
+        let mut winners = 0;
+        for handle in handles {
+            if handle
+                .await
+                .expect("claim task")
+                .expect("claim run")
+                .is_some()
+            {
+                winners += 1;
+            }
+        }
+        assert_eq!(winners, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_claim_recovers_expired_lease_only_while_pending() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let reservation = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "claim-recovery",
+            br#"{"ticket":"T-6"}"#,
+        )
+        .await
+        .expect("reserve webhook run");
+        let WorkflowWebhookRunReservation::Created(run_id) = reservation else {
+            panic!("first reservation must create");
+        };
+
+        let first_token = claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("first claim")
+            .expect("first claim wins");
+        assert!(claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("active lease must not be reclaimed")
+            .is_none());
+        sqlx::query(
+            "UPDATE workflow_runs SET webhook_execution_claimed_at = NOW() - INTERVAL '3 seconds' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("expire claim lease");
+        let recovered_token = claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("expired lease must be reclaimed")
+            .expect("expired lease has a winner");
+        assert_ne!(recovered_token, first_token);
+        assert!(
+            start_claimed_workflow_webhook_run(&pool, community, run_id, recovered_token,)
+                .await
+                .expect("start recovered claim")
+        );
+
+        assert!(claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("running run must not be reclaimed")
+            .is_none());
+        update_workflow_run(
+            &pool,
+            community,
+            run_id,
+            RunStatus::Completed,
+            0,
+            &serde_json::json!([]),
+            None,
+        )
+        .await
+        .expect("complete run");
+        assert!(claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("completed run must not be reclaimed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_stale_claim_cannot_start_after_lease_recovery() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let reservation = reserve_workflow_webhook_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            "claim-fencing",
+            br#"{"ticket":"T-7"}"#,
+        )
+        .await
+        .expect("reserve webhook run");
+        let WorkflowWebhookRunReservation::Created(run_id) = reservation else {
+            panic!("first reservation must create");
+        };
+
+        let stale_token = claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("first claim")
+            .expect("first claim wins");
+        sqlx::query(
+            "UPDATE workflow_runs SET webhook_execution_claimed_at = NOW() - INTERVAL '3 seconds' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("expire first claim");
+        let current_token = claim_workflow_webhook_run(&pool, community, run_id)
+            .await
+            .expect("recover claim")
+            .expect("recovery wins");
+
+        assert!(
+            !start_claimed_workflow_webhook_run(&pool, community, run_id, stale_token,)
+                .await
+                .expect("stale claimant is fenced")
+        );
+        assert_eq!(
+            get_workflow_run(&pool, community, run_id)
+                .await
+                .expect("pending run")
+                .status,
+            RunStatus::Pending
+        );
+        assert!(
+            start_claimed_workflow_webhook_run(&pool, community, run_id, current_token,)
+                .await
+                .expect("current claimant starts")
+        );
+        assert_eq!(
+            get_workflow_run(&pool, community, run_id)
+                .await
+                .expect("running run")
+                .status,
+            RunStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_rejects_partial_hash_pairs() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let hash = vec![0x42_u8; 32];
+
+        for (key_hash, payload_hash) in [(Some(hash.clone()), None), (None, Some(hash.clone()))] {
+            let error = sqlx::query(
+                r#"
+                INSERT INTO workflow_runs
+                    (community_id, workflow_id, webhook_idempotency_key_hash,
+                     webhook_payload_hash)
+                VALUES ($1, $2, $3::bytea, $4::bytea)
+                "#,
+            )
+            .bind(community.as_uuid())
+            .bind(workflow_id)
+            .bind(key_hash)
+            .bind(payload_hash)
+            .execute(&pool)
+            .await
+            .expect_err("partial hash pair must violate the CHECK constraint");
+            assert_eq!(
+                error.as_database_error().and_then(|db| db.code()),
+                Some("23514".into())
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_reservation_key_is_isolated_by_community_and_workflow() {
+        let pool = setup_pool().await;
+        let community_a = make_community(&pool).await;
+        let community_b = make_community(&pool).await;
+        let shared_workflow_id = Uuid::new_v4();
+        insert_workflow_with_ids(
+            &pool,
+            community_a,
+            shared_workflow_id,
+            Uuid::new_v4(),
+            "webhook-a",
+        )
+        .await;
+        insert_workflow_with_ids(
+            &pool,
+            community_b,
+            shared_workflow_id,
+            Uuid::new_v4(),
+            "webhook-b",
+        )
+        .await;
+        let (other_workflow_id, _) = make_workflow_in(&pool, community_a).await;
+
+        let mut run_ids = std::collections::HashSet::new();
+        for (community, workflow_id) in [
+            (community_a, shared_workflow_id),
+            (community_b, shared_workflow_id),
+            (community_a, other_workflow_id),
+        ] {
+            let reservation = reserve_workflow_webhook_run(
+                &pool,
+                community,
+                workflow_id,
+                None,
+                "shared-key",
+                br#"{"ticket":"T-4"}"#,
+            )
+            .await
+            .expect("reserve isolated webhook run");
+            let WorkflowWebhookRunReservation::Created(run_id) = reservation else {
+                panic!("each tenant/workflow scope must create independently");
+            };
+            run_ids.insert(run_id);
+        }
+
+        assert_eq!(run_ids.len(), 3);
     }
 
     /// Documents the retention-vs-interval coupling Sami flagged for §5c:
