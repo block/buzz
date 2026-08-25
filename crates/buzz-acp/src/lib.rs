@@ -2221,6 +2221,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        terse_register: config.terse_register,
     });
 
     if !config.memory_enabled {
@@ -4452,6 +4453,22 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("what it should do day-to-day"));
         assert!(prompt.contains("owner saves it"));
         assert!(prompt.contains("Do not ask about runtime, provider, model, credentials"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_terse_register() {
+        let prompt = include_str!("base_prompt.md");
+        // Register keys off the [Context] Audience line emitted by
+        // format_context_hints when --terse-register is enabled.
+        assert!(prompt.contains("`Audience: agents-only`"));
+        assert!(prompt.contains("`Audience: human-facing`"));
+        assert!(prompt.contains("telegraphic English"));
+        // Identifier-integrity hard rule: terse mode must never compress IDs.
+        assert!(prompt.contains("Never truncate, abbreviate, or paraphrase an identifier"));
+        // Anti-drift fence: no invented compression schemes.
+        assert!(prompt.contains("Do not invent codes"));
+        // Toggle-off behavior is explicit.
+        assert!(prompt.contains("When no `Audience:` line is present"));
     }
 
     #[test]
@@ -6798,6 +6815,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            terse_register: false,
         }
     }
 
@@ -7022,6 +7040,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            terse_register: false,
         }
     }
 

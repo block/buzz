@@ -1291,6 +1291,22 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
     s.push_str(&format!("\nDescription: {truncated}"));
 }
 
+/// Append an `Audience:` line to a `[Context]` block.
+///
+/// `audience` is `None` when the terse-register toggle is off (the line is
+/// omitted entirely, preserving the pre-toggle prompt byte-for-byte), and
+/// `Some(human_facing)` when it is on. The register rules in
+/// `base_prompt.md` key off this line; without it they are inert.
+fn append_audience(s: &mut String, audience: Option<bool>) {
+    if let Some(human_facing) = audience {
+        s.push_str(if human_facing {
+            "\nAudience: human-facing"
+        } else {
+            "\nAudience: agents-only"
+        });
+    }
+}
+
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
@@ -1298,6 +1314,12 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
 /// replies; in the channel branch a `Some` anchor means a human-facing
 /// top-level mention whose reply should open a new thread rooted at the
 /// triggering event.
+///
+/// `audience` gates the `Audience:` register line (see [`append_audience`]).
+/// Unlike the reply anchor, audience classification also applies to DMs: an
+/// agent→agent DM with no human mentioned is an agents-only exchange even
+/// though DM replies always anchor.
+#[allow(clippy::too_many_arguments)]
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1306,6 +1328,7 @@ fn format_context_hints(
     has_conversation_context: bool,
     conversation_context_had_delivered_events: bool,
     reply_anchor: Option<&str>,
+    audience: Option<bool>,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -1334,9 +1357,10 @@ fn format_context_hints(
         let mut s = format!(
             "[Context]\n\
              Scope: dm\n\
-             Channel: {channel_display}\n\
-             {ctx_hint}"
+             Channel: {channel_display}"
         );
+        append_audience(&mut s, audience);
+        s.push_str(&format!("\n{ctx_hint}"));
         // If this is a DM reply, include thread structural info as supplementary.
         if let Some(ref root) = thread_tags.root_event_id {
             s.push_str(&format!("\nThread root: {root}"));
@@ -1364,6 +1388,7 @@ fn format_context_hints(
              Channel: {channel_display}"
         );
         append_channel_description(&mut s, channel_info);
+        append_audience(&mut s, audience);
         s.push_str(&format!("\nThread root: {root}"));
         if let Some(ref parent) = thread_tags.parent_event_id {
             if parent != root {
@@ -1382,6 +1407,7 @@ fn format_context_hints(
              Channel: {channel_display}"
         );
         append_channel_description(&mut s, channel_info);
+        append_audience(&mut s, audience);
         s.push_str(
             "\nHint: Use `buzz messages get --channel <UUID>` for recent messages if needed.",
         );
@@ -1461,6 +1487,16 @@ pub struct FormatPromptArgs<'a> {
     /// Defaults to `false` so a caller that never sets it behaves as if this
     /// were the session's first message.
     pub standing_context_sent: bool,
+    /// Emit an `Audience:` line in `[Context]` so the base prompt's register
+    /// rules can distinguish agents-only turns (terse telegraphic English)
+    /// from human-facing turns (normal register). Off by default: no line is
+    /// emitted and prompts are byte-identical to the pre-toggle format.
+    ///
+    /// Audience classification reuses [`turn_is_human_facing`]: a turn is
+    /// human-facing when the triggering sender is a human OR any mentioned
+    /// participant is a human, failing open to human-facing for anyone who
+    /// cannot be classified.
+    pub terse_register: bool,
 }
 
 /// The prompt sections that do not change for the life of a session: base
@@ -1608,6 +1644,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             args.profile_lookup,
         )
     };
+    // Audience classification for the terse-register toggle. Computed for
+    // every scope (including DMs, which skip reply-anchor resolution but can
+    // still be agent↔agent exchanges).
+    let audience = args
+        .terse_register
+        .then(|| turn_is_human_facing(&sender_pubkey, &thread_tags, args.profile_lookup));
+
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,
@@ -1616,6 +1659,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         args.conversation_context.is_some(),
         args.conversation_context_had_delivered_events,
         reply_anchor.as_deref(),
+        audience,
     ));
 
     // 3. Conversation context (thread or DM).
@@ -4441,6 +4485,205 @@ mod tests {
         assert!(
             !prompt.contains(&format!("--reply-to {parent_id}")),
             "instruction should NOT anchor to the parent event id"
+        );
+    }
+
+    // ── Terse-register audience line ─────────────────────────────────────────
+
+    /// Sign an event with fresh keys and return it with a profile lookup that
+    /// classifies the signer as agent/human per `sender_is_agent`.
+    fn make_classified_event(
+        content: &str,
+        tags: Vec<Vec<String>>,
+        sender_is_agent: bool,
+    ) -> (Event, PromptProfileLookup) {
+        let keys = Keys::generate();
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
+            .map(|t| {
+                let strs: Vec<&str> = t.iter().map(|s| s.as_str()).collect();
+                nostr::Tag::parse(strs).unwrap()
+            })
+            .collect();
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .tags(nostr_tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let lookup = HashMap::from([(event.pubkey.to_hex(), profile(sender_is_agent))]);
+        (event, lookup)
+    }
+
+    fn batch_for(ch: Uuid, event: Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_audience_line_absent_when_toggle_off() {
+        // Off by default: no Audience line anywhere, prompts byte-identical
+        // to the pre-toggle format.
+        let ch = Uuid::new_v4();
+        let (event, lookup) = make_classified_event("agent ping", vec![], true);
+        let prompt = format_prompt(
+            &batch_for(ch, event),
+            &FormatPromptArgs {
+                profile_lookup: Some(&lookup),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains("Audience:"),
+            "toggle off must not emit an Audience line; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_audience_agents_only_for_agent_sender_no_human_mentions() {
+        // Agent sender, agent-only mentions → agents-only.
+        let (event, mut lookup) =
+            make_classified_event("status?", vec![vec!["p".into(), AGENT_B_PK.into()]], true);
+        lookup.insert(AGENT_B_PK.into(), profile(true));
+        let prompt = format_prompt(
+            &batch_for(Uuid::new_v4(), event),
+            &FormatPromptArgs {
+                profile_lookup: Some(&lookup),
+                terse_register: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("\nAudience: agents-only"),
+            "agent→agent turn should be agents-only; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_audience_human_facing_for_human_sender() {
+        let (event, lookup) = make_classified_event("hey bot", vec![], false);
+        let prompt = format_prompt(
+            &batch_for(Uuid::new_v4(), event),
+            &FormatPromptArgs {
+                profile_lookup: Some(&lookup),
+                terse_register: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("\nAudience: human-facing"),
+            "human sender should be human-facing; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_audience_human_facing_when_agent_mentions_human() {
+        // Agent sender but a human is tagged → human-facing.
+        let (event, mut lookup) =
+            make_classified_event("@human fyi", vec![vec!["p".into(), HUMAN_PK.into()]], true);
+        lookup.insert(HUMAN_PK.into(), profile(false));
+        let prompt = format_prompt(
+            &batch_for(Uuid::new_v4(), event),
+            &FormatPromptArgs {
+                profile_lookup: Some(&lookup),
+                terse_register: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("\nAudience: human-facing"),
+            "human mention should force human-facing; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_audience_fails_open_to_human_facing_without_lookup() {
+        // No profile lookup → unclassifiable sender → human-facing.
+        let event = make_event("who am I talking to");
+        let prompt = format_prompt(
+            &batch_for(Uuid::new_v4(), event),
+            &FormatPromptArgs {
+                terse_register: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("\nAudience: human-facing"),
+            "unclassifiable sender must fail open to human-facing; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_audience_agents_only_in_thread_scope() {
+        // Agent→agent inside a thread: agents-only line rides in the thread
+        // branch of format_context_hints (distinct code path from channel).
+        let root_id = "c".repeat(64);
+        let (event, mut lookup) = make_classified_event(
+            "thread update",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["p".into(), AGENT_B_PK.into()],
+            ],
+            true,
+        );
+        lookup.insert(AGENT_B_PK.into(), profile(true));
+        let prompt = format_prompt(
+            &batch_for(Uuid::new_v4(), event),
+            &FormatPromptArgs {
+                profile_lookup: Some(&lookup),
+                terse_register: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: thread"),
+            "expected thread scope; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("\nAudience: agents-only"),
+            "thread-scope agent turn should be agents-only; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_audience_agents_only_in_dm_scope() {
+        // Agent→agent DM: DMs always anchor replies, but audience is still
+        // classified — an agent-to-agent DM is an agents-only exchange.
+        let (event, lookup) = make_classified_event("dm ping", vec![], true);
+        let ci = PromptChannelInfo {
+            name: "dm".into(),
+            channel_type: "dm".into(),
+            description: None,
+        };
+        let prompt = format_prompt(
+            &batch_for(Uuid::new_v4(), event),
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                profile_lookup: Some(&lookup),
+                terse_register: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: dm"),
+            "expected dm scope; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("\nAudience: agents-only"),
+            "agent→agent DM should be agents-only; got: {prompt}"
         );
     }
 

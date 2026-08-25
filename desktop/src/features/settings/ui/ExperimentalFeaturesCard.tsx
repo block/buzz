@@ -4,6 +4,7 @@ import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { TerseRegisterRow } from "./TerseRegisterRow";
 
 function FeatureRow({ feature }: { feature: FeatureDefinition }) {
   const [enabled, toggle] = useFeatureToggle(feature.id);
@@ -60,6 +61,7 @@ export function ExperimentalFeaturesCard() {
         {previewFeatures.map((f) => (
           <FeatureRow feature={f} key={f.id} />
         ))}
+        <TerseRegisterRow />
       </SettingsOptionGroup>
     </section>
   );
