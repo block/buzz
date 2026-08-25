@@ -724,6 +724,75 @@ pub async fn reader_supports_aurora_identity(conn: &mut PgConnection) -> Result<
     }
 }
 
+/// Cluster identity of one session: the evidence that separates a real hot
+/// standby from a reader endpoint that is really the writer.
+///
+/// `in_recovery` is the load-bearing half — a session that is not replaying
+/// WAL is not on a replica, whatever else it is. `system_identifier` adds the
+/// diagnosis an operator needs to act: an identifier equal to the writer's
+/// means `READ_DATABASE_URL` resolves into the same cluster as
+/// `DATABASE_URL` (the copy-paste misconfiguration, and the Aurora
+/// `cluster-ro`-with-no-readers case), while a differing one means the reader
+/// is a *separate* primary — same misleading `replica` telemetry, entirely
+/// different remediation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterIdentity {
+    /// `pg_control_system().system_identifier` rendered as text: it is only
+    /// ever compared or logged, never arithmetic.
+    ///
+    /// `None` when the connected role lacks `EXECUTE` on the control
+    /// function — it is superuser-only by default and Buzz does not require
+    /// the relay's role to be a superuser. Identity is evidence, never a
+    /// routing gate, so an unreadable identifier degrades the diagnosis
+    /// rather than failing the probe.
+    pub system_identifier: Option<String>,
+    /// `pg_is_in_recovery()`: `true` on a hot standby, `false` on a primary.
+    /// Readable by every role, so this half is always present.
+    pub in_recovery: bool,
+}
+
+impl ClusterIdentity {
+    /// Whether this session is on the same cluster as `writer`.
+    ///
+    /// `None` when either side's identifier is unreadable: absence of the
+    /// privileged identifier is not evidence of a *distinct* cluster, and
+    /// reporting "different" there would invent a diagnosis. Callers gate on
+    /// [`ClusterIdentity::in_recovery`] and treat this purely as message
+    /// detail.
+    pub fn same_cluster_as(&self, writer: &ClusterIdentity) -> Option<bool> {
+        match (&self.system_identifier, &writer.system_identifier) {
+            (Some(reader), Some(writer)) => Some(reader == writer),
+            _ => None,
+        }
+    }
+}
+
+/// Read the [`ClusterIdentity`] of the session on `conn`.
+///
+/// Two statements rather than one: a single SELECT of both values would fail
+/// whole on `insufficient_privilege` (42501), losing the recovery flag that
+/// every role can read — and the recovery flag is the half the caller
+/// actually gates on.
+pub async fn cluster_identity(conn: &mut PgConnection) -> Result<ClusterIdentity, sqlx::Error> {
+    let in_recovery: bool = sqlx::query_scalar("SELECT pg_is_in_recovery()")
+        .fetch_one(&mut *conn)
+        .await?;
+    let system_identifier = match sqlx::query_scalar::<_, String>(
+        "SELECT system_identifier::text FROM pg_control_system()",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    {
+        Ok(identifier) => Some(identifier),
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42501") => None,
+        Err(e) => return Err(e),
+    };
+    Ok(ClusterIdentity {
+        system_identifier,
+        in_recovery,
+    })
+}
+
 /// Observe the heartbeat on a specific reader session — the
 /// connection-local half of the proof. Returns the observed token/epoch
 /// plus the backend identity of the session for route-decision evidence:
@@ -1092,6 +1161,76 @@ mod tests {
             .fetch_one(&mut *conn)
             .await
             .expect("connection usable after probe");
+        assert_eq!(one, 1);
+    }
+
+    /// Identifier comparison is a diagnosis aid, so an unreadable identifier
+    /// must report "unknown", never "different" — a role without `EXECUTE` on
+    /// `pg_control_system()` would otherwise be reported as a distinct
+    /// cluster on every deployment that grants the relay less than superuser.
+    #[test]
+    fn cluster_identity_compares_only_when_both_identifiers_are_readable() {
+        let with = |identifier: Option<&str>| ClusterIdentity {
+            system_identifier: identifier.map(str::to_owned),
+            in_recovery: false,
+        };
+        assert_eq!(
+            with(Some("7")).same_cluster_as(&with(Some("7"))),
+            Some(true),
+            "equal identifiers are the same cluster"
+        );
+        assert_eq!(
+            with(Some("7")).same_cluster_as(&with(Some("8"))),
+            Some(false),
+            "differing identifiers are different clusters"
+        );
+        assert_eq!(
+            with(None).same_cluster_as(&with(Some("7"))),
+            None,
+            "an unreadable reader identifier is unknown, not different"
+        );
+        assert_eq!(
+            with(Some("7")).same_cluster_as(&with(None)),
+            None,
+            "an unreadable writer identifier is unknown, not different"
+        );
+    }
+
+    /// A primary must report `in_recovery = false`, and reading identity must
+    /// not depend on the role holding `EXECUTE` on the privileged control
+    /// function: the probe returns `Ok` either way, with the identifier
+    /// present or `None`. Comparing a session against itself is the
+    /// same-cluster case the boot probe warns on.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_identity_reads_a_primary_with_or_without_control_privileges() {
+        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        let mut conn = pool.acquire().await.expect("conn");
+        let identity = cluster_identity(&mut conn)
+            .await
+            .expect("identity must be readable on any role");
+        assert!(
+            !identity.in_recovery,
+            "the dev database is a primary, not a standby"
+        );
+        let self_comparison = identity.same_cluster_as(&identity);
+        match &identity.system_identifier {
+            Some(_) => assert_eq!(
+                self_comparison,
+                Some(true),
+                "a readable identifier must match itself"
+            ),
+            None => assert_eq!(
+                self_comparison, None,
+                "an unreadable identifier must stay unknown rather than guess"
+            ),
+        }
+        // A privilege error must be swallowed as `None`, not left poisoning
+        // the session for the statements the boot ping runs next.
+        let one: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("connection usable after identity probe");
         assert_eq!(one, 1);
     }
 
