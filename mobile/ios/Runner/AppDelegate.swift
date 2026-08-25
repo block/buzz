@@ -11,7 +11,9 @@ import UserNotifications
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
+  private var huddleMediaPlugin: HuddleMediaPlugin?
 
   override func application(
     _ application: UIApplication,
@@ -24,6 +26,7 @@ import UserNotifications
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let messenger = engineBridge.applicationRegistrar.messenger()
+    huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
     mediaUploadChannel = FlutterMethodChannel(
       name: "buzz/media_upload",
       binaryMessenger: messenger
@@ -70,7 +73,7 @@ import UserNotifications
       forPlugin: "BuzzConcentricSheetSurface"
     ) {
       concentricSheetRegistrar.register(
-        ConcentricSheetSurfaceFactory(),
+        ConcentricSheetSurfaceFactory(messenger: messenger),
         withId: "buzz/concentric_sheet_surface"
       )
       concentricSheetSurfaceChannel = FlutterMethodChannel(
@@ -108,6 +111,24 @@ import UserNotifications
       )
     }
 
+    if let segmentedControlRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeSegmentedControl"
+    ) {
+      segmentedControlRegistrar.register(
+        NativeSegmentedControlFactory(messenger: messenger),
+        withId: "buzz/native_segmented_control"
+      )
+    }
+
+    if let skinToneRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeSkinToneControl"
+    ) {
+      skinToneRegistrar.register(
+        NativeSkinToneControlFactory(messenger: messenger),
+        withId: "buzz/native_skin_tone_control"
+      )
+    }
+
     if let stickyDateGlassRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzStickyDateGlassHeader"
     ) {
@@ -131,6 +152,14 @@ import UserNotifications
     nativeEmojiPickerCoordinator = NativeEmojiPickerCoordinator(
       messenger: messenger,
       parentViewController: nativeEmojiPickerRegistrar?.viewController
+    )
+
+    let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeProfileTextEditor"
+    )
+    nativeProfileTextEditorCoordinator = NativeProfileTextEditorCoordinator(
+      messenger: messenger,
+      parentViewController: nativeProfileTextEditorRegistrar?.viewController
     )
     if #available(iOS 16.0, *),
       let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(

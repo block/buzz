@@ -38,7 +38,6 @@ class BuzzTaskFixture:
 
     directory: tuple[DirectoryEntry, ...] = ()
     scripted_messages: tuple[ScriptedMessage, ...] = ()
-    minimum_agent_messages: int = 0
     observe_channel_names: tuple[str, ...] = ()
     user_display_name: str | None = None
     # Whether the task's verifier grades the exported relay snapshot. Only
@@ -137,7 +136,6 @@ _CROSS_THREAD_REQUESTS_FIXTURE = BuzzTaskFixture(
             ),
         ),
     ),
-    minimum_agent_messages=2,
     user_display_name="Priya Simone Patel",
     requires_evidence=True,
 )

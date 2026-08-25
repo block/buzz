@@ -44,12 +44,15 @@ import { mergeConcurrentChannelRecency } from "@/features/channels/lib/channelRe
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
   inspectChannelSnapshot,
   type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import {
+  CHANNEL_MEMBERS_STALE_TIME_MS,
+  channelMembersQueryKey,
+} from "@/features/channels/rosterFreshness";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -69,8 +72,6 @@ export const channelsFocusRefetchPolicy = {
 const channelsSnapshotPairKey = ["channels", "_snapshot-pair"] as const;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
-const channelMembersQueryKey = (channelId: string) =>
-  ["channels", channelId, "members"] as const;
 const channelTypeOrder = {
   stream: 0,
   forum: 1,
@@ -628,7 +629,7 @@ export function useChannelMembersQuery(
 
       return getChannelMembers(channelId);
     },
-    staleTime: 30_000,
+    staleTime: CHANNEL_MEMBERS_STALE_TIME_MS,
   });
 }
 
@@ -792,32 +793,6 @@ export function useDeleteChannelMutation(channelId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);
     },
-  });
-}
-
-/**
- * Whether the signed-in identity may add *another* identity to this channel,
- * per {@link canAddChannelMembers}. Both queries are the ones the channel UI
- * already holds, so this shares their cache rather than fetching again.
- */
-export function useCanAddChannelMembers(channelId: string | null) {
-  const channelsQuery = useChannelsQuery();
-  const membersQuery = useChannelMembersQuery(channelId);
-  const identityQuery = useIdentityQuery();
-
-  const channel =
-    channelsQuery.data?.find((candidate) => candidate.id === channelId) ?? null;
-  const selfPubkey = identityQuery.data?.pubkey ?? null;
-  const selfRole = selfPubkey
-    ? (membersQuery.data?.find(
-        (member) => member.pubkey.toLowerCase() === selfPubkey.toLowerCase(),
-      )?.role ?? null)
-    : null;
-
-  return canAddChannelMembers({
-    channelType: channel?.channelType,
-    visibility: channel?.visibility,
-    selfRole,
   });
 }
 

@@ -784,13 +784,8 @@ export function useUnreadChannels(
     relayClient,
   ]);
 
-  // Unread = inactive channels, plus any channel manually marked unread this
-  // session. A manually marked active channel must remain visible as unread
-  // until the user explicitly marks it read again.
-  // High-priority unread = DMs or channels with a mention/broadcast newer
-  // than the read marker. Forced-unread channels are dot tier only (not
-  // high-priority). Both sets share identical deps and always invalidate
-  // together, so they are computed in a single memo.
+  // Derive unread and high-priority projections together so they invalidate
+  // from the same read-state snapshot.
   const rawUnread =
     // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and latestVersion are intentional invalidation signals
     React.useMemo(() => {
@@ -841,7 +836,7 @@ export function useUnreadChannels(
           if (!isForcedUnread) continue;
           unread.add(channel.id);
           topLevelUnread.add(channel.id);
-          counts.set(channel.id, 1);
+          if (channel.channelType === "dm") counts.set(channel.id, 1);
           unreadChannelNotificationCount += 1;
           continue;
         }
@@ -863,13 +858,17 @@ export function useUnreadChannels(
             observedEvents,
             readAtForObservedEvent,
           );
-        counts.set(channel.id, badgeCount);
-        unreadChannelNotificationCount +=
+        const appBadgeCount =
           nativeProjection?.appBadgeCount ??
           countUnreadAppBadgeObservedEvents(
             observedEvents,
             readAtForObservedEvent,
           );
+        counts.set(
+          channel.id,
+          channel.channelType === "dm" ? badgeCount : appBadgeCount,
+        );
+        unreadChannelNotificationCount += appBadgeCount;
 
         // DM channels: any unread DM is high-priority.
         if (channel.channelType === "dm") {

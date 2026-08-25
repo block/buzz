@@ -55,12 +55,7 @@ import {
   MarkdownCodeBlock,
   SyntaxHighlightedCode,
 } from "./markdown/CodeBlock";
-import {
-  EntityLinkAnchor,
-  renderEntityLinkAnchor,
-  useEntityCardOpenHandlers,
-  useOpenEntityLink,
-} from "./markdown/entityLinks";
+import { EntityLinkAnchor, useOpenEntityLink } from "./markdown/entityLinks";
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import {
@@ -1352,17 +1347,28 @@ export function createMarkdownComponents(
       // Malformed message deep links fall through to external handling.
     }
 
-    // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
-    // fall through to the default anchor.
-    const entityAnchor = renderEntityLinkAnchor({
-      children,
-      href,
-      onOpenEntityLink,
-      relayOrigin,
-      interactive,
-      asChip: label === href,
-    });
-    if (entityAnchor) return entityAnchor;
+    // `buzz://pr|issue|repo|project?…` entity links navigate in-app;
+    // malformed ones fall through to the default anchor. The provider-backed
+    // component keeps metadata tooltips available for both raw chips and
+    // authored Markdown labels.
+    if (href) {
+      const entityAnchor = React.createElement(
+        EntityLinkAnchor,
+        {
+          href,
+          onOpenEntityLink,
+          relayOrigin,
+          interactive,
+          asChip: label === href,
+        },
+        children,
+      );
+      if (
+        parseEntityLink(href).ok ||
+        parseSupportedLinkPreview(href, relayOrigin)?.href.startsWith("buzz://")
+      )
+        return entityAnchor;
+    }
 
     const supportedLinkPreview = href
       ? parseSupportedLinkPreview(href, relayOrigin)
@@ -1746,13 +1752,9 @@ function MarkdownInner({
   const onOpenEntityLink = useOpenEntityLink();
   const onOpenMessageLink = React.useCallback(
     (link: ParsedMessageLink) => {
-      // Always route through `goChannel` with `messageId` set: the channel
-      // route already handles scroll-into-view + highlight via
+      // Always route through `goChannel` with `messageId` set: the navigation
+      // boundary guards every message-targeting caller before URL mutation.
       // `useAnchoredScroll` + `getEventById` backfill, and works for
-      // both stream-message replies and forum threads. Detecting "the thread
-      // root is a forum post" up front would require an event lookup we don't
-      // currently have synchronously; the brief explicitly allows skipping
-      // that detection and falling through.
       void goChannel(link.channelId, {
         messageId: link.messageId,
         threadRootId: link.threadRootId,
@@ -1824,11 +1826,6 @@ function MarkdownInner({
     processedContent = `${processedContent}\u200B`;
   }
 
-  const entityCardOpenHandlers = useEntityCardOpenHandlers(
-    resolvedLinkPreviews,
-    onOpenEntityLink,
-  );
-
   // When a config-nudge suppresses the prose (selectProseOrNudge returns
   // null), skip the parse entirely — it would be thrown away unrendered.
   const hasLeadingInlineContent = leadingInlineContent != null;
@@ -1889,7 +1886,6 @@ function MarkdownInner({
           <LinkPreviewList
             ImageLightbox={LinkPreviewImageLightbox}
             key={messageId}
-            onOpenByHref={entityCardOpenHandlers}
             onRemoveForEveryone={onRemoveLinkPreviewsForEveryone}
             previews={resolvedLinkPreviews}
           />

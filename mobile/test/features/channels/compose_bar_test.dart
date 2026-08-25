@@ -378,6 +378,10 @@ class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
 
+  /// Invoked after an event is handed to the socket but before its relay
+  /// acknowledgement is delivered. Tests may defer that acknowledgement.
+  final Future<void> Function(Map<String, dynamic> event)? beforeAcknowledged;
+
   /// Invoked after an event has been recorded and acknowledged, before the
   /// caller's `await` resumes. Lets a test interleave state changes (such as
   /// a community switch) between two relay round trips.
@@ -386,6 +390,7 @@ class _RecordingRelaySocket extends RelaySocket {
   _RecordingRelaySocket(
     this.events,
     this.handleMessage, {
+    this.beforeAcknowledged,
     this.onEventAcknowledged,
   }) : super(
          wsUrl: 'ws://localhost',
@@ -403,8 +408,18 @@ class _RecordingRelaySocket extends RelaySocket {
     if (payload case ['EVENT', final Map<String, dynamic> event]) {
       events.add(event);
       final id = event['id'] as String;
-      super.debugHandleOkForTest(['OK', id, true, '']);
-      onEventAcknowledged?.call(event);
+      final pending = beforeAcknowledged?.call(event);
+      if (pending == null) {
+        super.debugHandleOkForTest(['OK', id, true, '']);
+        onEventAcknowledged?.call(event);
+      } else {
+        unawaited(
+          pending.then((_) {
+            super.debugHandleOkForTest(['OK', id, true, '']);
+            onEventAcknowledged?.call(event);
+          }),
+        );
+      }
     }
   }
 
@@ -432,7 +447,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   Future<List<Channel>> build() async => _channels;
 
   @override
-  Future<void> refresh() async {
+  Future<void> refresh({bool fetchDirectory = false}) async {
     state = AsyncData(_channels);
   }
 
@@ -911,6 +926,124 @@ void main() {
 
       expect(sendCount, 1);
       expect(sentContent, 'First line\nSecond line');
+    });
+
+    testWidgets('clears text before the optimistic send completes', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a failed send restores an untouched cleared draft', (
+      tester,
+    ) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'retry me');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      delivery.completeError(Exception('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'retry me',
+      );
+    });
+
+    testWidgets('a failed send does not overwrite a new draft', (tester) async {
+      final delivery = Completer<void>();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
+                  delivery.future,
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'first draft');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+        if (tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!
+            .text
+            .isEmpty) {
+          break;
+        }
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+
+      await tester.enterText(find.byType(TextField), 'new draft');
+      delivery.completeError(StateError('relay rejected'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'new draft',
+      );
     });
 
     testWidgets('smoothly resizes the text field when a new line is added', (
@@ -3732,6 +3865,78 @@ void main() {
         ['p', agentPubkey],
         ['role', 'bot'],
       ]);
+    });
+
+    testWidgets('preserves edits made while a mentioned agent is being added', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      final addMemberAcknowledgement = Completer<void>();
+      String? sentContent;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+          beforeAcknowledged: (event) async {
+            if (event['kind'] == 9000) await addMemberAcknowledgement.future;
+          },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+
+      expect(
+        publishedEvents.where((event) => event['kind'] == 9000),
+        hasLength(1),
+      );
+
+      await tester.enterText(find.byType(TextField), 'newer draft');
+      addMemberAcknowledgement.complete();
+      await tester.pumpAndSettle();
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'newer draft',
+      );
     });
 
     testWidgets(

@@ -62,6 +62,18 @@ async function createWorkflow(
   await page.getByRole("menuitem", { name: "Send Message" }).click();
   await dialog.getByLabel("Message text").fill("Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await Promise.race([
+    activationConfirmation.waitFor({ state: "visible" }),
+    dialog.waitFor({ state: "hidden" }),
+  ]);
+  if (await activationConfirmation.isVisible()) {
+    await activationConfirmation
+      .getByRole("button", { name: "Turn on" })
+      .click();
+  }
   await expect(dialog).not.toBeVisible();
 }
 
@@ -433,6 +445,204 @@ test("mixed Buzz permalinks render as chips in the composer", async ({
   await expect(composerInput).not.toContainText("buzz://");
 });
 
+test("composer Buzz chip labels wrap without orphaning their icons", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
+      {
+        id: "mock-project-relaytoolsobservabilityconsole-main",
+        kind: 30617,
+        pubkey:
+          "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+        created_at: Math.floor(Date.now() / 1000) - 60,
+        content:
+          "Operator tooling and observability console for relay deployments.",
+        tags: [
+          ["d", "relaytoolsobservabilityconsole-main"],
+          ["name", "relaytoolsobservabilityconsole-main"],
+          [
+            "description",
+            "Operator tooling and observability console for relay deployments.",
+          ],
+          ["clone", "https://github.com/block/relay-tools.git"],
+        ],
+      },
+    ];
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const composerInput = page.getByTestId("message-input");
+  const repoLink =
+    "buzz://repo?owner=953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f&d=relaytoolsobservabilityconsole-main";
+  await composerInput.evaluate((element, text) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", text);
+    element.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      }),
+    );
+  }, repoLink);
+
+  const chip = composerInput.locator('[data-composer-buzz-link=""]');
+  const leadingFragment = chip.locator(".inline-chip-leading-fragment");
+  await expect(chip).toHaveText("relaytoolsobservabilityconsole-main");
+  const emptyLeadingFragmentHeight = await composerInput.evaluate((element) => {
+    const probe = document.createElement("span");
+    probe.className = "mention-chip wrapping-inline-chip";
+    const leading = document.createElement("span");
+    leading.className =
+      "inline-chip-leading-fragment inline-chip-with-icon inline-chip-icon-repo";
+    const remainder = document.createElement("span");
+    remainder.textContent = " leading-space";
+    probe.append(leading, remainder);
+    element.append(probe);
+    const height = leading.getBoundingClientRect().height;
+    probe.remove();
+    return height;
+  });
+  expect(emptyLeadingFragmentHeight).toBeGreaterThan(0);
+  const chipHeightAtWidth = async (width: number) => {
+    await composerInput.evaluate((element, nextWidth) => {
+      element.style.width = `${nextWidth}px`;
+    }, width);
+    return chip.evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const rects = Array.from(range.getClientRects()).filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      );
+      return (
+        Math.max(...rects.map((rect) => rect.bottom)) -
+        Math.min(...rects.map((rect) => rect.top))
+      );
+    });
+  };
+  const wideHeight = await chipHeightAtWidth(420);
+  const mediumHeight = await chipHeightAtWidth(210);
+  const narrowHeight = await chipHeightAtWidth(90);
+  expect(mediumHeight).toBeGreaterThan(wideHeight);
+  expect(narrowHeight).toBeGreaterThan(mediumHeight);
+  await expect(chip).toHaveCSS("display", "inline");
+  await expect(chip).toHaveCSS("overflow-wrap", "anywhere");
+  await expect(leadingFragment).toHaveText("relay");
+  await expect
+    .poll(() =>
+      chip.evaluate((element) => {
+        const chipRange = document.createRange();
+        chipRange.selectNodeContents(element);
+        const leading = element.querySelector(".inline-chip-leading-fragment");
+        const composerBounds = element
+          .closest('[data-testid="message-input"]')
+          ?.getBoundingClientRect();
+        const leadingBounds = leading?.getBoundingClientRect();
+        return {
+          chipWraps:
+            new Set(
+              Array.from(chipRange.getClientRects(), (rect) =>
+                Math.round(rect.y),
+              ),
+            ).size >= 2,
+          leadingContained:
+            Boolean(composerBounds && leadingBounds) &&
+            leadingBounds.right <= composerBounds.right,
+          leadingLineBoxes: leading?.getClientRects().length ?? 0,
+        };
+      }),
+    )
+    .toMatchObject({
+      chipWraps: true,
+      leadingContained: true,
+      leadingLineBoxes: 1,
+    });
+
+  await expect(chip).toHaveAttribute(
+    "title",
+    "Open repository relaytoolsobservabilityconsole-main",
+  );
+  await chipHeightAtWidth(420);
+  await composerInput.press("End");
+  await composerInput.pressSequentially(" after");
+  await expect(composerInput).toContainText(
+    "relaytoolsobservabilityconsole-main after",
+  );
+  await expect(chip).toHaveText("relaytoolsobservabilityconsole-main");
+  await page.getByTestId("send-message").click();
+
+  const sentChip = page.getByTestId("message-row").last().getByRole("button", {
+    name: "Open repository relaytoolsobservabilityconsole-main",
+  });
+  await expect(sentChip).toBeVisible();
+  await sentChip.evaluate((element) => {
+    const container = element.parentElement;
+    if (container) container.style.width = "220px";
+  });
+  const fragmentRects = await sentChip.evaluate((element) =>
+    Array.from(element.getClientRects(), (rect) => ({
+      bottom: rect.bottom,
+      height: rect.height,
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      width: rect.width,
+    })).filter((rect) => rect.width > 0 && rect.height > 0),
+  );
+  expect(fragmentRects.length).toBeGreaterThanOrEqual(2);
+
+  const tooltip = page.getByRole("tooltip");
+  await sentChip.focus();
+  await expect(tooltip).toBeVisible();
+  const positionOverFragment = async (index: number) => {
+    const fragment = await sentChip.evaluate((element, fragmentIndex) => {
+      const rects = Array.from(element.getClientRects()).filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      );
+      const rect = rects.at(fragmentIndex);
+      if (!rect) return null;
+      return {
+        height: rect.height,
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+      };
+    }, index);
+    if (!fragment) throw new Error(`Expected chip fragment ${index}`);
+    const cursorX = fragment.left + fragment.width / 2;
+    const cursorY = fragment.top + fragment.height / 2;
+    await page.mouse.move(cursorX, cursorY);
+    await expect(tooltip).toBeVisible();
+    let tooltipCenter = Number.NaN;
+    await expect
+      .poll(async () => {
+        const tooltipBox = await tooltip.boundingBox();
+        if (!tooltipBox) return Number.POSITIVE_INFINITY;
+        tooltipCenter = tooltipBox.x + tooltipBox.width / 2;
+        return Math.abs(tooltipCenter - cursorX);
+      })
+      .toBeLessThan(1);
+    return {
+      cursorX,
+      tooltipCenter,
+    };
+  };
+
+  const firstTooltip = await positionOverFragment(0);
+  const lastTooltip = await positionOverFragment(-1);
+  expect(
+    Math.abs(firstTooltip.tooltipCenter - firstTooltip.cursorX),
+  ).toBeLessThan(1);
+  expect(
+    Math.abs(lastTooltip.tooltipCenter - lastTooltip.cursorX),
+  ).toBeLessThan(1);
+  expect(
+    Math.abs(firstTooltip.tooltipCenter - lastTooltip.tooltipCenter),
+  ).toBeGreaterThan(1);
+});
+
 test("message links to visible root messages open the thread panel", async ({
   page,
 }) => {
@@ -581,7 +791,7 @@ test("message links to visible root messages open the thread panel", async ({
   await expect(randomChannelLink).toHaveCSS("display", "inline");
   await expect(
     randomChannelLink.locator(".inline-chip-leading-fragment"),
-  ).toHaveText("r");
+  ).toHaveText("rando");
   await expect(randomChannelLink).not.toHaveAttribute("title");
   await randomChannelLink.hover();
   const channelTooltip = page.getByRole("tooltip");

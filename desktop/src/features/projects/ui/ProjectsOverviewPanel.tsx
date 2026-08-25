@@ -8,7 +8,7 @@ import {
   Hash,
   Plus,
 } from "lucide-react";
-import type * as React from "react";
+import * as React from "react";
 
 import type {
   Project,
@@ -184,16 +184,24 @@ export function ProjectsOverviewContextPanel({
   summaries,
 }: ProjectsOverviewContextPanelProps) {
   const selection = useProjectSelection();
-  const selectionPresentation = projectSelectionPresentation(
-    selection?.items ?? [],
+  const selectionItems = selection?.items;
+  const selectionPresentation = React.useMemo(
+    () => projectSelectionPresentation(selectionItems ?? []),
+    [selectionItems],
   );
-  const context = projectsOverviewContext({
-    filter,
-    issues,
-    projects,
-    pullRequests,
-    summaries,
-  });
+  // Memoized: the rail re-renders with every Projects-view state change, and
+  // the context stats walk every issue and pull request in the community.
+  const context = React.useMemo(
+    () =>
+      projectsOverviewContext({
+        filter,
+        issues,
+        projects,
+        pullRequests,
+        summaries,
+      }),
+    [filter, issues, projects, pullRequests, summaries],
+  );
   const actionHandler =
     context.action?.kind === "issue"
       ? onCreateIssue

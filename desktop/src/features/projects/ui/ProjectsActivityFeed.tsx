@@ -1,3 +1,7 @@
+import * as React from "react";
+
+import { useNow } from "@/shared/lib/useNow";
+
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -181,7 +185,7 @@ function buildActivityItems({
       actorName: null,
       action: "created the repository",
       title: project.name,
-      body: contentPreview(project.description),
+      body: project.description,
       detail: null,
       target: { type: "project", project },
     });
@@ -228,7 +232,7 @@ function buildActivityItems({
       actorName: null,
       action: "opened a review in",
       title: pullRequest.title,
-      body: contentPreview(pullRequest.content),
+      body: pullRequest.content,
       detail: pullRequest.status,
       target,
     });
@@ -241,7 +245,7 @@ function buildActivityItems({
         actorName: null,
         action: "updated a review in",
         title: pullRequest.title,
-        body: contentPreview(update.content),
+        body: update.content,
         detail: update.commit?.slice(0, 7) ?? null,
         target,
       });
@@ -275,7 +279,7 @@ function buildActivityItems({
                 ? "requested review in"
                 : "commented on a review in",
         title: pullRequest.title,
-        body: contentPreview(comment.content),
+        body: comment.content,
         detail:
           kind === "approval"
             ? "Approved"
@@ -297,7 +301,7 @@ function buildActivityItems({
       actorName: null,
       action: "created a task in",
       title: issue.title,
-      body: contentPreview(issue.content),
+      body: issue.content,
       detail: issue.status,
       target,
     });
@@ -310,16 +314,26 @@ function buildActivityItems({
         actorName: null,
         action: "commented on a task in",
         title: issue.title,
-        body: contentPreview(comment.content),
+        body: comment.content,
         detail: null,
         target,
       });
     }
   }
 
-  return items
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, ACTIVITY_LIMIT);
+  return (
+    items
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .slice(0, ACTIVITY_LIMIT)
+      // Bodies are carried raw until here so the markdown flattening runs for
+      // the rendered window only — every issue/PR/comment in the community
+      // used to be flattened just to be sorted and discarded.
+      .map((item) =>
+        item.body === null
+          ? item
+          : { ...item, body: contentPreview(item.body) },
+      )
+  );
 }
 
 export function buildProjectsActivityAgentContextItems(
@@ -358,8 +372,8 @@ function startOfWeek(timestamp: number) {
   return Math.floor(date.getTime() / 1_000);
 }
 
-function groupActivityItems(items: ProjectActivityItem[]) {
-  const thisWeek = startOfWeek(Math.floor(Date.now() / 1_000));
+function groupActivityItems(items: ProjectActivityItem[], nowMs: number) {
+  const thisWeek = startOfWeek(Math.floor(nowMs / 1_000));
   const lastWeek = thisWeek - WEEK_SECONDS;
   const groups: ProjectActivityGroup[] = [
     { key: "this-week", label: "This week", items: [] },
@@ -596,8 +610,21 @@ function ActivityCard({
 
 /** Mixed GitHub-style workspace activity shown beneath the overview callouts. */
 export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
-  const items = buildActivityItems(props);
-  const groups = groupActivityItems(items);
+  const { issues, projects, pullRequests, snapshots } = props;
+  // Memoized: this feed re-renders with every parent state change (profiles
+  // landing, selection, hover), and an unmemoized rebuild re-flattened and
+  // re-sorted the whole community's activity each time.
+  const items = React.useMemo(
+    () => buildActivityItems({ issues, projects, pullRequests, snapshots }),
+    [issues, projects, pullRequests, snapshots],
+  );
+  // Week buckets are clock-derived; ticked so the memo cannot freeze "This
+  // week" across a week boundary. Coarse cadence — the boundary moves weekly.
+  const now = useNow(600_000);
+  const groups = React.useMemo(
+    () => groupActivityItems(items, now),
+    [items, now],
+  );
   const rangeItems = groups.flatMap((group) =>
     group.items.flatMap((item) => {
       const selectionItem = activitySelectionItem(item);

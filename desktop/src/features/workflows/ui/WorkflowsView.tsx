@@ -9,9 +9,12 @@ import {
   workflowListFocusRefetchPolicy,
   workflowQueryKey,
 } from "@/features/workflows/hooks";
+import { getWorkflowActivationWarning } from "@/features/workflows/ui/workflowActivationWarning";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
 import { WorkflowEditorHost } from "@/features/workflows/ui/WorkflowEditorHost";
+import { useWorkflowListAuthorPresentations } from "@/features/workflows/ui/useWorkflowListAuthorPresentations";
+import { useWorkflowListMessagePresentations } from "@/features/workflows/ui/useWorkflowListMessagePresentations";
 import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
 import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
 import {
@@ -25,6 +28,16 @@ import {
   triggerWorkflow,
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -99,6 +112,8 @@ export function WorkflowsView({
   onEditorPaneChange,
 }: WorkflowsViewProps) {
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
+  const [activationTarget, setActivationTarget] =
+    React.useState<Workflow | null>(null);
   const queryClient = useQueryClient();
 
   const editorWorkflowId =
@@ -133,6 +148,9 @@ export function WorkflowsView({
   });
 
   const allWorkflows = allWorkflowsQuery.data ?? [];
+  const workflows = allWorkflows.map(({ workflow }) => workflow);
+  const authorPresentations = useWorkflowListAuthorPresentations(workflows);
+  const messagePresentations = useWorkflowListMessagePresentations(workflows);
 
   const triggerMutation = useMutation({
     mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
@@ -175,6 +193,7 @@ export function WorkflowsView({
       });
     },
     onSuccess: (_data, workflow) => {
+      setActivationTarget(null);
       void queryClient.invalidateQueries({
         queryKey: workflowQueryKey(workflow.id),
       });
@@ -230,9 +249,21 @@ export function WorkflowsView({
 
   const toggleEnabled = toggleEnabledMutation.mutate;
   const handleToggleEnabled = React.useCallback(
-    (workflow: Workflow) => toggleEnabled(workflow),
+    (workflow: Workflow) => {
+      if (
+        !getWorkflowEnabled(workflow.definition) &&
+        getWorkflowActivationWarning(yamlStringify(workflow.definition))
+      ) {
+        setActivationTarget(workflow);
+        return;
+      }
+      toggleEnabled(workflow);
+    },
     [toggleEnabled],
   );
+  const activationWarning = activationTarget
+    ? getWorkflowActivationWarning(yamlStringify(activationTarget.definition))
+    : null;
 
   const editorWorkflowHint = allWorkflows.find(
     ({ workflow }) => workflow.id === editorWorkflowId,
@@ -284,12 +315,14 @@ export function WorkflowsView({
               <CreateWorkflowCard onClick={onCreateWorkflow} />
               {allWorkflows.map(({ workflow, channelName }) => (
                 <WorkflowCard
+                  authorPresentation={authorPresentations.get(workflow.id)}
                   channelName={channelName}
                   isTogglingEnabled={
                     toggleEnabledMutation.isPending &&
                     toggleEnabledMutation.variables?.id === workflow.id
                   }
                   key={workflow.id}
+                  messagePresentation={messagePresentations.get(workflow.id)}
                   onDelete={handleDelete}
                   onDuplicate={handleDuplicate}
                   onEdit={handleEdit}
@@ -315,6 +348,40 @@ export function WorkflowsView({
         onTriggerWorkflow={handleTrigger}
         workflowHint={editorWorkflowHint}
       />
+
+      <AlertDialog
+        onOpenChange={(open) => {
+          if (!open && !toggleEnabledMutation.isPending) {
+            setActivationTarget(null);
+          }
+        }}
+        open={activationTarget !== null}
+      >
+        <AlertDialogContent data-testid="workflow-activation-confirmation">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {activationWarning?.title ?? "Turn on this workflow?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {activationWarning?.description ??
+                "Turn it on to let it run immediately, or keep it off until you’re ready."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep off</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={toggleEnabledMutation.isPending}
+              onClick={(event) => {
+                if (!activationTarget) return;
+                event.preventDefault();
+                toggleEnabled(activationTarget);
+              }}
+            >
+              Turn on
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <WorkflowDeleteDialog
         error={
