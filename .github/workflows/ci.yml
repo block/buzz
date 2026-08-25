@@ -514,32 +514,43 @@ jobs:
           # pgschema omits this named CHECK when it creates workflow_runs from scratch.
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 <<'SQL'
-          ALTER TABLE workflow_runs
-              ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
-                  CHECK (
-                      (
-                          webhook_idempotency_key_hash IS NULL
-                          AND webhook_payload_hash IS NULL
-                          AND webhook_execution_claimed_at IS NULL
-                          AND webhook_execution_claim_token IS NULL
-                      )
-                      OR (
-                          webhook_idempotency_key_hash IS NOT NULL
-                          AND webhook_payload_hash IS NOT NULL
-                          AND octet_length(webhook_idempotency_key_hash) = 32
-                          AND octet_length(webhook_payload_hash) = 32
-                          AND (
+          DO $$
+          BEGIN
+              IF NOT EXISTS (
+                  SELECT 1
+                  FROM pg_constraint
+                  WHERE conname = 'workflow_runs_webhook_idempotency_hashes'
+                    AND conrelid = 'workflow_runs'::regclass
+              ) THEN
+                  ALTER TABLE workflow_runs
+                      ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
+                          CHECK (
                               (
-                                  webhook_execution_claimed_at IS NULL
+                                  webhook_idempotency_key_hash IS NULL
+                                  AND webhook_payload_hash IS NULL
+                                  AND webhook_execution_claimed_at IS NULL
                                   AND webhook_execution_claim_token IS NULL
                               )
                               OR (
-                                  webhook_execution_claimed_at IS NOT NULL
-                                  AND webhook_execution_claim_token IS NOT NULL
+                                  webhook_idempotency_key_hash IS NOT NULL
+                                  AND webhook_payload_hash IS NOT NULL
+                                  AND octet_length(webhook_idempotency_key_hash) = 32
+                                  AND octet_length(webhook_payload_hash) = 32
+                                  AND (
+                                      (
+                                          webhook_execution_claimed_at IS NULL
+                                          AND webhook_execution_claim_token IS NULL
+                                      )
+                                      OR (
+                                          webhook_execution_claimed_at IS NOT NULL
+                                          AND webhook_execution_claim_token IS NOT NULL
+                                      )
+                                  )
                               )
-                          )
-                      )
-                  );
+                          );
+              END IF;
+          END
+          $$;
           SQL
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
@@ -675,6 +686,17 @@ jobs:
         with:
           name: desktop-e2e-relay
           path: target/ci
+      - name: Workflow webhook migration smoke
+        run: |
+          docker exec -e PGPASSWORD="${BUZZ_TEST_POSTGRES_PASSWORD}" buzz-postgres \
+            psql -U buzz -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE buzz_migration_smoke"
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(run_migrations_applies_consolidated_initial_schema_on_fresh_database)' \
+            --run-ignored ignored-only
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz_migration_smoke
       - name: Apply schema and seed deployment community
         # MT: the relay resolves each request's tenant from the communities host
         # map and fails closed on an unmapped host. The reminder scheduler binds
@@ -704,32 +726,43 @@ jobs:
           # pgschema omits this named CHECK when it creates workflow_runs from scratch.
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 <<'SQL'
-          ALTER TABLE workflow_runs
-              ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
-                  CHECK (
-                      (
-                          webhook_idempotency_key_hash IS NULL
-                          AND webhook_payload_hash IS NULL
-                          AND webhook_execution_claimed_at IS NULL
-                          AND webhook_execution_claim_token IS NULL
-                      )
-                      OR (
-                          webhook_idempotency_key_hash IS NOT NULL
-                          AND webhook_payload_hash IS NOT NULL
-                          AND octet_length(webhook_idempotency_key_hash) = 32
-                          AND octet_length(webhook_payload_hash) = 32
-                          AND (
+          DO $$
+          BEGIN
+              IF NOT EXISTS (
+                  SELECT 1
+                  FROM pg_constraint
+                  WHERE conname = 'workflow_runs_webhook_idempotency_hashes'
+                    AND conrelid = 'workflow_runs'::regclass
+              ) THEN
+                  ALTER TABLE workflow_runs
+                      ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
+                          CHECK (
                               (
-                                  webhook_execution_claimed_at IS NULL
+                                  webhook_idempotency_key_hash IS NULL
+                                  AND webhook_payload_hash IS NULL
+                                  AND webhook_execution_claimed_at IS NULL
                                   AND webhook_execution_claim_token IS NULL
                               )
                               OR (
-                                  webhook_execution_claimed_at IS NOT NULL
-                                  AND webhook_execution_claim_token IS NOT NULL
+                                  webhook_idempotency_key_hash IS NOT NULL
+                                  AND webhook_payload_hash IS NOT NULL
+                                  AND octet_length(webhook_idempotency_key_hash) = 32
+                                  AND octet_length(webhook_payload_hash) = 32
+                                  AND (
+                                      (
+                                          webhook_execution_claimed_at IS NULL
+                                          AND webhook_execution_claim_token IS NULL
+                                      )
+                                      OR (
+                                          webhook_execution_claimed_at IS NOT NULL
+                                          AND webhook_execution_claim_token IS NOT NULL
+                                      )
+                                  )
                               )
-                          )
-                      )
-                  );
+                          );
+              END IF;
+          END
+          $$;
           SQL
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
