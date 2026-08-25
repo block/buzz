@@ -1,12 +1,12 @@
 import * as React from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
 
+import { selectSearchHighlightRouteState } from "@/app/routes/searchHighlightRouteState";
 import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ForumPostRouteSearch = {
   replyId?: string;
-  searchNavigationId?: string;
 };
 
 function validateForumPostSearch(
@@ -16,11 +16,6 @@ function validateForumPostSearch(
     replyId:
       typeof search.replyId === "string" && search.replyId.length > 0
         ? search.replyId
-        : undefined,
-    searchNavigationId:
-      typeof search.searchNavigationId === "string" &&
-      search.searchNavigationId.length > 0
-        ? search.searchNavigationId
         : undefined,
   };
 }
@@ -39,6 +34,9 @@ function ForumPostRouteComponent() {
   usePreviewFeatureWarning("forum");
   const { channelId, postId } = Route.useParams();
   const search = Route.useSearch();
+  const searchHighlight = useLocation({
+    select: selectSearchHighlightRouteState,
+  });
 
   return (
     <React.Suspense
@@ -47,7 +45,7 @@ function ForumPostRouteComponent() {
       <ChannelRouteScreen
         autoSendDraftKey={null}
         channelId={channelId}
-        searchNavigationId={search.searchNavigationId ?? null}
+        searchHighlight={searchHighlight}
         selectedPostId={postId}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}

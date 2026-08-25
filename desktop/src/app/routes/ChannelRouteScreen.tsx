@@ -1,9 +1,7 @@
 import * as React from "react";
 
-import {
-  getCachedSearchHitEvent,
-  consumeCachedSearchHitQuery,
-} from "@/app/navigation/searchHitEventCache";
+import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
+import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useOpenChannelDirectoryQuery } from "@/features/channels/openChannelDirectory";
@@ -23,7 +21,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
   channelId: string;
-  searchNavigationId: string | null;
+  searchHighlight: SearchHighlightNavigation | null;
   selectedPostId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
@@ -104,7 +102,7 @@ async function fetchRouteTargetEvents(
 export function ChannelRouteScreen({
   autoSendDraftKey,
   channelId,
-  searchNavigationId,
+  searchHighlight,
   selectedPostId,
   targetMessageId,
   targetReplyId,
@@ -137,50 +135,62 @@ export function ChannelRouteScreen({
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     return cachedTarget ? [cachedTarget] : [];
   });
-  const [searchHighlight, setSearchHighlight] = React.useState<{
-    messageId: string;
-    query: string;
-  } | null>(null);
-  const activeSearchNavigationIdRef = React.useRef<string | null>(null);
+  const [activeSearchHighlight, setActiveSearchHighlight] =
+    React.useState<SearchHighlightNavigation | null>(searchHighlight);
+  const appliedSearchActivationIdRef = React.useRef<string | null>(
+    searchHighlight?.activationId ?? null,
+  );
 
-  // Reset spliced target events and search highlighting when the channel
-  // changes. Tied to channel identity rather
-  // than the route target so clearing the `messageId` param or resolving a
-  // forum post mid-channel keeps the clicked highlight in view. Seeded with
-  // the mount key so the initial
-  // cache-seeded events survive first commit; only a genuine channel change
-  // clears them. Declared before the fetch effect so a channel switch clears
-  // stale events before the new target is fetched.
+  // Router state is transient and can be cleared by the target URL cleanup.
+  // Retain the applied activation locally until an ordinary route transition
+  // explicitly arrives without search state.
+  React.useEffect(() => {
+    if (!searchHighlight) {
+      const ordinaryTargetIds = [
+        selectedPostId,
+        targetMessageId,
+        targetReplyId,
+        targetThreadRootId,
+      ].filter((targetId): targetId is string => targetId !== null);
+      if (
+        ordinaryTargetIds.length > 0 &&
+        activeSearchHighlight &&
+        !ordinaryTargetIds.includes(activeSearchHighlight.messageId)
+      ) {
+        appliedSearchActivationIdRef.current = null;
+        setActiveSearchHighlight(null);
+      }
+      return;
+    }
+    if (appliedSearchActivationIdRef.current === searchHighlight.activationId) {
+      return;
+    }
+
+    appliedSearchActivationIdRef.current = searchHighlight.activationId;
+    setActiveSearchHighlight(searchHighlight);
+  }, [
+    activeSearchHighlight,
+    searchHighlight,
+    selectedPostId,
+    targetMessageId,
+    targetReplyId,
+    targetThreadRootId,
+  ]);
+
+  // Reset spliced target events when the channel changes. Tied to channel
+  // identity rather than the route target so clearing the `messageId` param
+  // mid-channel keeps the deep-linked row in view. Seeded with the mount key so
+  // the initial cache-seeded events survive first commit; only a genuine
+  // channel change clears them. Declared before the fetch effect so a channel
+  // switch clears stale events before the new target is fetched.
   const previousResetKeyRef = React.useRef<string>(channelId);
   React.useEffect(() => {
     if (previousResetKeyRef.current === channelId) return;
     previousResetKeyRef.current = channelId;
-    activeSearchNavigationIdRef.current = null;
+    appliedSearchActivationIdRef.current = null;
     setTargetMessageEvents([]);
-    setSearchHighlight(null);
+    setActiveSearchHighlight(null);
   }, [channelId]);
-
-  React.useEffect(() => {
-    if (!searchNavigationId) {
-      activeSearchNavigationIdRef.current = null;
-      setSearchHighlight(null);
-      return;
-    }
-    if (activeSearchNavigationIdRef.current === searchNavigationId) {
-      return;
-    }
-
-    activeSearchNavigationIdRef.current = searchNavigationId;
-    const highlight = consumeCachedSearchHitQuery(searchNavigationId);
-    setSearchHighlight(
-      highlight
-        ? {
-            messageId: highlight.eventId,
-            query: highlight.query,
-          }
-        : null,
-    );
-  }, [searchNavigationId]);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -266,8 +276,8 @@ export function ChannelRouteScreen({
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
-      targetSearchMessageId={searchHighlight?.messageId}
-      targetSearchQuery={searchHighlight?.query}
+      targetSearchMessageId={activeSearchHighlight?.messageId}
+      targetSearchQuery={activeSearchHighlight?.query}
     />
   );
 }

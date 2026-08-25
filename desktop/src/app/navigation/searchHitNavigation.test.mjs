@@ -51,7 +51,7 @@ test("search-hit navigation preserves forced message routing while active", asyn
       options: {
         force: true,
         messageId: "message",
-        searchNavigationId: undefined,
+        searchHighlight: undefined,
         threadRootId: "thread-root",
       },
     },
@@ -59,11 +59,8 @@ test("search-hit navigation preserves forced message routing while active", asyn
   assert.equal(getCachedSearchHitEvent("message")?.id, "message");
 });
 
-test("search-hit navigation retains the query and marks repeated route activations", async () => {
+test("search-hit navigation carries trimmed highlight state and forces repeated activations", async () => {
   clearSearchHitEventCache();
-  const { consumeCachedSearchHitQuery } = await import(
-    "./searchHitEventCache.ts"
-  );
   const calls = [];
 
   await openSearchHitWithNavigation(plainMessage, {
@@ -75,16 +72,13 @@ test("search-hit navigation retains the query and marks repeated route activatio
     query: "  Mentions  ",
   });
 
-  const searchNavigationId = calls[0].options.searchNavigationId;
-  assert.match(searchNavigationId, /^message:/);
-  assert.deepEqual(consumeCachedSearchHitQuery(searchNavigationId), {
-    eventId: "message",
-    query: "Mentions",
-  });
-  assert.equal(consumeCachedSearchHitQuery(searchNavigationId), null);
+  assert.equal(calls[0].options.force, true);
+  assert.equal(calls[0].options.searchHighlight.messageId, "message");
+  assert.equal(calls[0].options.searchHighlight.query, "Mentions");
+  assert.match(calls[0].options.searchHighlight.activationId, /.+/);
 });
 
-test("forum-post search navigation marks same-route activations", async () => {
+test("forum-post search navigation carries transient same-route activation state", async () => {
   clearSearchHitEventCache();
   const forumPost = { ...forumComment, eventId: "post", kind: 45001 };
   const calls = [];
@@ -98,7 +92,10 @@ test("forum-post search navigation marks same-route activations", async () => {
     query: "mentions",
   });
 
-  assert.match(calls[0].options.searchNavigationId, /^post:/);
+  assert.equal(calls[0].options.force, true);
+  assert.equal(calls[0].options.searchHighlight.messageId, "post");
+  assert.equal(calls[0].options.searchHighlight.query, "mentions");
+  assert.match(calls[0].options.searchHighlight.activationId, /.+/);
 });
 
 test("cancelled search-hit navigation cannot repopulate cache or route", async () => {

@@ -6,6 +6,7 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 
+import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
 import {
   allowNavigation,
@@ -32,7 +33,11 @@ export function useAppNavigation() {
         to: string;
         params?: Record<string, string>;
         search?: Record<string, string | undefined>;
-        state?: Record<string, unknown>;
+        state?:
+          | Record<string, unknown>
+          | ((
+              previousState: Record<string, unknown>,
+            ) => Record<string, unknown>);
       },
       behavior: NavigationBehavior = {},
       guardedTarget?: GuardedNavigation,
@@ -265,8 +270,8 @@ export function useAppNavigation() {
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
         messageId?: string;
-        /** Search result id that makes repeated same-route activations observable. */
-        searchNavigationId?: string;
+        /** Transient context for highlighting the selected search result. */
+        searchHighlight?: SearchHighlightNavigation;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
         thread?: string;
@@ -286,15 +291,18 @@ export function useAppNavigation() {
                   threadRootId: options.threadRootId ?? undefined,
                 }
               : {}),
-            ...(options?.searchNavigationId
-              ? { searchNavigationId: options.searchNavigationId }
-              : {}),
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
               : {}),
             ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
+          state: options?.searchHighlight
+            ? (previousState: Record<string, unknown>) => ({
+                ...previousState,
+                searchHighlight: options.searchHighlight,
+              })
+            : undefined,
         },
         {
           force: options?.force,
@@ -334,8 +342,8 @@ export function useAppNavigation() {
         force?: boolean;
         replace?: boolean;
         replyId?: string;
-        /** Search result id that makes repeated same-route activations observable. */
-        searchNavigationId?: string;
+        /** Transient context for highlighting the selected search result. */
+        searchHighlight?: SearchHighlightNavigation;
       },
     ) => {
       return commitNavigation(
@@ -347,10 +355,13 @@ export function useAppNavigation() {
           },
           search: {
             ...(options?.replyId ? { replyId: options.replyId } : {}),
-            ...(options?.searchNavigationId
-              ? { searchNavigationId: options.searchNavigationId }
-              : {}),
           },
+          state: options?.searchHighlight
+            ? (previousState: Record<string, unknown>) => ({
+                ...previousState,
+                searchHighlight: options.searchHighlight,
+              })
+            : undefined,
         },
         {
           force: options?.force,

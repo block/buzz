@@ -1,4 +1,5 @@
 import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
+import { createSearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import type { SearchHit } from "@/shared/api/types";
 
@@ -10,7 +11,7 @@ type SearchHitNavigationActions = {
     options?: {
       force?: boolean;
       messageId?: string;
-      searchNavigationId?: string;
+      searchHighlight?: ReturnType<typeof createSearchHighlightNavigation>;
       threadRootId?: string | null;
     },
   ) => Promise<unknown>;
@@ -20,7 +21,7 @@ type SearchHitNavigationActions = {
     options?: {
       force?: boolean;
       replyId?: string;
-      searchNavigationId?: string;
+      searchHighlight?: ReturnType<typeof createSearchHighlightNavigation>;
     },
   ) => Promise<unknown>;
   signal?: AbortSignal;
@@ -36,11 +37,12 @@ export async function openSearchHitWithNavigation(
   }
 
   const isLifecycleBound = Boolean(actions.signal);
-  const searchNavigationId = actions.query
-    ? `${hit.eventId}:${crypto.randomUUID()}`
-    : undefined;
+  const searchHighlight = createSearchHighlightNavigation(
+    hit.eventId,
+    actions.query,
+  );
   if (!isLifecycleBound) {
-    cacheSearchHitEvent(hit, actions.query, searchNavigationId);
+    cacheSearchHitEvent(hit);
   }
 
   const destination = await resolveDestination(hit);
@@ -51,21 +53,21 @@ export async function openSearchHitWithNavigation(
   if (isLifecycleBound) {
     // Delay community-scoped writes for notification routing until async
     // destination resolution completes and its owner is still current.
-    cacheSearchHitEvent(hit, actions.query, searchNavigationId);
+    cacheSearchHitEvent(hit);
   }
 
   if (destination.kind === "forum-post") {
     return actions.goForumPost(destination.channelId, destination.postId, {
-      force: actions.force,
+      force: actions.force || Boolean(searchHighlight),
       replyId: destination.replyId,
-      searchNavigationId,
+      searchHighlight,
     });
   }
 
   return actions.goChannel(destination.channelId, {
-    force: actions.force,
+    force: actions.force || Boolean(searchHighlight),
     messageId: destination.messageId,
-    searchNavigationId,
+    searchHighlight,
     threadRootId: destination.threadRootId,
   });
 }
