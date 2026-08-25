@@ -5447,7 +5447,7 @@ async function handleGetChannelReconnectRepair(
   config: E2eConfig | undefined,
 ): Promise<RelayEvent[]> {
   const kinds = new Set([
-    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100,
+    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 44102, 45001, 45003, 48100,
     48101, 48102, 48103,
   ]);
   const filter: Record<string, unknown> = {
