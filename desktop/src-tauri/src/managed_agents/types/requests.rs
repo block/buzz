@@ -131,15 +131,31 @@ pub struct UpdatePersonaRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateManagedAgentRequest {
     pub name: String,
-    /// Existing local Codex task to promote into this agent identity.
-    /// The backend resolves its workspace from Codex-owned metadata; callers
-    /// cannot supply an arbitrary workspace path.
+    /// Existing Codex task to promote into this agent identity. Without SSH
+    /// fields it resolves a task on this computer; with SSH fields it resolves
+    /// the task on the remote computer.
     #[serde(default)]
     pub codex_task_id: Option<String>,
     /// Legacy transport field retained for older clients. Task-bound agents
     /// always use the computer-level Codex shared runtime.
     #[serde(default)]
     pub codex_app_server_url: Option<String>,
+    #[serde(default)]
+    pub codex_ssh_host: Option<String>,
+    #[serde(default)]
+    pub codex_ssh_port: Option<u16>,
+    #[serde(default)]
+    pub codex_ssh_username: Option<String>,
+    #[serde(default)]
+    pub codex_ssh_identity_file: Option<String>,
+    #[serde(default)]
+    pub codex_ssh_remote_app_server_port: Option<u16>,
+    #[serde(default)]
+    pub codex_ssh_remote_shell: Option<String>,
+    #[serde(default)]
+    pub codex_task_name: Option<String>,
+    #[serde(default)]
+    pub codex_task_workspace: Option<String>,
     #[serde(default)]
     pub persona_id: Option<String>,
     /// Optional deployment-time team binding for runtime instruction layering.

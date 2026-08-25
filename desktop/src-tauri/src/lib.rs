@@ -773,6 +773,9 @@ pub fn run() {
             enable_codex_shared_runtime,
             launch_codex_desktop_shared,
             take_over_codex_desktop_shared,
+            connect_codex_ssh,
+            stop_codex_ssh,
+            list_codex_ssh_tasks,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
@@ -985,9 +988,11 @@ pub fn run() {
                 restart_requested.store(true, Ordering::SeqCst);
             }
             shut_down_app(app_handle, &run_shutdown_done);
+            managed_agents::stop_all();
         }
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
+            managed_agents::stop_all();
             app_handle.state::<ClipboardState>().release();
 
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]

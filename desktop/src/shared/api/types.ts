@@ -417,6 +417,14 @@ export type CreateManagedAgentInput = {
   name: string;
   codexTaskId?: string;
   codexAppServerUrl?: string;
+  codexSshHost?: string;
+  codexSshPort?: number;
+  codexSshUsername?: string;
+  codexSshIdentityFile?: string;
+  codexSshRemoteAppServerPort?: number;
+  codexSshRemoteShell?: "posix" | "powershell";
+  codexTaskName?: string;
+  codexTaskWorkspace?: string;
   personaId?: string;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;

@@ -5,6 +5,10 @@ export type CodexTaskBinding = {
   updatedAt: string;
   model: string | null;
   appServerUrl: string | null;
+  sshHost: string | null;
+  sshPort: number | null;
+  sshUsername: string | null;
+  sshIdentityFile: string | null;
 };
 
 export type CodexTaskSummary = {
@@ -45,6 +49,14 @@ export type CodexSharedRuntimeStatus = {
   desktopDetectionError: string | null;
 };
 
+export type CodexSshRuntimeStatus = {
+  host: string;
+  port: number;
+  username: string;
+  localPort: number;
+  appServerUrl: string;
+};
+
 export type RawCodexSharedRuntimeStatus = {
   enabled: boolean;
   state: CodexSharedRuntimeState;
@@ -76,6 +88,10 @@ export type RawCodexTaskBinding = {
   updated_at: string;
   model?: string | null;
   app_server_url?: string | null;
+  ssh_host?: string | null;
+  ssh_port?: number | null;
+  ssh_username?: string | null;
+  ssh_identity_file?: string | null;
 };
 
 export function fromRawCodexTaskBinding(
@@ -89,6 +105,10 @@ export function fromRawCodexTaskBinding(
         updatedAt: binding.updated_at,
         model: binding.model ?? null,
         appServerUrl: binding.app_server_url ?? null,
+        sshHost: binding.ssh_host ?? null,
+        sshPort: binding.ssh_port ?? null,
+        sshUsername: binding.ssh_username ?? null,
+        sshIdentityFile: binding.ssh_identity_file ?? null,
       }
     : null;
 }

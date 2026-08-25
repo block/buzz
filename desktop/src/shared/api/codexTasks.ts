@@ -3,6 +3,7 @@ import type {
   CodexSharedRuntimeStatus,
   CodexTaskHistory,
   CodexTaskSummary,
+  CodexSshRuntimeStatus,
 } from "@/shared/api/codexTaskTypes";
 import { fromRawCodexSharedRuntimeStatus } from "@/shared/api/codexTaskTypes";
 import { invokeTauri } from "@/shared/api/tauri";
@@ -84,4 +85,33 @@ export function takeOverCodexDesktopShared() {
   return invokeCodexSharedRuntimeStatus("take_over_codex_desktop_shared", {
     confirmed: true,
   });
+}
+
+export function connectCodexSsh(input: {
+  host: string;
+  port?: number;
+  username: string;
+  identityFile: string;
+  remoteAppServerPort?: number;
+  remoteShell?: "posix" | "powershell";
+}) {
+  return invokeTauri<CodexSshRuntimeStatus>("connect_codex_ssh", input);
+}
+
+export function stopCodexSsh(input: {
+  host: string;
+  username: string;
+  port: number;
+}) {
+  return invokeTauri<void>("stop_codex_ssh", input);
+}
+
+export function listCodexSshTasks(input: {
+  host: string;
+  port?: number;
+  username: string;
+  identityFile: string;
+  remoteShell?: "posix" | "powershell";
+}) {
+  return invokeTauri<CodexTaskSummary[]>("list_codex_ssh_tasks", input);
 }

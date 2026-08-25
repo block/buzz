@@ -10,6 +10,7 @@ import {
 import { useCodexSharedRuntimeQuery } from "@/features/agents/codexSharedRuntimeHooks";
 import { isCodexSharedRuntimeUsable } from "@/features/agents/codexSharedRuntimeStatus";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { connectCodexSsh, listCodexSshTasks, stopCodexSsh } from "@/shared/api/codexTasks";
 import type { CodexTaskSummary } from "@/shared/api/codexTaskTypes";
 import type { ManagedAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -44,7 +45,6 @@ export function CodexTaskAgentDialog({
   const codexRuntime = (runtimesQuery.data ?? []).find(
     (runtime) => runtime.id === "codex",
   );
-  const codexSetupReady = sharedRuntimeReady && Boolean(codexRuntime);
   const tasksQuery = useCodexTasksQuery({
     enabled: open,
   });
@@ -55,6 +55,19 @@ export function CodexTaskAgentDialog({
   const [taskId, setTaskId] = React.useState("");
   const [name, setName] = React.useState("");
   const [channelId, setChannelId] = React.useState("");
+  const [sshHost, setSshHost] = React.useState("");
+  const [sshPort, setSshPort] = React.useState("22");
+  const [sshUser, setSshUser] = React.useState("");
+  const [sshIdentity, setSshIdentity] = React.useState("");
+  const [sshShell, setSshShell] = React.useState<"posix" | "powershell">("posix");
+  const [sshRuntime, setSshRuntime] = React.useState<Awaited<ReturnType<typeof connectCodexSsh>> | null>(null);
+  const [sshPending, setSshPending] = React.useState(false);
+  const [sshError, setSshError] = React.useState<string | null>(null);
+  const [remoteTasks, setRemoteTasks] = React.useState<CodexTaskSummary[]>([]);
+  const [remoteTasksPending, setRemoteTasksPending] = React.useState(false);
+  const [remoteTaskId, setRemoteTaskId] = React.useState<string | null>(null);
+  const codexSetupReady = Boolean(codexRuntime) &&
+    (sharedRuntimeReady || sshRuntime !== null || sshHost.trim().length > 0);
 
   const tasks = tasksQuery.data ?? [];
   const filteredTasks = React.useMemo(() => {
@@ -104,8 +117,55 @@ export function CodexTaskAgentDialog({
     setTaskId("");
     setName("");
     setChannelId("");
+    setSshRuntime(null);
+    setSshError(null);
+    setRemoteTasks([]);
+    setRemoteTaskId(null);
     createMutation.reset();
     attachMutation.reset();
+  }
+
+  async function handleSshConnect() {
+    setSshPending(true);
+    setSshError(null);
+    try {
+      setSshRuntime(await connectCodexSsh({
+        host: sshHost,
+        port: Number(sshPort) || 22,
+        username: sshUser,
+        identityFile: sshIdentity,
+        remoteShell: sshShell,
+      }));
+    } catch (cause) {
+      setSshError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSshPending(false);
+    }
+  }
+
+  async function handleSshDisconnect() {
+    if (!sshRuntime) return;
+    await stopCodexSsh({ host: sshRuntime.host, username: sshRuntime.username, port: sshRuntime.port });
+    setSshRuntime(null);
+    setRemoteTaskId(null);
+  }
+
+  async function handleLoadRemoteTasks() {
+    setRemoteTasksPending(true);
+    setSshError(null);
+    try {
+      setRemoteTasks(await listCodexSshTasks({
+        host: sshHost,
+        port: Number(sshPort) || 22,
+        username: sshUser,
+        identityFile: sshIdentity,
+        remoteShell: sshShell,
+      }));
+    } catch (cause) {
+      setSshError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRemoteTasksPending(false);
+    }
   }
 
   function handleOpenChange(next: boolean) {
@@ -120,12 +180,22 @@ export function CodexTaskAgentDialog({
   }
 
   async function handleSubmit() {
-    if (!selectedTask || !codexRuntime || !name.trim()) return;
+    const selectedRemoteTask = remoteTasks.find((task) => task.id === remoteTaskId) ?? null;
+    const task = selectedRemoteTask ?? selectedTask;
+    if (!task || !codexRuntime || !name.trim()) return;
     try {
       const created = await createMutation.mutateAsync({
         name: name.trim(),
-        codexTaskId: selectedTask.id,
-        codexAppServerUrl: sharedRuntimeQuery.data?.url,
+        codexTaskId: task.id,
+        codexAppServerUrl: selectedRemoteTask ? undefined : sharedRuntimeQuery.data?.url,
+        codexSshHost: selectedRemoteTask ? sshHost : undefined,
+        codexSshPort: selectedRemoteTask ? Number(sshPort) || 22 : undefined,
+        codexSshUsername: selectedRemoteTask ? sshUser : undefined,
+        codexSshIdentityFile: selectedRemoteTask ? sshIdentity : undefined,
+        codexSshRemoteAppServerPort: selectedRemoteTask ? 51919 : undefined,
+        codexSshRemoteShell: selectedRemoteTask ? sshShell : undefined,
+        codexTaskName: task.threadName,
+        codexTaskWorkspace: task.workspace,
         agentCommand: codexRuntime.command,
         agentArgs: codexRuntime.defaultArgs,
         avatarUrl: codexRuntime.avatarUrl,
@@ -199,12 +269,54 @@ export function CodexTaskAgentDialog({
               <CodexSharedRuntimePanel enabled={open} />
             ) : (
               <>
+                <div className="space-y-3 rounded-md border border-border/60 p-3">
+                  <div>
+                    <p className="text-sm font-medium">Remote Codex computer (SSH)</p>
+                    <p className="text-xs text-muted-foreground">The remote computer must already run <code>codex app-server --listen ws://127.0.0.1:51919</code>. This creates a local SSH tunnel; private key contents never leave your computer.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Input aria-label="SSH host" onChange={(e) => setSshHost(e.target.value)} placeholder="host" value={sshHost} />
+                    <Input aria-label="SSH port" onChange={(e) => setSshPort(e.target.value)} placeholder="22" value={sshPort} />
+                    <Input aria-label="SSH username" onChange={(e) => setSshUser(e.target.value)} placeholder="username" value={sshUser} />
+                    <Input aria-label="SSH identity file" onChange={(e) => setSshIdentity(e.target.value)} placeholder="C:\\Users\\me\\.ssh\\id_ed25519" value={sshIdentity} />
+                    <select aria-label="Remote shell" className="h-9 rounded-md border border-input bg-background px-3 py-2 text-sm" onChange={(e) => setSshShell(e.target.value as "posix" | "powershell")} value={sshShell}>
+                      <option value="posix">macOS / Linux</option>
+                      <option value="powershell">Windows PowerShell</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {sshRuntime ? <Button onClick={() => void handleSshDisconnect()} size="sm" type="button" variant="outline">Disconnect</Button> : <Button disabled={sshPending || !sshHost || !sshUser || !sshIdentity} onClick={() => void handleSshConnect()} size="sm" type="button" variant="outline">{sshPending ? "Connecting..." : "Connect SSH"}</Button>}
+                    {sshRuntime ? <span className="break-all text-xs text-emerald-600">Tunnel ready: {sshRuntime.appServerUrl}</span> : null}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button disabled={remoteTasksPending || !sshHost || !sshUser || !sshIdentity} onClick={() => void handleLoadRemoteTasks()} size="sm" type="button" variant="outline">
+                      {remoteTasksPending ? "Loading remote tasks..." : "Load remote tasks"}
+                    </Button>
+                    {remoteTasks.length > 0 ? <span className="text-xs text-muted-foreground">{remoteTasks.length} remote tasks found</span> : null}
+                  </div>
+                  {remoteTasks.length > 0 ? (
+                    <div className="max-h-40 overflow-y-auto rounded-md border border-input text-xs">
+                      {remoteTasks.map((task) => (
+                        <button className={`block w-full border-b border-border/50 px-3 py-2 text-left last:border-b-0 ${remoteTaskId === task.id ? "bg-primary/10" : ""}`} key={task.id} onClick={() => { setRemoteTaskId(task.id); setTaskId(""); setName(taskLabel(task)); }} type="button">
+                          <div className="font-medium">{taskLabel(task)}</div>
+                          <div className="font-mono text-muted-foreground">{task.id}</div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {sshError ? <p className="text-xs text-destructive">{sshError}</p> : null}
+                </div>
                 <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm leading-5">
                   <span>Connected through the Codex shared runtime</span>
                   <span className="ml-2 break-all font-mono text-xs text-muted-foreground">
                     {sharedRuntimeQuery.data?.url}
                   </span>
                 </div>
+                {sshRuntime ? (
+                  <p className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm leading-5 text-emerald-800 dark:text-emerald-200">
+                    SSH runtime is connected. Select a remote task below to create an agent that runs on the remote Codex computer.
+                  </p>
+                ) : null}
 
                 <div className="space-y-1.5">
                   <label
@@ -267,8 +379,8 @@ export function CodexTaskAgentDialog({
                           className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 border-b border-border/50 px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/50 ${
                             selected ? "bg-primary/10" : ""
                           }`}
-                          disabled={
-                            tasksQuery.isLoading || createMutation.isPending
+                      disabled={
+                        tasksQuery.isLoading || createMutation.isPending || Boolean(sshRuntime)
                           }
                           key={task.id}
                           onClick={() => selectTask(task.id)}
@@ -342,9 +454,9 @@ export function CodexTaskAgentDialog({
                 </div>
 
                 <p className="break-words text-sm leading-6 text-muted-foreground">
-                  The agent is created offline and connects this task to Buzz
-                  through the computer shared runtime. Task history and
-                  workspace files stay on this computer.
+                  {remoteTaskId
+                    ? "The agent connects to the selected remote Codex task through SSH. Task history and workspace files remain on the remote computer."
+                    : "The agent connects this task to Buzz through the computer shared runtime. Task history and workspace files stay on this computer."}
                 </p>
 
                 {!runtimesQuery.isLoading && !codexRuntime ? (
@@ -372,9 +484,9 @@ export function CodexTaskAgentDialog({
               Cancel
             </Button>
             <Button
-              disabled={
-                !codexSetupReady ||
-                !selectedTask ||
+                disabled={
+                  !codexSetupReady ||
+                  !selectedTask && !remoteTaskId ||
                 !codexRuntime ||
                 !name.trim() ||
                 createMutation.isPending ||

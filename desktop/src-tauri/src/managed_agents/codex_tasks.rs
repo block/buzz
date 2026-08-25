@@ -40,6 +40,18 @@ pub struct CodexTaskBinding {
     /// spawning a private Codex process for the Buzz agent.
     #[serde(default)]
     pub app_server_url: Option<String>,
+    #[serde(default)]
+    pub ssh_host: Option<String>,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    #[serde(default)]
+    pub ssh_username: Option<String>,
+    #[serde(default)]
+    pub ssh_identity_file: Option<String>,
+    #[serde(default)]
+    pub ssh_remote_app_server_port: Option<u16>,
+    #[serde(default)]
+    pub ssh_remote_shell: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CodexTaskSummary {
@@ -244,6 +256,12 @@ pub fn binding_for_task_id(task_id: &str) -> Result<CodexTaskBinding, String> {
         updated_at: task.updated_at,
         model: task.model,
         app_server_url: None,
+        ssh_host: None,
+        ssh_port: None,
+        ssh_username: None,
+        ssh_identity_file: None,
+        ssh_remote_app_server_port: None,
+        ssh_remote_shell: None,
     })
 }
 
@@ -304,6 +322,55 @@ pub fn prepare_codex_task_binding(
     Ok(binding)
 }
 
+pub fn prepare_remote_codex_task_binding(
+    input: &CreateManagedAgentRequest,
+) -> Result<Option<CodexTaskBinding>, String> {
+    let Some(task_id) = input.codex_task_id.as_deref() else {
+        return Ok(None);
+    };
+    let host = input
+        .codex_ssh_host
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "SSH host is required for a remote Codex task".to_string())?;
+    let username = input
+        .codex_ssh_username
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "SSH username is required for a remote Codex task".to_string())?;
+    let identity_file = input
+        .codex_ssh_identity_file
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "SSH identity file is required for a remote Codex task".to_string())?;
+    Uuid::parse_str(task_id.trim()).map_err(|_| "Codex task ID must be a UUID".to_string())?;
+    Ok(Some(CodexTaskBinding {
+        task_id: task_id.trim().to_lowercase(),
+        thread_name: input
+            .codex_task_name
+            .clone()
+            .unwrap_or_else(|| format!("Remote Codex task {}", &task_id[..8.min(task_id.len())])),
+        workspace: input
+            .codex_task_workspace
+            .clone()
+            .unwrap_or_else(|| "Remote workspace".to_string()),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        model: None,
+        app_server_url: None,
+        ssh_host: Some(host),
+        ssh_port: Some(input.codex_ssh_port.unwrap_or(22)),
+        ssh_username: Some(username),
+        ssh_identity_file: Some(identity_file),
+        ssh_remote_app_server_port: Some(input.codex_ssh_remote_app_server_port.unwrap_or(51919)),
+        ssh_remote_shell: Some(
+            input
+                .codex_ssh_remote_shell
+                .clone()
+                .unwrap_or_else(|| "posix".to_string()),
+        ),
+    }))
+}
+
 pub fn save_agents_with_codex_task_binding(
     app: &AppHandle,
     records: &[ManagedAgentRecord],
@@ -330,22 +397,43 @@ pub fn task_binding_for_spawn(
     app: &AppHandle,
     record: &ManagedAgentRecord,
 ) -> Result<Option<CodexTaskBinding>, String> {
-    let binding = load_codex_task_binding(app, &record.pubkey)?;
-    if let Some(binding) = &binding {
+    let mut binding = load_codex_task_binding(app, &record.pubkey)?;
+    if let Some(binding) = binding.as_mut() {
         if record.backend != BackendKind::Local {
             return Err("Codex task-bound agents can only run on this computer".to_string());
         }
-        if !Path::new(&binding.workspace).is_dir() {
+        if binding.ssh_host.is_none() && !Path::new(&binding.workspace).is_dir() {
             return Err(format!(
                 "Codex task workspace no longer exists: {}",
                 binding.workspace
             ));
         }
-        let url = binding.app_server_url.as_deref().ok_or_else(|| {
-            "This Codex task binding predates shared runtime setup. Reopen Buzz to migrate it."
-                .to_string()
-        })?;
-        ensure_codex_shared_runtime_reachable(url)?;
+        let url = if let (Some(host), Some(username), Some(identity_file)) = (
+            binding.ssh_host.clone(),
+            binding.ssh_username.clone(),
+            binding.ssh_identity_file.clone(),
+        ) {
+            let status = super::connect(super::CodexSshConnectRequest {
+                host,
+                port: binding.ssh_port.unwrap_or(22),
+                username,
+                identity_file: PathBuf::from(identity_file),
+                remote_shell: binding
+                    .ssh_remote_shell
+                    .clone()
+                    .unwrap_or_else(|| "posix".to_string()),
+                remote_app_server_port: binding.ssh_remote_app_server_port.unwrap_or(51919),
+            })?;
+            let url = status.app_server_url;
+            binding.app_server_url = Some(url.clone());
+            url
+        } else {
+            binding.app_server_url.clone().ok_or_else(|| {
+                "This Codex task binding predates shared runtime setup. Reopen Buzz to migrate it."
+                    .to_string()
+            })?
+        };
+        ensure_codex_shared_runtime_reachable(&url)?;
     }
     Ok(binding)
 }
@@ -356,7 +444,9 @@ pub fn configure_task_bound_command(
     lazy: bool,
 ) {
     if let Some(binding) = binding {
-        command.current_dir(&binding.workspace);
+        if binding.ssh_host.is_none() {
+            command.current_dir(&binding.workspace);
+        }
         command.env("BUZZ_ACP_CODEX_TASK_ID", &binding.task_id);
         command.env("BUZZ_ACP_CODEX_TASK_WORKSPACE", &binding.workspace);
     } else {
@@ -485,6 +575,36 @@ pub fn get_codex_task_history(
 ) -> Result<CodexTaskHistory, String> {
     let binding = load_codex_task_binding(app, agent_pubkey)?
         .ok_or_else(|| "This agent is not bound to a Codex task".to_string())?;
+    if let (Some(host), Some(username), Some(identity_file)) = (
+        binding.ssh_host.clone(),
+        binding.ssh_username.clone(),
+        binding.ssh_identity_file.clone(),
+    ) {
+        let raw = super::read_codex_ssh_task_history(
+            super::CodexSshTaskQueryRequest {
+                host,
+                port: binding.ssh_port.unwrap_or(22),
+                username,
+                identity_file: PathBuf::from(identity_file),
+                remote_shell: binding
+                    .ssh_remote_shell
+                    .clone()
+                    .unwrap_or_else(|| "posix".to_string()),
+            },
+            &binding.task_id,
+        )?;
+        let path = tempfile::NamedTempFile::new()
+            .map_err(|error| format!("failed to create temporary history file: {error}"))?;
+        fs::write(path.path(), raw.as_bytes())
+            .map_err(|error| format!("failed to stage remote task history: {error}"))?;
+        let (messages, truncated) = read_codex_task_history(path.path())?;
+        return Ok(CodexTaskHistory {
+            task_id: binding.task_id,
+            thread_name: binding.thread_name,
+            messages,
+            truncated,
+        });
+    }
     let codex_home = codex_home_dir()?;
     let mut locations = HashMap::new();
     collect_session_locations(&codex_home.join("sessions"), false, &mut locations);
@@ -924,6 +1044,12 @@ mod tests {
             updated_at: "2026-08-11T00:00:00Z".to_string(),
             model: None,
             app_server_url: Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL.to_string()),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_username: None,
+            ssh_identity_file: None,
+            ssh_remote_app_server_port: None,
+            ssh_remote_shell: None,
         };
         let mut store = CodexTaskBindingStore {
             version: STORE_VERSION,
@@ -949,6 +1075,12 @@ mod tests {
             updated_at: "2026-08-11T00:00:00Z".to_string(),
             model: Some("gpt-5.5[xhigh]".to_string()),
             app_server_url: Some("ws://127.0.0.1:51919".to_string()),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_username: None,
+            ssh_identity_file: None,
+            ssh_remote_app_server_port: None,
+            ssh_remote_shell: None,
         };
         let mut command = Command::new("buzz-acp");
 

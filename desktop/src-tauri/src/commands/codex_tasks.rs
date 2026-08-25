@@ -1,4 +1,7 @@
-use crate::managed_agents::{CodexSharedRuntimeStatus, CodexTaskHistory, CodexTaskSummary};
+use crate::managed_agents::{
+    CodexSharedRuntimeStatus, CodexSshConnectRequest, CodexSshRuntimeStatus,
+    CodexSshTaskQueryRequest, CodexTaskHistory, CodexTaskSummary,
+};
 use tauri::AppHandle;
 
 #[tauri::command]
@@ -47,4 +50,30 @@ pub async fn take_over_codex_desktop_shared(
     confirmed: bool,
 ) -> Result<CodexSharedRuntimeStatus, String> {
     crate::managed_agents::take_over_codex_desktop_shared(&app, confirmed).await
+}
+
+#[tauri::command]
+pub async fn connect_codex_ssh(
+    request: CodexSshConnectRequest,
+) -> Result<CodexSshRuntimeStatus, String> {
+    tokio::task::spawn_blocking(move || crate::managed_agents::connect(request))
+        .await
+        .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn stop_codex_ssh(host: String, username: String, port: u16) -> Result<(), String> {
+    let key = format!("{}@{}:{}", username.trim(), host.trim(), port);
+    tokio::task::spawn_blocking(move || crate::managed_agents::stop(&key))
+        .await
+        .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn list_codex_ssh_tasks(
+    request: CodexSshTaskQueryRequest,
+) -> Result<Vec<CodexTaskSummary>, String> {
+    tokio::task::spawn_blocking(move || crate::managed_agents::list_codex_ssh_tasks(request))
+        .await
+        .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
