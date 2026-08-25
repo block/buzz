@@ -8,6 +8,7 @@ export function createCodexLabLatestManifest({
   version,
   signature,
   url,
+  allowInsecure = false,
   pubDate = new Date().toISOString(),
 }) {
   if (!SEMVER_RE.test(version ?? "")) {
@@ -18,7 +19,7 @@ export function createCodexLabLatestManifest({
   }
 
   const artifactUrl = new URL(url);
-  if (artifactUrl.protocol !== "https:") {
+  if (artifactUrl.protocol !== "https:" && !(allowInsecure && artifactUrl.protocol === "http:")) {
     throw new Error(`updater artifact URL must use HTTPS; got ${url}`);
   }
   if (Number.isNaN(Date.parse(pubDate))) {
@@ -52,6 +53,7 @@ function main() {
       url: { type: "string" },
       output: { type: "string" },
       "pub-date": { type: "string" },
+      "allow-insecure": { type: "boolean", default: false },
     },
   });
 
@@ -60,6 +62,7 @@ function main() {
     version: requireOption(values, "version"),
     signature: readFileSync(signaturePath, "utf8"),
     url: requireOption(values, "url"),
+    allowInsecure: values["allow-insecure"],
     pubDate: values["pub-date"],
   });
   const json = `${JSON.stringify(manifest, null, 2)}\n`;

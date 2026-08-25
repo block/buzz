@@ -35,6 +35,17 @@ test("rejects insecure artifact URLs", () => {
   );
 });
 
+test("allows insecure artifact URLs only when explicitly enabled", () => {
+  const manifest = createCodexLabLatestManifest({
+    version: "0.5.12",
+    signature: "signature",
+    url: "http://10.24.11.82/Buzz.exe",
+    allowInsecure: true,
+  });
+
+  assert.equal(manifest.platforms["windows-x86_64"].url, "http://10.24.11.82/Buzz.exe");
+});
+
 test("rejects malformed versions and empty signatures", () => {
   assert.throws(
     () =>

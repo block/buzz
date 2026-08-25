@@ -176,6 +176,25 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '<password>'
 .\scripts\build-codex-lab-windows.ps1 -EnableUpdater -VersionOverride 0.5.12
 ```
 
+To publish locally without waiting for a GitHub-hosted runner, use the local
+publisher. It reuses the incremental build cache and writes the installer,
+signature, `latest.json`, and build metadata to one directory. Serve that
+directory from the endpoint's HTTPS path:
+
+```powershell
+$env:BUZZ_UPDATER_PUBLIC_KEY = Get-Content -LiteralPath '<public-key>' -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath '<private-key>' -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '<password>'
+.\scripts\publish-codex-lab-local.ps1 `
+  -Version 0.5.13 `
+  -Endpoint 'https://updates.example.test/buzz/latest.json' `
+  -PublishDirectory 'D:\web\buzz-updates' `
+  -SkipDependencyInstall
+```
+
+For a temporary trusted LAN test only, use `-AllowInsecureEndpoint` with an
+`http://` endpoint. Do not use that mode for public releases.
+
 Only release from the shared `Lin/develop` integration branch. Feature work
 should arrive there through short-lived branches and reviewed pull requests so
 the updater never distributes an unmerged developer branch.
