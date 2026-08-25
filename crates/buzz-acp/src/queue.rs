@@ -426,7 +426,7 @@ impl EventQueue {
     ///
     /// Note: does NOT remove from `in_flight_channels` — caller must call
     /// `mark_complete` separately.
-    pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
+    pub fn requeue(&mut self, mut batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
         let attempt = {
             let count = self.retry_counts.entry(channel_id).or_insert(0);
@@ -482,6 +482,16 @@ impl EventQueue {
                 received_at: be.received_at, // preserve original timestamp (#46)
             });
         }
+        // Preserve cancel annotations across the retry: without this the
+        // next flush loses the cancelled-events context for this channel.
+        if !batch.cancelled_events.is_empty() {
+            let entry = self.cancelled_batches.entry(channel_id).or_default();
+            entry.extend(std::mem::take(&mut batch.cancelled_events));
+            self.cancel_reasons.insert(
+                channel_id,
+                batch.cancel_reason.unwrap_or(CancelReason::Steer),
+            );
+        }
         // Enforce per-channel cap: trim oldest (back) events if requeue pushed
         // the queue over the limit. Without this, repeated requeue+push cycles
         // can grow the queue unboundedly.
@@ -505,8 +515,19 @@ impl EventQueue {
     ///
     /// Does NOT set `retry_after`. Does NOT remove from `in_flight_channels` —
     /// caller must call `mark_complete` separately.
-    pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
+    pub fn requeue_preserve_timestamps(&mut self, mut batch: FlushBatch) {
         let channel_id = batch.channel_id;
+        // Preserve cancel annotations: the batch may carry cancelled_events
+        // from a prior cancel/flush cycle that led to the pool-exhausted
+        // requeue, and dropping them would lose the interrupt context.
+        if !batch.cancelled_events.is_empty() {
+            let entry = self.cancelled_batches.entry(channel_id).or_default();
+            entry.extend(std::mem::take(&mut batch.cancelled_events));
+            self.cancel_reasons.insert(
+                channel_id,
+                batch.cancel_reason.unwrap_or(CancelReason::Steer),
+            );
+        }
         let queue = self.queues.entry(channel_id).or_default();
         // Push to front in reverse order so original order is preserved.
         for be in batch.events.into_iter().rev() {
@@ -540,11 +561,23 @@ impl EventQueue {
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
     pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
-        let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
+        let channel_id = batch.channel_id;
+        let entry = self.cancelled_batches.entry(channel_id).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
-        self.cancel_reasons.insert(batch.channel_id, reason);
+        self.cancel_reasons.insert(channel_id, reason);
+        // Cap the cancelled-events side store too: a flood of cancels on one
+        // channel must not grow this Vec without bound (mirrors the per-channel
+        // cap on the generic queue above).
+        while entry.len() > MAX_PENDING_PER_CHANNEL {
+            entry.pop();
+            tracing::warn!(
+                channel_id = %channel_id,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "requeue_as_cancelled overflow — dropped oldest cancelled event to enforce cap"
+            );
+        }
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -2379,6 +2412,46 @@ mod tests {
         assert_eq!(next_batch.channel_id, ch_b);
     }
 
+    /// `requeue` must not discard a batch's `cancelled_events` on the retry
+    /// path — the next flush for that channel still has to carry the
+    /// interrupt context into the merged prompt.
+    #[test]
+    fn requeue_preserves_cancelled_events() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        queue.push(make_queued(ch, "interrupted-work-marker"));
+        let cancelled_batch = queue.flush_next().expect("should flush");
+        queue.requeue_as_cancelled(cancelled_batch, CancelReason::Interrupt);
+        queue.mark_complete(ch);
+
+        queue.push(make_queued(ch, "follow-up"));
+        let merged = queue.flush_next().expect("should flush merged batch");
+        assert_eq!(merged.cancelled_events.len(), 1);
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Interrupt));
+
+        assert!(
+            queue.requeue(merged).is_none(),
+            "first retry must not dead-letter"
+        );
+        queue.mark_complete(ch);
+        // Clear the backoff throttle so the next flush is immediate (the
+        // throttle itself is covered by the dedicated backoff tests).
+        queue.retry_after.remove(&ch);
+
+        let retried = queue.flush_next().expect("should flush after retry");
+        assert_eq!(
+            retried.cancelled_events.len(),
+            1,
+            "cancelled_events must survive the retry path"
+        );
+        assert_eq!(
+            retried.cancelled_events[0].event.content,
+            "interrupted-work-marker"
+        );
+        assert_eq!(retried.cancel_reason, Some(CancelReason::Interrupt));
+    }
+
     #[test]
     fn test_format_prompt_batch() {
         let ch = Uuid::new_v4();
@@ -3049,6 +3122,39 @@ mod tests {
             requeued_first_content,
             "requeued events should be at the front (oldest), not trimmed"
         );
+    }
+
+    /// `requeue_preserve_timestamps` (the pool-exhausted path) must keep a
+    /// batch's `cancelled_events` in the side store so the next flush still
+    /// delivers them as interrupted context with their original reason.
+    #[test]
+    fn test_requeue_preserve_timestamps_keeps_cancelled_events() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "interrupted-first-marker"));
+        let first_batch = q.flush_next().expect("should flush");
+        q.requeue_as_cancelled(first_batch, CancelReason::Interrupt);
+        q.mark_complete(ch);
+
+        q.push(make_queued(ch, "trigger"));
+        let merged = q.flush_next().expect("should flush merged batch");
+        assert_eq!(merged.cancelled_events.len(), 1);
+
+        q.requeue_preserve_timestamps(merged);
+        q.mark_complete(ch);
+
+        let next = q.flush_next().expect("should flush after requeue");
+        assert_eq!(
+            next.cancelled_events.len(),
+            1,
+            "cancelled_events must survive the pool-exhausted requeue"
+        );
+        assert_eq!(
+            next.cancelled_events[0].event.content, "interrupted-first-marker",
+            "the interrupted event must be delivered as cancelled context"
+        );
+        assert_eq!(next.cancel_reason, Some(CancelReason::Interrupt));
     }
 
     #[test]
@@ -4259,6 +4365,31 @@ mod tests {
         );
     }
 
+    /// A flood of `requeue_as_cancelled` calls on one channel must not grow
+    /// the side store past `MAX_PENDING_PER_CHANNEL` (mirrors the per-channel
+    /// cap the generic queue enforces).
+    #[test]
+    fn test_requeue_as_cancelled_enforces_cap() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        for round in 0..(MAX_PENDING_PER_CHANNEL / 10 + 2) {
+            for i in 0..10 {
+                q.push(make_queued(ch, &format!("cancel-r{round}-e{i}")));
+            }
+            let batch = q.flush_next().expect("should flush");
+            q.requeue_as_cancelled(batch, CancelReason::Interrupt);
+            q.mark_complete(ch);
+        }
+
+        assert!(
+            q.cancelled_batches
+                .get(&ch)
+                .is_none_or(|v| { v.len() <= MAX_PENDING_PER_CHANNEL }),
+            "cancelled side store must be capped at {MAX_PENDING_PER_CHANNEL}"
+        );
+    }
+
     #[test]
     fn test_reply_instruction_present_for_channel_thread_reply() {
         let ch = Uuid::new_v4();
@@ -4843,6 +4974,52 @@ mod tests {
             .collect();
         assert_eq!(recovered, vec![e1_id, e2_id, e3_id]);
         assert!(q.withheld_native_steer.is_empty());
+    }
+
+    /// `SteerAck::Success` ack drops the withheld event permanently: no
+    /// redelivery through `flush_next` / `has_flushable_work`, sibling events
+    /// on the channel unaffected, empty side-table entry cleaned up, second
+    /// call idempotent. Pins the behaviour `remove_event` provides to the
+    /// ack-success path (no source change — this pins existing behaviour).
+    #[test]
+    fn test_native_steer_success_ack_drops_withheld_event() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let first = make_queued(ch, "before-steer");
+        let steer = make_queued(ch, "@goose please steer");
+        let after = make_queued(ch, "after-steer");
+        let steer_id = steer.event.id.to_hex();
+        q.push(first);
+        q.push(steer);
+        q.push(after);
+
+        assert!(q.mark_native_steer_pending(ch, &steer_id));
+        assert_eq!(pending_count(&q), 2);
+
+        // SteerAck::Success path.
+        q.remove_event(ch, &steer_id);
+
+        assert!(
+            !q.withheld_native_steer.contains_key(&ch),
+            "side-table entry must be removed once empty"
+        );
+        // Sibling events survive and remain deliverable.
+        assert_eq!(pending_count(&q), 2);
+        let batch = q.flush_next().expect("siblings must still flush");
+        let delivered: Vec<String> = batch
+            .events
+            .iter()
+            .map(|be| be.event.content.clone())
+            .collect();
+        assert!(
+            !delivered.iter().any(|c| c.contains("please steer")),
+            "the acked steer event must never be redelivered, got: {delivered:?}"
+        );
+
+        // Idempotent: a second ack-style drop must not panic.
+        q.remove_event(ch, &steer_id);
+        assert_eq!(pending_count(&q), 0);
     }
 
     // ── format_prompt: agent_canvas ─────────────────────────────────────────

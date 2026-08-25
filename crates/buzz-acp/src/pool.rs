@@ -21,6 +21,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,6 +78,14 @@ pub struct TaskMeta {
     /// live session. The session ID prevents a late ack from contaminating a
     /// replacement session after task return.
     pub successful_steer_deliveries: HashSet<SuccessfulSteerDelivery>,
+    /// Free-standing watchdog (block/buzz#4860): set true by the watchdog
+    /// task before it aborts the in-flight turn. `None` when the knob is
+    /// disabled (default). `recover_panicked_agent` reads this to distinguish
+    /// a watchdog abort from a genuine panic.
+    pub watchdog_fired: Option<Arc<AtomicBool>>,
+    /// Handle to the watchdog sleep task. Disarmed (`.abort()`) on normal
+    /// completion or on recovery so the sleep doesn't wake into a no-op.
+    pub watchdog_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -543,6 +552,10 @@ pub enum PromptOutcome {
 #[derive(Debug, Clone)]
 pub struct ChannelInfoResolver {
     cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
+    /// Channels with a background resolve already in flight. Guards
+    /// [`Self::spawn_resolve`] so a burst of events for one unknown channel
+    /// fires a single fetch instead of one per event.
+    in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
     rest_client: RestClient,
 }
 
@@ -566,8 +579,57 @@ impl ChannelInfoResolver {
             .collect();
         Self {
             cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            in_flight: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             rest_client,
         }
+    }
+
+    /// Read the resolution cache without touching the network.
+    ///
+    /// For callers on a latency-critical path (the author gate runs per
+    /// inbound event) where awaiting a retrying REST fetch would stall the
+    /// whole event loop. A miss means "not known yet", not "not a DM".
+    pub fn cached(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        self.cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned())
+    }
+
+    /// Resolve `channel_id` in the background so later events hit the cache.
+    ///
+    /// At most one fetch per channel is in flight at a time; concurrent calls
+    /// for the same channel are dropped rather than queued. A failed fetch
+    /// clears the guard, so the next event retries.
+    pub fn spawn_resolve(&self, channel_id: Uuid) {
+        match self.in_flight.lock() {
+            Ok(mut in_flight) => {
+                if !in_flight.insert(channel_id) {
+                    return;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "channel resolver in-flight guard poisoned: {error}"
+                );
+                return;
+            }
+        }
+
+        let resolver = self.clone();
+        tokio::spawn(async move {
+            let resolved = resolver.resolve(channel_id).await;
+            if let Ok(mut in_flight) = resolver.in_flight.lock() {
+                in_flight.remove(&channel_id);
+            }
+            if resolved.is_none() {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "background channel-metadata resolution failed — will retry on next event"
+                );
+            }
+        });
     }
 
     pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
@@ -597,6 +659,10 @@ pub struct PromptContext {
     /// disables emission. This is the desktop crash-backstop signal — distinct
     /// from `heartbeat_prompt` (agent self-prompting).
     pub turn_liveness_interval: Duration,
+    /// Free-standing wall-clock watchdog for the entire `run_prompt_task`
+    /// future. `Duration::ZERO` disables it. Unlike the in-loop timers, this can
+    /// terminate a turn parked in relay/tool output (block/buzz#4860).
+    pub turn_output_timeout: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
     /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
@@ -7923,6 +7989,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             idle_timeout: Duration::from_secs(60),
             max_turn_duration: Duration::from_secs(120),
             turn_liveness_interval: Duration::ZERO,
+            turn_output_timeout: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,
