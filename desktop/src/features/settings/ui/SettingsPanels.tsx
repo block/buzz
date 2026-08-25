@@ -81,58 +81,69 @@ import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { VoiceSettingsCard } from "./VoiceSettingsCard";
 
-export type SettingsSection =
-  | "profile"
-  | "notifications"
-  | "voice"
-  | "experimental"
-  | "agents"
-  | "channel-templates"
-  | "compute"
-  | "appearance"
-  | "shortcuts"
-  | "hosted-communities"
-  | "community-members"
-  | "moderation"
-  | "custom-emoji"
-  | "local-archive"
-  | "mobile"
-  | "updates";
+/**
+ * A settings section identifier. `settingsSections` below is now the single
+ * source of truth for which section values exist, what each one renders, and
+ * where it sits in navigation — there is no separate union type to keep in
+ * sync. This alias stays a plain `string` purely so existing callers can
+ * still annotate a variable's intent; validity is checked at runtime via
+ * `isSettingsSection`, which consults the registry directly.
+ *
+ * Previously, adding a section meant touching a `SettingsSection` union, a
+ * `SETTINGS_SECTION_VALUES` array, a `settingsSections` descriptor, a
+ * `renderSettingsSection` switch case, and a `settingsNavGroups` entry (5
+ * parallel structures). It's now a single `settingsSections` entry.
+ *
+ * The `never` exhaustiveness check a switch statement used to provide is
+ * replaced by the registry being the *only* place a section is defined:
+ * there is nothing left to fall out of sync with.
+ */
+export type SettingsSection = string;
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 
-const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
-  "profile",
-  "notifications",
-  "voice",
-  "experimental",
-  "agents",
-  "channel-templates",
-  "compute",
-  "appearance",
-  "shortcuts",
-  "hosted-communities",
-  "community-members",
-  "moderation",
-  "custom-emoji",
-  "local-archive",
-  "mobile",
-  "updates",
-];
-
 export function isSettingsSection(value: unknown): value is SettingsSection {
   return (
-    typeof value === "string" &&
-    (SETTINGS_SECTION_VALUES as readonly string[]).includes(value)
+    typeof value === "string" && settingsSections.some((s) => s.value === value)
   );
 }
+
+/** Nav-group identifier a settings section is grouped under. See {@link SETTINGS_NAV_GROUPS}. */
+export type SettingsNavGroupId = "personal" | "communities" | "app";
+
+/**
+ * Static nav-group order + labels for the settings sidebar. Section → group
+ * membership lives on each `SettingsSectionDescriptor.group`; this just
+ * controls the order the group headers themselves appear in and what
+ * they're labeled.
+ */
+export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
+  id: SettingsNavGroupId;
+  label: string;
+}> = [
+  { id: "personal", label: "Personal" },
+  { id: "communities", label: "Communities" },
+  { id: "app", label: "App" },
+];
 
 export type SettingsSectionDescriptor = {
   value: SettingsSection;
   label: string;
   icon: LucideIcon;
+  /**
+   * Nav group this section is grouped under. Omitted for a section that
+   * should stay reachable by value but not appear in the sidebar — e.g.
+   * "moderation" below, which predates this registry and was never wired
+   * into a nav group; that (likely unintentional) behavior is preserved
+   * as-is here rather than fixed as a drive-by in this refactor.
+   */
+  group?: SettingsNavGroupId;
+  /** Explicit ordering within the group; lower renders first. Defaults to 0. */
+  order?: number;
   /** If set, this section is only visible when the feature is enabled */
   featureGate?: string;
+  /** Renders this section's panel body. */
+  render: (props: SettingsPanelProps) => React.ReactNode;
 };
 
 export type SettingsPanelProps = {
@@ -151,88 +162,162 @@ export type SettingsPanelProps = {
 };
 
 export const settingsSections: SettingsSectionDescriptor[] = [
-  {
-    value: "appearance",
-    label: "Appearance",
-    icon: MonitorCog,
-  },
+  // --- Personal ---
   {
     value: "profile",
     label: "Profile",
     icon: UserRound,
+    group: "personal",
+    order: 0,
+    render: (props) => (
+      <ProfileSettingsCard
+        currentPubkey={props.currentPubkey}
+        fallbackDisplayName={props.fallbackDisplayName}
+      />
+    ),
+  },
+  {
+    value: "appearance",
+    label: "Appearance",
+    icon: MonitorCog,
+    group: "personal",
+    order: 1,
+    render: () => <ThemeSettingsCard />,
   },
   {
     value: "notifications",
     label: "Notifications",
     icon: BellRing,
+    group: "personal",
+    order: 2,
+    render: (props) => (
+      <NotificationSettingsCard
+        isUpdatingDesktopNotifications={props.isUpdatingDesktopNotifications}
+        notificationErrorMessage={props.notificationErrorMessage}
+        notificationPermission={props.notificationPermission}
+        notificationSettings={props.notificationSettings}
+        onSetDesktopNotificationsEnabled={
+          props.onSetDesktopNotificationsEnabled
+        }
+        onSetHomeBadgeEnabled={props.onSetHomeBadgeEnabled}
+        onSetSlotAlertsEnabled={props.onSetSlotAlertsEnabled}
+        onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
+        onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
+        onSetSoundForSlot={props.onSetSoundForSlot}
+      />
+    ),
   },
   {
     value: "voice",
     label: "Voice",
     icon: Volume2,
-  },
-  {
-    value: "experimental",
-    label: "Experiments",
-    icon: FlaskConical,
-  },
-  {
-    value: "agents",
-    label: "Agents",
-    icon: Bot,
-    featureGate: "managed-agents",
-  },
-  {
-    value: "channel-templates",
-    label: "Channel templates",
-    icon: LayoutTemplate,
-    featureGate: "channel-templates",
-  },
-  {
-    value: "compute",
-    label: "Compute",
-    icon: Cpu,
+    group: "personal",
+    order: 3,
+    render: () => <VoiceSettingsCard />,
   },
   {
     value: "shortcuts",
     label: "Shortcuts",
     icon: Keyboard,
-  },
-  {
-    value: "hosted-communities",
-    label: "Hosted communities",
-    icon: MessagesSquare,
-  },
-  {
-    value: "community-members",
-    label: "Invites",
-    icon: Ticket,
-  },
-  {
-    value: "moderation",
-    label: "Moderation",
-    icon: ShieldAlert,
+    group: "personal",
+    order: 4,
+    render: () => <KeyboardShortcutsCard />,
   },
   {
     value: "custom-emoji",
     label: "Custom emoji",
     icon: Smile,
+    group: "personal",
+    order: 5,
     featureGate: "custom-emoji",
+    render: () => <CustomEmojiSettingsCard />,
   },
   {
     value: "local-archive",
     label: "Local archive",
     icon: Archive,
+    group: "personal",
+    order: 6,
+    render: () => <LocalArchiveSettingsCard />,
+  },
+  {
+    value: "channel-templates",
+    label: "Channel templates",
+    icon: LayoutTemplate,
+    group: "personal",
+    order: 7,
+    featureGate: "channel-templates",
+    render: () => <ChannelTemplatesSettingsCard />,
+  },
+  // --- Communities ---
+  {
+    value: "hosted-communities",
+    label: "Hosted communities",
+    icon: MessagesSquare,
+    group: "communities",
+    order: 0,
+    render: () => <HostedCommunitiesSettingsCard />,
+  },
+  {
+    value: "community-members",
+    label: "Invites",
+    icon: Ticket,
+    group: "communities",
+    order: 1,
+    render: (props) => (
+      <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
+    ),
+  },
+  // --- Not wired into any nav group (see doc comment on `group` above) ---
+  {
+    value: "moderation",
+    label: "Moderation",
+    icon: ShieldAlert,
+    render: () => <ModerationQueueCard />,
+  },
+  // --- App ---
+  {
+    value: "agents",
+    label: "Agents",
+    icon: Bot,
+    group: "app",
+    order: 0,
+    featureGate: "managed-agents",
+    render: () => <AgentsSettingsPanel />,
+  },
+  {
+    value: "compute",
+    label: "Compute",
+    icon: Cpu,
+    group: "app",
+    order: 1,
+    render: () => <MeshComputeSettingsCard />,
+  },
+  {
+    value: "experimental",
+    label: "Experiments",
+    icon: FlaskConical,
+    group: "app",
+    order: 2,
+    render: () => <ExperimentalFeaturesCard />,
   },
   {
     value: "mobile",
     label: "Mobile",
     icon: Smartphone,
+    group: "app",
+    order: 3,
+    render: (props) => (
+      <MobilePairingCard currentPubkey={props.currentPubkey} />
+    ),
   },
   {
     value: "updates",
     label: "Updates",
     icon: Download,
+    group: "app",
+    order: 4,
+    render: () => <UpdateChecker />,
   },
 ];
 
@@ -797,70 +882,4 @@ function ThemeSettingsCard() {
       </SettingsOptionGroupList>
     </section>
   );
-}
-
-export function renderSettingsSection(
-  section: SettingsSection,
-  props: SettingsPanelProps,
-): React.ReactNode {
-  switch (section) {
-    case "profile":
-      return (
-        <ProfileSettingsCard
-          currentPubkey={props.currentPubkey}
-          fallbackDisplayName={props.fallbackDisplayName}
-        />
-      );
-    case "notifications":
-      return (
-        <NotificationSettingsCard
-          isUpdatingDesktopNotifications={props.isUpdatingDesktopNotifications}
-          notificationErrorMessage={props.notificationErrorMessage}
-          notificationPermission={props.notificationPermission}
-          notificationSettings={props.notificationSettings}
-          onSetDesktopNotificationsEnabled={
-            props.onSetDesktopNotificationsEnabled
-          }
-          onSetHomeBadgeEnabled={props.onSetHomeBadgeEnabled}
-          onSetSlotAlertsEnabled={props.onSetSlotAlertsEnabled}
-          onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
-          onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
-          onSetSoundForSlot={props.onSetSoundForSlot}
-        />
-      );
-    case "voice":
-      return <VoiceSettingsCard />;
-    case "experimental":
-      return <ExperimentalFeaturesCard />;
-    case "agents":
-      return <AgentsSettingsPanel />;
-    case "channel-templates":
-      return <ChannelTemplatesSettingsCard />;
-    case "compute":
-      return <MeshComputeSettingsCard />;
-    case "appearance":
-      return <ThemeSettingsCard />;
-    case "shortcuts":
-      return <KeyboardShortcutsCard />;
-    case "hosted-communities":
-      return <HostedCommunitiesSettingsCard />;
-    case "community-members":
-      return (
-        <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
-      );
-    case "moderation":
-      return <ModerationQueueCard />;
-    case "custom-emoji":
-      return <CustomEmojiSettingsCard />;
-    case "local-archive":
-      return <LocalArchiveSettingsCard />;
-    case "mobile":
-      return <MobilePairingCard currentPubkey={props.currentPubkey} />;
-    case "updates":
-      return <UpdateChecker />;
-    default: {
-      const exhaustiveCheck: never = section;
-      return exhaustiveCheck;
-    }
-  }
 }

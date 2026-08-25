@@ -30,7 +30,7 @@ import {
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 import {
-  renderSettingsSection,
+  SETTINGS_NAV_GROUPS,
   settingsSections,
   type SettingsPanelProps,
   type SettingsSection,
@@ -47,33 +47,6 @@ type SettingsViewProps = SettingsPanelProps & {
   onSectionChange: (section: SettingsSection) => void;
   section: SettingsSection;
 };
-
-const settingsNavGroups: Array<{
-  label: string;
-  sections: SettingsSection[];
-}> = [
-  {
-    label: "Personal",
-    sections: [
-      "profile",
-      "appearance",
-      "notifications",
-      "voice",
-      "shortcuts",
-      "custom-emoji",
-      "local-archive",
-      "channel-templates",
-    ],
-  },
-  {
-    label: "Communities",
-    sections: ["hosted-communities", "community-members"],
-  },
-  {
-    label: "App",
-    sections: ["agents", "compute", "experimental", "mobile", "updates"],
-  },
-];
 
 function SettingsSectionButton({
   active,
@@ -186,23 +159,32 @@ export function SettingsView({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  const visibleSectionByValue = React.useMemo(
-    () => new Map(visibleSections.map((entry) => [entry.value, entry])),
-    [visibleSections],
-  );
-  const visibleNavGroups = React.useMemo(
-    () =>
-      settingsNavGroups
-        .map((group) => ({
-          ...group,
-          sections: group.sections
-            .map((value) => visibleSectionByValue.get(value))
-            .filter(
-              (entry): entry is SettingsSectionDescriptor => entry != null,
-            ),
-        }))
-        .filter((group) => group.sections.length > 0),
-    [visibleSectionByValue],
+  // Group visible sections by their `group` field, in `SETTINGS_NAV_GROUPS`
+  // order, sorted within each group by `order`. Sections with no `group`
+  // (e.g. "moderation") are omitted from the sidebar entirely, mirroring
+  // pre-registry behavior where they simply weren't listed in any nav group.
+  const visibleNavGroups = React.useMemo(() => {
+    const byGroup = new Map<string, SettingsSectionDescriptor[]>();
+    for (const entry of visibleSections) {
+      if (!entry.group) continue;
+      const list = byGroup.get(entry.group);
+      if (list) {
+        list.push(entry);
+      } else {
+        byGroup.set(entry.group, [entry]);
+      }
+    }
+    return SETTINGS_NAV_GROUPS.map(({ id, label }) => ({
+      label,
+      sections: (byGroup.get(id) ?? [])
+        .slice()
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+    })).filter((group) => group.sections.length > 0);
+  }, [visibleSections]);
+
+  const activeSection = React.useMemo(
+    () => visibleSections.find((entry) => entry.value === section),
+    [visibleSections, section],
   );
 
   return (
@@ -342,7 +324,7 @@ export function SettingsView({
               className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4"
               data-testid={`settings-panel-${section}`}
             >
-              {renderSettingsSection(section, {
+              {activeSection?.render({
                 currentPubkey,
                 fallbackDisplayName,
                 isUpdatingDesktopNotifications,
@@ -355,7 +337,7 @@ export function SettingsView({
                 onSetNotifyWhileViewing,
                 onSetAllSlotAlertsEnabled,
                 onSetSoundForSlot,
-              })}
+              }) ?? null}
             </div>
           </section>
         </div>
