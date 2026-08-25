@@ -1914,3 +1914,175 @@ mod tests {
         );
     }
 }
+
+/// Command-level coverage for `cmd_set_canvas`'s writer discipline: it must read
+/// the head, stamp `created_at` strictly ahead of a future-dated head, carry the
+/// head's id as the `expected-revision` tag, fall back to an `expected-revision:
+/// none` create when no head exists, and refuse to submit against a structurally
+/// malformed head. These pin the fix so a revert to `created_at = now` / no head
+/// read fails a test rather than silently recreating the false-success bug.
+///
+/// Each test spins up a local axum relay that answers `POST /query` with a fixed
+/// head and captures the event submitted to `POST /events`, then inspects the
+/// signed event — behaviour at the command seam, not implementation details.
+#[cfg(test)]
+mod set_canvas_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    use super::cmd_set_canvas;
+    use crate::client::BuzzClient;
+    use crate::CliError;
+
+    const CHANNEL: &str = "326d56bc-c96c-4af0-86a1-5e804cd1b467";
+
+    #[derive(Clone)]
+    struct RelayState {
+        query_response: Arc<String>,
+        submitted: Arc<Mutex<Option<Value>>>,
+    }
+
+    /// Spawn a relay that returns `query_response` from `POST /query` and records
+    /// the event posted to `POST /events`. `submitted` stays `None` until (and
+    /// unless) `set` actually publishes.
+    async fn relay(query_response: &str) -> (String, Arc<Mutex<Option<Value>>>) {
+        let submitted: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let state = RelayState {
+            query_response: Arc::new(query_response.to_string()),
+            submitted: submitted.clone(),
+        };
+        let app = Router::new()
+            .route(
+                "/query",
+                post(|State(s): State<RelayState>, _body: Bytes| async move {
+                    (*s.query_response).clone()
+                }),
+            )
+            .route(
+                "/events",
+                post(|State(s): State<RelayState>, body: Bytes| async move {
+                    let event: Value = serde_json::from_slice(&body).expect("event json");
+                    *s.submitted.lock().unwrap() = Some(event);
+                    r#"{"event_id":"deadbeef","accepted":true,"message":""}"#.to_string()
+                }),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted)
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    fn tag_value(event: &Value, key: &str) -> Option<String> {
+        event
+            .get("tags")?
+            .as_array()?
+            .iter()
+            .find(|t| {
+                t.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some(key)
+            })
+            .and_then(|t| t.as_array())
+            .and_then(|a| a.get(1))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// A future-dated head forces the `max(now, head + 1)` bump to resolve to
+    /// `head + 1` deterministically (no clock dependence, no sleeps), so the
+    /// submitted revision sorts strictly ahead of the head under
+    /// `created_at DESC, id ASC` and carries the head id as `expected-revision`.
+    #[tokio::test]
+    async fn set_stamps_ahead_of_future_head_and_asserts_it() {
+        let head_id = "a".repeat(64);
+        let future: u64 = 4_102_444_800; // 2100-01-01Z — always ahead of `now`
+        let head = json!([{
+            "id": head_id,
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": future,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, submitted) = relay(&head.to_string()).await;
+
+        cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect("set succeeds");
+
+        let event = submitted.lock().unwrap().clone().expect("set must submit");
+        assert_eq!(
+            event.get("created_at").and_then(|v| v.as_u64()),
+            Some(future + 1),
+            "must stamp strictly ahead of the future-dated head"
+        );
+        assert_eq!(
+            tag_value(&event, "expected-revision").as_deref(),
+            Some(head_id.as_str()),
+            "must assert the head id it read"
+        );
+        assert_eq!(event.get("kind").and_then(|v| v.as_u64()), Some(40100));
+    }
+
+    /// No head yet: `set` still submits (create is not an error) and records the
+    /// create-assertion `expected-revision: none`.
+    #[tokio::test]
+    async fn set_with_no_head_creates_with_expected_revision_none() {
+        let (url, submitted) = relay("[]").await;
+
+        cmd_set_canvas(&client(&url), CHANNEL, "first content")
+            .await
+            .expect("set on empty channel succeeds");
+
+        let event = submitted.lock().unwrap().clone().expect("set must submit");
+        assert_eq!(
+            tag_value(&event, "expected-revision").as_deref(),
+            Some("none"),
+            "no-head create must assert expected-revision: none"
+        );
+    }
+
+    /// A structurally malformed head (row without `id`) is an ordinary error, not
+    /// a conflict, and nothing is published — the exact boundary the fix added.
+    #[tokio::test]
+    async fn set_errors_on_head_without_id_and_does_not_submit() {
+        let head = json!([{
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": 1_700_000_000u64,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, submitted) = relay(&head.to_string()).await;
+
+        let err = cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect_err("malformed head must error");
+
+        assert!(
+            matches!(err, CliError::Other(_)),
+            "expected Other, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("no canvas head id found"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            submitted.lock().unwrap().is_none(),
+            "no event may be published when the head is malformed"
+        );
+    }
+}
