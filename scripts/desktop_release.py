@@ -257,12 +257,15 @@ def validate(args: argparse.Namespace) -> None:
     bad = [str(path.relative_to(ROOT)) for path, value in manifests.items() if value != version]
     if bad:
         raise SystemExit(f"version mismatch in: {', '.join(bad)}")
-    author = git("show", "-s", "--format=%an <%ae>", candidate)
-    body = git("show", "-s", "--format=%B", candidate)
-    if not author:
+    name = git("show", "-s", "--format=%an", candidate)
+    email = git("show", "-s", "--format=%ae", candidate)
+    if not name or not email:
         raise SystemExit("candidate has no author identity")
-    if f"Signed-off-by: {author}" not in body:
-        raise SystemExit(f"candidate is missing a Signed-off-by trailer matching its author {author}")
+    author = f"{name} <{email}>"
+    body = git("show", "-s", "--format=%B", candidate)
+    signoffs = re.findall(rf"(?m)^Signed-off-by: {re.escape(author)}$", body)
+    if len(signoffs) != 1:
+        raise SystemExit(f"candidate must carry exactly one Signed-off-by trailer matching its author {author}")
     if not re.search(r"(?m)^Co-authored-by: .+ <.+>$", body):
         raise SystemExit("candidate is missing automation Co-authored-by trailer")
     print(f"validated immutable desktop candidate {candidate} for desktop-v{version}")

@@ -77,6 +77,29 @@ PY
   fi
   git reset -q --hard "$good_candidate"
 
+  # The trailer must be a complete anchored line, not substring-matched. A prose
+  # line that merely contains the sign-off text, or a real trailer with trailing
+  # garbage, must be rejected. Both were accepted before the anchored parse.
+  for bogus in \
+    'not-a-trailer Signed-off-by: test <test@example.com>' \
+    'Signed-off-by: test <test@example.com> trailing-garbage'; do
+    git commit -q --amend -m 'chore(release): release Buzz Desktop version 1.0.1' \
+      -m 'Co-authored-by: Test Automation <test@example.com>' -m "$bogus"
+    if PATH="$mock_bin:$PATH" scripts/desktop_release.py validate --version 1.0.1 --repo block/buzz >/dev/null 2>&1; then
+      echo "validator accepted a malformed sign-off: $bogus" >&2; exit 1
+    fi
+    git reset -q --hard "$good_candidate"
+  done
+
+  # Two matching sign-offs are also invalid: the contract is exactly one.
+  git commit -q --amend -m 'chore(release): release Buzz Desktop version 1.0.1' \
+    -m 'Co-authored-by: Test Automation <test@example.com>' \
+    -m 'Signed-off-by: test <test@example.com>' -m 'Signed-off-by: test <test@example.com>'
+  if PATH="$mock_bin:$PATH" scripts/desktop_release.py validate --version 1.0.1 --repo block/buzz >/dev/null 2>&1; then
+    echo "validator accepted duplicate Signed-off-by trailers" >&2; exit 1
+  fi
+  git reset -q --hard "$good_candidate"
+
   grep -Fq "$unrelated_before" CHANGELOG.md
   grep -Fq "$unrelated_after" CHANGELOG.md
   ! grep -Fq "$prior_merge" CHANGELOG.md
