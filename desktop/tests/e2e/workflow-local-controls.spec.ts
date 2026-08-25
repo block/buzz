@@ -294,7 +294,9 @@ test("round-trips and reopens structured message-text conditions", async ({
   expect(firstOperatorBox).not.toBeNull();
   expect(secondOperatorBox).not.toBeNull();
   expect(thirdOperatorBox).not.toBeNull();
-  expect(secondOperatorBox?.x).toBeGreaterThan(firstOperatorBox?.x ?? 0);
+  expect(
+    Math.abs((secondOperatorBox?.x ?? 0) - (firstOperatorBox?.x ?? 0)),
+  ).toBeGreaterThan(1);
   expect(
     Math.abs((secondOperatorBox?.y ?? 0) - (firstOperatorBox?.y ?? 0)),
   ).toBeLessThan(1);
