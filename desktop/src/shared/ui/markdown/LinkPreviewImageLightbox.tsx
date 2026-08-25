@@ -19,16 +19,12 @@ type ImageZoomOverlayProps = {
   galleryIndex?: number;
   galleryItems?: ImageGalleryItem[];
   onClose: () => void;
-  onCopy: (src: string | undefined) => void;
-  onDownload: (src: string | undefined) => void;
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
   sourceCornerRadii: ImageLightboxCornerRadii;
   sourceScope?: Element | null;
   src: string | undefined;
 };
-
-const ignoreUnavailableImageAction = () => undefined;
 
 export function createLinkPreviewImageLightbox(
   ImageZoomOverlay: ComponentType<ImageZoomOverlayProps>,
@@ -105,8 +101,6 @@ export function createLinkPreviewImageLightbox(
             galleryIndex={lightboxState.galleryIndex}
             galleryItems={lightboxState.galleryItems}
             onClose={() => setLightboxState(null)}
-            onCopy={ignoreUnavailableImageAction}
-            onDownload={ignoreUnavailableImageAction}
             resolvedSrc={src}
             sourceBox={lightboxState.sourceBox}
             sourceCornerRadii={lightboxState.sourceCornerRadii}

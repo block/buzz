@@ -40,9 +40,10 @@ async function emitMockMessage(
   content: string,
   parentEventId?: string,
   createdAt?: number,
+  extraTags?: string[][],
 ): Promise<string> {
   const eventId = await page.evaluate(
-    ({ body, createdAt: timestamp, parent }) => {
+    ({ body, createdAt: timestamp, parent, tags }) => {
       const event = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -50,6 +51,7 @@ async function emitMockMessage(
             content: string;
             createdAt?: number;
             parentEventId?: string;
+            extraTags?: string[][];
           }) => { id?: string } | undefined;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -57,10 +59,11 @@ async function emitMockMessage(
         content: body,
         createdAt: timestamp,
         parentEventId: parent,
+        extraTags: tags,
       });
       return event?.id ?? null;
     },
-    { body: content, createdAt, parent: parentEventId },
+    { body: content, createdAt, parent: parentEventId, tags: extraTags },
   );
 
   if (!eventId) throw new Error("Expected mock message event id");
@@ -516,6 +519,110 @@ test("thread gallery includes only currently rendered media", async ({
   await expect(dialog.getByRole("img", { name: "branch" })).toBeVisible();
   await expect(position).toHaveText("2 / 3");
   await expect(dialog.getByRole("img", { name: "child" })).toHaveCount(0);
+});
+
+test("preview-first galleries retain Markdown image actions", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/6705";
+  await installMockBridge(page, {
+    uploadDescriptors: [
+      {
+        url: `http://localhost:3000/media/${IMAGE_SHAS[2]}.png`,
+        sha256: IMAGE_SHAS[2],
+        size: 3456,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        dim: "140x140",
+        filename: "preview.png",
+      },
+    ],
+  });
+  await installNoDimImageRoutes(page);
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="140" height="140"><rect width="100%" height="100%" fill="#60a5fa"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.appearance.linkPreviewStyle", "rich");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+
+  const timestamp = Math.floor(Date.now() / 1000) - 10;
+  const rootId = await emitMockMessage(
+    page,
+    "preview action root",
+    undefined,
+    timestamp,
+  );
+  await emitMockMessage(
+    page,
+    [
+      `preview action reply ${previewUrl}`,
+      `![body image](${NO_DIM_WIDE_URL})`,
+    ].join("\n"),
+    rootId,
+    timestamp + 1,
+    [
+      [
+        "link-preview",
+        "snapshot",
+        "1",
+        previewUrl,
+        "Preview title",
+        "Example",
+        "Preview description",
+        `http://localhost:3000/media/${IMAGE_SHAS[2]}.png`,
+        IMAGE_SHAS[2],
+        "",
+        "",
+      ],
+    ],
+  );
+
+  await page
+    .locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+    )
+    .click();
+  const reply = page
+    .getByTestId("message-thread-panel")
+    .getByTestId("message-row")
+    .filter({ hasText: "preview action reply" });
+  await reply.getByRole("button", { name: /Zoom image: Preview from/ }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("status")).toHaveText("2 / 2");
+  await dialog.getByRole("button", { name: "Previous image" }).click();
+  const bodyImage = dialog.getByRole("img", { name: "body image" });
+  await expect(bodyImage).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Download image" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("download_image");
+
+  await bodyImage.click({ button: "right" });
+  await dialog.getByRole("button", { name: "Copy image" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("copy_image_to_clipboard");
 });
 
 test("adjacent channel messages remain separate image galleries", async ({
