@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod channel_templates;
 pub mod channels;
+pub mod definitions;
 pub mod dms;
 pub mod emoji;
 pub mod feed;
@@ -11,6 +12,7 @@ pub mod moderation;
 pub mod notes;
 pub mod pack;
 pub mod patches;
+pub mod personas;
 pub mod pr;
 pub mod projects;
 pub mod reactions;

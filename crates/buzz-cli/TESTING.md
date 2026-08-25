@@ -485,6 +485,107 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 Personas (NIP-AP, kind:30175)
+
+Owner-authored agent definitions. These are the same coordinates
+Buzz Desktop reads, so run them with the **same key as the Desktop you expect
+the definitions to appear in** — a different key writes to a different
+coordinate space and Desktop shows nothing.
+
+```bash
+# create (flags)
+buzz personas create --display-name "Herring" --prompt "Ask the annoying question." \
+  --runtime claude --model claude-opus-5 | jq .
+# → {event_id, accepted, message, slug} — slug is the d-tag ("herring")
+
+# create (from a Desktop export; --replace required to overwrite)
+buzz personas create --from ~/Downloads/Herring.agent.json --replace | jq .
+
+# avatars: --avatar takes a local image, --avatar-url takes a hosted URL.
+# Every raster is downscaled to 512px and re-encoded, then measured: it rides
+# inline in the event when it fits (so Desktop renders it without a fetch),
+# and uploads when it doesn't. Flat art usually lands back inside the bound.
+buzz personas create --display-name "Herring" --prompt x --avatar ~/Pictures/herring.png | jq .
+
+# a photo straight off a camera — carries EXIF, which media storage refuses.
+# Re-encoding drops it, so this must succeed rather than fail with a 422.
+buzz personas create --display-name "Herring" --prompt x --avatar ~/Pictures/IMG_1234.jpg --replace | jq .
+# check the avatar is upright: a rotated result means EXIF orientation was
+# dropped instead of applied.
+
+# a small photo rides inline, which skips media storage entirely — so confirm
+# the CLI, not the validator, is what dropped the EXIF:
+buzz personas get herring --json | jq -r '.[0].content' \
+  | jq -r .avatar_url | sed 's/^data:[^,]*,//' | base64 -d | exiftool -
+# → no GPS, no Make/Model, no colour profile
+
+# list / get (the slug is positional, matching `projects` and `mem`)
+buzz personas list
+buzz personas get herring
+buzz personas get herring --json | jq .   # sig-stripped array of one
+
+# delete (NIP-09 a-tag tombstone; the CLI re-reads to confirm the coordinate
+# is gone, because the relay accepts a tombstone that deleted nothing)
+buzz personas delete herring
+buzz personas get herring   # exits non-zero: not found
+```
+
+Checks worth making by hand:
+
+```bash
+# Desktop rejects invisible characters in definition text; so must the CLI
+buzz personas create --display-name $'Review​er' --prompt x; echo "exit: $?"   # 1
+
+# Re-creating without --replace is a write conflict, not a silent overwrite
+buzz personas create --display-name "Herring" --prompt y; echo "exit: $?"           # 5
+
+# --replace keeps catalog visibility: --shared survives a replace that omits it
+buzz personas create --display-name "Herring" --prompt x --shared --replace
+buzz personas create --display-name "Herring" --prompt y --replace
+buzz personas get herring | grep shared    # → shared: true
+
+# A non-image --avatar is refused locally rather than after a round trip
+buzz personas create --display-name "Herring" --prompt x --avatar ./notes.txt; echo "exit: $?"  # 1
+
+# An --avatar-url Desktop's reader drops is refused rather than published to
+# render as nothing
+buzz personas create --display-name "Herring" --prompt x \
+  --avatar-url 'ftp://example.test/h.png'; echo "exit: $?"   # 1
+
+# Bounds Desktop enforces at mint, so the CLI must not publish past them
+buzz personas create --display-name "Herring" --prompt x --parallelism 99; echo "exit: $?"
+# → "99 is not in 1..=32", exit 1
+
+# Re-importing a persona Desktop already published must not mint a second
+# coordinate. Desktop publishes in-app personas under their record UUID, so
+# the import adopts that id rather than the slug its name derives.
+buzz personas create --from ~/Downloads/Herring.agent.json; echo "exit: $?"
+# → note: 'Herring' is already published as '<uuid>'
+# → exit 5, "persona '<uuid>' already exists — pass --replace to overwrite it"
+buzz personas create --from ~/Downloads/Herring.agent.json --replace | jq -r .slug
+# → the UUID, not "herring". `buzz personas list` still shows one Herring.
+
+# Only an identical definition adopts. Edit the prompt and it is a different
+# persona, published at its own slug rather than overwriting Desktop's.
+jq '.definition.systemPrompt = "Something else."' ~/Downloads/Herring.agent.json > /tmp/other.agent.json
+buzz personas create --from /tmp/other.agent.json | jq -r .slug
+# → note: a different persona named 'Herring' is published as '<uuid>'
+# → "herring"
+
+# A snapshot import is fail-closed: a wrong-typed field is refused, not
+# dropped, so the persona published always matches the file
+jq '.definition.namePool = ["Herring", 42]' ~/Downloads/Herring.agent.json > /tmp/bad.agent.json
+buzz personas create --from /tmp/bad.agent.json; echo "exit: $?"
+# → "not a valid v1 agent snapshot", exit 1
+
+# Past the 5 MiB Desktop itself refuses to import
+head -c 6000000 /dev/zero | tr '\0' a > /tmp/big.agent.json
+buzz personas create --from /tmp/big.agent.json; echo "exit: $?"   # 1, "snapshot limit"
+```
+
+Cross-check in Desktop: after `personas create`, the definition appears in the
+agent picker.
+
 ---
 
 ## 7. Error Path Testing
@@ -624,3 +725,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
 | 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 63 | `personas create` | ☐ | Flags, `--from` snapshot, `--replace` conflict → exit 5, invisible-character reject → exit 1 |
+| 63a | `personas create --avatar` | ☐ | Small image inlines with its metadata stripped; large flat art downscales back to inline; EXIF-bearing photo succeeds and lands upright; non-image → exit 1; `--avatar-url` conflict or non-http(s) URL → exit 1 |
+| 64 | `personas list` / `get` | ☐ | `--json` is a sig-stripped array |
+| 65 | `personas delete` | ☐ | Delete→get 404; warns when a published team still lists it |

@@ -1108,6 +1108,15 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
+        self.upload_bytes(bytes).await
+    }
+
+    /// Upload an in-memory blob to the relay's Blossom endpoint.
+    ///
+    /// The MIME type is detected from the bytes themselves, so callers holding
+    /// decoded image data — an avatar carried inline in a snapshot, say — do
+    /// not have to stage a temporary file to reuse the upload path.
+    pub async fn upload_bytes(&self, bytes: Vec<u8>) -> Result<BlobDescriptor, CliError> {
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
