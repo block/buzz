@@ -503,29 +503,36 @@ async fn main() -> anyhow::Result<()> {
         info!(runtime_id = %runtime_id, "Inter-relay mesh started");
     }
 
-    // Git-on-object-storage: admit the configured S3/MinIO backend against the
+    // Git-on-object-storage: admit the configured object store against the
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
+    //
+    // The profile follows the provider — a wide ETag race for S3, a paced
+    // generation race for Cloud Storage — so the defaults below are the
+    // profile's, and the environment only overrides them.
     if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
         .map(|v| v != "false")
         .unwrap_or(true)
     {
-        let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
+        let mut cfg = buzz_relay::api::git::store::ProbeConfig::for_provider(provider);
+        if let Some(race_width) = std::env::var("BUZZ_GIT_PROBE_WRITERS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(32);
-        let race_rounds = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
+        {
+            cfg.race_width = race_width;
+        }
+        if let Some(race_rounds) = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(3);
-        let cfg = buzz_relay::api::git::store::ProbeConfig {
-            race_width,
-            race_rounds,
-        };
+        {
+            cfg.race_rounds = race_rounds;
+        }
         tracing::info!(
-            race_width,
-            race_rounds,
+            profile = %provider,
+            race_width = cfg.race_width,
+            race_rounds = cfg.race_rounds,
+            same_key_spacing_ms = cfg.same_key_spacing.as_millis() as u64,
             "running git object-store conformance probe (A3 gate)"
         );
         let report = state
@@ -534,9 +541,15 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
         tracing::info!(
+            profile = %report.profile,
             race_width = report.race_width,
             race_rounds = report.race_rounds,
             transport_drops = report.transport_drops,
+            throttled_racers = report.throttled_racers,
+            throttled_rounds_retried = report.throttled_rounds_retried,
+            min_same_key_gap_ms =
+                report.min_same_key_gap.map(|gap| gap.as_millis() as u64),
+            cleanup_failures = report.cleanup_failures,
             "git object-store backend admitted: A3 conformance probe passed"
         );
     }

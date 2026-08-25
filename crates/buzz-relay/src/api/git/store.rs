@@ -31,10 +31,11 @@
 #![allow(dead_code)] // wired in by the push path in a follow-up commit
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use buzz_object_store::{
-    ConditionalWrite, ImmutableWrite, ObjectStore, ObjectStoreError, Revision, S3AddressingStyle,
-    S3ObjectStore, S3StoreConfig, WriteCondition,
+    ConditionalWrite, ImmutableWrite, ObjectStore, ObjectStoreError, ProviderKind, Revision,
+    S3AddressingStyle, S3ObjectStore, S3StoreConfig, WriteCondition,
 };
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -107,22 +108,65 @@ fn backend(operation: &'static str, message: String) -> StoreError {
 
 /// Configuration for `GitStore::run_conformance_probe`.
 ///
-/// Defaults: 32-way concurrency, 3 rounds. The probe is a deployment gate —
-/// run at startup, fail-closed. See `docs/git-on-object-storage.md` §Conformance.
-#[derive(Debug, Clone)]
+/// The probe is a deployment gate — run at startup, fail-closed. See
+/// `docs/git-on-object-storage.md` §Conformance.
+///
+/// Defaults are per-provider ([`ProbeConfig::for_provider`]) because the two
+/// profiles are proving the same axiom against backends with very different
+/// admission costs: an S3-compatible store answers a wide race cheaply, while
+/// Cloud Storage publishes a one-write-per-second ceiling per object name, so a
+/// wide, tightly-spaced race there measures the rate limiter rather than the
+/// conditional-write semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeConfig {
     /// How many tasks race per round. Must be ≥ 2.
     pub race_width: usize,
     /// How many rounds to run each race phase.
     pub race_rounds: usize,
+    /// How many times a round that proved nothing may be re-run before the
+    /// probe gives up.
+    ///
+    /// A round proves nothing when no racer's outcome distinguishes a
+    /// conforming backend from a broken one — every racer throttled, or too few
+    /// racers were classified to have witnessed a race at all. Retrying is not
+    /// leniency: an unproven round is neither pass nor fail, and exhausting the
+    /// budget without ever proving a round fails the probe.
+    pub unproven_round_retries: usize,
+    /// Minimum wall-clock spacing between mutations of the same key.
+    ///
+    /// Zero for backends with no documented per-object write ceiling. Cloud
+    /// Storage documents one write per second per object name, so its profile
+    /// spaces same-key rounds beyond that interval — the probe proves the
+    /// store's conditional-write semantics, and deliberately violating the
+    /// published rate limit would only prove that the rate limiter works.
+    pub same_key_spacing: Duration,
+}
+
+impl ProbeConfig {
+    /// Defaults for `provider`.
+    pub fn for_provider(provider: ProviderKind) -> Self {
+        match provider {
+            ProviderKind::S3 => Self {
+                race_width: 32,
+                race_rounds: 3,
+                unproven_round_retries: 3,
+                same_key_spacing: Duration::ZERO,
+            },
+            ProviderKind::Gcs => Self {
+                race_width: 3,
+                race_rounds: 2,
+                unproven_round_retries: 3,
+                // Just past Cloud Storage's documented one-write-per-second
+                // per-object ceiling.
+                same_key_spacing: Duration::from_millis(1_100),
+            },
+        }
+    }
 }
 
 impl Default for ProbeConfig {
     fn default() -> Self {
-        Self {
-            race_width: 32,
-            race_rounds: 3,
-        }
+        Self::for_provider(ProviderKind::S3)
     }
 }
 
@@ -130,10 +174,40 @@ impl Default for ProbeConfig {
 /// detail lives in `ProbeFailure` (the error variant).
 #[derive(Debug, Clone)]
 pub struct ProbeReport {
+    /// Which provider profile ran.
+    pub profile: ProviderKind,
     /// Concurrency used.
     pub race_width: usize,
     /// Rounds executed per race phase.
     pub race_rounds: usize,
+    /// Racers the backend answered with throttling across all race rounds.
+    ///
+    /// A throttled racer is *never* a lost race — the write was refused before
+    /// the precondition was evaluated, so it is evidence about request rate and
+    /// about nothing else. Counting them separately is what keeps backpressure
+    /// from masquerading as conformance. Non-zero here on a passing probe means
+    /// "admitted, and the backend was pacing us", which is the expected shape on
+    /// a provider with a per-object write ceiling.
+    pub throttled_racers: usize,
+    /// Race rounds that proved nothing and were re-run.
+    ///
+    /// See [`ProbeConfig::unproven_round_retries`]. Non-zero on a passing probe
+    /// means every round eventually proved itself, but the backend needed more
+    /// attempts than a quiet one would.
+    pub throttled_rounds_retried: usize,
+    /// Shortest observed interval between two same-key mutation rounds, when
+    /// the profile spaces them.
+    ///
+    /// Reported so a passing probe can be checked against the spacing it
+    /// claimed to honour rather than trusted to have slept.
+    pub min_same_key_gap: Option<Duration>,
+    /// Probe objects the cleanup pass could not remove.
+    ///
+    /// Cleanup failure does not fail the probe — a store that satisfies every
+    /// conformance axiom is admitted even if a tidy-up delete flaked — but it
+    /// is surfaced because silent probe-key accumulation in a shared bucket is
+    /// exactly the kind of leak that is invisible until it is large.
+    pub cleanup_failures: usize,
     /// Total number of *transport-unknown* per-racer outcomes across all
     /// race rounds (sum of both `if_match_race` and `if_none_match_race`
     /// phases). A "transport-unknown" is a pre-classification failure —
@@ -155,7 +229,12 @@ pub struct ProbeReport {
 #[derive(Debug, thiserror::Error)]
 #[error("conformance probe failed in phase '{phase}' (round {round}, key {key}): {reason}")]
 pub struct ProbeFailure {
-    /// One of `sequential`, `if_match_race`, `if_none_match_race`, `revision_consistency`.
+    /// The profile phase that failed.
+    ///
+    /// S3 profile: `sequential`, `if_match_race`, `if_none_match_race`,
+    /// `revision_consistency`. Cloud Storage profile: `immutable`,
+    /// `pointer_create`, `pointer_read`, `cas_replace`, `stale_cas`,
+    /// `cas_race`, `generation_roundtrip`.
     pub phase: &'static str,
     /// Round index (0-based) when this phase ran multiple rounds.
     pub round: usize,
@@ -168,6 +247,103 @@ pub struct ProbeFailure {
 impl From<ProbeFailure> for StoreError {
     fn from(f: ProbeFailure) -> Self {
         StoreError::Probe(f)
+    }
+}
+
+/// Marks a body written by the Cloud Storage profile's racing writers.
+///
+/// Public to the crate so a test double can recognise a racer's write without
+/// hard-coding the probe's body format.
+pub(crate) const GCS_RACE_BODY_PREFIX: &str = "probe-gcs-race:";
+
+/// Build a Cloud Storage profile failure.
+fn gcs_failure(phase: &'static str, round: usize, key: &str, reason: String) -> ProbeFailure {
+    ProbeFailure {
+        phase,
+        round,
+        key: key.to_string(),
+        reason,
+    }
+}
+
+/// Read the object generation out of a revision the store reported committing.
+///
+/// A commit with no generation is fatal, not cosmetic: the generation is the
+/// only token that can predicate the next write, so a caller handed nothing
+/// would have to either stop writing or drop its precondition — and dropping it
+/// turns the pointer swap into a blind overwrite. Cloud Storage has no live
+/// generation `0`, so zero *is* the absent case.
+fn gcs_generation(
+    phase: &'static str,
+    round: usize,
+    key: &str,
+    revision: &Revision,
+) -> Result<i64, ProbeFailure> {
+    match revision.expect_gcs_generation() {
+        Ok(generation) if generation > 0 => Ok(generation),
+        Ok(_) => Err(gcs_failure(
+            phase,
+            round,
+            key,
+            "the store reported a successful write with no object generation".to_string(),
+        )),
+        Err(error) => Err(gcs_failure(
+            phase,
+            round,
+            key,
+            format!("expected an object generation: {error}"),
+        )),
+    }
+}
+
+/// What one Cloud Storage race round established.
+enum GcsRaceOutcome {
+    /// Exactly one racer committed, witnessed by at least one other classified
+    /// racer.
+    Committed {
+        /// Generation the winner committed.
+        generation: i64,
+        /// Bytes the winner wrote.
+        body: Vec<u8>,
+    },
+    /// The round is neither pass nor fail — nothing in it distinguishes a
+    /// conforming store from a broken one — so it must be re-run.
+    Unproven(String),
+}
+
+/// Counters and pacing state carried across the Cloud Storage phases.
+#[derive(Default)]
+struct GcsProbeState {
+    transport_drops: usize,
+    throttled_racers: usize,
+    throttled_rounds_retried: usize,
+    min_same_key_gap: Option<Duration>,
+    last_same_key_write: Option<Instant>,
+}
+
+impl GcsProbeState {
+    /// Wait until `spacing` has elapsed since the previous same-key mutation,
+    /// and record the interval actually observed.
+    ///
+    /// The recorded gap is measured, not assumed: the report carries it so a
+    /// passing probe can be checked against the spacing it claimed to honour.
+    async fn pace(&mut self, spacing: Duration) {
+        let now = match self.last_same_key_write {
+            None => Instant::now(),
+            Some(previous) => {
+                let elapsed = previous.elapsed();
+                if elapsed < spacing {
+                    tokio::time::sleep(spacing - elapsed).await;
+                }
+                let gap = previous.elapsed();
+                self.min_same_key_gap = Some(
+                    self.min_same_key_gap
+                        .map_or(gap, |shortest| shortest.min(gap)),
+                );
+                Instant::now()
+            }
+        };
+        self.last_same_key_write = Some(now);
     }
 }
 
@@ -403,6 +579,32 @@ impl GitStore {
     /// `StoreError::Probe(ProbeFailure)` and the caller (relay startup) MUST
     /// refuse to come up.
     ///
+    /// The profile is chosen by the configured provider, not by the caller: the
+    /// axioms are the same for every backend, but the evidence that admits one
+    /// is provider-shaped. An S3-compatible store is admitted by a wide race on
+    /// ETag preconditions; Cloud Storage is admitted by a paced race on object
+    /// generations, where a refused (throttled) write is not a lost race.
+    pub async fn run_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        if cfg.race_width < 2 || cfg.race_rounds == 0 {
+            return Err(ProbeFailure {
+                phase: "config",
+                round: 0,
+                key: String::new(),
+                reason: format!(
+                    "race_width must be ≥ 2 and race_rounds ≥ 1, got {}/{}",
+                    cfg.race_width, cfg.race_rounds
+                ),
+            }
+            .into());
+        }
+        match self.store.provider() {
+            ProviderKind::S3 => self.run_s3_conformance_probe(cfg).await,
+            ProviderKind::Gcs => self.run_gcs_conformance_probe(cfg).await,
+        }
+    }
+
+    /// The S3 profile: revision-token compare-and-swap under a wide race.
+    ///
     /// Four phases:
     ///
     /// 1. **`sequential`** — write a content-addressed object, read it back,
@@ -420,20 +622,8 @@ impl GitStore {
     ///    `get_pointer` into `put_pointer(Matches(...))` and assert it
     ///    commits. Tests that the token is opaque and stable between read and
     ///    CAS.
-    pub async fn run_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+    async fn run_s3_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
         use std::sync::Arc;
-        if cfg.race_width < 2 || cfg.race_rounds == 0 {
-            return Err(ProbeFailure {
-                phase: "config",
-                round: 0,
-                key: String::new(),
-                reason: format!(
-                    "race_width must be ≥ 2 and race_rounds ≥ 1, got {}/{}",
-                    cfg.race_width, cfg.race_rounds
-                ),
-            }
-            .into());
-        }
         let nonce = uuid::Uuid::new_v4();
         let pointer_key = format!("probe/pointer-{nonce}");
         // Accumulator for *transport-unknown* per-racer outcomes across both
@@ -708,10 +898,530 @@ impl GitStore {
         let _ = self.store.delete(&pointer_key).await;
 
         Ok(ProbeReport {
+            profile: ProviderKind::S3,
             race_width: cfg.race_width,
             race_rounds: cfg.race_rounds,
             transport_drops,
+            throttled_racers: 0,
+            throttled_rounds_retried: 0,
+            min_same_key_gap: None,
+            cleanup_failures: 0,
         })
+    }
+
+    /// The Cloud Storage profile: object-generation compare-and-swap, paced to
+    /// the provider's published per-object write ceiling.
+    ///
+    /// Same axioms, different evidence. Cloud Storage answers a stale
+    /// precondition with 412 (an ordinary conflict) and an over-rate write with
+    /// 429 (a refusal to evaluate the precondition at all), and it publishes a
+    /// maximum of one write per second to a single object name. A profile that
+    /// ignored either fact would be measuring the rate limiter: a burst of 429s
+    /// would either be miscounted as lost races — turning "the backend paced us"
+    /// into "the backend admitted two winners' worth of losers" — or would make
+    /// a round pass with no race in it. So this profile races narrowly, spaces
+    /// same-key rounds past the ceiling, classifies throttles separately from
+    /// conflicts, and re-runs a round that proved nothing rather than scoring
+    /// it.
+    ///
+    /// Phases, in order:
+    ///
+    /// 1. **`immutable`** — create-only write of a content-addressed object,
+    ///    read back, digest verified. A1 plus read-after-write.
+    /// 2. **`pointer_create`** — create the pointer under the create-only
+    ///    precondition, which Cloud Storage spells as generation `0`.
+    /// 3. **`pointer_read`** — read body and generation from one response and
+    ///    check both against what was just committed. A2.
+    /// 4. **`cas_replace`** — replace under the observed generation; the commit
+    ///    must report a *different* generation.
+    /// 5. **`stale_cas`** — replay the superseded generation; must conflict. A
+    ///    store that commits here is performing blind overwrites.
+    /// 6. **`cas_race`** — `race_width` writers on one generation, `race_rounds`
+    ///    times: exactly one commit, every other classified racer a conflict or
+    ///    a throttle, and the stored object equal to the winner's.
+    /// 7. **`generation_roundtrip`** — the winning generation predicates the
+    ///    next successful compare-and-swap, closing the loop the push path
+    ///    depends on.
+    ///
+    /// Probe objects are removed afterwards on both the success and the failure
+    /// path; a cleanup failure is reported, not fatal.
+    async fn run_gcs_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        let nonce = uuid::Uuid::new_v4();
+        let mut written = Vec::new();
+        let mut state = GcsProbeState::default();
+
+        let outcome = self
+            .gcs_probe_phases(&cfg, nonce, &mut written, &mut state)
+            .await;
+        let cleanup_failures = self.remove_probe_objects(&written).await;
+        outcome?;
+
+        Ok(ProbeReport {
+            profile: ProviderKind::Gcs,
+            race_width: cfg.race_width,
+            race_rounds: cfg.race_rounds,
+            transport_drops: state.transport_drops,
+            throttled_racers: state.throttled_racers,
+            throttled_rounds_retried: state.throttled_rounds_retried,
+            min_same_key_gap: state.min_same_key_gap,
+            cleanup_failures,
+        })
+    }
+
+    /// The Cloud Storage phases, factored out so cleanup runs on every path.
+    async fn gcs_probe_phases(
+        &self,
+        cfg: &ProbeConfig,
+        nonce: uuid::Uuid,
+        written: &mut Vec<String>,
+        state: &mut GcsProbeState,
+    ) -> Result<(), StoreError> {
+        // -- Phase 1: immutable ------------------------------------------------
+        // The nonce makes this key new, so the create-only write must report a
+        // create rather than a collision.
+        let body = format!("probe-gcs-immutable-{nonce}").into_bytes();
+        let key = Self::content_key("probe/gcs-immutable", &body);
+        written.push(key.clone());
+        let outcome = self
+            .put_immutable_raw(&key, &body)
+            .await
+            .map_err(|e| gcs_failure("immutable", 0, &key, format!("create-only write: {e}")))?;
+        if outcome != ImmutableWrite::Created {
+            return Err(gcs_failure(
+                "immutable",
+                0,
+                &key,
+                "a freshly nonced key reported a collision, so the create-only \
+                 precondition is not being evaluated"
+                    .to_string(),
+            )
+            .into());
+        }
+        let read = self
+            .get_verified(&key, &Self::digest_hex(&body))
+            .await
+            .map_err(|e| gcs_failure("immutable", 0, &key, format!("verified read: {e}")))?;
+        if read[..] != body[..] {
+            return Err(gcs_failure(
+                "immutable",
+                0,
+                &key,
+                "read-after-write returned different bytes".to_string(),
+            )
+            .into());
+        }
+
+        // -- Phase 2: pointer_create -------------------------------------------
+        let pointer_key = format!("probe/gcs-pointer-{nonce}");
+        written.push(pointer_key.clone());
+        let seed = format!("probe-gcs-pointer-seed-{nonce}").into_bytes();
+        state.pace(cfg.same_key_spacing).await;
+        let created = self
+            .put_pointer(&pointer_key, &seed, WriteCondition::Absent)
+            .await
+            .map_err(|e| {
+                gcs_failure(
+                    "pointer_create",
+                    0,
+                    &pointer_key,
+                    format!("create-only pointer write: {e}"),
+                )
+            })?;
+        let mut generation = match created {
+            ConditionalWrite::Committed(revision) => {
+                gcs_generation("pointer_create", 0, &pointer_key, &revision)?
+            }
+            ConditionalWrite::Conflict => {
+                return Err(gcs_failure(
+                    "pointer_create",
+                    0,
+                    &pointer_key,
+                    "a freshly nonced pointer key was already taken".to_string(),
+                )
+                .into())
+            }
+        };
+
+        // -- Phase 3: pointer_read ---------------------------------------------
+        // Body and generation must describe the same committed object, or the
+        // generation a caller predicates its next write on names a version it
+        // never read.
+        let (revision, stored) = self
+            .get_pointer(&pointer_key)
+            .await
+            .map_err(|e| gcs_failure("pointer_read", 0, &pointer_key, format!("read: {e}")))?
+            .ok_or_else(|| {
+                gcs_failure(
+                    "pointer_read",
+                    0,
+                    &pointer_key,
+                    "the pointer just committed does not exist".to_string(),
+                )
+            })?;
+        let observed = gcs_generation("pointer_read", 0, &pointer_key, &revision)?;
+        if observed != generation {
+            return Err(gcs_failure(
+                "pointer_read",
+                0,
+                &pointer_key,
+                format!(
+                    "read reported generation {observed} for the object committed as {generation}"
+                ),
+            )
+            .into());
+        }
+        if stored[..] != seed[..] {
+            return Err(gcs_failure(
+                "pointer_read",
+                0,
+                &pointer_key,
+                "read returned bytes other than the committed body".to_string(),
+            )
+            .into());
+        }
+
+        // -- Phase 4: cas_replace ----------------------------------------------
+        let replacement = format!("probe-gcs-replace-{nonce}").into_bytes();
+        state.pace(cfg.same_key_spacing).await;
+        let superseded = generation;
+        generation = match self
+            .put_pointer(
+                &pointer_key,
+                &replacement,
+                WriteCondition::Matches(Revision::GcsGeneration(generation)),
+            )
+            .await
+            .map_err(|e| gcs_failure("cas_replace", 0, &pointer_key, format!("write: {e}")))?
+        {
+            ConditionalWrite::Committed(revision) => {
+                let committed = gcs_generation("cas_replace", 0, &pointer_key, &revision)?;
+                if committed == superseded {
+                    return Err(gcs_failure(
+                        "cas_replace",
+                        0,
+                        &pointer_key,
+                        format!(
+                            "the replacement reported the same generation {superseded} it \
+                             replaced, so the token cannot distinguish versions"
+                        ),
+                    )
+                    .into());
+                }
+                committed
+            }
+            ConditionalWrite::Conflict => {
+                return Err(gcs_failure(
+                    "cas_replace",
+                    0,
+                    &pointer_key,
+                    "a compare-and-swap on the just-read generation conflicted with no \
+                     competing writer"
+                        .to_string(),
+                )
+                .into())
+            }
+        };
+
+        // -- Phase 5: stale_cas ------------------------------------------------
+        let stale_body = format!("probe-gcs-stale-{nonce}").into_bytes();
+        state.pace(cfg.same_key_spacing).await;
+        match self
+            .put_pointer(
+                &pointer_key,
+                &stale_body,
+                WriteCondition::Matches(Revision::GcsGeneration(superseded)),
+            )
+            .await
+            .map_err(|e| gcs_failure("stale_cas", 0, &pointer_key, format!("write: {e}")))?
+        {
+            ConditionalWrite::Conflict => {}
+            ConditionalWrite::Committed(_) => {
+                return Err(gcs_failure(
+                    "stale_cas",
+                    0,
+                    &pointer_key,
+                    format!(
+                        "a write predicated on superseded generation {superseded} committed: \
+                         the precondition is not being enforced, so every pointer update is a \
+                         blind overwrite"
+                    ),
+                )
+                .into())
+            }
+        }
+
+        // -- Phase 6: cas_race -------------------------------------------------
+        for round in 0..cfg.race_rounds {
+            let mut attempt = 0usize;
+            let winner = loop {
+                state.pace(cfg.same_key_spacing).await;
+                match self
+                    .gcs_race_round(round, attempt, &pointer_key, nonce, generation, cfg, state)
+                    .await?
+                {
+                    GcsRaceOutcome::Committed { generation, body } => {
+                        break (generation, body);
+                    }
+                    GcsRaceOutcome::Unproven(reason) => {
+                        if attempt >= cfg.unproven_round_retries {
+                            return Err(gcs_failure(
+                                "cas_race",
+                                round,
+                                &pointer_key,
+                                format!(
+                                    "no round proved a race in {} attempts: {reason}",
+                                    attempt + 1
+                                ),
+                            )
+                            .into());
+                        }
+                        attempt += 1;
+                        state.throttled_rounds_retried += 1;
+                        tracing::warn!(
+                            phase = "cas_race",
+                            round,
+                            attempt,
+                            reason = %reason,
+                            "conformance race round proved nothing; re-running"
+                        );
+                    }
+                }
+            };
+            let (committed, body) = winner;
+
+            // The stored object must be the winner's, at the winner's
+            // generation: a loser's payload surviving the race is the failure
+            // mode the whole pointer protocol exists to exclude.
+            let (revision, stored) = self
+                .get_pointer(&pointer_key)
+                .await
+                .map_err(|e| {
+                    gcs_failure(
+                        "cas_race",
+                        round,
+                        &pointer_key,
+                        format!("post-race read: {e}"),
+                    )
+                })?
+                .ok_or_else(|| {
+                    gcs_failure(
+                        "cas_race",
+                        round,
+                        &pointer_key,
+                        "the pointer vanished during the race".to_string(),
+                    )
+                })?;
+            let settled = gcs_generation("cas_race", round, &pointer_key, &revision)?;
+            if settled != committed {
+                return Err(gcs_failure(
+                    "cas_race",
+                    round,
+                    &pointer_key,
+                    format!(
+                        "the winner committed generation {committed} but the object settled at \
+                         {settled}"
+                    ),
+                )
+                .into());
+            }
+            if stored[..] != body[..] {
+                return Err(gcs_failure(
+                    "cas_race",
+                    round,
+                    &pointer_key,
+                    "the object holds bytes no racer reported committing".to_string(),
+                )
+                .into());
+            }
+            generation = committed;
+        }
+
+        // -- Phase 7: generation_roundtrip -------------------------------------
+        // The generation a racer won with must predicate the next write; that
+        // chain — commit, then compare-and-swap on the returned token — is
+        // exactly what the push path does between two pushes.
+        let final_body = format!("probe-gcs-roundtrip-{nonce}").into_bytes();
+        state.pace(cfg.same_key_spacing).await;
+        match self
+            .put_pointer(
+                &pointer_key,
+                &final_body,
+                WriteCondition::Matches(Revision::GcsGeneration(generation)),
+            )
+            .await
+            .map_err(|e| {
+                gcs_failure(
+                    "generation_roundtrip",
+                    0,
+                    &pointer_key,
+                    format!("write: {e}"),
+                )
+            })? {
+            ConditionalWrite::Committed(revision) => {
+                let committed = gcs_generation("generation_roundtrip", 0, &pointer_key, &revision)?;
+                if committed == generation {
+                    return Err(gcs_failure(
+                        "generation_roundtrip",
+                        0,
+                        &pointer_key,
+                        format!("the write reported the same generation {generation} it replaced"),
+                    )
+                    .into());
+                }
+            }
+            ConditionalWrite::Conflict => {
+                return Err(gcs_failure(
+                    "generation_roundtrip",
+                    0,
+                    &pointer_key,
+                    "the generation a racer committed did not predicate the next write, so a \
+                     winner cannot chain its own pushes"
+                        .to_string(),
+                )
+                .into())
+            }
+        }
+
+        Ok(())
+    }
+
+    /// One race round: `cfg.race_width` writers on the same generation.
+    ///
+    /// Returns the winner when the round proved something, and
+    /// [`GcsRaceOutcome::Unproven`] when it did not. Only a semantic violation —
+    /// two winners, a commit with no generation, an unclassifiable backend
+    /// answer — fails here.
+    #[allow(clippy::too_many_arguments)]
+    async fn gcs_race_round(
+        &self,
+        round: usize,
+        attempt: usize,
+        pointer_key: &str,
+        nonce: uuid::Uuid,
+        generation: i64,
+        cfg: &ProbeConfig,
+        state: &mut GcsProbeState,
+    ) -> Result<GcsRaceOutcome, StoreError> {
+        let mut tasks = Vec::with_capacity(cfg.race_width);
+        for racer in 0..cfg.race_width {
+            let body =
+                format!("{GCS_RACE_BODY_PREFIX}{round}:{attempt}:{racer}:{nonce}").into_bytes();
+            let condition = WriteCondition::Matches(Revision::GcsGeneration(generation));
+            tasks.push(async move {
+                let outcome = self.put_pointer(pointer_key, &body, condition).await;
+                (racer, body, outcome)
+            });
+        }
+
+        let mut winners: Vec<(i64, Vec<u8>)> = Vec::new();
+        let mut conflicts = 0usize;
+        let mut throttled = 0usize;
+        let mut drops = 0usize;
+        for (racer, body, outcome) in futures_util::future::join_all(tasks).await {
+            match outcome {
+                Ok(ConditionalWrite::Committed(revision)) => {
+                    let committed = gcs_generation("cas_race", round, pointer_key, &revision)?;
+                    winners.push((committed, body));
+                }
+                Ok(ConditionalWrite::Conflict) => conflicts += 1,
+                // Throttling is a refusal to evaluate the precondition, so it
+                // says nothing about who won. It is counted, never scored.
+                Err(StoreError::Backend(ObjectStoreError::Throttled { .. })) => {
+                    throttled += 1;
+                    state.throttled_racers += 1;
+                }
+                Err(StoreError::Backend(ref e)) if e.is_ambiguous() => {
+                    drops += 1;
+                    state.transport_drops += 1;
+                    tracing::warn!(
+                        phase = "cas_race",
+                        round,
+                        racer,
+                        "transport drop (pre-classification: socket/send failure)"
+                    );
+                }
+                Err(e) => {
+                    return Err(gcs_failure(
+                        "cas_race",
+                        round,
+                        pointer_key,
+                        format!("racer {racer}: {e}"),
+                    )
+                    .into())
+                }
+            }
+        }
+
+        if winners.len() > 1 {
+            return Err(gcs_failure(
+                "cas_race",
+                round,
+                pointer_key,
+                format!(
+                    "{} racers committed on one generation: the store is not linearizing \
+                     conditional writes",
+                    winners.len()
+                ),
+            )
+            .into());
+        }
+
+        // Classified observers. A throttled racer is one: it proves the round
+        // ran, even though it proves nothing about the precondition.
+        let classified = winners.len() + conflicts + throttled;
+        if let Some((committed, body)) = winners.pop() {
+            if classified < 2 {
+                return Ok(GcsRaceOutcome::Unproven(format!(
+                    "only {classified} of {} racers were classified, so no race was witnessed \
+                     ({drops} transport drops)",
+                    cfg.race_width
+                )));
+            }
+            return Ok(GcsRaceOutcome::Committed {
+                generation: committed,
+                body,
+            });
+        }
+
+        if conflicts == 0 {
+            return Ok(GcsRaceOutcome::Unproven(format!(
+                "no racer committed and none saw the generation move ({throttled} throttled, \
+                 {drops} transport drops)"
+            )));
+        }
+        if drops > 0 {
+            return Ok(GcsRaceOutcome::Unproven(format!(
+                "{conflicts} racers saw the generation move but the committing racer's outcome \
+                 was never classified ({drops} transport drops)"
+            )));
+        }
+        Err(gcs_failure(
+            "cas_race",
+            round,
+            pointer_key,
+            format!(
+                "{conflicts} racers were told the generation had moved, but no racer committed \
+                 and every outcome was classified: the object changed without an acknowledged \
+                 writer"
+            ),
+        )
+        .into())
+    }
+
+    /// Delete the probe's objects, returning how many could not be removed.
+    ///
+    /// Runs on the failure path too: a failed probe is the one that gets
+    /// re-run, so that is exactly when leaking keys into the deployment's own
+    /// bucket must not happen.
+    async fn remove_probe_objects(&self, keys: &[String]) -> usize {
+        let mut failures = 0usize;
+        for key in keys {
+            if let Err(error) = self.store.delete(key).await {
+                failures += 1;
+                tracing::warn!(%error, "conformance probe could not remove its object");
+            }
+        }
+        failures
     }
 
     /// Helper: hex SHA-256 of bytes.
@@ -833,6 +1543,643 @@ mod tests {
                 matches!(err, StoreError::Config(_)),
                 "expected Config error, got {err:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod profiles {
+    //! Profile behaviour against a scripted store.
+    //!
+    //! The probe consumes the object-store seam, so a test double can answer a
+    //! race any way a real backend could — including ways no conforming backend
+    //! ever would. That is the point: a conformance gate is only worth its boot
+    //! time if it *fails* on the answers it claims to reject, and a live bucket
+    //! cannot be asked to commit two writers on one generation.
+
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use buzz_object_store::{BulkDeleteOutcome, ByteStream, ListPage, ObjectMeta};
+
+    use super::*;
+
+    /// How a scripted racer answers.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RacerOutcome {
+        /// Commit regardless of the precondition — the only way to stage two
+        /// winners on one generation.
+        Win,
+        /// Commit, but report no object generation.
+        WinWithoutGeneration,
+        /// The ordinary lost-race answer.
+        Conflict,
+        /// Refuse the write for request rate.
+        Throttle,
+        /// Never produce a classified answer.
+        Drop,
+    }
+
+    /// An in-memory object store with real compare-and-swap semantics, plus a
+    /// script that can override the answers to the probe's racing writers.
+    struct ScriptedStore {
+        provider: ProviderKind,
+        objects: Mutex<HashMap<String, (i64, Bytes)>>,
+        next_generation: AtomicI64,
+        race_script: Mutex<VecDeque<RacerOutcome>>,
+        /// Blind-overwrite bug: commit even when the precondition is stale.
+        accept_stale_precondition: bool,
+        /// Report a created object as committed with no generation.
+        zero_generation_on_create: bool,
+    }
+
+    impl ScriptedStore {
+        fn new(provider: ProviderKind) -> Self {
+            Self {
+                provider,
+                objects: Mutex::new(HashMap::new()),
+                // No live object has generation 0; that value means "absent".
+                next_generation: AtomicI64::new(1),
+                race_script: Mutex::new(VecDeque::new()),
+                accept_stale_precondition: false,
+                zero_generation_on_create: false,
+            }
+        }
+
+        /// Script consecutive race rounds; rounds past the script race for real.
+        fn scripting(self, rounds: impl IntoIterator<Item = Vec<RacerOutcome>>) -> Self {
+            self.race_script
+                .lock()
+                .unwrap()
+                .extend(rounds.into_iter().flatten());
+            self
+        }
+
+        fn accepting_stale_preconditions(mut self) -> Self {
+            self.accept_stale_precondition = true;
+            self
+        }
+
+        fn without_create_generation(mut self) -> Self {
+            self.zero_generation_on_create = true;
+            self
+        }
+
+        fn keys(&self) -> Vec<String> {
+            let mut keys: Vec<_> = self.objects.lock().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        }
+
+        /// Mint the revision token this provider would report.
+        fn revision(&self, generation: i64) -> Revision {
+            match self.provider {
+                ProviderKind::S3 => Revision::S3Etag(format!("\"{generation}\"")),
+                ProviderKind::Gcs => Revision::GcsGeneration(generation),
+            }
+        }
+
+        /// Read a caller's revision back, rejecting one from another provider
+        /// exactly as a real provider does.
+        fn generation_of(&self, revision: &Revision) -> Result<i64, ObjectStoreError> {
+            match self.provider {
+                ProviderKind::S3 => revision
+                    .expect_s3_etag()
+                    .map(|tag| tag.trim_matches('"').parse().unwrap_or(-1)),
+                ProviderKind::Gcs => revision.expect_gcs_generation(),
+            }
+        }
+
+        fn commit(&self, key: &str, bytes: &[u8]) -> i64 {
+            let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+            self.objects
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), (generation, Bytes::copy_from_slice(bytes)));
+            generation
+        }
+
+        fn current_generation(&self, key: &str) -> i64 {
+            self.objects
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|(generation, _)| *generation)
+                .unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for ScriptedStore {
+        fn provider(&self) -> ProviderKind {
+            self.provider
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            _content_type: &str,
+        ) -> Result<(), ObjectStoreError> {
+            self.commit(key, bytes);
+            Ok(())
+        }
+
+        async fn put_file(
+            &self,
+            _key: &str,
+            _path: &std::path::Path,
+            _content_type: &str,
+        ) -> Result<(), ObjectStoreError> {
+            Err(ObjectStoreError::Provider {
+                operation: "put_file",
+                message: "unused by the conformance probe".into(),
+            })
+        }
+
+        async fn put_immutable(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            content_type: &str,
+        ) -> Result<ImmutableWrite, ObjectStoreError> {
+            match self
+                .put_conditional(key, bytes, content_type, WriteCondition::Absent)
+                .await?
+            {
+                ConditionalWrite::Committed(_) => Ok(ImmutableWrite::Created),
+                ConditionalWrite::Conflict => Ok(ImmutableWrite::AlreadyPresent),
+            }
+        }
+
+        async fn put_conditional(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            _content_type: &str,
+            condition: WriteCondition,
+        ) -> Result<ConditionalWrite, ObjectStoreError> {
+            let expected = match &condition {
+                WriteCondition::Absent => 0,
+                WriteCondition::Matches(revision) => self.generation_of(revision)?,
+            };
+
+            // Only the profile's racing writers are scripted; every other write
+            // gets real compare-and-swap semantics, so the phases around the
+            // race behave like a conforming store unless a test says otherwise.
+            if bytes.starts_with(GCS_RACE_BODY_PREFIX.as_bytes()) {
+                let scripted = self.race_script.lock().unwrap().pop_front();
+                match scripted {
+                    Some(RacerOutcome::Win) => {
+                        return Ok(ConditionalWrite::Committed(
+                            self.revision(self.commit(key, bytes)),
+                        ))
+                    }
+                    Some(RacerOutcome::WinWithoutGeneration) => {
+                        self.commit(key, bytes);
+                        return Ok(ConditionalWrite::Committed(Revision::GcsGeneration(0)));
+                    }
+                    Some(RacerOutcome::Conflict) => return Ok(ConditionalWrite::Conflict),
+                    Some(RacerOutcome::Throttle) => {
+                        return Err(ObjectStoreError::Throttled {
+                            operation: "put_conditional",
+                            retry_after: None,
+                        })
+                    }
+                    Some(RacerOutcome::Drop) => {
+                        return Err(ObjectStoreError::TransportAmbiguous {
+                            operation: "put_conditional",
+                            message: "connection reset by peer".into(),
+                        })
+                    }
+                    None => {}
+                }
+            }
+
+            let current = self.current_generation(key);
+            let honour_stale =
+                self.accept_stale_precondition && matches!(condition, WriteCondition::Matches(_));
+            if current != expected && !honour_stale {
+                return Ok(ConditionalWrite::Conflict);
+            }
+            let generation = self.commit(key, bytes);
+            if self.zero_generation_on_create && current == 0 {
+                return Ok(ConditionalWrite::Committed(Revision::GcsGeneration(0)));
+            }
+            Ok(ConditionalWrite::Committed(self.revision(generation)))
+        }
+
+        async fn get(&self, key: &str) -> Result<Bytes, ObjectStoreError> {
+            self.objects
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|(_, bytes)| bytes.clone())
+                .ok_or_else(|| ObjectStoreError::NotFound { key: key.into() })
+        }
+
+        async fn get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: u64,
+        ) -> Result<Bytes, ObjectStoreError> {
+            let bytes = self.get(key).await?;
+            Ok(bytes.slice(start as usize..=(end as usize)))
+        }
+
+        async fn get_stream(&self, _key: &str) -> Result<ByteStream, ObjectStoreError> {
+            Err(ObjectStoreError::Provider {
+                operation: "get_stream",
+                message: "unused by the conformance probe".into(),
+            })
+        }
+
+        async fn get_with_revision(
+            &self,
+            key: &str,
+        ) -> Result<Option<(Revision, Bytes)>, ObjectStoreError> {
+            let found = self
+                .objects
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|(generation, bytes)| (*generation, bytes.clone()));
+            Ok(found.map(|(generation, bytes)| (self.revision(generation), bytes)))
+        }
+
+        async fn head(&self, key: &str) -> Result<Option<ObjectMeta>, ObjectStoreError> {
+            let found = self
+                .objects
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|(generation, bytes)| (*generation, bytes.len() as u64));
+            Ok(found.map(|(generation, size)| ObjectMeta {
+                size,
+                revision: Some(self.revision(generation)),
+            }))
+        }
+
+        async fn list_page(
+            &self,
+            _prefix: &str,
+            _continuation_token: Option<String>,
+            _max_keys: usize,
+        ) -> Result<ListPage, ObjectStoreError> {
+            Ok(ListPage::default())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.objects.lock().unwrap().remove(key);
+            Ok(())
+        }
+
+        async fn delete_objects(
+            &self,
+            keys: &[String],
+        ) -> Result<BulkDeleteOutcome, ObjectStoreError> {
+            let mut objects = self.objects.lock().unwrap();
+            let mut outcome = BulkDeleteOutcome::default();
+            for key in keys {
+                objects.remove(key);
+                outcome.deleted += 1;
+            }
+            Ok(outcome)
+        }
+
+        async fn ping(&self) -> Result<(), ObjectStoreError> {
+            Ok(())
+        }
+
+        async fn versioning_detected(&self) -> Result<bool, ObjectStoreError> {
+            Ok(false)
+        }
+    }
+
+    /// A Cloud Storage profile config with the sleeps taken out, so the tests
+    /// that are not about pacing run at memory speed.
+    fn unpaced(race_rounds: usize) -> ProbeConfig {
+        ProbeConfig {
+            race_width: 3,
+            race_rounds,
+            unproven_round_retries: 3,
+            same_key_spacing: Duration::ZERO,
+        }
+    }
+
+    fn probe_failure(error: StoreError) -> ProbeFailure {
+        match error {
+            StoreError::Probe(failure) => failure,
+            other => panic!("expected a probe failure, got {other:?}"),
+        }
+    }
+
+    /// Each profile's defaults are the ones the provider can actually answer.
+    /// The S3 numbers are unchanged — this profile is already admitted in
+    /// production and a conformance gate that quietly narrows is worse than one
+    /// that never widened.
+    #[test]
+    fn profile_defaults_follow_the_provider() {
+        let s3 = ProbeConfig::for_provider(ProviderKind::S3);
+        assert_eq!(s3, ProbeConfig::default());
+        assert_eq!(s3.race_width, 32);
+        assert_eq!(s3.race_rounds, 3);
+        assert_eq!(s3.same_key_spacing, Duration::ZERO);
+
+        let gcs = ProbeConfig::for_provider(ProviderKind::Gcs);
+        assert!(gcs.race_width >= 2 && gcs.race_width < s3.race_width);
+        assert!(gcs.race_rounds >= 1);
+        assert!(
+            gcs.same_key_spacing > Duration::from_secs(1),
+            "same-key rounds must be spaced past Cloud Storage's one-write-per-second ceiling"
+        );
+        assert!(gcs.unproven_round_retries >= 1);
+    }
+
+    /// A conforming store passes, and the probe leaves nothing behind.
+    #[tokio::test]
+    async fn a_conforming_store_is_admitted_and_cleans_up() {
+        let backend = Arc::new(ScriptedStore::new(ProviderKind::Gcs));
+        let store = GitStore::new(backend.clone());
+
+        let report = store
+            .run_conformance_probe(unpaced(2))
+            .await
+            .expect("a conforming store is admitted");
+
+        assert_eq!(report.profile, ProviderKind::Gcs);
+        assert_eq!(report.race_width, 3);
+        assert_eq!(report.race_rounds, 2);
+        assert_eq!(report.throttled_racers, 0);
+        assert_eq!(report.throttled_rounds_retried, 0);
+        assert_eq!(report.transport_drops, 0);
+        assert_eq!(report.cleanup_failures, 0);
+        assert!(
+            backend.keys().is_empty(),
+            "probe objects left behind: {:?}",
+            backend.keys()
+        );
+    }
+
+    /// The failure the pointer protocol exists to exclude. Two winners is never
+    /// a pacing artefact, a retryable round, or a degraded observation — it is
+    /// the store admitting a lost update.
+    #[tokio::test]
+    async fn two_committed_racers_fail_the_probe() {
+        let backend = Arc::new(ScriptedStore::new(ProviderKind::Gcs).scripting([vec![
+            RacerOutcome::Win,
+            RacerOutcome::Win,
+            RacerOutcome::Conflict,
+        ]]));
+        let failure = probe_failure(
+            GitStore::new(backend)
+                .run_conformance_probe(unpaced(1))
+                .await
+                .expect_err("two winners on one generation must fail closed"),
+        );
+        assert_eq!(failure.phase, "cas_race");
+        assert!(
+            failure.reason.contains("2 racers committed"),
+            "unexpected reason: {}",
+            failure.reason
+        );
+    }
+
+    /// A round in which every racer was refused for rate proves nothing: no
+    /// precondition was ever evaluated. Scoring it as "no winner" would fail a
+    /// conforming store for being paced, so the round is re-run instead.
+    #[tokio::test]
+    async fn a_fully_throttled_round_is_re_run_rather_than_scored() {
+        let backend = Arc::new(
+            ScriptedStore::new(ProviderKind::Gcs).scripting([vec![RacerOutcome::Throttle; 3]]),
+        );
+        let report = GitStore::new(backend)
+            .run_conformance_probe(unpaced(1))
+            .await
+            .expect("a throttled round is re-run, and the re-run proves the race");
+
+        assert_eq!(report.throttled_rounds_retried, 1);
+        assert_eq!(report.throttled_racers, 3);
+    }
+
+    /// Re-running is bounded. A store that only ever throttles is never
+    /// admitted — the probe fails rather than waiting forever or passing on no
+    /// evidence.
+    #[tokio::test]
+    async fn re_runs_are_bounded_and_an_unproven_race_fails_closed() {
+        let mut cfg = unpaced(1);
+        cfg.unproven_round_retries = 2;
+        let backend = Arc::new(ScriptedStore::new(ProviderKind::Gcs).scripting(
+            vec![vec![RacerOutcome::Throttle; 3]; cfg.unproven_round_retries + 1],
+        ));
+
+        let failure = probe_failure(
+            GitStore::new(backend)
+                .run_conformance_probe(cfg)
+                .await
+                .expect_err("a store that only throttles is never admitted"),
+        );
+        assert_eq!(failure.phase, "cas_race");
+        assert!(
+            failure
+                .reason
+                .contains("no round proved a race in 3 attempts"),
+            "unexpected reason: {}",
+            failure.reason
+        );
+    }
+
+    /// One winner among a mix of conflicts and throttles is a pass: the
+    /// throttled racer is counted, not treated as a loser, and one classified
+    /// witness is enough to have seen the race.
+    #[tokio::test]
+    async fn a_throttled_racer_is_never_a_lost_race() {
+        let backend = Arc::new(ScriptedStore::new(ProviderKind::Gcs).scripting([vec![
+            RacerOutcome::Win,
+            RacerOutcome::Conflict,
+            RacerOutcome::Throttle,
+        ]]));
+        let report = GitStore::new(backend)
+            .run_conformance_probe(unpaced(1))
+            .await
+            .expect("a round with one winner, one conflict and one throttle is proven");
+
+        assert_eq!(report.throttled_racers, 1);
+        assert_eq!(report.throttled_rounds_retried, 0);
+    }
+
+    /// A commit the store cannot name is unusable: the caller has nothing to
+    /// predicate its next write on. Fatal wherever it appears.
+    #[tokio::test]
+    async fn a_commit_without_a_generation_fails_the_probe() {
+        let on_create = Arc::new(ScriptedStore::new(ProviderKind::Gcs).without_create_generation());
+        let failure = probe_failure(
+            GitStore::new(on_create)
+                .run_conformance_probe(unpaced(1))
+                .await
+                .expect_err("a create with no generation must fail closed"),
+        );
+        assert_eq!(failure.phase, "pointer_create");
+        assert!(
+            failure.reason.contains("no object generation"),
+            "unexpected reason: {}",
+            failure.reason
+        );
+
+        let on_race = Arc::new(ScriptedStore::new(ProviderKind::Gcs).scripting([vec![
+            RacerOutcome::WinWithoutGeneration,
+            RacerOutcome::Conflict,
+            RacerOutcome::Conflict,
+        ]]));
+        let failure = probe_failure(
+            GitStore::new(on_race)
+                .run_conformance_probe(unpaced(1))
+                .await
+                .expect_err("a race winner with no generation must fail closed"),
+        );
+        assert_eq!(failure.phase, "cas_race");
+        assert!(
+            failure.reason.contains("no object generation"),
+            "unexpected reason: {}",
+            failure.reason
+        );
+    }
+
+    /// A store that commits on a superseded generation is doing blind
+    /// overwrites, which silently loses pushes. The stale phase is what catches
+    /// it, and it must catch it before any race runs.
+    #[tokio::test]
+    async fn a_store_that_honours_a_stale_generation_fails_the_probe() {
+        let backend =
+            Arc::new(ScriptedStore::new(ProviderKind::Gcs).accepting_stale_preconditions());
+        let failure = probe_failure(
+            GitStore::new(backend)
+                .run_conformance_probe(unpaced(1))
+                .await
+                .expect_err("an unenforced precondition must fail closed"),
+        );
+        assert_eq!(failure.phase, "stale_cas");
+        assert!(
+            failure.reason.contains("blind overwrite"),
+            "unexpected reason: {}",
+            failure.reason
+        );
+    }
+
+    /// Every racer was told the generation had moved, and every outcome was
+    /// classified — so the object changed with no writer acknowledged. That is
+    /// a lost update announcing itself, not an unproven round: the probe must
+    /// not retry its way past it.
+    #[tokio::test]
+    async fn a_round_where_every_racer_loses_fails_the_probe() {
+        let backend = Arc::new(
+            ScriptedStore::new(ProviderKind::Gcs).scripting([vec![RacerOutcome::Conflict; 3]]),
+        );
+        let failure = probe_failure(
+            GitStore::new(backend)
+                .run_conformance_probe(unpaced(1))
+                .await
+                .expect_err("conflicts with no acknowledged winner must fail closed"),
+        );
+        assert_eq!(failure.phase, "cas_race");
+        assert!(
+            failure
+                .reason
+                .contains("the object changed without an acknowledged writer"),
+            "unexpected reason: {}",
+            failure.reason
+        );
+    }
+
+    /// Every racer's outcome was unknown, so the round is unproven rather than
+    /// a failure — the probe admits stores, not networks.
+    #[tokio::test]
+    async fn transport_drops_leave_the_observer_set_rather_than_failing() {
+        let backend = Arc::new(
+            ScriptedStore::new(ProviderKind::Gcs).scripting([vec![RacerOutcome::Drop; 3]]),
+        );
+        let report = GitStore::new(backend)
+            .run_conformance_probe(unpaced(1))
+            .await
+            .expect("a dropped round is re-run");
+
+        assert_eq!(report.transport_drops, 3);
+        assert_eq!(report.throttled_rounds_retried, 1);
+    }
+
+    /// Pacing is measured, not asserted: the probe sleeps between same-key
+    /// mutations and reports the shortest interval it actually observed.
+    #[tokio::test]
+    async fn same_key_mutations_are_spaced_by_the_configured_interval() {
+        let spacing = Duration::from_millis(40);
+        let mut cfg = unpaced(2);
+        cfg.race_width = 2;
+        cfg.same_key_spacing = spacing;
+
+        // create, replace, stale, two race rounds, round-trip: six same-key
+        // mutations, so five paced gaps.
+        let paced_gaps = 5;
+        let backend = Arc::new(ScriptedStore::new(ProviderKind::Gcs));
+        let started = Instant::now();
+        let report = GitStore::new(backend)
+            .run_conformance_probe(cfg)
+            .await
+            .expect("a conforming store is admitted");
+        let elapsed = started.elapsed();
+
+        let observed = report
+            .min_same_key_gap
+            .expect("a paced profile reports the interval it observed");
+        assert!(
+            observed >= spacing,
+            "shortest observed gap {observed:?} is under the configured {spacing:?}"
+        );
+        assert!(
+            elapsed >= spacing * paced_gaps,
+            "the whole probe took {elapsed:?}, less than {paced_gaps} gaps of {spacing:?}"
+        );
+    }
+
+    /// The provider selects the profile. An S3 store still runs the ETag
+    /// profile, unchanged, and reports none of the Cloud Storage counters.
+    #[tokio::test]
+    async fn an_s3_store_runs_the_s3_profile() {
+        let backend = Arc::new(ScriptedStore::new(ProviderKind::S3));
+        let report = GitStore::new(backend)
+            .run_conformance_probe(ProbeConfig {
+                race_width: 3,
+                race_rounds: 1,
+                ..ProbeConfig::default()
+            })
+            .await
+            .expect("a conforming S3 store is admitted");
+
+        assert_eq!(report.profile, ProviderKind::S3);
+        assert_eq!(report.transport_drops, 0);
+        assert_eq!(report.throttled_racers, 0);
+        assert_eq!(report.min_same_key_gap, None);
+    }
+
+    /// The width floor is a property of the gate, not of a profile: one writer
+    /// cannot witness a race whichever provider is underneath.
+    #[tokio::test]
+    async fn a_race_narrower_than_two_writers_is_rejected() {
+        for provider in [ProviderKind::S3, ProviderKind::Gcs] {
+            let backend = Arc::new(ScriptedStore::new(provider));
+            let failure = probe_failure(
+                GitStore::new(backend)
+                    .run_conformance_probe(ProbeConfig {
+                        race_width: 1,
+                        race_rounds: 1,
+                        ..ProbeConfig::for_provider(provider)
+                    })
+                    .await
+                    .expect_err("a single writer cannot witness a race"),
+            );
+            assert_eq!(failure.phase, "config");
         }
     }
 }
@@ -1005,6 +2352,7 @@ mod probe {
             .run_conformance_probe(ProbeConfig {
                 race_width: 8,
                 race_rounds: 2,
+                ..ProbeConfig::for_provider(ProviderKind::S3)
             })
             .await
             .expect("conformance probe");
