@@ -1344,6 +1344,132 @@ pub async fn insert_event_with_thread_metadata(
     Ok(result)
 }
 
+/// Outcome of a channel-head conditional canvas write.
+///
+/// Canvas events (kind 40100) are plain appends that accrue as version history;
+/// the "current" canvas is the live head under `created_at DESC, id ASC`. When a
+/// write carries an `expected-revision` precondition, this enum reports whether
+/// it matched.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelHeadWriteStatus {
+    /// The event was appended as the new channel head.
+    Inserted,
+    /// The exact event already existed (idempotent replay of the current head).
+    Duplicate,
+    /// `ExpectedHead` was required but no live head exists for the channel/kind.
+    RevisionMissing,
+    /// The live head differs from the required `ExpectedHead` (or `ExpectNoHead`
+    /// was required but a head already exists).
+    RevisionMismatch,
+}
+
+/// Optimistic-concurrency precondition for [`insert_channel_head_checked`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelHeadPrecondition<'a> {
+    /// Require that no live head exists yet (first creation of the canvas).
+    ExpectNoHead,
+    /// Require the live head to match this validated 32-byte event ID.
+    ExpectedHead(&'a [u8]),
+}
+
+/// Conditionally append a channel-head event (canvas kind 40100) under an
+/// optimistic-concurrency precondition.
+///
+/// The check and the insert share one advisory lock keyed on
+/// `(community, kind, channel)` — deliberately excluding the author, since any
+/// channel member edits the same canvas and cross-author concurrent edits must
+/// serialize on the same head. The head is read as `created_at DESC, id ASC`
+/// (matching the read path), the precondition is evaluated, and on success the
+/// event plus its mentions are inserted in the same transaction. Precondition
+/// failures mutate nothing.
+pub async fn insert_channel_head_checked(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Uuid,
+    precondition: ChannelHeadPrecondition<'_>,
+) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
+    let kind_i32 = event_kind_i32(event);
+    let received_at = Utc::now();
+    let incoming_id = event.id.as_bytes();
+
+    let mut tx = pool.begin().await?;
+
+    // Serialize check+insert per (community, kind, channel). The author is
+    // intentionally excluded from the key.
+    let lock_key = crate::replaceable::event_replacement_lock_key(
+        community_id,
+        kind_i32,
+        &[],
+        Some(channel_id.as_bytes().as_slice()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
+    let head: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT id FROM events \
+         WHERE community_id = $1 AND kind = $2 AND channel_id = $3 AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind_i32)
+    .bind(channel_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Idempotent replay: the incoming event already is the live head.
+    if head
+        .as_ref()
+        .is_some_and(|id| id.as_slice() == incoming_id.as_slice())
+    {
+        tx.rollback().await?;
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), true),
+            ChannelHeadWriteStatus::Duplicate,
+        ));
+    }
+
+    let status = match (precondition, head.as_ref()) {
+        (ChannelHeadPrecondition::ExpectNoHead, None) => None,
+        (ChannelHeadPrecondition::ExpectNoHead, Some(_)) => {
+            Some(ChannelHeadWriteStatus::RevisionMismatch)
+        }
+        (ChannelHeadPrecondition::ExpectedHead(_), None) => {
+            Some(ChannelHeadWriteStatus::RevisionMissing)
+        }
+        (ChannelHeadPrecondition::ExpectedHead(expected), Some(id)) => {
+            if id.as_slice() == expected {
+                None
+            } else {
+                Some(ChannelHeadWriteStatus::RevisionMismatch)
+            }
+        }
+    };
+    if let Some(status) = status {
+        tx.rollback().await?;
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), false),
+            status,
+        ));
+    }
+
+    let (stored, was_inserted) =
+        insert_event_with_thread_metadata_tx(&mut tx, community_id, event, Some(channel_id), None)
+            .await?;
+    if !was_inserted {
+        // Lost an insert race after passing the precondition (another writer
+        // committed the identical id). Treat as an idempotent duplicate.
+        tx.rollback().await?;
+        return Ok((stored, ChannelHeadWriteStatus::Duplicate));
+    }
+    crate::insert_mentions_in_transaction(&mut tx, community_id, event, Some(channel_id)).await?;
+    tx.commit().await?;
+
+    Ok((stored, ChannelHeadWriteStatus::Inserted))
+}
+
 /// Atomically insert a kind:7 reaction event and its reaction row.
 ///
 /// Ordering is load-bearing: resolve target, upsert/reactivate the reaction row,
@@ -2737,5 +2863,183 @@ mod tests {
         .to_string();
         assert!(!huddle_started_content_links(&wrong_field, channel_id));
         assert!(!huddle_started_content_links("not-json", channel_id));
+    }
+
+    fn make_canvas_event_at(content: &str, created_at: u64) -> nostr::Event {
+        make_event_at(buzz_core::kind::KIND_CANVAS as u16, content, created_at)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expect_no_head_creates_first_canvas() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# First", 1000);
+
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+        assert_eq!(status, ChannelHeadWriteStatus::Inserted);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expect_no_head_rejects_when_head_exists() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let first = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &first,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        let second = make_canvas_event_at("# Racing create", 1001);
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &second,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("second create attempt");
+        assert_eq!(status, ChannelHeadWriteStatus::RevisionMismatch);
+
+        // The losing create must not have been persisted.
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(second.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count losing create");
+        assert_eq!(persisted, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expected_head_matches_and_advances() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let first = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &first,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        let second = make_canvas_event_at("# Second", 1001);
+        let head = first.id.as_bytes();
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &second,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(head.as_slice()),
+        )
+        .await
+        .expect("edit against head");
+        assert_eq!(status, ChannelHeadWriteStatus::Inserted);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expected_head_mismatch_rejects() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let first = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &first,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        let stale = make_canvas_event_at("# Stale edit", 1002);
+        let wrong_head = [0u8; 32];
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &stale,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(&wrong_head),
+        )
+        .await
+        .expect("stale edit attempt");
+        assert_eq!(status, ChannelHeadWriteStatus::RevisionMismatch);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expected_head_missing_rejects() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# Edit with no head", 1000);
+        let some_head = [1u8; 32];
+
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(&some_head),
+        )
+        .await
+        .expect("edit with no head");
+        assert_eq!(status, ChannelHeadWriteStatus::RevisionMissing);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_replay_of_head_is_duplicate() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        // Replaying the exact head under ExpectedHead(head) is idempotent.
+        let head = event.id.as_bytes();
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(head.as_slice()),
+        )
+        .await
+        .expect("replay head");
+        assert_eq!(status, ChannelHeadWriteStatus::Duplicate);
     }
 }

@@ -263,16 +263,53 @@ pub async fn cmd_list_channel_members(
     Ok(())
 }
 
-pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+/// Fetch a channel's full canvas event stream (kind 40100).
+async fn fetch_canvas_stream(
+    client: &BuzzClient,
+    channel_id: &str,
+) -> Result<Vec<serde_json::Value>, CliError> {
     let filter = serde_json::json!({
         "kinds": [40100],
         "#h": [channel_id]
     });
     let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    if let Some(content) = events
-        .first()
+    Ok(serde_json::from_str(&resp).unwrap_or_default())
+}
+
+/// Return the live canvas head from a stream, applying the relay's head
+/// ordering: newest `created_at`, ties broken by lowest event ID.
+fn canvas_head(events: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    events.iter().max_by(|a, b| {
+        let ts = |e: &serde_json::Value| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = |e: &serde_json::Value| {
+            e.get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        // Later timestamp wins; on a tie the lower id is the head, so reverse
+        // the id comparison to make it the max under this ordering.
+        ts(a).cmp(&ts(b)).then_with(|| id(b).cmp(&id(a)))
+    })
+}
+
+pub async fn cmd_get_canvas(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: Option<&str>,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    if let Some(revision) = revision {
+        validate_hex64(revision)?;
+    }
+    let events = fetch_canvas_stream(client, channel_id).await?;
+    let selected = match revision {
+        Some(revision) => events
+            .iter()
+            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(revision)),
+        None => canvas_head(&events),
+    };
+    if let Some(content) = selected
         .and_then(|e| e.get("content"))
         .and_then(|c| c.as_str())
     {
@@ -281,6 +318,83 @@ pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(),
         println!("null");
     }
     Ok(())
+}
+
+/// List canvas revisions newest-first as JSON `{event_id, author, created_at}`.
+pub async fn cmd_canvas_history(
+    client: &BuzzClient,
+    channel_id: &str,
+    limit: usize,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    let mut events = fetch_canvas_stream(client, channel_id).await?;
+    // Newest first; ties broken by lowest id so the head sorts first.
+    events.sort_by(|a, b| {
+        let ts = |e: &serde_json::Value| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = |e: &serde_json::Value| {
+            e.get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        ts(b).cmp(&ts(a)).then_with(|| id(a).cmp(&id(b)))
+    });
+    let revisions: Vec<serde_json::Value> = events
+        .iter()
+        .take(limit)
+        .map(|e| {
+            serde_json::json!({
+                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                "author": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&revisions).unwrap_or_default());
+    Ok(())
+}
+
+/// Restore the canvas to a previous revision by re-publishing its content with
+/// an `expected-revision` precondition pinned to the current head.
+pub async fn cmd_restore_canvas(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: &str,
+) -> Result<(), CliError> {
+    let channel_uuid = parse_uuid(channel_id)?;
+    validate_hex64(revision)?;
+    let events = fetch_canvas_stream(client, channel_id).await?;
+
+    let content = events
+        .iter()
+        .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(revision))
+        .and_then(|e| e.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "revision {revision} not found for channel {channel_id}"
+            ))
+        })?
+        .to_string();
+
+    let head = canvas_head(&events)
+        .and_then(|e| e.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+
+    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some(head))
+        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    let event = client.sign_event(builder)?;
+    match client.submit_event(event).await {
+        Ok(resp) => {
+            println!("{}", normalize_write_response(&resp));
+            Ok(())
+        }
+        Err(CliError::Relay { body, .. }) if body.starts_with("conflict:") => {
+            Err(CliError::Conflict(body))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn cmd_create_channel(
@@ -730,7 +844,7 @@ pub async fn cmd_create_channel_from_template(
             .replace("{channel.name}", name)
             .replace("{template.name}", &template.name);
         let canvas_result: Result<(), CliError> = async {
-            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
+            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, None)
                 .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
             let event = client.sign_event(builder)?;
             client.submit_event(event).await?;
@@ -1071,7 +1185,7 @@ pub async fn cmd_set_canvas(
     let content = read_or_stdin(content)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
+    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, None)
         .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -1188,8 +1302,14 @@ pub async fn dispatch(
 pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::CanvasCmd;
     match cmd {
-        CanvasCmd::Get { channel } => cmd_get_canvas(client, &channel).await,
+        CanvasCmd::Get { channel, revision } => {
+            cmd_get_canvas(client, &channel, revision.as_deref()).await
+        }
         CanvasCmd::Set { channel, content } => cmd_set_canvas(client, &channel, &content).await,
+        CanvasCmd::History { channel, limit } => cmd_canvas_history(client, &channel, limit).await,
+        CanvasCmd::Restore { channel, revision } => {
+            cmd_restore_canvas(client, &channel, &revision).await
+        }
     }
 }
 

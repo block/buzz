@@ -721,6 +721,10 @@ pub enum CanvasCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Fetch a specific historical revision by event ID (64-char hex);
+        /// defaults to the current head
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Set (replace) the canvas document for a channel
     Set {
@@ -730,6 +734,24 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+    /// List canvas revision history for a channel, newest first
+    History {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Maximum number of revisions to return
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Restore the canvas to a previous revision by re-publishing its content
+    Restore {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Revision event ID to restore (64-char hex)
+        #[arg(long)]
+        revision: String,
     },
 }
 
@@ -2301,7 +2323,10 @@ mod tests {
                 "update"
             ]
         );
-        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "canvas"),
+            vec!["get", "history", "restore", "set"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2403,7 +2428,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
-            ("canvas", 2),
+            ("canvas", 4),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),

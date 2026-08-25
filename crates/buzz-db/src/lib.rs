@@ -82,7 +82,10 @@ pub use community::{
     UnarchivedCommunityRecord,
 };
 pub use error::{DbError, Result};
-pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use event::{
+    ChannelHeadPrecondition, ChannelHeadWriteStatus, EventQuery, ReactionEventInsertOutcome,
+    DEFAULT_MAX_PAGE_LIMIT,
+};
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
@@ -1736,6 +1739,26 @@ impl Db {
             }
         }
         Ok(result)
+    }
+
+    /// Conditionally append a canvas head event under an optimistic-concurrency
+    /// precondition, serializing the head check and insert per channel.
+    #[datastore_span(name = "insert_channel_head_checked", system = "postgresql")]
+    pub async fn insert_channel_head_checked(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        precondition: event::ChannelHeadPrecondition<'_>,
+    ) -> Result<(StoredEvent, event::ChannelHeadWriteStatus)> {
+        event::insert_channel_head_checked(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            precondition,
+        )
+        .await
     }
 
     /// Atomically insert a kind:7 reaction event and its reaction row.

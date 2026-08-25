@@ -537,8 +537,20 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 }
 
 /// Build a canvas update event (kind 40100).
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+///
+/// When `expected_revision` is set, the relay applies it as an optimistic
+/// concurrency precondition on the channel's live canvas head: a 64-hex event
+/// ID requires the head to match, and the literal `none` requires no head to
+/// exist yet. Omit it for an unconditional append (backward compatible).
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(expected_revision) = expected_revision {
+        tags.push(tag(&["expected-revision", expected_revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
@@ -2888,10 +2900,25 @@ mod tests {
     #[test]
     fn set_canvas_happy_path() {
         let cid = uuid();
-        let ev = sign(build_set_canvas(cid, "# Canvas\nHello").unwrap());
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHello", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 40100);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert_eq!(ev.content, "# Canvas\nHello");
+        assert!(!ev.tags.iter().any(|t| t
+            .as_slice()
+            .first()
+            .is_some_and(|k| k == "expected-revision")));
+    }
+
+    #[test]
+    fn set_canvas_pins_expected_revision() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHi", Some(&head)).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+
+        let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
+        assert!(has_tag(&create, "expected-revision", "none"));
     }
 
     #[test]
