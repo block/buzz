@@ -20,3 +20,7 @@ Use the **Staging dev relay image** GitHub Actions workflow to publish a pre-mer
    ```
 
 This path is intentionally separate from the production/main relay image path (`ghcr.io/block/buzz`) so a staging-only branch deployment is obvious in BPCI.
+
+These images are for manual, pre-merge staging evaluation only. They are not release-qualified and must not be promoted to production or used by the canonical Kargo promotion path.
+
+While bb-block remains a shared staging environment, do not deploy a target ref through this runtime-only path if it changes `migrations/` or requires changes to `deploy/charts/buzz/`. Backwards-compatible migrations can still leave the shared database ahead of the restored `main` image. Use an isolated environment or deployment-time enforcement for those changes.
