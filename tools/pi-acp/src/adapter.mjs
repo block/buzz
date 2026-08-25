@@ -186,7 +186,7 @@ export class PiAcpAdapter {
         agentInfo: { name: "pi-acp", version: "0.1.0" },
         _meta: {
           steering: { supported: true },
-          pilot: { productionReady: false },
+          pilot: { liveCanaryValidated: true, fleetApproved: false },
         },
       }),
     );

@@ -4,7 +4,7 @@
 `@earendil-works/pi-coding-agent` through `AgentSession` and keeps Buzz authoritative for relay
 routing, identity, deadlines, deduplication, and NIP-AM publication.
 
-Status: reviewed canary candidate, not the default runtime and not approved for fleet rollout.
+Status: live production canary validated on Caliper; not the default runtime and not approved for fleet rollout. See [`../../docs/pi-acp-production-canary-2026-08-25.md`](../../docs/pi-acp-production-canary-2026-08-25.md).
 
 ## Implemented
 

@@ -94,6 +94,8 @@ async function handshake(harness) {
   const initialized = await harness.waitFor((message) => message.id === 1);
   assert.equal(initialized.result.protocolVersion, 2);
   assert.equal(initialized.result._meta.steering.supported, true);
+  assert.equal(initialized.result._meta.pilot.liveCanaryValidated, true);
+  assert.equal(initialized.result._meta.pilot.fleetApproved, false);
 
   harness.send({
     jsonrpc: "2.0",
