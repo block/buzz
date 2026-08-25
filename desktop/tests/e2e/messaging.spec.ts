@@ -2245,7 +2245,9 @@ test("selected GIFs keep distinct accessible names in the composer and lightbox"
 
   // Composer thumbnails carry distinct accessible names from the GIF titles.
   for (const gif of gifs) {
-    await expect(thumbnails.getByAltText(gif.title)).toBeVisible();
+    await expect(
+      thumbnails.getByRole("button", { name: gif.title, exact: true }),
+    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: `Remove ${gif.title}` }),
     ).toHaveCount(1);
@@ -2253,7 +2255,9 @@ test("selected GIFs keep distinct accessible names in the composer and lightbox"
 
   // Each lightbox dialog is titled by the same GIF name.
   for (const gif of gifs) {
-    await thumbnails.getByAltText(gif.title).click();
+    await thumbnails
+      .getByRole("button", { name: gif.title, exact: true })
+      .click();
     await expect(
       page.getByRole("dialog", { name: `${gif.title} preview` }),
     ).toBeVisible();

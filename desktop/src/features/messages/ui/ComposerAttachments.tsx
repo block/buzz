@@ -353,40 +353,41 @@ const MediaAttachmentItem = React.forwardRef<
         style={composerMediaStyle()}
       >
         <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
-          <DialogPrimitive.Trigger asChild>
-            <div className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70">
-              {isVideo ? (
-                <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
-                  {videoPosterUrl ? (
-                    <img
-                      src={videoPosterUrl}
-                      alt={mediaLabel}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="h-full w-full bg-muted/80" />
-                  )}
-                  <div className="absolute inset-0 bg-black/15" />
-                  <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
-                    <Play className="h-4 w-4 fill-white text-white" />
-                  </div>
+          <DialogPrimitive.Trigger
+            aria-label={mediaLabel}
+            className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70"
+          >
+            {isVideo ? (
+              <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
+                {videoPosterUrl ? (
+                  <img
+                    src={videoPosterUrl}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="h-full w-full bg-muted/80" />
+                )}
+                <div className="absolute inset-0 bg-black/15" />
+                <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
+                  <Play className="h-4 w-4 fill-white text-white" />
                 </div>
-              ) : (
-                <img
-                  src={thumbUrl}
-                  alt={mediaLabel}
-                  className="h-full w-full object-cover"
-                />
-              )}
-              {isSpoilered ? (
-                <div
-                  className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
-                  data-composer-media-spoiler=""
-                >
-                  <HatGlasses className="h-4 w-4" />
-                </div>
-              ) : null}
-            </div>
+              </div>
+            ) : (
+              <img
+                src={thumbUrl}
+                alt=""
+                className="h-full w-full object-cover"
+              />
+            )}
+            {isSpoilered ? (
+              <div
+                className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
+                data-composer-media-spoiler=""
+              >
+                <HatGlasses className="h-4 w-4" />
+              </div>
+            ) : null}
           </DialogPrimitive.Trigger>
           <DialogPrimitive.Portal>
             <DialogPrimitive.Overlay
