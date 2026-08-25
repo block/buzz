@@ -265,6 +265,13 @@ const MediaAttachmentItem = React.forwardRef<
   const [mode, setMode] = React.useState<"view" | "edit">("view");
 
   const hash = shortHash(attachment.sha256);
+  // One accessible name for every control/label in this item. Provider media
+  // (e.g. KLIPY GIFs) carries a `displayLabel` but no filename or hash; ordinary
+  // uploads keep their historical `Attachment <hash>` name.
+  const mediaLabel =
+    attachment.displayLabel?.trim() ||
+    attachment.filename?.trim() ||
+    `Attachment ${hash}`;
   const isVideo = attachment.type.startsWith("video/");
   const thumbUrl = attachment.thumb
     ? rewriteRelayUrl(attachment.thumb)
@@ -349,7 +356,7 @@ const MediaAttachmentItem = React.forwardRef<
                   {videoPosterUrl ? (
                     <img
                       src={videoPosterUrl}
-                      alt={`Video attachment ${hash}`}
+                      alt={mediaLabel}
                       className="h-full w-full object-cover"
                     />
                   ) : (
@@ -363,7 +370,7 @@ const MediaAttachmentItem = React.forwardRef<
               ) : (
                 <img
                   src={thumbUrl}
-                  alt={`Attachment ${hash}`}
+                  alt={mediaLabel}
                   className="h-full w-full object-cover"
                 />
               )}
@@ -391,7 +398,7 @@ const MediaAttachmentItem = React.forwardRef<
               onEscapeKeyDown={handleEscapeKeyDown}
             >
               <DialogPrimitive.Title className="sr-only">
-                Attachment {hash} preview
+                {mediaLabel} preview
               </DialogPrimitive.Title>
               <DialogPrimitive.Description className="sr-only">
                 Full-size attachment preview. Press Escape or click outside to
@@ -405,7 +412,7 @@ const MediaAttachmentItem = React.forwardRef<
               ) : null}
               {mode === "edit" && !isVideo ? (
                 <ComposerImageEditor
-                  alt={`Attachment ${hash}`}
+                  alt={mediaLabel}
                   src={rewriteRelayUrl(attachment.url)}
                   sourceUrl={attachment.url}
                   sourceType={attachment.type}
@@ -425,7 +432,7 @@ const MediaAttachmentItem = React.forwardRef<
                 />
               ) : (
                 <img
-                  alt={`Attachment ${hash}`}
+                  alt={mediaLabel}
                   className={cn(
                     "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
                     isSpoilered && "blur-2xl brightness-75",
@@ -519,7 +526,7 @@ const MediaAttachmentItem = React.forwardRef<
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <button
-              aria-label="Remove attachment"
+              aria-label={`Remove ${mediaLabel}`}
               type="button"
               onClick={() => onRemove(attachment.url)}
               className={COMPOSER_MEDIA_REMOVE_CLASS}

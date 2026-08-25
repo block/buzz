@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { LoaderCircle, Search } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import type { KlipyGif } from "@/features/gifs/api";
@@ -33,6 +34,7 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
 }: KlipyGifPickerProps) {
   const [search, setSearch] = React.useState("");
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
+  const prefersReducedMotion = useReducedMotion() ?? false;
 
   React.useEffect(() => {
     const timeout = window.setTimeout(
@@ -106,25 +108,47 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
           </div>
         ) : (
           <div className="columns-2 gap-1.5" data-testid="klipy-gif-grid">
-            {gifsQuery.data.map((gif) => (
-              <button
-                aria-label={`Choose ${gif.title}`}
-                className="mb-1.5 block w-full break-inside-avoid overflow-hidden rounded-lg bg-muted outline-hidden ring-offset-background transition-[filter,transform] hover:brightness-110 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:scale-[0.98]"
-                key={gif.slug}
-                onClick={() => onSelect(gif)}
-                title={gif.title}
-                type="button"
-              >
-                <img
-                  alt={gif.title}
-                  className="block h-auto w-full"
-                  height={gif.preview.height}
-                  loading="lazy"
-                  src={gif.preview.url}
-                  width={gif.preview.width}
-                />
-              </button>
-            ))}
+            {gifsQuery.data.map((gif) => {
+              const staticPoster = prefersReducedMotion ? gif.poster : null;
+              const showAnimated = !prefersReducedMotion;
+              return (
+                <button
+                  aria-label={`Choose ${gif.title}`}
+                  className="mb-1.5 block w-full break-inside-avoid overflow-hidden rounded-lg bg-muted outline-hidden ring-offset-background transition-[filter,transform] hover:brightness-110 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:scale-[0.98]"
+                  key={gif.slug}
+                  onClick={() => onSelect(gif)}
+                  title={gif.title}
+                  type="button"
+                >
+                  {showAnimated ? (
+                    <img
+                      alt={gif.title}
+                      className="block h-auto w-full"
+                      height={gif.preview.height}
+                      loading="lazy"
+                      src={gif.preview.url}
+                      width={gif.preview.width}
+                    />
+                  ) : staticPoster ? (
+                    <img
+                      alt={gif.title}
+                      className="block h-auto w-full"
+                      height={staticPoster.height}
+                      loading="lazy"
+                      src={staticPoster.url}
+                      width={staticPoster.width}
+                    />
+                  ) : (
+                    <span
+                      className="flex aspect-video w-full items-center justify-center bg-muted px-2 text-center text-xs text-muted-foreground"
+                      data-testid="klipy-gif-static-placeholder"
+                    >
+                      {gif.title}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

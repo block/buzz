@@ -36,6 +36,12 @@ export type KlipyResponse = {
 export type KlipyGif = {
   id: number | null;
   original: Required<KlipyAsset>;
+  /**
+   * Static (non-animated) poster for the GIF, when KLIPY exposes a `jpg`
+   * asset. Rendered in place of the animated preview under
+   * `prefers-reduced-motion: reduce`.
+   */
+  poster: Required<KlipyAsset> | null;
   preview: Required<KlipyAsset>;
   slug: string;
   title: string;
@@ -130,9 +136,17 @@ export function normalizeKlipyGifs(items: KlipyRawGif[]): KlipyGif[] {
     );
     if (!original || !preview) continue;
 
+    const poster = firstCompleteAsset(
+      item.file.sm?.jpg,
+      item.file.xs?.jpg,
+      item.file.md?.jpg,
+      item.file.hd?.jpg,
+    );
+
     gifs.push({
       id: item.id ?? null,
       original,
+      poster,
       preview,
       slug: item.slug,
       title: item.title?.trim() || "GIF",
@@ -160,6 +174,7 @@ export function klipyGifFilename(gif: KlipyGif): string {
 export function klipyGifAttachment(gif: KlipyGif): BlobDescriptor {
   return {
     dim: `${gif.original.width}x${gif.original.height}`,
+    displayLabel: gif.title,
     filename: klipyGifFilename(gif),
     sha256: "",
     size: gif.original.size,

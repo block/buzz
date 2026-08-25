@@ -39,6 +39,31 @@ test("normalizeKlipyGifs selects a compact preview and medium GIF", () => {
   assert.equal(gif.title, "Ship it");
   assert.equal(gif.original.url, GIF_ASSET.url);
   assert.equal(gif.preview.url, "https://static.klipy.com/preview.webp");
+  assert.equal(gif.poster, null);
+});
+
+test("normalizeKlipyGifs carries a static jpg poster when present", () => {
+  const [gif] = normalizeKlipyGifs([
+    {
+      id: 8,
+      title: "Static poster",
+      slug: "static-poster",
+      type: "gif",
+      file: {
+        md: { gif: GIF_ASSET },
+        sm: {
+          jpg: {
+            url: "https://static.klipy.com/poster.jpg",
+            width: 220,
+            height: 124,
+            size: 8,
+          },
+        },
+      },
+    },
+  ]);
+
+  assert.equal(gif.poster?.url, "https://static.klipy.com/poster.jpg");
 });
 
 test("normalizeKlipyGifs omits ads and malformed file records", () => {
@@ -120,6 +145,7 @@ test("klipyGifFilename sanitizes provider slugs", () => {
   const gif = {
     id: 1,
     original: GIF_ASSET,
+    poster: null,
     preview: GIF_ASSET,
     slug: "  That's a wrap!  ",
     title: "That's a wrap",
@@ -134,6 +160,7 @@ test("klipyGifAttachment references KLIPY media without an uploaded copy", () =>
   const attachment = klipyGifAttachment({
     id: 1,
     original: GIF_ASSET,
+    poster: null,
     preview: GIF_ASSET,
     slug: "ship-it",
     title: "Ship it",
@@ -141,6 +168,7 @@ test("klipyGifAttachment references KLIPY media without an uploaded copy", () =>
 
   assert.deepEqual(attachment, {
     dim: "640x360",
+    displayLabel: "Ship it",
     filename: "ship-it.gif",
     sha256: "",
     size: 42,

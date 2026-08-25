@@ -28,10 +28,12 @@
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
-export type ImetaMedia = BlobDescriptor & {
-  /** Composer-only label used for attachment links; not emitted in imeta. */
-  displayLabel?: string;
-};
+/**
+ * Editor-side attachment shape. Identical to `BlobDescriptor` (which already
+ * carries the composer-only `displayLabel`), so it plugs into
+ * `setPendingImeta` directly.
+ */
+export type ImetaMedia = BlobDescriptor;
 
 /**
  * Project a Nostr event's imeta tags into the `BlobDescriptor[]` shape the

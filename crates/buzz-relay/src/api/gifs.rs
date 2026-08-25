@@ -33,6 +33,19 @@ pub(crate) const SHARE_PATH: &str = "/gifs/share";
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Build the dedicated KLIPY client. Redirects are disabled: the API key rides
+/// in the request path, so following a provider 3xx could replay a key-bearing
+/// URL to an attacker-chosen host. With no redirect policy, a 3xx comes back as
+/// a non-success status that the handlers map to a generic `502`, and the
+/// `Location` target is never read or forwarded.
+pub fn build_gif_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(UPSTREAM_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("static GIF HTTP client configuration")
+}
+
 #[derive(Debug, Deserialize)]
 /// Client-owned search context forwarded to KLIPY by the relay.
 pub struct SearchRequest {
@@ -504,5 +517,97 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         let serialized = serde_json::to_string(&body.0).expect("serialize generic error");
         assert!(!serialized.contains("secret-key"));
+    }
+
+    /// A provider 3xx must never cause a second connection, and the error
+    /// surfaced past the shared send/reject path must leak neither the API key
+    /// (carried in the request path) nor the redirect target.
+    ///
+    /// Mutation check: swapping `build_gif_http_client`'s redirect policy back
+    /// to the default makes the client follow the 302, the redirect listener
+    /// records a request, and this test fails on the `redirect_hits` assertion.
+    #[tokio::test]
+    async fn gif_client_refuses_provider_redirects_without_leaking_secrets() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const SECRET_KEY: &str = "super-secret-klipy-key";
+
+        // Second listener: the redirect target. It must never be reached.
+        let redirect_hits = Arc::new(AtomicUsize::new(0));
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect address");
+        let redirect_hits_server = redirect_hits.clone();
+        let redirect_server = tokio::spawn(async move {
+            axum::serve(
+                redirect_listener,
+                Router::new().route(
+                    "/leaked",
+                    get(move || {
+                        redirect_hits_server.fetch_add(1, Ordering::SeqCst);
+                        async { "reached the redirect target" }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve redirect target");
+        });
+
+        // Fake upstream: answers the key-bearing path with a 302 whose Location
+        // points at the second listener, exactly the disclosure vector.
+        let redirect_location = format!("http://{redirect_addr}/leaked");
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake upstream");
+        let upstream_addr = upstream_listener.local_addr().expect("upstream address");
+        let location_header = redirect_location.clone();
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(
+                upstream_listener,
+                Router::new().route(
+                    &format!("/{SECRET_KEY}/gifs/search"),
+                    get(move || {
+                        let location = location_header.clone();
+                        async move {
+                            (
+                                StatusCode::FOUND,
+                                [(header::LOCATION, location)],
+                                "provider body naming the secret-key",
+                            )
+                        }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve fake upstream");
+        });
+
+        let client = build_gif_http_client();
+        let response =
+            send_upstream(client.get(format!("http://{upstream_addr}/{SECRET_KEY}/gifs/search")))
+                .await
+                .expect("request completes without following the redirect");
+
+        // The redirect was not followed: the client surfaces the 3xx itself.
+        assert!(response.status().is_redirection());
+        assert!(!response.status().is_success());
+        assert_eq!(redirect_hits.load(Ordering::SeqCst), 0);
+
+        // The shared reject path (both handlers gate on `!is_success`) returns a
+        // static generic error carrying no key and no redirect target.
+        let (status, body) = api_error(
+            StatusCode::BAD_GATEWAY,
+            "GIF provider rejected the search request",
+        );
+        let serialized = serde_json::to_string(&body.0).expect("serialize generic error");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!serialized.contains(SECRET_KEY));
+        assert!(!serialized.contains(&redirect_location));
+
+        upstream_server.abort();
+        redirect_server.abort();
+        let _ = upstream_server.await;
+        let _ = redirect_server.await;
     }
 }
