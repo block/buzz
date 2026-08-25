@@ -44,10 +44,7 @@ import {
 import { buildMessageComposerEditTarget } from "@/features/messages/lib/draftMentionRefs";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
-import {
-  getThreadReference,
-  isThreadReply,
-} from "@/features/messages/lib/threading";
+import { isThreadReply } from "@/features/messages/lib/threading";
 import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHeadCache";
 import {
   resolveTimelineLoadingLatch,
@@ -87,6 +84,7 @@ import { useChannelTargetReset } from "./useChannelTargetReset";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { getLatestActiveChannelMessage } from "./ChannelScreen.helpers";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 import { GuardedChannelPane } from "./GuardedChannelPane";
 import { useNavigationGuard } from "./useNavigationGuard";
@@ -204,13 +202,8 @@ export function ChannelScreen({
   }, [activeChannelId, openThreadHeadId]);
   const messagesQuery = useChannelMessagesQuery(activeChannel);
   const windowQuery = useChannelWindowQuery(activeChannel);
-  const threadRepliesInChannel = React.useMemo(
-    () =>
-      windowQuery.data
-        ? channelWindowThreadRepliesInChannel(windowQuery.data)
-        : false,
-    [windowQuery.data],
-  );
+  const threadRepliesInChannel =
+    !!windowQuery.data && channelWindowThreadRepliesInChannel(windowQuery.data);
   const threadRepliesQuery = useThreadReplies(
     activeChannel,
     effectiveOpenThreadHeadId,
@@ -218,18 +211,11 @@ export function ChannelScreen({
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
-  const latestActiveMessage = React.useMemo(() => {
-    const messages = messagesQuery.data;
-    if (!messages) return null;
-    if (threadRepliesInChannel) {
-      return messages[messages.length - 1] ?? null;
-    }
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (getThreadReference(messages[index].tags).parentId === null)
-        return messages[index];
-    }
-    return null;
-  }, [messagesQuery.data, threadRepliesInChannel]);
+  const latestActiveMessage = React.useMemo(
+    () =>
+      getLatestActiveChannelMessage(messagesQuery.data, threadRepliesInChannel),
+    [messagesQuery.data, threadRepliesInChannel],
+  );
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;

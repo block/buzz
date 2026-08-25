@@ -4,10 +4,6 @@ import { Hash, LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
-import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
-import { ComposerUploadProgressOverlay } from "@/features/messages/ui/ComposerUploadProgressOverlay";
-import { MessageComposer } from "@/features/messages/ui/MessageComposer";
-import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
@@ -41,13 +37,10 @@ import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPre
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
-import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
-import {
-  containsWelcomePersonaMention,
-  WelcomeComposerGuidanceLayer,
-} from "@/features/channels/ui/WelcomeComposerBanner";
+import { containsWelcomePersonaMention } from "@/features/channels/ui/WelcomeComposerBanner";
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import { ChannelMainComposerDock } from "@/features/channels/ui/ChannelMainComposerDock";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -754,108 +747,41 @@ export const ChannelPane = React.memo(function ChannelPane({
                 </Button>
               </div>
             ) : (
-              <div
-                className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:-z-10 before:h-24 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:-z-10 after:h-12 after:bg-background after:content-['']"
-                data-testid="channel-composer-overlay"
-                ref={composerWrapperRef}
-              >
-                <ComposerUploadProgressOverlay />
-                <div
-                  className={cn(
-                    "composer-dock composer-overlay-corner-masks relative pointer-events-auto",
-                    hasComposerBottomActivity && "composer-dock--with-activity",
-                  )}
-                >
-                  {isActiveWelcomeChannel && !timeoutState.active ? (
-                    <WelcomeComposerGuidanceLayer
-                      onDismiss={handleDismissWelcomeBanner}
-                      settingUp={welcomeKickoffSettingUp}
-                      state={welcomeComposerBannerState}
-                    >
-                      {welcomeKickoffStage}
-                    </WelcomeComposerGuidanceLayer>
-                  ) : null}
-                  {timeoutState.active ? (
-                    <ComposerTimeoutBanner
-                      expiresAtMs={timeoutState.expiresAtMs}
-                    />
-                  ) : null}
-                  <ComposerDockBackdrop gutterClassName="inset-x-5" />
-                  <MessageComposer
-                    audienceContext={{ type: "channel" }}
-                    channelId={activeChannel?.id ?? null}
-                    channelName={activeChannel?.name ?? "channel"}
-                    channelType={activeChannel?.channelType ?? null}
-                    containerClassName="px-5 pb-0"
-                    layoutMode="dock"
-                    disabled={isComposerDisabled}
-                    editTarget={mainEditTarget}
-                    autoSubmitDraftKey={autoSendDraftKey}
-                    onAutoSubmitComplete={handleAutoSubmitComplete}
-                    isSending={isSending}
-                    mediaController={mainComposerMedia}
-                    onDeferredEditPendingChange={setMainDeferredEditPending}
-                    onCancelEdit={onCancelEdit}
-                    onCancelReply={
-                      projectedThreadComposer.composerTarget
-                        ? projectedThreadComposer.cancelReply
-                        : undefined
-                    }
-                    onCaptureSendContext={
-                      projectedThreadComposer.captureSendContext
-                    }
-                    onEditLastOwnMessage={handleEditLastOwnMainMessage}
-                    onEditSave={onEditSave}
-                    onPrepareSendChannel={
-                      activeChannel?.channelType === "dm"
-                        ? prepareDmSendChannel
-                        : undefined
-                    }
-                    onSend={handleSendMessage}
-                    profiles={profiles}
-                    replyTarget={projectedThreadComposer.composerTarget}
-                    showBackgroundUploadProgress={false}
-                    placeholder={
-                      projectedThreadComposer.composerTarget
-                        ? undefined
-                        : timeoutState.active
-                          ? "You're timed out by community moderators."
-                          : isModerationDmChannel
-                            ? "This channel is read-only."
-                            : activeChannel?.archivedAt
-                              ? "Archived channels are read-only."
-                              : activeChannel?.channelType === "forum"
-                                ? "Forum posting is not wired in this pass."
-                                : activeChannel
-                                  ? activeChannel.channelType === "dm" &&
-                                    directMessageIntro
-                                    ? `Message ${directMessageIntro.displayName}`
-                                    : `Message #${activeChannel.name}`
-                                  : "Select a channel"
-                    }
-                    showTopBorder={false}
-                    typingParentEventId={
-                      projectedThreadComposer.target?.id ?? null
-                    }
-                    typingRootEventId={projectedThreadComposer.rootId}
-                  />
-                  {/* The activity accessory is anchored in the dock's reserved
-                    bottom rail, so fading it cannot change the observed
-                    overlay height or move the conversation. Its natural
-                    content height remains responsive. */}
-                  <ChannelComposerActivityAccessory
-                    agents={activityAgents}
-                    channel={activeChannel}
-                    currentPubkey={currentPubkey}
-                    onOpenAgentSession={onOpenAgentSession}
-                    openAgentSessionPubkey={openAgentSessionPubkey}
-                    profiles={profiles}
-                    typingPubkeys={typingPubkeys}
-                    visible={hasComposerBottomActivity}
-                    workingBotPubkeys={composerWorkingBotPubkeys}
-                  />
-                </div>
-              </div>
+              <ChannelMainComposerDock
+                activeChannel={activeChannel}
+                activityAgents={activityAgents}
+                autoSendDraftKey={autoSendDraftKey}
+                composerRef={composerWrapperRef}
+                composerWorkingBotPubkeys={composerWorkingBotPubkeys}
+                currentPubkey={currentPubkey}
+                directMessageIntroDisplayName={
+                  directMessageIntro?.displayName ?? null
+                }
+                handleAutoSubmitComplete={handleAutoSubmitComplete}
+                handleDismissWelcomeBanner={handleDismissWelcomeBanner}
+                handleEditLastOwnMainMessage={handleEditLastOwnMainMessage}
+                handleSendMessage={handleSendMessage}
+                hasComposerBottomActivity={hasComposerBottomActivity}
+                isActiveWelcomeChannel={isActiveWelcomeChannel}
+                isComposerDisabled={isComposerDisabled}
+                isModerationDmChannel={isModerationDmChannel}
+                isSending={isSending}
+                mainComposerMedia={mainComposerMedia}
+                mainEditTarget={mainEditTarget}
+                onCancelEdit={onCancelEdit}
+                onEditSave={onEditSave}
+                onOpenAgentSession={onOpenAgentSession}
+                openAgentSessionPubkey={openAgentSessionPubkey}
+                prepareDmSendChannel={prepareDmSendChannel}
+                profiles={profiles}
+                projectedThreadComposer={projectedThreadComposer}
+                setMainDeferredEditPending={setMainDeferredEditPending}
+                timeoutState={timeoutState}
+                typingPubkeys={typingPubkeys}
+                welcomeComposerBannerState={welcomeComposerBannerState}
+                welcomeKickoffSettingUp={welcomeKickoffSettingUp}
+                welcomeKickoffStage={welcomeKickoffStage}
+              />
             )}
             {canDropInMainColumn && mainComposerMedia.isDragOver ? (
               <DropZoneOverlay className="z-50 rounded-2xl bg-primary/20 backdrop-blur-sm" />
