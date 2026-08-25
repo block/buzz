@@ -62,6 +62,31 @@ test("splitSearchMatches keeps one-character prefixes on lexeme boundaries", () 
   ]);
 });
 
+test("splitSearchMatches maps expanding lowercase prefixes to original spans", () => {
+  assert.deepEqual(splitSearchMatches("İstanbul release", "İs"), [
+    { isMatch: true, key: "0-2", text: "İs" },
+    { isMatch: false, key: "2-14", text: "tanbul release" },
+  ]);
+  assert.deepEqual(splitSearchMatches("İstanbul release", "İst"), [
+    { isMatch: true, key: "0-3", text: "İst" },
+    { isMatch: false, key: "3-13", text: "anbul release" },
+  ]);
+});
+
+test("splitSearchMatches does not split a character whose lowercase form expands", () => {
+  assert.deepEqual(splitSearchMatches("İstanbul release", "i"), [
+    { isMatch: true, key: "0-1", text: "İ" },
+    { isMatch: false, key: "1-15", text: "stanbul release" },
+  ]);
+});
+
+test("splitSearchMatches preserves UTF-16 boundaries for supplementary letters", () => {
+  assert.deepEqual(splitSearchMatches("𐐀İstanbul release", "𐐨İs"), [
+    { isMatch: true, key: "0-4", text: "𐐀İs" },
+    { isMatch: false, key: "4-14", text: "tanbul release" },
+  ]);
+});
+
 test("buildSearchResultPreview keeps a late match visible", () => {
   const content = `${"prefix ".repeat(30)}mentions appear here ${"suffix ".repeat(20)}`;
   const preview = buildSearchResultPreview(content, "mentions", 96);

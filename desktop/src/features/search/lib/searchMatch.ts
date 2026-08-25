@@ -69,6 +69,24 @@ function getTextLexemes(text: string): TextLexeme[] {
   }));
 }
 
+function getOriginalPrefixLength(
+  original: string,
+  normalizedLength: number,
+): number {
+  let normalizedOffset = 0;
+  let originalOffset = 0;
+
+  for (const character of original) {
+    normalizedOffset += character.toLowerCase().length;
+    originalOffset += character.length;
+    if (normalizedOffset >= normalizedLength) {
+      return originalOffset;
+    }
+  }
+
+  return original.length;
+}
+
 function getMatchSpans(
   text: string,
   query: string,
@@ -93,9 +111,12 @@ function getMatchSpans(
         matcher.isPrefix && lexeme.normalized.startsWith(matcher.value),
     );
     if (prefixMatch) {
+      const originalLexeme = text.slice(lexeme.start, lexeme.end);
       spans.push({
         start: lexeme.start,
-        end: lexeme.start + prefixMatch.value.length,
+        end:
+          lexeme.start +
+          getOriginalPrefixLength(originalLexeme, prefixMatch.value.length),
       });
     }
   }
