@@ -13,7 +13,6 @@ import {
   X,
 } from "lucide-react";
 
-import type { BlobDescriptor } from "@/shared/api/tauri";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import {
@@ -226,7 +225,7 @@ function composerMediaStyle(): React.CSSProperties {
 }
 
 type MediaAttachmentItemProps = {
-  attachment: BlobDescriptor;
+  attachment: ImetaMedia;
   isSpoilered: boolean;
   onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
   onRemove: (url: string) => void;

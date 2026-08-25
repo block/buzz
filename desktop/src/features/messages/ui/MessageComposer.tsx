@@ -152,9 +152,7 @@ function MessageComposerImpl({
     queuedAttachments: ReturnType<typeof useMediaUpload>["queuedAttachments"];
     spoileredAttachmentUrls: Set<string>;
   } | null>(null);
-  const mentions = useMentions(channelId, undefined, profiles, {
-    channelType,
-  });
+  const mentions = useMentions(channelId, undefined, profiles, { channelType });
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
   const emojiAutocomplete = useEmojiAutocomplete(customEmoji);

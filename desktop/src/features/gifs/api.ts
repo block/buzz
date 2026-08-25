@@ -1,4 +1,4 @@
-import type { BlobDescriptor } from "@/shared/api/tauri";
+import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 
 type KlipyAsset = {
   height?: number;
@@ -171,7 +171,7 @@ export function klipyGifFilename(gif: KlipyGif): string {
  * to the message body but deliberately omits an imeta tag, since Buzz relays
  * only accept verified local `/media/` entries in imeta.
  */
-export function klipyGifAttachment(gif: KlipyGif): BlobDescriptor {
+export function klipyGifAttachment(gif: KlipyGif): ImetaMedia {
   return {
     dim: `${gif.original.width}x${gif.original.height}`,
     displayLabel: gif.title,

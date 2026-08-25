@@ -541,12 +541,6 @@ export type BlobDescriptor = {
   image?: string;
   /** Original filename captured client-side. */
   filename?: string;
-  /**
-   * Human-readable label for attachment links and accessible names. Composer-
-   * only — never emitted in imeta tags. Carries a provider title (e.g. a KLIPY
-   * GIF name) that has no filename or content hash to fall back on.
-   */
-  displayLabel?: string;
 };
 
 export async function uploadMedia(
