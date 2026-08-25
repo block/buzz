@@ -4444,6 +4444,15 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               sig: "mocksig".repeat(20).slice(0, 128),
             },
             {
+              id: "mock-forum-offsite-thread",
+              pubkey: ALICE_PUBKEY,
+              created_at: Math.floor(Date.now() / 1000) - 85 * 60,
+              kind: 45001,
+              tags: [["h", channelId]],
+              content: "Team offsite planning and travel notes.",
+              sig: "mocksig".repeat(20).slice(0, 128),
+            },
+            {
               id: "mock-forum-release-reply",
               pubkey: ALICE_PUBKEY,
               created_at: Math.floor(Date.now() / 1000) - 80 * 60,
@@ -13621,6 +13630,15 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetEvent(
           payload as Parameters<typeof handleGetEvent>[0],
           activeConfig,
+        );
+      case "get_events":
+        return Promise.all(
+          (payload as { eventIds: string[] }).eventIds.map(
+            async (eventId) =>
+              JSON.parse(
+                await handleGetEvent({ eventId }, activeConfig),
+              ) as RelayEvent,
+          ),
         );
       case "sign_event":
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push({

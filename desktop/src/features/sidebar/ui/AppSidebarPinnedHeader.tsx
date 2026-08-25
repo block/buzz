@@ -30,7 +30,7 @@ type AppSidebarPinnedHeaderProps = {
   onCreateAgent: () => void;
   onCreateChannel: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
-  onOpenSearchResult: (hit: SearchHit) => void;
+  onOpenSearchResult: (hit: SearchHit, query: string) => void;
   onSelectChannel: (channelId: string) => void;
   searchChannels: Channel[];
   searchFocusRequest: number;

@@ -194,6 +194,10 @@ export type ChannelPaneProps = {
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadFirstUnreadReplyId?: string | null;
   targetMessageId: string | null;
+  /** Exact clicked result id, including a reply routed into the thread panel. */
+  targetSearchMessageId?: string | null;
+  /** Search text to highlight within the clicked result. */
+  targetSearchQuery?: string;
   typingPubkeys: string[];
   isFollowingThread?: boolean;
   onFollowThread?: () => void;

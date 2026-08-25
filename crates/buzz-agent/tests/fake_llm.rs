@@ -16,6 +16,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+mod common;
+use common::approve_permission;
+
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -396,12 +399,7 @@ async fn unsupported_image_response_recovers_without_replaying_image() {
     loop {
         let message = h.recv().await;
         if message.get("method") == Some(&json!("session/request_permission")) {
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": message["id"],
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&message)).await;
         } else if message["id"] == json!(prompt_id) {
             assert_eq!(message["result"]["stopReason"], "end_turn");
             break;

@@ -88,26 +88,21 @@ import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
-import { GuardedChannelPane } from "./GuardedChannelPane"; import { useNavigationGuard } from "./useNavigationGuard";
+import { GuardedChannelPane } from "./GuardedChannelPane"; import { useNavigationGuard } from "./useNavigationGuard"; import * as searchForwarding from "./searchTargetForwarding";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
   activeChannel,
   autoSendDraftKey,
   currentIdentity,
   currentProfile,
-  headerEndActions,
-  idleAuxiliaryPanel,
-  idleAuxiliaryHeaderActions,
-  idleAuxiliaryOverridesThread,
+  headerEndActions, idleAuxiliaryPanel,
+  idleAuxiliaryHeaderActions, idleAuxiliaryOverridesThread,
   idleAuxiliaryTitle,
-  onAddFiles,
-  onCloseIdleAuxiliaryPanel,
-  onCloseForumPost,
-  onSelectForumPost,
-  selectedForumPostId,
-  targetForumReplyId,
-  targetMessageEvents,
-  targetMessageId,
+  onAddFiles, onCloseIdleAuxiliaryPanel,
+  onCloseForumPost, onSelectForumPost,
+  selectedForumPostId, targetForumReplyId,
+  targetMessageEvents, targetMessageId,
+  ...searchTarget
 }: ChannelScreenProps) {
   const queryClient = useQueryClient();
   const { goHome } = useAppNavigation();
@@ -824,13 +819,12 @@ export function ChannelScreen({
         >
           {activeChannel ? (
             activeChannel.channelType === "forum" ? (
-              <ForumChannelContent
-                canResetPanelWidth={canResetThreadPanelWidth}
-                channel={activeChannel}
+              searchForwarding.renderSearchAwareForum(
+                <ForumChannelContent
+                canResetPanelWidth={canResetThreadPanelWidth} channel={activeChannel}
                 currentPubkey={currentPubkey}
                 header={channelHeader}
-                onClosePost={onCloseForumPost}
-                onCloseProfilePanel={handleCloseProfilePanel}
+                onClosePost={onCloseForumPost} onCloseProfilePanel={handleCloseProfilePanel}
                 onOpenDm={handleOpenDm}
                 onOpenProfilePanel={handleOpenProfilePanel}
                 onPanelResizeStart={handleThreadPanelResizeStart}
@@ -843,17 +837,16 @@ export function ChannelScreen({
                 profilePanelTab={profilePanelTab}
                 profilePanelView={profilePanelView}
                 selectedPostId={selectedForumPostId}
-                targetReplyId={targetForumReplyId}
-              />
+                  targetReplyId={targetForumReplyId}
+                />,
+                searchTarget,
+              )
             ) : (
               <React.Suspense
-                fallback={
-                  <ChannelScreenLoadingFallback
-                    isHuddleTranscript={isHuddleTranscript}
-                  />
-                }
+                fallback={<ChannelScreenLoadingFallback {...{ isHuddleTranscript }} />}
               >
-                <GuardedChannelPane
+                {searchForwarding.renderSearchAwareChannel(
+                  <GuardedChannelPane
                   activeChannel={activeChannel}
                   activityAgents={channelAgentSessionAgents}
                   agentPubkeys={agentPubkeys}
@@ -987,8 +980,10 @@ export function ChannelScreen({
                   threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
-                  typingPubkeys={humanTypingPubkeys}
-                />
+                    typingPubkeys={humanTypingPubkeys}
+                  />,
+                  searchTarget,
+                )}
               </React.Suspense>
             )
           ) : (

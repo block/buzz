@@ -38,6 +38,16 @@ export type ImageGalleryItem = {
   thumbnailCornerRadii?: ImageLightboxCornerRadii;
 };
 
+export type ImageLightboxZoomAnchor = {
+  x: number;
+  y: number;
+};
+
+export type ImageLightboxZoomState = {
+  zoom: number;
+  zoomOffset: ImageLightboxZoomAnchor;
+};
+
 export const IMAGE_LIGHTBOX_ENTER_MS = 260;
 export const IMAGE_LIGHTBOX_EXIT_MS = 170;
 export const IMAGE_LIGHTBOX_FADE_ENTER_MS = 180;
@@ -54,7 +64,8 @@ export const IMAGE_LIGHTBOX_WHEEL_ZOOM_SPEED = 0.002;
 export const IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA = 0.2;
 export const IMAGE_LIGHTBOX_MIN_ZOOM = 1;
 export const IMAGE_LIGHTBOX_MAX_ZOOM = 3;
-export const IMAGE_LIGHTBOX_ZOOM_STEP = 0.05;
+export const IMAGE_LIGHTBOX_ZOOM_STEP = 0.15;
+export const IMAGE_LIGHTBOX_CLICK_ZOOM = 1.75;
 export const IMAGE_LIGHTBOX_EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
 export const IMAGE_LIGHTBOX_EASE_IN_OUT = "cubic-bezier(0.77, 0, 0.175, 1)";
 export const IMAGE_LIGHTBOX_EXPANDED_CORNER_RADIUS = "1rem";
@@ -151,15 +162,88 @@ export function imageLightboxTransform(
 export function imageLightboxZoomBox(
   targetBox: ImageLightboxBox,
   zoom: number,
+  offset: ImageLightboxZoomAnchor = { x: 0, y: 0 },
 ): ImageLightboxBox {
   const width = targetBox.width * zoom;
   const height = targetBox.height * zoom;
 
   return {
     height,
-    left: targetBox.left + (targetBox.width - width) / 2,
-    top: targetBox.top + (targetBox.height - height) / 2,
+    left: targetBox.left + (targetBox.width - width) / 2 + offset.x,
+    top: targetBox.top + (targetBox.height - height) / 2 + offset.y,
     width,
+  };
+}
+
+export function imageLightboxZoomBoxAtPoint(
+  targetBox: ImageLightboxBox,
+  currentBox: ImageLightboxBox,
+  nextZoom: number,
+  point: ImageLightboxZoomAnchor,
+): ImageLightboxBox {
+  const relativeX = (point.x - currentBox.left) / Math.max(1, currentBox.width);
+  const relativeY = (point.y - currentBox.top) / Math.max(1, currentBox.height);
+  const nextBox = imageLightboxZoomBox(targetBox, nextZoom);
+
+  return {
+    ...nextBox,
+    left: point.x - relativeX * nextBox.width,
+    top: point.y - relativeY * nextBox.height,
+  };
+}
+
+export function imageLightboxZoomStateAtZoom(
+  currentState: ImageLightboxZoomState,
+  nextZoom: number,
+): ImageLightboxZoomState {
+  const zoom = clampImageLightboxZoom(nextZoom);
+  if (zoom === IMAGE_LIGHTBOX_MIN_ZOOM) {
+    return { zoom, zoomOffset: { x: 0, y: 0 } };
+  }
+
+  // Scale the stored offset by the zoom ratio so the image point currently
+  // at the frame center stays anchored there as the slider/wheel changes zoom.
+  const offsetScale = zoom / currentState.zoom;
+  return {
+    zoom,
+    zoomOffset: {
+      x: currentState.zoomOffset.x * offsetScale,
+      y: currentState.zoomOffset.y * offsetScale,
+    },
+  };
+}
+
+export function imageLightboxZoomStateAtPoint(
+  targetBox: ImageLightboxBox,
+  currentState: ImageLightboxZoomState,
+  point: ImageLightboxZoomAnchor,
+): ImageLightboxZoomState {
+  const nextZoom =
+    currentState.zoom === IMAGE_LIGHTBOX_MIN_ZOOM
+      ? IMAGE_LIGHTBOX_CLICK_ZOOM
+      : IMAGE_LIGHTBOX_MIN_ZOOM;
+  if (nextZoom === IMAGE_LIGHTBOX_MIN_ZOOM) {
+    return imageLightboxZoomStateAtZoom(currentState, nextZoom);
+  }
+
+  const currentBox = imageLightboxZoomBox(
+    targetBox,
+    currentState.zoom,
+    currentState.zoomOffset,
+  );
+  const nextBox = imageLightboxZoomBoxAtPoint(
+    targetBox,
+    currentBox,
+    nextZoom,
+    point,
+  );
+  const centeredNextBox = imageLightboxZoomBox(targetBox, nextZoom);
+  return {
+    zoom: nextZoom,
+    zoomOffset: {
+      x: nextBox.left - centeredNextBox.left,
+      y: nextBox.top - centeredNextBox.top,
+    },
   };
 }
 

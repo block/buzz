@@ -3,8 +3,12 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { WorkflowAuthorPicker } from "./WorkflowAuthorPicker";
 import { WorkflowEmojiField } from "./WorkflowEmojiField";
+import { WorkflowMessagePicker } from "./WorkflowMessagePicker";
+import { useWorkflowTriggerPresentation } from "./useWorkflowTriggerPresentation";
 import { FieldLabel } from "./workflowFormPrimitives";
 import {
   buildConditionExpressions,
@@ -45,10 +49,79 @@ function compact(value: string): string {
     : `${trimmed.slice(0, 11)}…${trimmed.slice(-6)}`;
 }
 
+function fieldUsesFullHeightPicker(field: string): boolean {
+  return field === "trigger_author" || field === "trigger_message_id";
+}
+
 function fieldPlaceholder(field: string): string {
   if (field === "trigger_author") return "64-character hex pubkey";
   if (field === "trigger_message_id") return "64-character hex event ID";
   return "e.g. deploy";
+}
+
+function ExclusionStrike() {
+  return (
+    <span aria-hidden="true" className="pointer-events-none absolute inset-0">
+      <span className="absolute inset-0 [clip-path:circle(50%_at_50%_50%)]">
+        <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          <span className="block h-1 w-9 translate-y-0.5 -rotate-45 rounded-full bg-background/90" />
+        </span>
+      </span>
+      <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        <span className="block h-0.5 w-8 -rotate-45 rounded-full bg-muted-foreground" />
+      </span>
+    </span>
+  );
+}
+
+function AuthorConditionSummary({
+  avatarUrl,
+  excluded,
+  label,
+}: {
+  avatarUrl: string | null;
+  excluded: boolean;
+  label: string;
+}) {
+  return (
+    <span className="flex shrink-0 items-center">
+      <span className="relative shrink-0">
+        <UserAvatar
+          avatarUrl={avatarUrl}
+          className="h-6 w-6"
+          displayName={label}
+          fallbackDelayMs={0}
+          size="xs"
+        />
+        {excluded ? <ExclusionStrike /> : null}
+      </span>
+      <span className="sr-only">
+        {excluded ? "Excluded author: " : "Selected author: "}
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function EmojiConditionSummary({
+  emoji,
+  excluded,
+}: {
+  emoji: string;
+  excluded: boolean;
+}) {
+  return (
+    <span className="relative flex h-6 w-6 shrink-0 items-center justify-center">
+      <span aria-hidden="true" className="text-2xl leading-none">
+        {emoji}
+      </span>
+      {excluded ? <ExclusionStrike /> : null}
+      <span className="sr-only">
+        {excluded ? "Excluded reaction emoji: " : "Selected reaction emoji: "}
+        {emoji}
+      </span>
+    </span>
+  );
 }
 
 export function WorkflowTriggerConditions({
@@ -58,6 +131,7 @@ export function WorkflowTriggerConditions({
   onConditionDraftsChange,
   triggerType,
   value,
+  workflowChannelId,
 }: {
   conditionDrafts: ParsedConditionExpression[] | null;
   disabled?: boolean;
@@ -68,6 +142,7 @@ export function WorkflowTriggerConditions({
     "message_posted" | "diff_posted" | "reaction_added"
   >;
   value: string;
+  workflowChannelId?: string | null;
 }) {
   const parsedValue = React.useMemo(
     () => parseConditionExpressions(value, triggerType),
@@ -79,8 +154,22 @@ export function WorkflowTriggerConditions({
   const [expandedField, setExpandedField] = React.useState<string | null>(
     () => conditionFieldsForTrigger(triggerType)[0]?.value ?? null,
   );
+  const disclosureButtons = React.useRef(new Map<string, HTMLButtonElement>());
+  const collapsePicker = React.useCallback((field: string) => {
+    setExpandedField(null);
+    disclosureButtons.current.get(field)?.focus();
+  }, []);
   const conditions = conditionDrafts ?? parsedValue ?? [];
   const localValue = React.useRef(value);
+  const triggerPresentation = useWorkflowTriggerPresentation(
+    {
+      filter: conditions.length
+        ? buildConditionExpressions(conditions)
+        : undefined,
+      on: triggerType,
+    },
+    workflowChannelId,
+  );
 
   React.useEffect(() => {
     if (value === localValue.current) return;
@@ -109,10 +198,16 @@ export function WorkflowTriggerConditions({
   };
 
   const fields = conditionFieldsForTrigger(triggerType);
+  const fullHeightPickerExpanded =
+    mode === "basic" && fieldUsesFullHeightPicker(expandedField ?? "");
 
   return (
     <Tabs
-      className="space-y-3"
+      className={cn(
+        "space-y-3",
+        fullHeightPickerExpanded &&
+          "flex h-full min-h-0 flex-col space-y-0 gap-3",
+      )}
       onValueChange={(next) => setMode(next as "basic" | "advanced")}
       value={mode}
     >
@@ -168,7 +263,12 @@ export function WorkflowTriggerConditions({
           </button>
         </div>
       ) : (
-        <div className="divide-y divide-border/50">
+        <div
+          className={cn(
+            "divide-y divide-border/50",
+            fullHeightPickerExpanded && "flex min-h-0 flex-1 flex-col",
+          )}
+        >
           {fields.map((field) => {
             const existing = conditions.find(
               (condition) => condition.field === field.value,
@@ -179,8 +279,32 @@ export function WorkflowTriggerConditions({
             const summary = existing
               ? `${OPERATOR_LABELS[condition.operator]}${condition.value ? ` ${compact(condition.value)}` : ""}`
               : "Any";
+            const authorSummary =
+              existing &&
+              field.value === "trigger_author" &&
+              triggerPresentation.pubkey &&
+              triggerPresentation.label
+                ? triggerPresentation.label
+                : null;
+            const messageSummary =
+              existing &&
+              field.value === "trigger_message_id" &&
+              triggerPresentation.messageId &&
+              triggerPresentation.messageLabel
+                ? triggerPresentation.messageLabel
+                    .trim()
+                    .replaceAll(/\s+/g, " ")
+                : null;
             return (
-              <div className={cn(expanded && "pb-4")} key={field.value}>
+              <div
+                className={cn(
+                  expanded && "pb-4 last:pb-0",
+                  expanded &&
+                    fieldUsesFullHeightPicker(field.value) &&
+                    "flex min-h-0 flex-1 flex-col",
+                )}
+                key={field.value}
+              >
                 <button
                   aria-expanded={expanded}
                   className="flex min-h-12 w-full items-center gap-3 py-3 text-left transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-50"
@@ -188,14 +312,43 @@ export function WorkflowTriggerConditions({
                   onClick={() =>
                     setExpandedField(expanded ? null : field.value)
                   }
+                  ref={(button) => {
+                    if (button)
+                      disclosureButtons.current.set(field.value, button);
+                    else disclosureButtons.current.delete(field.value);
+                  }}
                   type="button"
                 >
                   <span className="min-w-0 flex-1 truncate text-base font-medium">
                     {field.label}
                   </span>
-                  <span className="max-w-44 truncate font-mono text-xs text-muted-foreground">
-                    {summary}
-                  </span>
+                  {authorSummary ? (
+                    <AuthorConditionSummary
+                      avatarUrl={triggerPresentation.avatarUrl}
+                      excluded={condition.operator === "not_equals"}
+                      label={authorSummary}
+                    />
+                  ) : messageSummary ? (
+                    <span
+                      className={cn(
+                        "max-w-44 truncate text-xs text-muted-foreground",
+                        condition.operator === "not_equals" && "line-through",
+                      )}
+                    >
+                      “{messageSummary}”
+                    </span>
+                  ) : existing &&
+                    field.value === "trigger_emoji" &&
+                    condition.value.trim() ? (
+                    <EmojiConditionSummary
+                      emoji={condition.value.trim()}
+                      excluded={condition.operator === "not_equals"}
+                    />
+                  ) : (
+                    <span className="max-w-44 truncate font-mono text-xs text-muted-foreground">
+                      {summary}
+                    </span>
+                  )}
                   <ChevronRight
                     className={cn(
                       "h-4 w-4 shrink-0 text-muted-foreground/70 transition-transform duration-150 motion-reduce:transition-none",
@@ -204,7 +357,13 @@ export function WorkflowTriggerConditions({
                   />
                 </button>
                 {expanded ? (
-                  <div className="animate-in space-y-3 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
+                  <div
+                    className={cn(
+                      "animate-in space-y-3 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none",
+                      fieldUsesFullHeightPicker(field.value) &&
+                        "flex min-h-0 flex-1 flex-col space-y-0 gap-3",
+                    )}
+                  >
                     <fieldset>
                       <legend className="sr-only">Match</legend>
                       <div className="grid grid-cols-2 gap-2.5">
@@ -258,6 +417,51 @@ export function WorkflowTriggerConditions({
                           }
                           value={condition.value}
                         />
+                      ) : field.value === "trigger_author" ? (
+                        <WorkflowAuthorPicker
+                          channelId={workflowChannelId}
+                          disabled={disabled}
+                          id="wf-trigger-author-value"
+                          onEscape={() => collapsePicker(field.value)}
+                          onChange={(pubkey) =>
+                            updateConditions(
+                              pubkey
+                                ? [
+                                    ...conditions.filter(
+                                      (item) => item.field !== field.value,
+                                    ),
+                                    { ...condition, value: pubkey },
+                                  ]
+                                : conditions.filter(
+                                    (item) => item.field !== field.value,
+                                  ),
+                            )
+                          }
+                          value={condition.value}
+                        />
+                      ) : field.value === "trigger_message_id" ? (
+                        <WorkflowMessagePicker
+                          channelId={workflowChannelId}
+                          disabled={disabled}
+                          id="wf-trigger-message-id-value"
+                          key={workflowChannelId ?? "unscoped"}
+                          onEscape={() => collapsePicker(field.value)}
+                          onChange={(messageId) =>
+                            updateConditions(
+                              messageId
+                                ? [
+                                    ...conditions.filter(
+                                      (item) => item.field !== field.value,
+                                    ),
+                                    { ...condition, value: messageId },
+                                  ]
+                                : conditions.filter(
+                                    (item) => item.field !== field.value,
+                                  ),
+                            )
+                          }
+                          value={condition.value}
+                        />
                       ) : (
                         <div className="space-y-1.5">
                           <FieldLabel
@@ -299,7 +503,7 @@ export function WorkflowTriggerConditions({
                         </div>
                       )
                     ) : null}
-                    {existing ? (
+                    {existing && !fieldUsesFullHeightPicker(field.value) ? (
                       <button
                         className="text-xs font-medium text-muted-foreground hover:text-foreground"
                         disabled={disabled}

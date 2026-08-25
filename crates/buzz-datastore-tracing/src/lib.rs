@@ -70,6 +70,9 @@ impl Parse for DatastoreArgs {
 /// PostgreSQL spans always omit function arguments, use the `buzz_datastore`
 /// target, and expose only canonical semantic fields plus explicitly supplied
 /// safe fields. An `Err` sets `otel.status_code` without inspecting the error.
+/// The literal `name` also labels a logical-operation duration histogram. Slow
+/// completions are sampled and logged with only that name, outcome, and elapsed
+/// time; arguments, error values, and return values are never formatted.
 #[proc_macro_attribute]
 pub fn datastore_span(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as DatastoreArgs);
@@ -129,9 +132,46 @@ pub fn datastore_span(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     });
+    let outcome = if returns_result {
+        quote! {
+            if #result.is_err() { "error" } else { "success" }
+        }
+    } else {
+        quote!("success")
+    };
     function.block = Box::new(syn::parse_quote!({
+        let __buzz_datastore_started_7f3a9c = ::std::time::Instant::now();
         let #result: #return_type = (async #original_body).await;
         #record_error
+        let __buzz_datastore_outcome_7f3a9c = #outcome;
+        let __buzz_datastore_elapsed_7f3a9c = __buzz_datastore_started_7f3a9c.elapsed();
+        ::metrics::histogram!(
+            "buzz_db_operation_duration_seconds",
+            "operation" => #name,
+            "outcome" => __buzz_datastore_outcome_7f3a9c,
+        )
+        .record(__buzz_datastore_elapsed_7f3a9c.as_secs_f64());
+        if __buzz_datastore_elapsed_7f3a9c >= ::std::time::Duration::from_millis(500) {
+            static __BUZZ_DATASTORE_SLOW_SAMPLE_7F3A9C:
+                ::std::sync::atomic::AtomicU64 = ::std::sync::atomic::AtomicU64::new(0);
+            if __BUZZ_DATASTORE_SLOW_SAMPLE_7F3A9C.fetch_add(
+                1,
+                ::std::sync::atomic::Ordering::Relaxed,
+            ) % 100 == 0 {
+                let __buzz_datastore_elapsed_ms_7f3a9c =
+                    __buzz_datastore_elapsed_7f3a9c
+                        .as_millis()
+                        .min(::std::primitive::u64::MAX as u128) as u64;
+                ::tracing::warn!(
+                    target: "buzz_datastore",
+                    parent: None,
+                    operation = #name,
+                    outcome = __buzz_datastore_outcome_7f3a9c,
+                    elapsed_ms = __buzz_datastore_elapsed_ms_7f3a9c,
+                    "slow datastore operation"
+                );
+            }
+        }
         #result
     }));
 
