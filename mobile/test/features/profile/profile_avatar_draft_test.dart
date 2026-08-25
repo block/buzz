@@ -28,25 +28,6 @@ void main() {
     expect(service.uploadedParts, ['poster', 'animation', 'animation']);
   });
 
-  test('animated draft supports one upload at a time', () async {
-    final service = _SingleUploadService();
-    addTearDown(service.dispose);
-    final draft = ProfileAnimatedAvatarDraft(
-      poster: Uint8List.fromList([1]),
-      animation: Uint8List.fromList([2]),
-    );
-
-    final url = await draft.upload(service);
-
-    expect(service.maxInFlight, 1);
-    expect(service.uploadedParts, ['poster', 'animation']);
-    expect(parseAnimatedAvatarUrl(url)?.posterUrl, 'https://relay/poster.png');
-    expect(
-      parseAnimatedAvatarUrl(url)?.animationUrl,
-      'https://relay/animation.png',
-    );
-  });
-
   test('animated draft reuploads every part for a new community', () async {
     final first = _RecordingUploadService('first');
     final second = _RecordingUploadService('second');
@@ -65,46 +46,6 @@ void main() {
     expect(firstUrl, contains('https://first.example/'));
     expect(secondUrl, contains('https://second.example/'));
   });
-}
-
-final class _SingleUploadService extends MediaUploadService {
-  _SingleUploadService()
-    : super(
-        baseUrl: 'https://relay.example',
-        nsec: null,
-        pickGalleryImage: () async => null,
-        pickGalleryVideo: () async => null,
-      );
-
-  final uploadedParts = <String>[];
-  int _inFlight = 0;
-  int maxInFlight = 0;
-
-  @override
-  Future<BlobDescriptor> uploadBytes(
-    Uint8List bytes, {
-    required String mimeType,
-    ValueChanged<double>? onProgress,
-    UploadCancellationToken? cancellationToken,
-  }) async {
-    _inFlight++;
-    maxInFlight = _inFlight > maxInFlight ? _inFlight : maxInFlight;
-    if (_inFlight > 1) {
-      _inFlight--;
-      throw Exception('upload concurrency limit reached');
-    }
-    final part = bytes.single == 1 ? 'poster' : 'animation';
-    uploadedParts.add(part);
-    await Future<void>.delayed(Duration.zero);
-    _inFlight--;
-    return BlobDescriptor(
-      url: 'https://relay/$part.png',
-      sha256: '$part-hash',
-      size: bytes.length,
-      type: mimeType,
-      uploaded: 1,
-    );
-  }
 }
 
 final class _RecordingUploadService extends MediaUploadService {

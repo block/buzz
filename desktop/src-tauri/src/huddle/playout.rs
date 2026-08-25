@@ -44,6 +44,9 @@ const SPEAKER_LEVEL_TICK_MS: u64 = 50;
 /// Per-peer arrival window for the TTS interrupt frame counter.
 const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 const REMOTE_RELEASE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+/// Match Mobile's speaking treatment: an open microphone can emit continuous
+/// non-DTX Opus for room tone, so packet type alone is not evidence of speech.
+const REMOTE_SPEECH_LEVEL_DBOV: i8 = -55;
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
 const PLAYOUT_TICK_MS: u64 = 10;
 
@@ -86,19 +89,30 @@ fn normalized_speaker_level(level_dbov: i8) -> f32 {
     ((f32::from(level_dbov) + 60.0) / 48.0).clamp(0.0, 1.0)
 }
 
+fn is_remote_speech_frame(is_dtx: bool, level_dbov: i8) -> bool {
+    !is_dtx && level_dbov >= REMOTE_SPEECH_LEVEL_DBOV
+}
+
 fn update_remote_release_deadline(
     peer: u8,
-    is_dtx: bool,
+    is_speech: bool,
     remote_floor_owners: &std::collections::HashSet<u8>,
     deadlines: &mut std::collections::HashMap<u8, tokio::time::Instant>,
     now: tokio::time::Instant,
 ) {
-    if !is_dtx {
-        deadlines.remove(&peer);
-    } else if remote_floor_owners.contains(&peer) {
-        deadlines
-            .entry(peer)
-            .or_insert(now + REMOTE_RELEASE_DEBOUNCE);
+    if remote_floor_owners.contains(&peer) {
+        if is_speech {
+            // Refresh from audible speech itself. Some mobile capture paths
+            // stop producing packets once speech ends, so waiting for a DTX
+            // or quiet packet can otherwise hold the human floor forever.
+            deadlines.insert(peer, now + REMOTE_RELEASE_DEBOUNCE);
+        } else {
+            // Preserve the deadline from the last audible frame. Continuous
+            // room-tone packets must not keep extending the human floor.
+            deadlines
+                .entry(peer)
+                .or_insert(now + REMOTE_RELEASE_DEBOUNCE);
+        }
     }
 }
 
@@ -437,19 +451,20 @@ pub(crate) async fn run_playout_recv_loop(
                             continue;
                         }
                         let is_dtx = (header.flags & FLAG_DTX) != 0;
-                        // Only count non-DTX arrivals toward the UI's
-                        // active-speaker set. DTX/comfort packets are emitted
-                        // by an idle peer to keep the codec alive — they
-                        // don't mean the peer is speaking, and shouldn't
-                        // make their tile flash for the 500 ms speaker tick.
+                        let is_remote_speech =
+                            is_remote_speech_frame(is_dtx, header.level_dbov);
+                        // Only count audible arrivals toward the UI's
+                        // active-speaker set. An open mobile microphone can
+                        // continuously emit non-DTX room tone, so require an
+                        // audible level before treating a packet as speech.
                         update_remote_release_deadline(
                             peer_idx,
-                            is_dtx,
+                            is_remote_speech,
                             &remote_floor_owners,
                             &mut remote_release_deadlines,
                             tokio::time::Instant::now(),
                         );
-                        if !is_dtx {
+                        if is_remote_speech {
                             active_indices.insert(peer_idx);
                             let level = normalized_speaker_level(header.level_dbov);
                             speaker_levels
@@ -497,7 +512,7 @@ pub(crate) async fn run_playout_recv_loop(
                         // Count only remote-human speech toward floor onset.
                         // Agent audio still plays, but it must not acquire the
                         // human floor or suppress another agent's response.
-                        if !is_dtx && remote_human {
+                        if is_remote_speech && remote_human {
                             if last_frame_reset.elapsed() >= FRAME_WINDOW {
                                 frame_counts.clear();
                                 last_frame_reset = tokio::time::Instant::now();
@@ -507,6 +522,14 @@ pub(crate) async fn run_playout_recv_loop(
                             if *count >= REMOTE_SPEECH_THRESHOLD {
                                 human_floor.enter_remote(peer_idx);
                                 remote_floor_owners.insert(peer_idx);
+                                // The threshold-crossing frame is processed
+                                // before this peer becomes an owner. Arm its
+                                // release here so silence need not arrive in a
+                                // later packet to let queued TTS continue.
+                                remote_release_deadlines.insert(
+                                    peer_idx,
+                                    tokio::time::Instant::now() + REMOTE_RELEASE_DEBOUNCE,
+                                );
                                 if tts_active.load(Ordering::Acquire) {
                                     tts_cancel.store(true, Ordering::Release);
                                 }
@@ -647,18 +670,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn continuous_dtx_does_not_extend_remote_floor_deadline() {
+    fn continuous_silence_does_not_extend_remote_floor_deadline() {
         let peer = 7;
         let started = tokio::time::Instant::now();
         let owners = std::collections::HashSet::from([peer]);
         let mut deadlines = std::collections::HashMap::new();
 
-        update_remote_release_deadline(peer, true, &owners, &mut deadlines, started);
+        update_remote_release_deadline(peer, false, &owners, &mut deadlines, started);
         let armed = deadlines[&peer];
         for elapsed_ms in [100, 200, 300, 400] {
             update_remote_release_deadline(
                 peer,
-                true,
+                false,
                 &owners,
                 &mut deadlines,
                 started + std::time::Duration::from_millis(elapsed_ms),
@@ -678,16 +701,46 @@ mod tests {
     }
 
     #[test]
-    fn dtx_from_non_owner_does_not_arm_remote_floor_deadline() {
+    fn last_speech_frame_arms_remote_floor_release_without_follow_up_audio() {
+        let peer = 7;
+        let started = tokio::time::Instant::now();
+        let owners = std::collections::HashSet::from([peer]);
+        let mut deadlines = std::collections::HashMap::new();
+
+        update_remote_release_deadline(peer, true, &owners, &mut deadlines, started);
+        let armed = started + REMOTE_RELEASE_DEBOUNCE;
+        assert_eq!(deadlines[&peer], armed);
+
+        let human_floor = HumanFloor::new();
+        human_floor.enter_remote(peer);
+        let mut owners = owners;
+        release_expired_remote_floors(armed, &mut owners, &mut deadlines, &human_floor);
+
+        assert!(!human_floor.is_blocked());
+        assert!(owners.is_empty());
+        assert!(deadlines.is_empty());
+    }
+
+    #[test]
+    fn silence_from_non_owner_does_not_arm_remote_floor_deadline() {
         let mut deadlines = std::collections::HashMap::new();
         update_remote_release_deadline(
             7,
-            true,
+            false,
             &std::collections::HashSet::new(),
             &mut deadlines,
             tokio::time::Instant::now(),
         );
         assert!(deadlines.is_empty());
+    }
+
+    #[test]
+    fn remote_speech_requires_non_dtx_audio_above_the_activity_floor() {
+        assert!(!is_remote_speech_frame(true, 0));
+        assert!(!is_remote_speech_frame(false, -127));
+        assert!(!is_remote_speech_frame(false, -56));
+        assert!(is_remote_speech_frame(false, -55));
+        assert!(is_remote_speech_frame(false, -12));
     }
 
     #[test]
