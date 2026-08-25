@@ -485,9 +485,9 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
-### 6.13 Personas (NIP-AP, kind:30175)
+### 6.13 Personas & Teams (NIP-AP, kind:30175 / kind:30176)
 
-Owner-authored agent definitions. These are the same coordinates
+Owner-authored agent definitions and rosters. These are the same coordinates
 Buzz Desktop reads, so run them with the **same key as the Desktop you expect
 the definitions to appear in** — a different key writes to a different
 coordinate space and Desktop shows nothing.
@@ -524,8 +524,15 @@ buzz personas list
 buzz personas get herring
 buzz personas get herring --json | jq .   # sig-stripped array of one
 
+# create a team; members resolve by d-tag OR persona display name
+buzz teams create --name "Red team" --persona Herring --persona quinby | jq .
+# → {event_id, accepted, message, team_id}
+buzz teams create --from ~/Downloads/Red\ team.team.json --replace | jq .
+buzz teams get red-team
+
 # delete (NIP-09 a-tag tombstone; the CLI re-reads to confirm the coordinate
 # is gone, because the relay accepts a tombstone that deleted nothing)
+buzz teams delete red-team
 buzz personas delete herring
 buzz personas get herring   # exits non-zero: not found
 ```
@@ -533,6 +540,9 @@ buzz personas get herring   # exits non-zero: not found
 Checks worth making by hand:
 
 ```bash
+# A member with no published persona is refused rather than seated empty
+buzz teams create --name "Ghost team" --persona nobody-published; echo "exit: $?"   # 1
+
 # Desktop rejects invisible characters in definition text; so must the CLI
 buzz personas create --display-name $'Review​er' --prompt x; echo "exit: $?"   # 1
 
@@ -543,6 +553,15 @@ buzz personas create --display-name "Herring" --prompt y; echo "exit: $?"       
 buzz personas create --display-name "Herring" --prompt x --shared --replace
 buzz personas create --display-name "Herring" --prompt y --replace
 buzz personas get herring | grep shared    # → shared: true
+
+# A team created from --name is addressed by its slug; the miss says so
+buzz teams create --name "Red team" --persona herring
+buzz teams get "Red team"; echo "exit: $?"   # 1, error names 'red-team'
+buzz teams get red-team                      # found
+
+# A team past the relay's content cap fails locally, before members resolve
+buzz teams create --name "Red team" --instructions "$(head -c 300000 /dev/zero | tr '\0' a)"
+echo "exit: $?"   # 1, "too large to publish"
 
 # A non-image --avatar is refused locally rather than after a round trip
 buzz personas create --display-name "Herring" --prompt x --avatar ./notes.txt; echo "exit: $?"  # 1
@@ -581,10 +600,15 @@ buzz personas create --from /tmp/bad.agent.json; echo "exit: $?"
 # Past the 5 MiB Desktop itself refuses to import
 head -c 6000000 /dev/zero | tr '\0' a > /tmp/big.agent.json
 buzz personas create --from /tmp/big.agent.json; echo "exit: $?"   # 1, "snapshot limit"
+
+# Same for a team snapshot, at Desktop's 25 MiB team limit
+jq '.team.instructions = ["be terse"]' ~/Downloads/Red\ team.team.json > /tmp/bad.team.json
+buzz teams create --from /tmp/bad.team.json; echo "exit: $?"
+# → "not a valid v1 team snapshot", exit 1
 ```
 
 Cross-check in Desktop: after `personas create`, the definition appears in the
-agent picker.
+agent picker; after `teams create`, the team appears with every member seated.
 
 ---
 
@@ -729,3 +753,6 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 63a | `personas create --avatar` | ☐ | Small image inlines with its metadata stripped; large flat art downscales back to inline; EXIF-bearing photo succeeds and lands upright; non-image → exit 1; `--avatar-url` conflict or non-http(s) URL → exit 1 |
 | 64 | `personas list` / `get` | ☐ | `--json` is a sig-stripped array |
 | 65 | `personas delete` | ☐ | Delete→get 404; warns when a published team still lists it |
+| 66 | `teams create` | ☐ | Flags, `--from` snapshot, members by d-tag and by display name, unpublished member → exit 1 |
+| 67 | `teams list` / `get` | ☐ | Members absent vs. empty render differently |
+| 68 | `teams delete` | ☐ | Delete→get 404; verify in Desktop the team is gone |

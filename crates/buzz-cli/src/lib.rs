@@ -240,6 +240,9 @@ enum Cmd {
     /// Publish and manage agent definitions (personas) on the relay
     #[command(subcommand)]
     Personas(PersonasCmd),
+    /// Group published personas into teams
+    #[command(subcommand)]
+    Teams(TeamsCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
@@ -1961,6 +1964,80 @@ pub enum PersonasCmd {
     },
 }
 
+/// Flags for `buzz teams create`.
+///
+/// A `clap::Args` struct rather than inline variant fields so the CLI surface
+/// and the resolver share one definition of the create inputs.
+#[derive(clap::Args)]
+pub struct TeamCreateArgs {
+    /// Team id (the event d-tag), used verbatim. Defaults to the name,
+    /// slugified. Buzz Desktop ids are raw UUIDs or identifiers like
+    /// `builtin-team:welcome` — pass one exactly as Desktop shows it
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Team name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Short description
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Instructions layered over each member's own prompt
+    #[arg(long, conflicts_with = "instructions_file")]
+    pub instructions: Option<String>,
+    /// Read the instructions from a file
+    #[arg(long)]
+    pub instructions_file: Option<String>,
+    /// Member persona slug; repeat for each member. Replaces the roster from
+    /// --from when both are given
+    #[arg(long)]
+    pub persona: Vec<String>,
+    /// Read fields from a Buzz Desktop `.team.json` export; members are taken
+    /// as persona slugs and must already be published
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Overwrite an existing team at this id
+    #[arg(long)]
+    pub replace: bool,
+}
+
+/// Subcommands for `buzz teams` — kind:30176 team definitions.
+///
+/// A team references personas by slug, so every member must already be
+/// published; `create` rejects a roster naming a persona that does not exist.
+// clap cannot derive `Args` through a `Box`, and a subcommand enum is built
+// once per process — boxing to even out variant sizes would trade an allocation
+// for nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+pub enum TeamsCmd {
+    /// Publish a team over already-published personas
+    #[command(after_help = "Examples:\n  \
+        buzz teams create --name 'Red team' --persona monocle --persona quinby --persona herring\n  \
+        buzz teams create --from ./red-team.team.json\n  \
+        buzz teams create --id red-team --name 'Red team' --instructions-file ./charter.md \\\n    \
+          --persona herring --replace")]
+    Create(TeamCreateArgs),
+    /// List teams published by this identity
+    List {
+        /// Emit JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one team
+    Get {
+        /// Team id
+        id: String,
+        /// Emit the relay event as a sig-stripped JSON array
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a team (NIP-09 coordinate tombstone)
+    Delete {
+        /// Team id
+        id: String,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2162,6 +2239,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Personas(sub) => commands::personas::dispatch(sub, &client).await,
+        Cmd::Teams(sub) => commands::teams::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
@@ -2329,6 +2407,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "teams",
             "upload",
             "users",
             "workflows",
@@ -2419,6 +2498,10 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "personas"),
+            vec!["create", "delete", "get", "list"]
+        );
+        assert_eq!(
+            names(&cmd, "teams"),
             vec!["create", "delete", "get", "list"]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);

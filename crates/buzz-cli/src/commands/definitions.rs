@@ -211,6 +211,11 @@ pub const SNAPSHOT_VERSION: u64 = 1;
 /// in Buzz Desktop's persona import.
 pub const MAX_AGENT_SNAPSHOT_BYTES: usize = 5 * 1024 * 1024;
 
+/// Largest team snapshot this CLI reads, mirroring `MAX_TEAM_SNAPSHOT_JSON_BYTES`
+/// in Buzz Desktop's team import. Larger than the agent cap because a team
+/// carries a snapshot per member.
+pub const MAX_TEAM_SNAPSHOT_BYTES: usize = 25 * 1024 * 1024;
+
 /// Load and parse a Buzz Desktop snapshot export (`.agent.json` /
 /// `.team.json`), checking the `format` and `version` envelope before the caller
 /// reads its payload. Refuses a file past `max_bytes`.

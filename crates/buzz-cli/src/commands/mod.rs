@@ -18,6 +18,7 @@ pub mod projects;
 pub mod reactions;
 pub mod repos;
 pub mod social;
+pub mod teams;
 pub mod upload;
 pub mod users;
 pub mod workflows;
