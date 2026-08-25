@@ -7,7 +7,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["buzz-codex-lab"]
+        "schemes": ["buzz", "buzz-codex-lab"]
       }
     },
     "updater": {
