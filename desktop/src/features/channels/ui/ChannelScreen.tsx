@@ -77,6 +77,7 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { classifyChannel } from "@/shared/channel-features";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
@@ -171,6 +172,12 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
+  // Classifies through the same channel-feature registry ChatHeader's glyph
+  // resolution uses (see `shared/channel-features`), rather than each call
+  // site below independently re-checking `channelType === "forum"`.
+  const isActiveChannelForum =
+    activeChannel !== null &&
+    classifyChannel(activeChannel)?.pluginId === "forum";
   const isHuddleTranscript = useIsHuddleTranscript(activeChannelId);
   const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
   const requireThreadEditResolutionRef = React.useRef<() => boolean>(
@@ -624,7 +631,7 @@ export function ChannelScreen({
     activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
   const timelineLoadingNow =
     activeChannel !== null &&
-    activeChannel.channelType !== "forum" &&
+    !isActiveChannelForum &&
     selectTimelineLoadingState(
       {
         isPending: messagesQuery.isPending,
@@ -709,9 +716,7 @@ export function ChannelScreen({
     channelContentWidthPx > 0 &&
     channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
   const isSinglePanelView =
-    isNarrowPanelViewport &&
-    activeChannel?.channelType !== "forum" &&
-    hasAuxiliaryPanel;
+    isNarrowPanelViewport && !isActiveChannelForum && hasAuxiliaryPanel;
   const shouldCompactHeaderActions =
     hasAuxiliaryPanel &&
     channelContentWidthPx > 0 &&
@@ -724,7 +729,7 @@ export function ChannelScreen({
   });
   const handleManageChannel = React.useCallback(() => {
     if (!requireThreadEditResolution()) return;
-    if (activeChannel?.channelType === "forum") {
+    if (isActiveChannelForum) {
       openGlobalChannelManagement();
       return;
     }
@@ -740,7 +745,7 @@ export function ChannelScreen({
     setProfilePanelPubkey(null);
     setChannelManagementOpen(true);
   }, [
-    activeChannel?.channelType,
+    isActiveChannelForum,
     channelManagementOpen,
     openGlobalChannelManagement,
     requireThreadEditResolution,
@@ -772,11 +777,12 @@ export function ChannelScreen({
         onManageChannel={handleManageChannel}
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView && !isHuddleTranscript}
-        transparentChrome={activeChannel?.channelType !== "forum"}
+        transparentChrome={!isActiveChannelForum}
       />
     ),
     [
       activeChannel,
+      isActiveChannelForum,
       activeChannelEphemeralDisplay,
       activeChannelTitle,
       shouldCompactHeaderActions,
@@ -824,7 +830,7 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            activeChannel.channelType === "forum" ? (
+            isActiveChannelForum ? (
               <ForumChannelContent
                 canResetPanelWidth={canResetThreadPanelWidth}
                 channel={activeChannel}

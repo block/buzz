@@ -1,13 +1,10 @@
 import {
   Activity,
   Bot,
-  CircleDot,
   Copy,
-  FileText,
   FolderGit2,
   Hash,
   House,
-  Lock,
   Zap,
 } from "lucide-react";
 import type * as React from "react";
@@ -15,6 +12,7 @@ import { toast } from "sonner";
 
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
+import { channelGlyph } from "@/shared/channel-features";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
@@ -69,19 +67,22 @@ function ChannelIcon({
     return <FolderGit2 className={HEADER_ICON_CLASS} />;
   }
 
-  if (channelType === "dm") {
-    return <CircleDot className={HEADER_ICON_CLASS} />;
+  // dm → private → forum → hash, in that order, is now a priority-ordered
+  // channel-feature plugin cascade (see `shared/channel-features/builtins.ts`)
+  // rather than an inline if-chain — `ChannelScreen`'s forum/chat content
+  // dispatch classifies through the same plugins, so there's one place that
+  // knows "what kind of channel is this" instead of two independently
+  // re-deriving it.
+  if (!channelType) {
+    return <Hash className={CHANNEL_HASH_ICON_CLASS} color="gray" />;
   }
-
-  if (visibility === "private") {
-    return <Lock className={HEADER_ICON_CLASS} />;
-  }
-
-  if (channelType === "forum") {
-    return <FileText className={HEADER_ICON_CLASS} />;
-  }
-
-  return <Hash className={CHANNEL_HASH_ICON_CLASS} color="gray" />;
+  const Glyph =
+    channelGlyph({ channelType, visibility: visibility ?? "open" }) ?? Hash;
+  return Glyph === Hash ? (
+    <Hash className={CHANNEL_HASH_ICON_CLASS} color="gray" />
+  ) : (
+    <Glyph className={HEADER_ICON_CLASS} />
+  );
 }
 
 export function ChatHeader({
