@@ -176,12 +176,13 @@ async function installAudienceFixtures(
   });
 }
 
-test("keeps a queued-attachment send locked until upload settlement", async ({
+test("keeps a queued-attachment send locked through upload and send settlement", async ({
   page,
 }) => {
   await installAudienceFixtures(page, {
     deferredComposerUploads: true,
-    uploadDelayMs: 3_000,
+    uploadDelayMs: 1_500,
+    sendMessageDelayMs: 2_000,
     uploadDescriptors: [
       {
         filename: "delayed-video.mp4",
@@ -197,9 +198,8 @@ test("keeps a queued-attachment send locked until upload settlement", async ({
 
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
-  await input.fill("@Mor");
-  await input.press("Tab");
-  await input.type(" delayed upload");
+  await automaticallyMention(composer, "Morgarita");
+  await input.type("delayed upload");
 
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),
@@ -211,32 +211,43 @@ test("keeps a queued-attachment send locked until upload settlement", async ({
     name: "delayed-video.mp4",
   });
 
-  const outgoingCountBefore = await page.evaluate(
-    () => window.__BUZZ_E2E_SIGNED_EVENTS__?.length ?? 0,
-  );
+  const sendAttempts = () =>
+    page.evaluate(
+      () =>
+        window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+          (entry) => entry.command === "send_channel_message",
+        ).length ?? 0,
+    );
+  const sendAttemptsBefore = await sendAttempts();
   await input.press("Enter");
+  await expect(input).toHaveText("@Morgarita ");
   await expect(composer.getByTestId("composer-upload-progress")).toBeVisible();
-  await page.waitForTimeout(500);
-  await expect(composer.getByTestId("send-message")).toBeDisabled();
+
+  // The restored persistent audience makes Enter an actionable second submit.
+  // It must remain blocked while the deferred attachment is still uploading.
   await input.press("Enter");
   await input.press("Enter");
+  await expect.poll(sendAttempts).toBe(sendAttemptsBefore);
 
   await expect(composer.getByTestId("composer-upload-progress")).toHaveCount(
     0,
-    {
-      timeout: 5_000,
-    },
+    { timeout: 5_000 },
   );
-  await expect
-    .poll(
-      () =>
-        page.evaluate(
-          (before) => (window.__BUZZ_E2E_SIGNED_EVENTS__?.length ?? 0) - before,
-          outgoingCountBefore,
-        ),
-      { timeout: 5_000 },
-    )
-    .toBe(1);
+  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
+
+  // Upload has settled, but the independently delayed send has not. The same
+  // restored audience must remain locked until finishSend() settles too.
+  await input.press("Enter");
+  await input.press("Enter");
+  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
+
+  await expect(
+    page
+      .getByTestId("message-row")
+      .filter({ hasText: "delayed upload" })
+      .last(),
+  ).toBeVisible({ timeout: 5_000 });
+  await expect.poll(sendAttempts).toBe(sendAttemptsBefore + 1);
 });
 
 test("automatically mentions multiple agents from the mention picker", async ({
