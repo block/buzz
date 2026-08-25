@@ -1,8 +1,10 @@
-//! Local CML validation and canonicalization commands.
+//! Local CML validation, canonicalization, and signed lifecycle commands.
 
 use std::{fs, io::Read};
 
 use crate::error::CliError;
+use buzz_core::cml_event::{CmlRole, CmlTransition};
+use nostr::{Event, EventId};
 
 /// Validate CML text without performing I/O.
 pub fn validate_input(input: &str) -> Result<(), CliError> {
@@ -49,6 +51,129 @@ fn read_input(path: &str) -> Result<String, CliError> {
     }
     fs::read_to_string(path)
         .map_err(|error| CliError::Usage(format!("failed to read {path}: {error}")))
+}
+
+/// Map a CLI transition name to its typed transition and actor role.
+fn parse_transition(name: &str) -> Result<(CmlTransition, CmlRole), CliError> {
+    use buzz_core::cml_event::{CmlRole as R, CmlTransition as T};
+    Ok(match name {
+        "plan" => (T::Plan, R::Planner),
+        "claim" => (T::Claim, R::Worker),
+        "start" => (T::Start, R::Worker),
+        "submit" => (T::Submit, R::Worker),
+        "block" => (T::Block, R::Worker),
+        "reject" => (T::ReviewReject, R::Reviewer),
+        "fix-submit" => (T::FixSubmit, R::Fixer),
+        "approve" => (T::ReviewApprove, R::Reviewer),
+        "merge" => (T::Merge, R::Planner),
+        "prove" => (T::RuntimeProve, R::Reviewer),
+        "cancel" => (T::Cancel, R::Planner),
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown transition {other:?}; expected plan|claim|start|submit|block|reject|fix-submit|approve|merge|prove|cancel"
+            )))
+        }
+    })
+}
+
+/// Run `buzz cml events publish` — sign and submit one lifecycle event.
+pub async fn cmd_events_publish(
+    client: &crate::client::BuzzClient,
+    private_key: &str,
+    transition: &str,
+    channel: &str,
+    task_file: &str,
+    prev: Option<&str>,
+) -> Result<(), CliError> {
+    let keys = nostr::Keys::parse(private_key)
+        .map_err(|error| CliError::Auth(format!("invalid private key: {error}")))?;
+    let channel_id = uuid::Uuid::parse_str(channel)
+        .map_err(|error| CliError::Usage(format!("invalid channel UUID: {error}")))?;
+    let (transition, role) = parse_transition(transition)?;
+    let task_text = read_input(task_file)?;
+    let task = buzz_core::cml::parse_cml(&task_text)
+        .map_err(|error| CliError::Usage(format!("invalid CML snapshot: {error}")))?;
+    let previous = match prev {
+        Some(hex) => Some(
+            EventId::from_hex(hex)
+                .map_err(|error| CliError::Usage(format!("invalid --prev event id: {error}")))?,
+        ),
+        None => None,
+    };
+    let builder = buzz_sdk::build_cml_transition(channel_id, &task, transition, role, previous)
+        .map_err(|error| CliError::Usage(format!("invalid transition: {error}")))?;
+    let event = builder
+        .sign_with_keys(&keys)
+        .map_err(|e| CliError::Other(format!("failed to sign transition event: {e}")))?;
+    buzz_core::cml_event::validate_cml_event(&event)
+        .map_err(|error| CliError::Usage(format!("self-check rejected event: {error}")))?;
+    let event_id = event.id.to_hex();
+    let raw = client
+        .submit_event(event)
+        .await
+        .map_err(|error| CliError::Other(format!("relay rejected event: {error}")))?;
+    crate::commands::parse_write_response(&raw, "duplicate CML transition")?;
+    println!(r#"{{"accepted":true,"event_id":"{event_id}"}}"#);
+    Ok(())
+}
+
+/// Run `buzz cml events reduce` — fetch and reduce a task's events.
+pub async fn cmd_events_reduce(
+    client: &crate::client::BuzzClient,
+    channel: &str,
+    task: &str,
+) -> Result<(), CliError> {
+    let channel_id = uuid::Uuid::parse_str(channel)
+        .map_err(|error| CliError::Usage(format!("invalid channel UUID: {error}")))?;
+    let task_id = uuid::Uuid::parse_str(task)
+        .map_err(|error| CliError::Usage(format!("invalid task UUID: {error}")))?;
+    let events = fetch_cml_events(client, channel_id, task_id).await?;
+    let reduced = buzz_core::cml_event::reduce_cml_events(&events)
+        .map_err(|error| CliError::Usage(format!("reduction failed: {error}")))?;
+    let snapshot = reduced
+        .task
+        .to_canonical_json()
+        .map_err(|error| CliError::Other(format!("serialize snapshot: {error}")))?;
+    let verdict = if reduced.conflicted {
+        "conflicted"
+    } else {
+        "ok"
+    };
+    println!(
+        r#"{{"verdict":"{verdict}","head":"{}","snapshot":{}}}"#,
+        reduced.head.to_hex(),
+        snapshot.trim_end()
+    );
+    Ok(())
+}
+
+async fn fetch_cml_events(
+    client: &crate::client::BuzzClient,
+    channel: uuid::Uuid,
+    task: uuid::Uuid,
+) -> Result<Vec<Event>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [43001, 43002, 43003, 43004, 43005, 43006],
+        "#h": [channel.to_string()],
+        "#d": [task.to_string()],
+        "limit": 500,
+    });
+    let raw = client
+        .query(&filter)
+        .await
+        .map_err(|error| CliError::Other(format!("relay query failed: {error}")))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| CliError::Other(format!("relay response not JSON: {error}")))?;
+    let events = value
+        .as_array()
+        .ok_or_else(|| CliError::Other("relay response is not an event array".into()))?;
+    events
+        .iter()
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|error| CliError::Other(format!("invalid event in response: {error}")))
+        })
+        .collect()
 }
 
 #[cfg(test)]

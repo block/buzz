@@ -351,16 +351,34 @@ impl CmlTask {
 
     fn validate_status_lease(&self) -> Result<(), CmlError> {
         let lease_holder = self.lease.as_ref().map(|lease| lease.holder.as_str());
-        let expected_holder = match self.status {
+        match self.status {
             CmlStatus::Claimed | CmlStatus::Working | CmlStatus::Review => {
-                self.roles.worker.as_deref()
+                // Worker holds through submit; after a fix round the fixer
+                // submits back to review while still holding the lease.
+                let round_tripped_by_fixer = self.status == CmlStatus::Review
+                    && self.review.round > 0
+                    && self.roles.fixer.is_some();
+                if lease_holder.is_none() {
+                    return invalid("status requires a lease held by its assigned worker or fixer");
+                }
+                let worker_ok = lease_holder == self.roles.worker.as_deref();
+                let fixer_ok =
+                    round_tripped_by_fixer && lease_holder == self.roles.fixer.as_deref();
+                if !worker_ok && !fixer_ok {
+                    return invalid("status requires a lease held by its assigned worker or fixer");
+                }
             }
-            CmlStatus::Fixing => self.roles.fixer.as_deref(),
+            CmlStatus::Fixing => {
+                if lease_holder.is_none() || lease_holder != self.roles.fixer.as_deref() {
+                    return invalid("fixing requires a lease held by the assigned fixer");
+                }
+            }
             CmlStatus::Blocked => {
-                if lease_holder == self.roles.fixer.as_deref() {
-                    self.roles.fixer.as_deref()
-                } else {
-                    self.roles.worker.as_deref()
+                let holder_ok = lease_holder.is_some()
+                    && (lease_holder == self.roles.worker.as_deref()
+                        || lease_holder == self.roles.fixer.as_deref());
+                if !holder_ok {
+                    return invalid("blocked requires a lease held by the worker or fixer");
                 }
             }
             CmlStatus::Proposed
@@ -375,9 +393,6 @@ impl CmlTask {
                 }
                 return Ok(());
             }
-        };
-        if expected_holder.is_none() || lease_holder != expected_holder {
-            return invalid("status requires a lease held by its assigned worker or fixer");
         }
         Ok(())
     }
