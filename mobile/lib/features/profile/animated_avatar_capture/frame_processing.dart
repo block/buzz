@@ -88,3 +88,23 @@ Uint8List _applySegmentationMask(_MaskRequest request) {
   }
   return image.encodePng(result, level: 4);
 }
+
+/// Encodes one poster frame for validating animated-avatar framing parity.
+@visibleForTesting
+Uint8List encodeAnimatedAvatarPoster({
+  required Uint8List frame,
+  required double scale,
+}) => _encodeAvatar(
+  _EncodeRequest(
+    frames: [frame],
+    posterIndex: 0,
+    scale: scale,
+    offsetX: 0,
+    offsetY: 0,
+    backdropColor: 0xff0000ff,
+    personOutline: false,
+    shapeScale: 1,
+    shapeOffsetX: 0,
+    shapeOffsetY: 0,
+  ),
+).poster;

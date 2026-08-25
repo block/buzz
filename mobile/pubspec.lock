@@ -162,7 +162,7 @@ packages:
     source: hosted
     version: "0.10.2"
   camera_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: camera_platform_interface
       sha256: "4524ca6eb4176b066864036ad4fe02c3e4863e63b77eadc21a5bf56824f43498"

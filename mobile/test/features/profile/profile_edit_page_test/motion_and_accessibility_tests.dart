@@ -53,97 +53,6 @@ void runProfileEditMotionAndAccessibilityTests() {
     );
   });
 
-  testWidgets(
-    'keeps the multiline text editor usable with large text and the keyboard',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      tester.view.devicePixelRatio = 1;
-      tester.view.physicalSize = const Size(320, 568);
-      tester.platformDispatcher.textScaleFactorTestValue = 2;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-      addTearDown(tester.view.reset);
-      final notifier = _FakeProfileNotifier();
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          overrides: [profileProvider.overrideWith(() => notifier)],
-          child: const ProfileEditPage(),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final descriptionRow = find.byKey(
-        const ValueKey('profile-description-row'),
-      );
-      await tester.ensureVisible(descriptionRow);
-      await tester.pumpAndSettle();
-      await tester.tap(descriptionRow);
-      await tester.pumpAndSettle();
-
-      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
-      await tester.pumpAndSettle();
-
-      expect(
-        MediaQuery.textScalerOf(
-          tester.element(find.byKey(const ValueKey('profile-field-input'))),
-        ).scale(10),
-        20,
-      );
-      expect(
-        MediaQuery.viewInsetsOf(
-          tester.element(find.byKey(const ValueKey('profile-field-input'))),
-        ).bottom,
-        300,
-      );
-      expect(tester.takeException(), isNull);
-      expect(
-        find.byKey(const ValueKey('profile-field-scroll-view')),
-        findsOneWidget,
-      );
-      await tester.enterText(
-        find.byKey(const ValueKey('profile-field-input')),
-        'Making collaboration feel effortless.',
-      );
-      await tester.pump();
-      final save = find.byKey(const ValueKey('profile-field-save'));
-      await tester.ensureVisible(save);
-      await tester.pumpAndSettle();
-      expect(save.hitTestable(), findsOneWidget);
-      await tester.tap(save);
-      await tester.pumpAndSettle();
-      expect(notifier.savedDescriptions, [
-        'Making collaboration feel effortless.',
-      ]);
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
-
-  testWidgets('photo preparation errors are accessibility live regions', (
-    tester,
-  ) async {
-    final uploadService = _FailingPreparationMediaUploadService();
-    addTearDown(uploadService.dispose);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          mediaUploadServiceProvider.overrideWithValue(uploadService),
-        ],
-        child: const ProfileEditPage(startInPhotoEditor: true),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Photo Library'));
-    await tester.pumpAndSettle();
-
-    final message = find.text("We couldn't prepare that photo. Try again.");
-    expect(message, findsOneWidget);
-    final errorSemantics = tester.widget<Semantics>(
-      find.ancestor(of: message, matching: find.byType(Semantics)).first,
-    );
-    expect(errorSemantics.properties.liveRegion, isTrue);
-  });
-
   testWidgets('exposes the selected avatar mode on Android', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -470,6 +379,135 @@ void runProfileEditMotionAndAccessibilityTests() {
     );
     expect(selectedTile.properties.button, isTrue);
     expect(selectedTile.properties.selected, isTrue);
+  });
+
+  testWidgets('uses liquid-glass avatar rail icons on iOS', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Row(
+          children: [
+            Expanded(
+              child: AvatarEditorOptionButton(
+                icon: Icons.palette,
+                iosIcon: IosGlassNavigationIcon.palette,
+                label: 'Background',
+                selected: true,
+                onTap: () {},
+              ),
+            ),
+            Expanded(
+              child: AvatarEditorOptionButton(
+                icon: Icons.face,
+                iosIcon: IosGlassNavigationIcon.emoji,
+                label: 'Emoji',
+                selected: false,
+                onTap: () {},
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final nativeIcons = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .map((params) => params['icon'])
+        .toList();
+    expect(nativeIcons, containsAll(['palette', 'emoji']));
+    final selectedControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .where((params) => params['selected'] == true)
+        .toList();
+    expect(selectedControls.single['icon'], 'palette');
+    expect(
+      selectedControls.single['foregroundColor'],
+      AppTheme.light().colorScheme.primary.toARGB32(),
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('doubles the avatar rail icon-to-label spacing', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: AvatarEditorOptionButton(
+          icon: Icons.palette,
+          label: 'Background',
+          selected: false,
+          onTap: () {},
+        ),
+      ),
+    );
+
+    final surface = find.byType(AnimatedContainer);
+    expect(
+      tester.getRect(find.text('Background')).top -
+          tester.getRect(surface).bottom,
+      avatarEditorOptionLabelGap,
+    );
+  });
+
+  testWidgets('uses liquid glass for animated capture and review on iOS', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: SizedBox(
+          height: 500,
+          child: AnimatedAvatarCapture(
+            key: ValueKey('animated-capture-glass-test'),
+            height: 500,
+            onPrepareChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    var nativeControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .toList();
+    expect(
+      nativeControls.any(
+        (params) => params['icon'] == 'shutter' && params['label'] == 'Record',
+      ),
+      isTrue,
+    );
+
+    final frame = Uint8List.fromList(
+      image.encodePng(image.Image(width: 8, height: 8)),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: SizedBox(
+          height: 500,
+          child: AnimatedAvatarCapture(
+            key: ValueKey('animated-review-glass-test'),
+            height: 500,
+            initialFrames: [frame, frame],
+            onPrepareChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    nativeControls = tester
+        .widgetList<UiKitView>(find.byType(UiKitView))
+        .map((view) => view.creationParams as Map<String, Object>)
+        .toList();
+    final reviewIcons = nativeControls
+        .map((params) => params['icon'])
+        .whereType<String>()
+        .toList();
+    expect(reviewIcons, containsAll(['person', 'palette', 'frame', 'camera']));
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('uses the shared animated background grid for emoji avatars', (

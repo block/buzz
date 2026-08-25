@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
+import 'package:buzz/features/profile/animated_avatar_capture.dart';
 import 'package:buzz/features/profile/emoji_avatar_tile.dart';
+import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -18,6 +21,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_native_segmented_control.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/shared/widgets/progressive_animated_avatar.dart';
 import 'package:flutter/foundation.dart';
@@ -540,13 +544,19 @@ void main() {
     await tester.pump(const Duration(milliseconds: 150));
     expect(
       tester.getCenter(find.byKey(const ValueKey('emoji-avatar-preview'))).dy,
-      closeTo(screenSize.height / 2 - avatarBackgroundPreviewShift, 0.01),
+      closeTo(screenSize.height / 2 - 140, 0.01),
     );
     expect(
       tester
           .getSize(find.byKey(const ValueKey('emoji-avatar-picker-content')))
           .height,
-      lessThan(expandedPickerHeight),
+      expandedPickerHeight,
+    );
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('emoji-background-editor'))),
+      tester.getCenter(
+        find.byKey(const ValueKey('emoji-background-editor-alignment')),
+      ),
     );
 
     await tester.tap(find.text('Animated'));
@@ -632,7 +642,14 @@ void main() {
           profileProvider.overrideWith(() => notifier),
           mediaUploadServiceProvider.overrideWithValue(uploadService),
         ],
-        child: const ProfileEditPage(),
+        child: ProfileEditPage(
+          imageAvatarCaptureBuilder:
+              ({required height, required onAccepted, required onClosed}) =>
+                  _FakeImageAvatarCapture(
+                    onAccepted: onAccepted,
+                    onClosed: onClosed,
+                  ),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -640,18 +657,67 @@ void main() {
     await tester.tap(find.text('Edit Photo'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Camera'));
-    await _waitForAvatarCropToLoad(tester);
-    expect(find.text('Position Photo'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 200)),
-    );
+    await tester.pump();
+    expect(find.byKey(const ValueKey('fake-image-camera')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('fake-image-camera-accept')));
     await tester.pumpAndSettle();
     expect(notifier.savedAvatarUrls, isEmpty);
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
     await tester.pumpAndSettle();
 
-    expect(notifier.savedAvatarUrls, ['https://relay.example/camera.png']);
+    expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
+  });
+
+  testWidgets('keeps the local animation visible after profile Save', (
+    tester,
+  ) async {
+    final notifier = _FakeProfileNotifier(updatesProfileState: true);
+    final uploadService = _FakeMediaUploadService();
+    addTearDown(uploadService.dispose);
+    final frame = Uint8List.fromList(
+      image.encodePng(
+        image.Image(width: 8, height: 8)..setPixelRgba(4, 4, 255, 0, 0, 255),
+      ),
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: ProfileEditPage(
+          animatedAvatarCaptureBuilder:
+              ({required height, required onPrepareChanged}) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  onPrepareChanged(
+                    () async => ProfileAnimatedAvatarDraft(
+                      animation: frame,
+                      poster: frame,
+                    ),
+                  );
+                });
+                return const SizedBox(
+                  key: ValueKey('fake-animated-avatar-review'),
+                );
+              },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Animated'));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('progressive-animated-avatar-local-handoff')),
+      findsOneWidget,
+    );
+    expect(notifier.savedAvatarUrls.single, contains('#buzz-anim='));
   });
 
   testWidgets('saves a desktop-compatible emoji avatar', (tester) async {
@@ -847,10 +913,12 @@ class _FakeProfileNotifier extends ProfileNotifier {
       about: 'Building Buzz',
     ),
     this.failedAvatarSaves = 0,
+    this.updatesProfileState = false,
   });
 
   final UserProfile profile;
   int failedAvatarSaves;
+  final bool updatesProfileState;
   final savedDisplayNames = <String>[];
   final savedDescriptions = <String>[];
   final savedAvatarUrls = <String>[];
@@ -895,27 +963,35 @@ class _FakeProfileNotifier extends ProfileNotifier {
       throw Exception('profile publish failed');
     }
     savedAvatarUrls.add(avatarUrl);
-  }
-}
-
-class _FailingPreparationMediaUploadService extends _FakeMediaUploadService {
-  @override
-  Future<Uint8List> prepareImageBytes(XFile image) async {
-    throw Exception('image preparation failed');
+    if (updatesProfileState) {
+      final current = state.requireValue!;
+      state = AsyncData(
+        UserProfile(
+          pubkey: current.pubkey,
+          displayName: current.displayName,
+          avatarUrl: avatarUrl,
+          about: current.about,
+          nip05Handle: current.nip05Handle,
+        ),
+      );
+    }
   }
 }
 
 class _FakeMediaUploadService extends MediaUploadService {
-  _FakeMediaUploadService({this.delayGallery = false})
-    : super(
-        baseUrl: 'https://relay.example',
-        nsec: null,
-        pickGalleryImage: () async => null,
-        pickGalleryVideo: () async => null,
-      );
+  _FakeMediaUploadService({
+    this.delayGallery = false,
+    this.failImagePreparation = false,
+  }) : super(
+         baseUrl: 'https://relay.example',
+         nsec: null,
+         pickGalleryImage: () async => null,
+         pickGalleryVideo: () async => null,
+       );
 
   var _camera = false;
   final bool delayGallery;
+  final bool failImagePreparation;
   final _gallerySelection = Completer<XFile?>();
   int uploadCount = 0;
 
@@ -941,7 +1017,10 @@ class _FakeMediaUploadService extends MediaUploadService {
   }
 
   @override
-  Future<Uint8List> prepareImageBytes(XFile image) => image.readAsBytes();
+  Future<Uint8List> prepareImageBytes(XFile image) async {
+    if (failImagePreparation) throw Exception('image preparation failed');
+    return image.readAsBytes();
+  }
 
   @override
   Future<BlobDescriptor> uploadBytes(
@@ -961,4 +1040,33 @@ class _FakeMediaUploadService extends MediaUploadService {
       uploaded: 1,
     );
   }
+}
+
+class _FakeImageAvatarCapture extends StatelessWidget {
+  const _FakeImageAvatarCapture({
+    required this.onAccepted,
+    required this.onClosed,
+  });
+
+  final ValueChanged<Uint8List> onAccepted;
+  final VoidCallback onClosed;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    key: const ValueKey('fake-image-camera'),
+    children: [
+      TextButton(
+        key: const ValueKey('fake-image-camera-close'),
+        onPressed: onClosed,
+        child: const Text('Close fake camera'),
+      ),
+      TextButton(
+        key: const ValueKey('fake-image-camera-accept'),
+        onPressed: () => onAccepted(
+          Uint8List.fromList(image.encodeJpg(image.Image(width: 8, height: 8))),
+        ),
+        child: const Text('Accept fake photo'),
+      ),
+    ],
+  );
 }
