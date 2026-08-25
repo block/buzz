@@ -450,6 +450,46 @@ for (const { theme, color } of [
   });
 }
 
+test("macOS reveal waits for the themed window backing", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript(() => {
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page, { windowBackingColorDelayMs: 500 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "set_window_backing_color",
+        ),
+      ),
+    )
+    .toBe(true);
+  expect(
+    await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+        (entry) => entry.command === "initial-render-ready",
+      ),
+    ),
+  ).toBe(false);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "initial-render-ready",
+        ),
+      ),
+    )
+    .toBe(true);
+});
+
 test("custom section icon and name align with channel columns", async ({
   page,
 }) => {

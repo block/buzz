@@ -189,6 +189,8 @@ type E2eConfig = {
   mock?: {
     /** Tauri window label exposed to the app. Defaults to the main window. */
     windowLabel?: string;
+    /** Delay native backing updates to verify startup reveal ordering. */
+    windowBackingColorDelayMs?: number;
     ttsSettings?: {
       version: number;
       agentTextToSpeech: boolean;
@@ -14120,8 +14122,13 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
         return null;
-      case "set_window_backing_color":
+      case "set_window_backing_color": {
+        const delayMs = activeConfig?.mock?.windowBackingColorDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
         return null;
+      }
       case "set_window_vibrancy":
         return null;
       case "plugin:window|is_fullscreen":
