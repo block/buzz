@@ -239,6 +239,18 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+    /// Harness-side publish fallback metadata for the in-flight channel turn.
+    /// Cleared at dispatch and populated only after reply anchoring is resolved.
+    pub reply_fallback: Option<ReplyFallbackContext>,
+}
+
+/// Information needed to publish an ACP final response without exposing the
+/// agent's Nostr signing key to its terminal subprocess.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplyFallbackContext {
+    pub channel_id: Uuid,
+    pub reply_to: Option<String>,
+    pub turn_started_at_secs: u64,
 }
 
 /// Package name reported by `claude-agent-acp` in its `initialize` response.
@@ -1750,6 +1762,7 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
+    agent.reply_fallback = None;
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -1759,6 +1772,7 @@ pub async fn run_prompt_task(
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
+    let turn_started_at_secs = nostr::Timestamp::now().as_secs();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2345,6 +2359,16 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+
+        agent.reply_fallback = Some(ReplyFallbackContext {
+            channel_id: b.channel_id,
+            reply_to: crate::queue::reply_anchor_for_batch(
+                b,
+                channel_info.as_ref(),
+                profile_lookup.as_ref(),
+            ),
+            turn_started_at_secs,
+        });
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -4584,6 +4608,119 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+/// Publish the ACP turn's final text only when the agent did not already send
+/// a Buzz message during the turn.
+///
+/// The relay query is deliberately fail-closed: an unavailable or malformed
+/// response suppresses the fallback, because a missed reply is recoverable but
+/// a duplicate can notify people twice. The one-second Nostr timestamp
+/// granularity can also suppress a fallback when the agent authored another
+/// message in the same channel during the start second; that is the safer side
+/// of the same tradeoff.
+pub(crate) async fn post_agent_reply_fallback(
+    rest: &crate::relay::RestClient,
+    context: &ReplyFallbackContext,
+    content: &str,
+) {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel = context.channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .author(rest.keys.public_key())
+        .custom_tags(h_tag, [channel.as_str()])
+        .since(nostr::Timestamp::from(context.turn_started_at_secs))
+        .limit(1);
+
+    let existing = match tokio::time::timeout(
+        Duration::from_secs(5),
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(value)) => match value.as_array() {
+            Some(events) => !events.is_empty(),
+            None => {
+                tracing::warn!(
+                    channel = %context.channel_id,
+                    "reply fallback query returned malformed data — suppressing publish"
+                );
+                return;
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(
+                channel = %context.channel_id,
+                "reply fallback query failed — suppressing publish: {e}"
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                channel = %context.channel_id,
+                "reply fallback query timed out — suppressing publish"
+            );
+            return;
+        }
+    };
+    if existing {
+        tracing::debug!(
+            channel = %context.channel_id,
+            "agent already published during turn — suppressing reply fallback"
+        );
+        return;
+    }
+
+    let thread_ref = context.reply_to.as_deref().and_then(|reply_to| {
+        let event_id = nostr::EventId::from_hex(reply_to).ok()?;
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: event_id,
+            parent_event_id: event_id,
+        })
+    });
+    let builder = match buzz_sdk::build_message(
+        context.channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+    ) {
+        Ok(builder) => builder,
+        Err(e) => {
+            tracing::warn!(channel = %context.channel_id, "reply fallback build failed: {e}");
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(event) => event,
+        Err(e) => {
+            tracing::warn!(channel = %context.channel_id, "reply fallback sign failed: {e}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => tracing::info!(
+            channel = %context.channel_id,
+            event_id = %event.id,
+            "published ACP final response via harness fallback"
+        ),
+        Ok(Err(e)) => {
+            tracing::warn!(channel = %context.channel_id, "reply fallback publish failed: {e}")
+        }
+        Err(_) => tracing::warn!(channel = %context.channel_id, "reply fallback publish timed out"),
+    }
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -5983,6 +6120,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            reply_fallback: None,
         };
         agent.state.heartbeat_session = Some("live-session".into());
 
@@ -6080,6 +6218,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            reply_fallback: None,
         };
         agent
             .state
@@ -6255,6 +6394,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            reply_fallback: None,
         };
         agent
             .state
@@ -6408,6 +6548,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            reply_fallback: None,
         };
         agent
             .state
@@ -7407,6 +7548,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            reply_fallback: None,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -7468,6 +7610,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            reply_fallback: None,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop
@@ -8490,6 +8633,145 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+
+    async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        let mut buf = [0_u8; 4096];
+        let header_end = loop {
+            let read = socket.read(&mut buf).await.expect("read test request");
+            assert!(read > 0, "connection closed before request headers");
+            bytes.extend_from_slice(&buf[..read]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("content length"))
+            })
+            .unwrap_or(0);
+        while bytes.len() < header_end + content_length {
+            let read = socket.read(&mut buf).await.expect("read test request body");
+            assert!(read > 0, "connection closed before request body");
+            bytes.extend_from_slice(&buf[..read]);
+        }
+        String::from_utf8(bytes[header_end..header_end + content_length].to_vec())
+            .expect("utf8 request body")
+    }
+
+    async fn write_test_http_json(socket: &mut tokio::net::TcpStream, body: &str) {
+        use tokio::io::AsyncWriteExt;
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write test response");
+    }
+
+    #[tokio::test]
+    async fn reply_fallback_publishes_threaded_message_when_turn_has_no_agent_post() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (submitted_tx, mut submitted_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut query_socket, _) = listener.accept().await.expect("accept query");
+            let _ = read_test_http_request(&mut query_socket).await;
+            write_test_http_json(&mut query_socket, "[]").await;
+
+            let (mut submit_socket, _) = listener.accept().await.expect("accept submit");
+            let body = read_test_http_request(&mut submit_socket).await;
+            submitted_tx.send(body).expect("capture submitted event");
+            write_test_http_json(&mut submit_socket, "{}").await;
+        });
+
+        let channel_id = Uuid::new_v4();
+        let reply_to = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        post_agent_reply_fallback(
+            &rest,
+            &ReplyFallbackContext {
+                channel_id,
+                reply_to: Some(reply_to.into()),
+                turn_started_at_secs: Timestamp::now().as_secs(),
+            },
+            "  fallback reply  ",
+        )
+        .await;
+        server.await.expect("test server");
+
+        let event: serde_json::Value =
+            serde_json::from_str(&submitted_rx.recv().await.expect("submitted event body"))
+                .expect("submitted event JSON");
+        assert_eq!(event["kind"], json!(9));
+        assert_eq!(event["content"], json!("fallback reply"));
+        let tags = event["tags"].as_array().expect("event tags");
+        assert!(tags.iter().any(|tag| tag == &json!(["h", channel_id])));
+        assert!(tags.iter().any(|tag| tag.as_array().is_some_and(|parts| {
+            parts.first() == Some(&json!("e")) && parts.get(1) == Some(&json!(reply_to))
+        })));
+    }
+
+    #[tokio::test]
+    async fn reply_fallback_suppresses_publish_when_agent_already_posted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (mut query_socket, _) = listener.accept().await.expect("accept query");
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            let _ = read_test_http_request(&mut query_socket).await;
+            write_test_http_json(&mut query_socket, "[{}]").await;
+
+            if tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_ok()
+            {
+                server_requests.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        post_agent_reply_fallback(
+            &rest,
+            &ReplyFallbackContext {
+                channel_id: Uuid::new_v4(),
+                reply_to: None,
+                turn_started_at_secs: Timestamp::now().as_secs(),
+            },
+            "must not be submitted",
+        )
+        .await;
+        server.await.expect("test server");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 }
 
