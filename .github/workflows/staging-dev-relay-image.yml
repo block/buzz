@@ -16,10 +16,6 @@ on:
         required: true
         type: string
 
-concurrency:
-  group: staging-dev-relay-image-${{ github.workflow }}-${{ github.run_id }}
-  cancel-in-progress: false
-
 permissions: {}
 
 env:
@@ -119,7 +115,7 @@ jobs:
             exit 1
           fi
 
-          image_tag="dev-sha-${target_sha}"
+          image_tag="dev-sha-${target_sha}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           {
             echo "target_sha=${target_sha}"
             echo "image_tag=${image_tag}"
@@ -219,8 +215,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
     steps:
       - name: Download per-arch digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -257,13 +251,6 @@ jobs:
             --format '{{json .Manifest}}' | jq -r '.digest')
           echo "digest=${merged_digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Attest provenance for the merged image
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
-        with:
-          subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.manifest.outputs.digest }}
-          push-to-registry: true
-
       - name: Deployment summary
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
@@ -285,10 +272,5 @@ jobs:
             echo "  image:"
             echo "    repository: ${ECR_REPOSITORY}"
             echo "    tag: ${IMAGE_TAG}"
-            echo '```'
-            echo
-            echo "Verify provenance:"
-            echo '```'
-            echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner block"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
