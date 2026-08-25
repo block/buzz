@@ -456,7 +456,7 @@ test("the mention button opens settings and can undo an address", async ({
     .toContain(AGENT_A);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
 });
 
 test("always-mentioned agents remain in the mention button while Enter-send resolves", async ({
