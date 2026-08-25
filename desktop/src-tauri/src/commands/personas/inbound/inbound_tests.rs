@@ -879,6 +879,7 @@ fn inbound_managed_agent_content(
         respond_to_allowlist: vec![],
         device_id: None,
         device_label: None,
+        capabilities: vec![],
     }
 }
 

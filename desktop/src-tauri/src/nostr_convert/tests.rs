@@ -563,6 +563,102 @@ fn managed_agent_directory_drops_invalid_device_metadata_but_keeps_the_agent() {
     assert_eq!(agents[0].device_label, None);
 }
 
+/// REG-4: owner-attested capability strings and model id published on a
+/// kind:30177 record reach the directory, and stay empty/absent for records
+/// published by builds that predate the fields.
+#[test]
+fn managed_agent_directory_surfaces_owner_attested_capabilities_and_model() {
+    let agent_keys = Keys::generate();
+    let owner_keys = Keys::generate();
+    let agent_pubkey = agent_keys.public_key().to_hex();
+
+    let auth_tag_json =
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+            .expect("compute auth tag");
+    let auth_tag_values: Vec<String> =
+        serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+    let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Bumble"}"#)
+        .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+        .sign_with_keys(&agent_keys)
+        .expect("sign profile");
+
+    let stamped = EventBuilder::new(
+        Kind::Custom(30177),
+        serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "anyone",
+            "capabilities": ["web-search", "code-review"],
+            "model": "claude-opus-4",
+        })
+        .to_string(),
+    )
+    .tags([Tag::parse(["d", agent_pubkey.as_str()]).expect("parse d tag")])
+    .sign_with_keys(&owner_keys)
+    .expect("sign managed-agent event");
+
+    let agents = relay_agents_from_managed_agent_events(&[stamped], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].capabilities, vec!["web-search", "code-review"]);
+    assert_eq!(agents[0].model.as_deref(), Some("claude-opus-4"));
+
+    // A record from an older build yields empty capabilities and no model —
+    // never fabricated values.
+    let unstamped = managed_agent_event(&owner_keys, &agent_pubkey, "Bumble", "anyone", &[]);
+    let agents =
+        relay_agents_from_managed_agent_events(&[unstamped], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].capabilities, Vec::<String>::new());
+    assert_eq!(agents[0].model, None);
+}
+
+/// REG-4 negative: the validate-or-None rule applies per capability string
+/// and to the model — a hostile value degrades alone and never hides a real,
+/// reachable agent.
+#[test]
+fn managed_agent_directory_drops_invalid_capabilities_and_model_but_keeps_the_agent() {
+    let agent_keys = Keys::generate();
+    let owner_keys = Keys::generate();
+    let agent_pubkey = agent_keys.public_key().to_hex();
+
+    let auth_tag_json =
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+            .expect("compute auth tag");
+    let auth_tag_values: Vec<String> =
+        serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+    let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Bumble"}"#)
+        .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+        .sign_with_keys(&agent_keys)
+        .expect("sign profile");
+
+    // A bidi override in one capability, an over-long second capability, and
+    // a bidi-bearing model — all correctly signed.
+    let hostile = EventBuilder::new(
+        Kind::Custom(30177),
+        serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "anyone",
+            "capabilities": ["ok-capability", "evil\u{202E}cap", "a".repeat(65).as_str()],
+            "model": "evil\u{202E}model",
+        })
+        .to_string(),
+    )
+    .tags([Tag::parse(["d", agent_pubkey.as_str()]).expect("parse d tag")])
+    .sign_with_keys(&owner_keys)
+    .expect("sign managed-agent event");
+
+    let agents = relay_agents_from_managed_agent_events(&[hostile], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1, "the agent itself must still be reachable");
+    assert_eq!(agents[0].name, "Bumble");
+    assert_eq!(
+        agents[0].capabilities,
+        vec!["ok-capability"],
+        "the valid capability survives; bidi and over-long ones are dropped"
+    );
+    assert_eq!(agents[0].model, None, "bidi-bearing model dropped");
+}
+
 #[test]
 fn managed_agent_directory_rejects_agents_without_verified_owner_profiles() {
     let owner_keys = Keys::generate();

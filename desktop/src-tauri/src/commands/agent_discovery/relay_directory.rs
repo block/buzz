@@ -263,6 +263,7 @@ mod tests {
                 respond_to_allowlist: Vec::new(),
                 device_id: None,
                 device_label: None,
+                model: None,
             },
             RelayAgentInfo {
                 pubkey: "c".repeat(64),
@@ -277,6 +278,7 @@ mod tests {
                 respond_to_allowlist: Vec::new(),
                 device_id: None,
                 device_label: None,
+                model: None,
             },
         ];
 
@@ -305,6 +307,7 @@ mod tests {
             respond_to_allowlist: Vec::new(),
             device_id: None,
             device_label: None,
+            model: None,
         }];
 
         retain_agents_allowed_by_build(&mut agents, false);

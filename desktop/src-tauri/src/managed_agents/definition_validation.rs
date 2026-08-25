@@ -86,6 +86,31 @@ pub(crate) fn validate_device_label(label: &str) -> Result<(), String> {
     validate_visible_text(trimmed, "Device name", false)
 }
 
+/// Maximum length of one owner-attested directory string (capability or
+/// model), in `char`s.
+pub(crate) const MAX_DIRECTORY_STRING_CHARS: usize = 64;
+
+/// Validate an owner-attested directory string (capability label, model id)
+/// against the same visible-text policy as a device label.
+///
+/// These strings are published in world-readable kind:30177 events and
+/// rendered verbatim beside an agent's name in other people's clients. Same
+/// threat and same policy class as [`validate_device_label`]: zero-width
+/// characters and bidi overrides must not pass.
+pub(crate) fn validate_capability(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Capability string must not be empty".to_string());
+    }
+    let count = trimmed.chars().count();
+    if count > MAX_DIRECTORY_STRING_CHARS {
+        return Err(format!(
+            "Capability string is too long ({count} characters, max {MAX_DIRECTORY_STRING_CHARS})"
+        ));
+    }
+    validate_visible_text(trimmed, "Capability string", false)
+}
+
 fn validate_visible_text(
     value: &str,
     label: &str,
