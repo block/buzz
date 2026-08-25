@@ -701,9 +701,9 @@ class _MessageCodeBlock extends HookWidget {
     }
 
     final codeBaseStyle = TextStyle(
-      fontFamily: 'GeistMono',
-      fontSize: 13,
-      height: 1.5,
+      fontFamily: CodeStyle.fontFamily,
+      fontSize: CodeStyle.fontSize,
+      height: CodeStyle.lineHeight,
       color: context.colors.onSurface,
     );
     final isDark = context.theme.brightness == Brightness.dark;
@@ -715,11 +715,9 @@ class _MessageCodeBlock extends HookWidget {
     return Container(
       margin: const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest.withValues(alpha: 0.6),
+        color: CodeStyle.background(context.colors),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: context.colors.outline.withValues(alpha: 0.7),
-        ),
+        border: Border.all(color: CodeStyle.border(context.colors)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
