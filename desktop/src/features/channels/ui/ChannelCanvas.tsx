@@ -51,6 +51,11 @@ export function ChannelCanvas({
 
   const canvasContent = canvasQuery.data?.content ?? null;
   const canvasRevision = canvasQuery.data?.eventId ?? null;
+  // A canvas exists whenever a persisted revision is present — an empty-string
+  // revision is a valid kind:40100 write (restore can republish one), so
+  // existence, the Create/Edit label, and History must key off the revision id,
+  // not content truthiness.
+  const canvasExists = canvasRevision !== null;
   // Defer the single large Markdown parse so opening the canvas commits the
   // surrounding chrome immediately and the heavy render reconciles after.
   const deferredCanvasContent = React.useDeferredValue(canvasContent);
@@ -144,7 +149,7 @@ export function ChannelCanvas({
 
   return (
     <div className="space-y-3">
-      {canvasContent ? (
+      {canvasExists ? (
         <div
           className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3"
           data-testid="channel-canvas-content"
@@ -168,10 +173,10 @@ export function ChannelCanvas({
           variant="outline"
         >
           <Pencil className="h-4 w-4" />
-          {canvasContent ? "Edit canvas" : "Create canvas"}
+          {canvasExists ? "Edit canvas" : "Create canvas"}
         </Button>
       ) : null}
-      {canvasContent ? (
+      {canvasExists ? (
         <>
           <Button
             aria-expanded={showHistory}
@@ -188,7 +193,7 @@ export function ChannelCanvas({
             <CanvasHistoryPanel
               canRestore={canEdit && !isArchived}
               channelId={channelId}
-              currentContent={canvasContent}
+              currentContent={canvasContent ?? ""}
               currentRevision={canvasRevision}
             />
           ) : null}

@@ -110,9 +110,13 @@ export function CanvasHistoryPanel({
               <button
                 aria-expanded={isSelected}
                 className="flex w-full items-baseline justify-between gap-2 px-3 py-2 text-left"
-                onClick={() =>
-                  setSelectedId(isSelected ? null : revision.eventId)
-                }
+                onClick={() => {
+                  // Clear any prior restore error so it can't render under a
+                  // different row once the selection moves — the mutation state
+                  // is shared across every row.
+                  restoreMutation.reset();
+                  setSelectedId(isSelected ? null : revision.eventId);
+                }}
                 type="button"
               >
                 <span className="truncate text-sm font-medium">

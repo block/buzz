@@ -119,7 +119,11 @@ pub async fn get_canvas_history(
     if before_id.is_some() && until.is_none() {
         return Err("before_id requires until".to_string());
     }
-    let page_size = limit.unwrap_or(100).max(1);
+    // Bound the page size to the relay's read maximum. Beyond 1,000 the relay
+    // silently clamps the returned rows, which would make `events.len() ==
+    // page_size` false and null the cursor even when older revisions remain,
+    // stranding them behind an unreachable page.
+    let page_size = resolve_history_page_size(limit)?;
 
     let mut filter = serde_json::json!({
         "kinds": [40100],
@@ -168,4 +172,41 @@ pub async fn get_canvas_history(
         "revisions": revisions,
         "next_cursor": next_cursor,
     }))
+}
+
+/// Resolve and validate the history page size against the relay's read
+/// maximum. Defaults to 100 when unset; a value outside `1..=1000` is rejected
+/// so cursor generation is never based on a size the relay would silently
+/// clamp (which strands older revisions behind a falsely-terminated page).
+fn resolve_history_page_size(limit: Option<usize>) -> Result<usize, String> {
+    let page_size = limit.unwrap_or(100);
+    if !(1..=1000).contains(&page_size) {
+        return Err("limit must be between 1 and 1000".to_string());
+    }
+    Ok(page_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_history_page_size;
+
+    #[test]
+    fn defaults_to_100_when_unset() {
+        assert_eq!(resolve_history_page_size(None).unwrap(), 100);
+    }
+
+    #[test]
+    fn rejects_zero() {
+        assert!(resolve_history_page_size(Some(0)).is_err());
+    }
+
+    #[test]
+    fn accepts_relay_maximum() {
+        assert_eq!(resolve_history_page_size(Some(1000)).unwrap(), 1000);
+    }
+
+    #[test]
+    fn rejects_above_relay_maximum() {
+        assert!(resolve_history_page_size(Some(1001)).is_err());
+    }
 }
