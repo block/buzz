@@ -5,50 +5,18 @@
 
 use std::collections::BTreeMap;
 
-use buzz_core_pkg::kind::{event_is_shared, KIND_PERSONA};
-use nostr::{EventBuilder, Kind, Tag};
-use serde::{Deserialize, Serialize};
+use buzz_core_pkg::kind::event_is_shared;
+use buzz_sdk_pkg::agent_definitions::normalize_d_tag;
+use nostr::EventBuilder;
 
 use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
-/// The JSON body stored in a persona event's content field.
-///
-/// Field order MUST match the NIP-AP reference vectors (`docs/nips/NIP-AP.md`
-/// content body: `display_name, system_prompt, avatar_url, runtime, model,
-/// provider, name_pool`). serde emits fields in declaration order, so this
-/// order pins the exact content bytes and therefore the NIP-01 event id — a
-/// reorder here breaks cross-implementation interop. Guarded by
+/// The published persona wire shape, owned by the SDK so the CLI publishes the
+/// identical body — including the field order that pins content bytes and
+/// therefore `persona_content_hash`. Guarded by
 /// `content_matches_nip_ap_vector`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersonaEventContent {
-    pub display_name: String,
-    /// Optional since the unified agent model (NIP-AP revision): a definition
-    /// can be pure configuration. Writers emit `Some` whenever the record has
-    /// a prompt (including the empty string) so pre-revision content bytes —
-    /// and therefore `persona_content_hash` — are unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub name_pool: Vec<String>,
-    /// Definition-level defaults copied onto instances at creation
-    /// (NIP-AP behavioral fields). Absent = defer to client defaults;
-    /// `skip_serializing_if` keeps pre-revision hashes stable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub respond_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub respond_to_allowlist: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parallelism: Option<u32>,
-}
+pub use buzz_sdk_pkg::agent_definitions::PersonaEventContent;
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
 ///
@@ -70,45 +38,6 @@ pub fn persona_d_tag(record: &AgentDefinition) -> String {
     normalize_d_tag(raw)
 }
 
-/// Normalize a raw slug to the NIP-AP grammar `^[a-z0-9][a-z0-9_-]{0,63}$`.
-///
-/// - ASCII-lowercase every char (pack slugs are `[a-zA-Z0-9_-]+`, so this is
-///   the only transform uppercase slugs need).
-/// - Map any char outside `[a-z0-9_-]` to `-` (defensive; pack slugs never
-///   contain such chars, but `id` fallbacks and future inputs might).
-/// - If the first char is not `[a-z0-9]` (i.e. a leading `_`/`-`), prepend `a`
-///   rather than trimming — trimming `_ops`→`ops` would collide with a real
-///   `ops` pack, whereas the prefix keeps distinct inputs distinct.
-/// - Truncate to 64 bytes (the grammar's max).
-///
-/// The transform is deterministic. It is NOT globally injective (`A-b` and
-/// `a_b` both contain only safe chars and stay distinct, but two slugs
-/// differing only in case — e.g. `Ops` and `ops` — collapse to the same
-/// d-tag). That case-fold collision is inherent to the lowercase relay grammar
-/// and is the correct NIP-33 behavior: same logical persona, one coordinate.
-fn normalize_d_tag(raw: &str) -> String {
-    let mut out: String = raw
-        .chars()
-        .map(|c| {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if !out
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
-    {
-        out.insert(0, 'a');
-    }
-    out.truncate(64);
-    out
-}
-
 /// Compute the NIP-AP monotonic `created_at` for a write (`docs/nips/NIP-AP.md:117`
 /// step 3): `max(now, T + 1)` where `T` is the retained head's `created_at`
 /// (or 0 when no head exists).
@@ -121,9 +50,12 @@ fn normalize_d_tag(raw: &str) -> String {
 /// Bumping past the head guarantees a fresh write always supersedes regardless
 /// of clock skew.
 pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timestamp {
-    let now = nostr::Timestamp::now().as_secs() as i64;
-    let floor = prior_head_created_at.map_or(0, |t| t + 1);
-    nostr::Timestamp::from(now.max(floor) as u64)
+    // Arithmetic lives in buzz-core (pure, `now` injected, unit-tested there);
+    // this wrapper only supplies the clock.
+    nostr::Timestamp::from(buzz_core_pkg::engram::monotonic_created_at(
+        nostr::Timestamp::now().as_secs(),
+        prior_head_created_at.map(|t| t.max(0) as u64),
+    ))
 }
 
 /// Build a kind:30175 event from a `AgentDefinition`.
@@ -132,19 +64,12 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
 pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
     // Single projection point — persona_event_content owns the field mapping
     // (and the hash-stability rules that come with it).
-    let content = persona_event_content(record);
-
-    let content_json = serde_json::to_string(&content)
-        .map_err(|e| format!("failed to serialize persona content: {e}"))?;
-
-    let d_tag = persona_d_tag(record);
-    let mut tags =
-        vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
-    if record.shared {
-        tags.push(Tag::parse(["shared", "true"]).map_err(|e| format!("invalid shared tag: {e}"))?);
-    }
-
-    Ok(EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), content_json).tags(tags))
+    buzz_sdk_pkg::agent_definitions::build_persona_event(
+        &persona_d_tag(record),
+        &persona_event_content(record),
+        record.shared,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Build a NIP-09 deletion (kind:5) targeting a persona's kind:30175 event.
@@ -154,30 +79,20 @@ pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, Str
 /// which leaves the parameterized-replaceable coordinate live. The coordinate
 /// delete removes the persona for every client and across reboots.
 pub fn build_persona_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<EventBuilder, String> {
-    let coord = format!("{KIND_PERSONA}:{owner_pubkey_hex}:{d_tag}");
-    let tag = Tag::parse(["a", coord.as_str()]).map_err(|e| format!("invalid a-tag: {e}"))?;
-    Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
+    buzz_sdk_pkg::agent_definitions::build_persona_delete(d_tag, owner_pubkey_hex)
+        .map_err(|e| e.to_string())
 }
 
 /// Parse a kind:30175 event back into a `AgentDefinition`.
 ///
 /// The event's d-tag becomes the persona ID and slug.
 pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, String> {
-    let d_tag = event
-        .tags
-        .iter()
-        .find_map(|tag| {
-            let values: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
-            if values.first() == Some(&"d") {
-                values.get(1).map(|s| s.to_string())
-            } else {
-                None
-            }
-        })
-        .ok_or("persona event missing d-tag")?;
+    let d_tag = buzz_sdk_pkg::agent_definitions::event_d_tag(event)
+        .ok_or("persona event missing d-tag")?
+        .to_string();
 
-    let content: PersonaEventContent = serde_json::from_str(event.content.as_ref())
-        .map_err(|e| format!("failed to parse persona event content: {e}"))?;
+    let content = buzz_sdk_pkg::agent_definitions::persona_content_from_event(event)
+        .map_err(|e| e.to_string())?;
 
     let created_at = event.created_at.to_human_datetime();
 

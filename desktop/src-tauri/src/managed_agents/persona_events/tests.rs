@@ -1,5 +1,7 @@
 use super::*;
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
+use buzz_core_pkg::kind::KIND_PERSONA;
+use nostr::{Kind, Tag};
 
 /// A linked instance record with no persona-derived fields set yet — the
 /// state right after creation, before any snapshot apply.
