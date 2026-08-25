@@ -27,7 +27,7 @@ test("revision-does-not-exist reject is a conflict as Error and as raw string", 
 
 test("conflict marker embedded in a longer wrapped message still matches", () => {
   const wrapped = new Error(
-    "submit failed: conflict: canvas revision does not exist (relay)",
+    "submit failed: conflict: canvas revision does not exist",
   );
   assert.equal(isCanvasConflictError(wrapped), true);
 });

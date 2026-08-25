@@ -418,9 +418,9 @@ pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder,
 /// Kind 40100 — set canvas.
 ///
 /// When `expected_revision` is `Some`, an `["expected-revision", <event-id>]`
-/// tag is attached so the relay can reject the write if the canvas head moved
-/// since the client loaded it (optimistic concurrency). Omitting it preserves
-/// the historical unconditional-append behavior.
+/// tag is attached. The tag is documentary/advisory: today's relay does not
+/// enforce it, so optimistic concurrency is checked client-side before submit.
+/// Omitting it preserves the historical unconditional-append behavior.
 pub fn build_set_canvas(
     channel_id: Uuid,
     content: &str,

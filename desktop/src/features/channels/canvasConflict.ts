@@ -34,8 +34,8 @@ export const CANVAS_CONFLICT_MESSAGE =
 export const CANVAS_EXPECTED_REVISION_NONE = "none";
 
 /**
- * True when `error` is the relay's optimistic-concurrency conflict — the head
- * moved or the expected revision no longer exists between the load and the
+ * True when `error` is the desktop client's advisory precondition failure — the
+ * head moved or the expected revision no longer exists between the load and the
  * save. Accepts `Error` instances and raw strings so callers can pass whatever
  * the Tauri IPC layer hands them.
  */
