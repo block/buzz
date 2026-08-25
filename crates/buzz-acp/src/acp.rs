@@ -28,6 +28,7 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 /// returns `end_turn`, creating a deterministic second reply.
 const NATIVE_DELIVERY_PROTECTED_CHILD_ENV: &[&str] = &[
     "BUZZ_PRIVATE_KEY",
+    "NOSTR_PRIVATE_KEY",
     "BUZZ_ACP_PRIVATE_KEY",
     "BUZZ_AUTH_TAG",
     "BUZZ_API_TOKEN",
@@ -3861,6 +3862,39 @@ mod tests {
             "DELIVERY_TEST_KEEP",
             enabled
         ));
+    }
+
+    #[test]
+    fn native_delivery_withholds_every_desktop_signing_alias_from_child() {
+        let extra_env = vec![(
+            crate::config::NATIVE_DELIVERY_CHILD_ENV_SENTINEL.into(),
+            "1".into(),
+        )];
+        let mut command = tokio::process::Command::new("unused-child");
+
+        let enabled = configure_native_delivery_child_isolation(&mut command, &extra_env);
+        assert!(enabled);
+
+        let removed: std::collections::HashSet<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().to_string())
+            .collect();
+        for key in [
+            "BUZZ_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+        ] {
+            assert!(
+                removed.contains(key),
+                "desktop signing alias {key} must be removed from the child"
+            );
+            assert!(withhold_native_delivery_child_env(key, enabled));
+        }
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
