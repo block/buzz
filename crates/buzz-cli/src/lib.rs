@@ -234,6 +234,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Validate and canonicalize local Buzz CML task snapshots
+    #[command(subcommand)]
+    Cml(CmlCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -1850,6 +1853,24 @@ pub enum MemCmd {
     },
 }
 
+/// Subcommands for local CML task snapshots.
+#[derive(Subcommand)]
+pub enum CmlCmd {
+    /// Validate a CML file; use `-` to read standard input
+    Validate {
+        /// CML file path or `-`
+        path: String,
+    },
+    /// Emit canonical, key-sorted CML; use `-` to read standard input
+    Canonicalize {
+        /// CML file path or `-`
+        path: String,
+        /// Write to a file instead of standard output
+        #[arg(long)]
+        output: Option<String>,
+    },
+}
+
 /// Subcommands for `buzz pack`.
 #[derive(Subcommand)]
 pub enum PackCmd {
@@ -1999,12 +2020,23 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
-    if let Cmd::Pack(ref sub) = cli.command {
-        return match sub {
-            PackCmd::Validate { path } => commands::pack::cmd_validate(path),
-            PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
-        };
+    // CML and pack commands are local-only — no relay connection needed.
+    match &cli.command {
+        Cmd::Cml(sub) => {
+            return match sub {
+                CmlCmd::Validate { path } => commands::cml::cmd_validate(path),
+                CmlCmd::Canonicalize { path, output } => {
+                    commands::cml::cmd_canonicalize(path, output.as_deref())
+                }
+            };
+        }
+        Cmd::Pack(sub) => {
+            return match sub {
+                PackCmd::Validate { path } => commands::pack::cmd_validate(path),
+                PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
+            };
+        }
+        _ => {}
     }
 
     // Auth: private key is required for all relay operations.
@@ -2066,7 +2098,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Cml(_) | Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
 
@@ -2197,6 +2229,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "cml",
             "dms",
             "emoji",
             "feed",
@@ -2302,6 +2335,7 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(names(&cmd, "cml"), vec!["canonicalize", "validate"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
