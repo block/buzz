@@ -30,7 +30,6 @@ members = [
     "crates/business-query-contracts",
     "crates/business-anomaly-contracts",
     "crates/business-action-contracts",
-    "crates/business-execution-contracts",
     "crates/business-iam",
     "services/business-analytics",
     "services/business-action-service",

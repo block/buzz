@@ -93,15 +93,13 @@ IAM capability 目录已登记 `sales_order:write`、`purchase_order:write`、
 `inventory:adjust`、`payment:execute` 和 `business_approval:approve`。系统级默认义务与
 角色/直接授权上的附加义务取并集，授权人不能通过发放角色移除默认控制。
 
-这些记录只描述未来执行所需的权限和控制，不签发写委托，也不开放 `/execute`。真正
-执行前还必须验证 Step-up 证据绑定当前人员与任务、审批人具备审批权限、发起人与审批人
-分离、双人复核身份互异，并在可回滚的 Business API 上完成预演和验收。在此之前状态保持
-`V7_BLOCKED`。
+这些记录只描述未来可能需要的权限和控制，不签发写委托，也不开放 `/execute`。当前产品
+没有自动业务执行能力；若未来重新提出写入需求，应作为新的产品与安全项目单独立项和评审。
 
 ## 当前状态与下一步
 
 已完成策略模型、数据库 schema、gateway 决策接入、权限子集签发、同步撤销和 PostgreSQL 集成测试。仍需完成：
 
 1. IAM 管理 API/业务台管理界面和双人复核；
-2. 写入 capability、Step-up、审批和职责分离策略；
+2. 完善管理操作所需的 Step-up、审批和职责分离策略；
 3. 独立部署、密钥轮换、监控和灾备演练。

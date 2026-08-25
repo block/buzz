@@ -1,5 +1,4 @@
--- Register future write capabilities and their non-bypassable default controls.
--- No runtime route accepts these capabilities yet: execution remains V7_BLOCKED.
+-- Register human-managed execution permissions and their non-bypassable controls.
 INSERT INTO business_iam.permissions(
   id,capability,resource_type,action,obligations,risk_level
 )

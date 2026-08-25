@@ -994,18 +994,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "business-execution-contracts"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "schemars",
- "serde",
- "serde_json",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "business-iam"
 version = "0.1.0"
 dependencies = [

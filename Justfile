@@ -510,13 +510,6 @@ business-action-check:
     pnpm -C desktop typecheck
     pnpm -C desktop check
 
-# V6.5 contracts and the checked-in honest blocked-readiness evidence.
-business-v65-check:
-    cargo test -p business-execution-contracts
-
-business-v7-readiness:
-    cargo run -p business-execution-contracts --bin v7-readiness-check -- docs/business-execution/v7-readiness-evidence.json
-
 # Business Core B1: master data, enterprise roles, six data-scope dimensions,
 # object access checks, and assignee/approver eligibility.
 business-core-check:
