@@ -68,7 +68,10 @@ void main() {
   testWidgets('waits for an in-flight camera before lifecycle replacement', (
     tester,
   ) async {
-    final platform = _TestCameraPlatform(blockInitializeForCameraIds: {1});
+    final platform = _TestCameraPlatform(
+      blockDisposeForCameraIds: {1},
+      blockInitializeForCameraIds: {1},
+    );
     final previousPlatform = CameraPlatform.instance;
     CameraPlatform.instance = platform;
     addTearDown(() => CameraPlatform.instance = previousPlatform);
@@ -108,6 +111,11 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(platform.disposedCameraIds, [1]);
+    expect(platform.createdCameraIds, [1]);
+
+    platform.completeDispose(1);
+    await tester.pump();
+    await tester.pump();
     expect(platform.createdCameraIds, [1, 2]);
     final shutter = tester.widget<InkWell>(
       find.byKey(const ValueKey('image-camera-shutter')),
@@ -232,5 +240,9 @@ class _TestCameraPlatform extends CameraPlatform {
     _disposeCompleters[cameraId]!.completeError(
       PlatformException(code: 'dispose-failed'),
     );
+  }
+
+  void completeDispose(int cameraId) {
+    _disposeCompleters[cameraId]!.complete();
   }
 }
