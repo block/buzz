@@ -60,6 +60,17 @@ type UseDraftPersistLifecycleParams = {
   syncComposerContentFromEditor: () => string;
 };
 
+type UseDraftPersistLifecycleResult = {
+  /**
+   * Record the latest authored editor content. Empty content is persisted
+   * immediately and remains authoritative across composer remounts until a
+   * later non-empty editor update supersedes it.
+   */
+  trackAuthoredContent: (content: string) => void;
+};
+
+const authoritativelyClearedDraftKeys = new Set<string>();
+
 /**
  * Owns the draft-persist lifecycle for `MessageComposer`.
  *
@@ -104,8 +115,10 @@ export function useDraftPersistLifecycle({
   setSpoileredAttachmentUrls,
   spoileredAttachmentUrlsRef,
   syncComposerContentFromEditor,
-}: UseDraftPersistLifecycleParams): void {
+}: UseDraftPersistLifecycleParams): UseDraftPersistLifecycleResult {
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
+  const emptyContentIsAuthoritativeRef = React.useRef(false);
+  const isRestoringContentRef = React.useRef(false);
   const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
     [],
   );
@@ -117,7 +130,7 @@ export function useDraftPersistLifecycle({
   pendingImetaForPersistRef.current = livePendingImeta;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     // The outgoing draft is persisted by the cleanup below, which runs before
     // this body on key changes and has the correct outgoing channelId in its
     // closure. Do NOT re-persist prevKey here: channelId in this render
@@ -134,7 +147,15 @@ export function useDraftPersistLifecycle({
         : [];
     }
     restoreQueuedAttachments?.(restoredQueuedAttachmentsRef.current);
-    const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
+    const wasAuthoritativelyCleared = effectiveDraftKey
+      ? authoritativelyClearedDraftKeys.has(effectiveDraftKey)
+      : false;
+    const saved =
+      effectiveDraftKey && !wasAuthoritativelyCleared
+        ? loadDraft(effectiveDraftKey)
+        : undefined;
+    emptyContentIsAuthoritativeRef.current = wasAuthoritativelyCleared;
+    isRestoringContentRef.current = true;
     if (saved) {
       setContent(saved.content);
       restoreMentionRefs(saved.mentionRefs ?? []);
@@ -153,6 +174,7 @@ export function useDraftPersistLifecycle({
       setPendingImeta([]);
       setSpoileredAttachmentUrls(new Set());
     }
+    isRestoringContentRef.current = false;
 
     return () => {
       if (effectiveDraftKey) {
@@ -160,7 +182,9 @@ export function useDraftPersistLifecycle({
         if (queuedAttachments.length > 0) {
           saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
         }
-        const content = syncComposerContentFromEditor();
+        const content = emptyContentIsAuthoritativeRef.current
+          ? ""
+          : syncComposerContentFromEditor();
         persistDraft(
           effectiveDraftKey,
           content,
@@ -172,4 +196,28 @@ export function useDraftPersistLifecycle({
       }
     };
   }, [effectiveDraftKey]);
+
+  const trackAuthoredContent = React.useCallback(
+    (content: string) => {
+      if (!effectiveDraftKey || isRestoringContentRef.current) return;
+      if (content.length > 0) {
+        authoritativelyClearedDraftKeys.delete(effectiveDraftKey);
+        emptyContentIsAuthoritativeRef.current = false;
+        return;
+      }
+      authoritativelyClearedDraftKeys.add(effectiveDraftKey);
+      emptyContentIsAuthoritativeRef.current = true;
+      persistDraft(
+        effectiveDraftKey,
+        content,
+        channelId ?? effectiveDraftKey,
+        [...pendingImetaForPersistRef.current],
+        [...spoileredAttachmentUrlsRef.current],
+        [],
+      );
+    },
+    [channelId, effectiveDraftKey, persistDraft, spoileredAttachmentUrlsRef],
+  );
+
+  return { trackAuthoredContent };
 }

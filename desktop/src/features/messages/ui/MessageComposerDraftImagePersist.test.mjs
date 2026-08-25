@@ -585,6 +585,60 @@ test("draft_lifecycle_empty_target_clears_stale_mention_refs", async () => {
   await handle.unmount();
 });
 
+test("draft_lifecycle_persists_an_explicit_clear_before_async_rerender", async () => {
+  const DRAFT_KEY = "chan-clear-race";
+  setupStore("pubkey-clear-race");
+  persistDraftEntry(DRAFT_KEY, "draft text", DRAFT_KEY, [], []);
+
+  let editorContent = "";
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "draft text");
+
+  trackAuthoredContent("");
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "the authoritative update removes the stale body even while editor reads lag",
+  );
+
+  await handle.unmount();
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "async settlement must not repersist the deleted body",
+  );
+
+  const remounted = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, "", "the deleted body must not be restored");
+  await remounted.unmount();
+});
+
 test("draft_lifecycle_preserves_local_files_across_a_b_a_switch", async () => {
   setupStore("pubkey-switch-files");
   const FILE_A = {
