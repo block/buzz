@@ -58,6 +58,7 @@ fn minimal_record() -> ManagedAgentRecord {
         last_error: Some("SENTINEL_LAST_ERROR".to_string()), // MUST NOT appear
         last_error_code: Some(42), // MUST NOT appear
         respond_to: RespondTo::default(),
+        allow_non_owner_dm: false,
         respond_to_allowlist: vec!["pubkey1hex".to_string()],
         slug: Some("test-agent".to_string()),
         runtime: Some("goose".to_string()),

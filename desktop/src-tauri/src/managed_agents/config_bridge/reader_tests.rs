@@ -100,6 +100,7 @@ fn test_record() -> ManagedAgentRecord {
         last_error: None,
         last_error_code: None,
         respond_to: crate::managed_agents::types::RespondTo::OwnerOnly,
+        allow_non_owner_dm: false,
         respond_to_allowlist: vec![],
         display_name: None,
         slug: None,

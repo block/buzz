@@ -74,6 +74,7 @@ pub(super) fn fixture(
         last_error: None,
         last_error_code: None,
         respond_to,
+        allow_non_owner_dm: false,
         respond_to_allowlist: allowlist,
         display_name: None,
         slug: None,

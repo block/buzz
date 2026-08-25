@@ -745,6 +745,7 @@ fn summary_fixture(
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),
+        allow_non_owner_dm: false,
     }
 }
 

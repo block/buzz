@@ -33,6 +33,7 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
     items: [
       "增强 Windows 上 Codex shared runtime 的自动启动与诊断能力。",
       "支持通过局域网别名连接，并改进 Codex task runtime 的发现速度。",
+      "断线重连会按频道无损补回遗漏消息，并处理实时消息与补偿消息的重叠。",
     ],
   },
   {

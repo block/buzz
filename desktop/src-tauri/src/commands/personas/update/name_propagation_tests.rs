@@ -43,6 +43,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         last_error: None,
         last_error_code: None,
         respond_to: Default::default(),
+        allow_non_owner_dm: false,
         respond_to_allowlist: vec![],
         display_name: display_name.map(str::to_string),
         slug: None,

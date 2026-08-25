@@ -257,6 +257,7 @@ mod tests {
             last_error: Some("some runtime error".to_string()),
             last_error_code: None,
             respond_to: RespondTo::Allowlist,
+            allow_non_owner_dm: false,
             respond_to_allowlist: vec!["79be667e".to_string()],
             // Unified-model fields carry real values so the exclusion test
             // proves they are absent from the wire, not vacuously empty.

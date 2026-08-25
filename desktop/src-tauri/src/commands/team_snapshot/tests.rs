@@ -218,6 +218,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         last_error: None,
         last_error_code: None,
         respond_to: crate::managed_agents::RespondTo::default(),
+        allow_non_owner_dm: false,
         respond_to_allowlist: vec![],
         is_builtin: false,
         is_active: true,
