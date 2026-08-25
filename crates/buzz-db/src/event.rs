@@ -1415,7 +1415,7 @@ fn candidate_supersedes_head(
 /// A matching `ExpectedHead` precondition additionally requires the candidate
 /// to sort strictly ahead of the current head under `created_at DESC, id ASC`.
 /// Otherwise the write would be accepted and fanned out yet leave the visible
-/// head unchanged — a same-second lower-id or behind-clock writer would
+/// head unchanged — a same-second higher-id or behind-clock writer would
 /// "succeed" without restoring the selected content or advancing the canvas.
 /// Such writes reject as [`ChannelHeadWriteStatus::SupersedeFailed`]. First-party
 /// writers sign `created_at = max(now, head.created_at + 1)`, so this reject is

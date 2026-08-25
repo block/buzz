@@ -331,18 +331,18 @@ pub async fn cmd_get_canvas(
 ///
 /// Uses composite `(until, before_id)` pagination so a `limit` above one relay
 /// page returns the full requested window instead of a silently truncated one.
+/// The Clap layer bounds `limit` to 1–10000, so the request is never unbounded.
 pub async fn cmd_canvas_history(
     client: &BuzzClient,
     channel_id: &str,
-    limit: usize,
+    limit: u32,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     let filter = serde_json::json!({
         "kinds": [40100],
         "#h": [channel_id],
     });
-    let capped = u32::try_from(limit).unwrap_or(u32::MAX);
-    let events = client.query_paginated(filter, capped).await?;
+    let events = client.query_paginated(filter, limit).await?;
     let revisions: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
@@ -362,16 +362,15 @@ pub async fn cmd_canvas_history(
 ///
 /// The target revision is fetched by an ID-scoped query (resolves any age) and
 /// the head by a separate `limit: 1` query — neither scans the full stream. The
-/// republished event is signed with `created_at = max(now, head.created_at + 1)`
-/// (contract v3 writer discipline) so it sorts strictly ahead of the asserted
-/// head and the relay's head-advancement guard is not tripped.
+/// republished event is built via [`buzz_sdk::build_set_canvas_after_head`],
+/// which applies contract-v3 writer discipline (`created_at = max(now,
+/// head.created_at + 1)`) so it sorts strictly ahead of the asserted head and
+/// the relay's head-advancement guard is not tripped.
 pub async fn cmd_restore_canvas(
     client: &BuzzClient,
     channel_id: &str,
     revision: &str,
 ) -> Result<(), CliError> {
-    use nostr::Timestamp;
-
     let channel_uuid = parse_uuid(channel_id)?;
     validate_hex64(revision)?;
 
@@ -396,9 +395,9 @@ pub async fn cmd_restore_canvas(
         .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
     let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some(head_id))
-        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?
-        .custom_created_at(Timestamp::from(canvas_write_timestamp(head_created_at)));
+    let builder =
+        buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
+            .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
     let event = client.sign_event(builder)?;
     match client.submit_event(event).await {
         Ok(resp) => {
@@ -410,17 +409,6 @@ pub async fn cmd_restore_canvas(
         }
         Err(e) => Err(e),
     }
-}
-
-/// Writer-discipline timestamp for a canvas write asserting `head_created_at`:
-/// `max(now, head.created_at + 1)`. Guarantees the new event sorts strictly
-/// ahead of the asserted head under `created_at DESC, id ASC` (contract v3).
-fn canvas_write_timestamp(head_created_at: u64) -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    now.max(head_created_at.saturating_add(1))
 }
 
 pub async fn cmd_create_channel(
