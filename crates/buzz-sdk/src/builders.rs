@@ -2964,7 +2964,7 @@ mod tests {
         let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, future_head).unwrap());
         assert!(has_tag(&ev, "expected-revision", &head));
         assert!(
-            ev.created_at.as_secs() >= future_head + 1,
+            ev.created_at.as_secs() > future_head,
             "created_at {} must be strictly ahead of future head {future_head}",
             ev.created_at.as_secs()
         );
