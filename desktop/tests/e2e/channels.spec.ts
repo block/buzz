@@ -34,6 +34,7 @@ type MockFeedWindow = Window & {
     content: string;
     createdAt?: number;
     id?: string;
+    mentionPubkeys?: string[];
     parentEventId?: string;
     pubkey?: string;
   }) => {
@@ -142,6 +143,43 @@ async function readOutgoingChannelId(
           continue;
         }
         return frame[1].tags?.find((tag) => tag[0] === "h")?.[1] ?? null;
+      } catch {}
+    }
+
+    return null;
+  }, content);
+}
+
+async function readOutgoingEvent(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    const entries =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+
+    for (const entry of entries) {
+      if (entry.command !== "plugin:websocket|send") continue;
+      const data = (
+        entry.payload as { message?: { data?: string } } | undefined
+      )?.message?.data;
+      if (!data) continue;
+
+      try {
+        const frame = JSON.parse(data) as [
+          string,
+          { content?: string; tags?: string[][] },
+        ];
+        if (frame[0] === "EVENT" && frame[1]?.content === expectedContent) {
+          return frame[1];
+        }
       } catch {}
     }
 
@@ -3881,6 +3919,85 @@ test("home inbox groups consecutive DMs and opens the full conversation", async 
   await expect(
     detail.getByRole("button", { name: "Open conversation" }),
   ).toBeVisible();
+});
+
+test("Inbox DM send addresses the participant and survives a newer channel send", async ({
+  page,
+}) => {
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  const incomingId = "91".repeat(32);
+  const incomingContent = "Inbox DM delivery regression target";
+  const inboxSend = "Sent from Inbox to the DM participant";
+  const newerSend = "Newer message from the conversation";
+
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({ channelId, content, currentPubkey, id, senderPubkey }) => {
+      const win = window as MockFeedWindow;
+      const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emit || !push) throw new Error("Mock bridge helpers unavailable.");
+
+      const event = emit({
+        channelName: "alice-tyler",
+        content,
+        id,
+        mentionPubkeys: [currentPubkey],
+        pubkey: senderPubkey,
+      });
+      push({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "alice-tyler",
+        channel_type: "dm",
+        content: event.content,
+        created_at: event.created_at,
+        id: event.id,
+        kind: event.kind,
+        pubkey: event.pubkey,
+        tags: event.tags,
+      });
+    },
+    {
+      channelId: dmChannelId,
+      content: incomingContent,
+      currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      id: incomingId,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await page.getByTestId(`home-inbox-item-${incomingId}`).click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail).toContainText(incomingContent);
+  await detail.getByTestId("message-input").fill(inboxSend);
+  await detail.getByTestId("send-message").click();
+  await expect(detail).toContainText(inboxSend);
+
+  await expect.poll(() => readOutgoingEvent(page, inboxSend)).not.toBeNull();
+  const sentEvent = await readOutgoingEvent(page, inboxSend);
+  expect(sentEvent?.tags).toContainEqual(["h", dmChannelId]);
+  expect(sentEvent?.tags).toContainEqual(["p", TEST_IDENTITIES.alice.pubkey]);
+  expect(sentEvent?.tags?.some((tag) => tag[0] === "e")).toBe(false);
+
+  await detail.getByRole("button", { name: "Open conversation" }).click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText(inboxSend);
+
+  const channelComposer = page.getByTestId("channel-composer-overlay");
+  await channelComposer.getByTestId("message-input").fill(newerSend);
+  await channelComposer.getByTestId("send-message").click();
+  await expect(timeline).toContainText(newerSend);
+  await expect(timeline).toContainText(inboxSend);
 });
 
 test("home inbox manage affordance opens management without leaving home", async ({
