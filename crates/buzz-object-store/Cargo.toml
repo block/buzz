@@ -14,7 +14,10 @@ bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 google-cloud-gax = "1.13"
-google-cloud-storage = "=1.17.0"
+# `default-rustls-provider` would install aws-lc-rs as the process-wide rustls
+# provider. Buzz installs ring at startup instead (see `buzz-relay`'s `main`),
+# and two providers racing for the default is a panic at first use.
+google-cloud-storage = { version = "=1.17.0", default-features = false }
 quick-xml = { version = "0.38", features = ["serialize"] }
 rand = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
@@ -26,3 +29,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 google-cloud-wkt = "1.7"
+hex = { workspace = true }
+sha2 = { workspace = true }
+# The live GCS tests are their own process, so they install the same rustls
+# provider `buzz-relay`'s `main` does before making a TLS request.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

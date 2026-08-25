@@ -368,6 +368,51 @@ conditional writes cannot admit a backend against it.
    a quote mismatch between the read path and the write path silently tests the
    wrong thing. The probe must use the exact token format the pointer write uses.
 
+### Provider profiles
+
+The axioms are the same for every backend; the *evidence* that admits one is
+provider-shaped, so the probe runs the profile the configured provider needs.
+
+The four phases above are the **S3 profile**: a wide race (default 32 writers ×
+3 rounds) on revision-token preconditions, with unclassified transport failures
+dropped from the observer set and a floor of two classified observers per round.
+
+A backend that publishes a per-object write ceiling needs a different shape.
+Google Cloud Storage documents a maximum of one write per second to a single
+object name and answers an over-rate write with `429` — a refusal to evaluate
+the precondition at all, which is categorically not a lost race. Running the S3
+profile against it would measure the rate limiter rather than the store: a burst
+of `429`s would either be scored as losers, making a correctly paced backend look
+like one admitting lost updates, or would leave a round with no race in it. The
+**Cloud Storage profile** therefore races narrowly (default 3 × 2), spaces
+same-key rounds past the published ceiling, and adds the phases that only exist
+where the revision is an object generation:
+
+1. create-only content-addressed write, read back, digest verified;
+2. pointer creation under the create-only precondition (generation `0`);
+3. body and generation read from one response, checked against the commit;
+4. compare-and-swap on the observed generation, which must report a new one;
+5. replay of the superseded generation, which must conflict;
+6. a race on one generation, repeated, with the stored object required to equal
+   the winner's;
+7. the winning generation predicating the next successful write.
+
+Three rules stop pacing from becoming leniency:
+
+- **Two committed racers is always fatal.** No throttle, drop, or retry budget
+  can explain it.
+- **A commit reported without a generation is fatal**, wherever it appears. The
+  caller would have nothing to predicate its next write on, and dropping the
+  precondition turns the pointer swap into a blind overwrite.
+- **A round that proves nothing is re-run, not scored.** Every racer throttled,
+  or too few classified to have witnessed a race, is neither pass nor fail;
+  the round is re-run within a bounded budget, and exhausting it fails the probe.
+  Conflicts with no acknowledged winner stay fatal — that is a lost update
+  announcing itself.
+
+Both profiles remain fail-closed deployment gates, and both remove their own
+objects afterwards on the success and failure paths alike.
+
 **Proof surface (explicit non-goals of the probe and the design).** The protocol
 depends only on conditional writes of *small single objects* (the manifest
 pointer). It does **not** depend on, and the probe does **not** test:
@@ -413,6 +458,18 @@ knowledge, new.
 
 ## Implementation Correspondence
 
+> **A note on vocabulary.** This specification states A1 and A3 in S3 terms —
+> ETags, `If-Match`, `If-None-Match: *` — because that is the backend the
+> axioms were first admitted against. The implementation states them in
+> provider-neutral terms: `crates/buzz-object-store` defines an opaque
+> `Revision` (the CAS token), `WriteCondition::{Absent, Matches}` (the
+> precondition), and `ConditionalWrite::{Committed, Conflict}` (the outcome).
+> An ETag is one inhabitant of `Revision` and exists only inside the S3
+> provider. The mapping is exact — `Absent` is `If-None-Match: *`, `Matches(e)`
+> is `If-Match: e`, `Conflict` is the 412 — so every theorem below transfers
+> unchanged; a backend is admitted by the §Conformance probe, not by speaking
+> S3's header vocabulary.
+
 The fence (Theorem 1) maps to a single structural obligation on the
 implementation, stated here as a requirement the code must meet for the proof to
 transfer:
@@ -434,7 +491,7 @@ transfer:
 - **Parent observed once.** `hydrate_for_write` reads the pointer, fetches and
   verifies the parent manifest, materializes the workspace from it, and returns
   a `(HydratedRepo, ParentState)` pair where `ParentState` carries the exact
-  `(ETag, digest, Manifest)` triple the workspace was hydrated against. That
+  `(Revision, digest, Manifest)` triple the workspace was hydrated against. That
   same `ParentState` rides on the `PushContext` through receive-pack, and
   `cas_publish` predicates the CAS on `parent_state.if_match` — it never re-reads
   the pointer. The "build on `d_old`, publish against `d_new`" hazard is closed

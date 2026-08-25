@@ -140,6 +140,15 @@ pub struct ProbeConfig {
     /// store's conditional-write semantics, and deliberately violating the
     /// published rate limit would only prove that the rate limiter works.
     pub same_key_spacing: Duration,
+    /// Key namespace for the objects the probe writes for itself.
+    ///
+    /// The default reproduces the keys the probe has always used. Overriding it
+    /// gives a run its own disposable namespace, which is what lets a test
+    /// prove the cleanup pass emptied it. (The S3 profile's content-addressed
+    /// phase writes a pack object under the store's own `packs/` namespace by
+    /// construction — it exercises the production write path — and is not
+    /// affected by this setting.)
+    pub key_prefix: String,
 }
 
 impl ProbeConfig {
@@ -151,6 +160,7 @@ impl ProbeConfig {
                 race_rounds: 3,
                 unproven_round_retries: 3,
                 same_key_spacing: Duration::ZERO,
+                key_prefix: DEFAULT_PROBE_KEY_PREFIX.to_string(),
             },
             ProviderKind::Gcs => Self {
                 race_width: 3,
@@ -159,10 +169,20 @@ impl ProbeConfig {
                 // Just past Cloud Storage's documented one-write-per-second
                 // per-object ceiling.
                 same_key_spacing: Duration::from_millis(1_100),
+                key_prefix: DEFAULT_PROBE_KEY_PREFIX.to_string(),
             },
         }
     }
+
+    /// Run under `prefix` instead of the default namespace.
+    pub fn under_key_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.key_prefix = prefix.into();
+        self
+    }
 }
+
+/// Namespace the probe writes its own objects under.
+const DEFAULT_PROBE_KEY_PREFIX: &str = "probe";
 
 impl Default for ProbeConfig {
     fn default() -> Self {
@@ -625,7 +645,7 @@ impl GitStore {
     async fn run_s3_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
         use std::sync::Arc;
         let nonce = uuid::Uuid::new_v4();
-        let pointer_key = format!("probe/pointer-{nonce}");
+        let pointer_key = format!("{}/pointer-{nonce}", cfg.key_prefix);
         // Accumulator for *transport-unknown* per-racer outcomes across both
         // race phases. See `ProbeReport::transport_drops` for the rationale.
         let mut transport_drops = 0usize;
@@ -762,7 +782,7 @@ impl GitStore {
         // Bypass `put_immutable`'s collision-swallow to count raw outcomes.
         for round in 0..cfg.race_rounds {
             let body = format!("probe-inm-race-{nonce}-{round}").into_bytes();
-            let key = Self::content_key("probe/inm-race", &body);
+            let key = Self::content_key(&format!("{}/inm-race", cfg.key_prefix), &body);
             // Clean slate.
             let _ = self.store.delete(&key).await;
             let arc_self: Arc<&Self> = Arc::new(self);
@@ -980,7 +1000,7 @@ impl GitStore {
         // The nonce makes this key new, so the create-only write must report a
         // create rather than a collision.
         let body = format!("probe-gcs-immutable-{nonce}").into_bytes();
-        let key = Self::content_key("probe/gcs-immutable", &body);
+        let key = Self::content_key(&format!("{}/gcs-immutable", cfg.key_prefix), &body);
         written.push(key.clone());
         let outcome = self
             .put_immutable_raw(&key, &body)
@@ -1012,7 +1032,7 @@ impl GitStore {
         }
 
         // -- Phase 2: pointer_create -------------------------------------------
-        let pointer_key = format!("probe/gcs-pointer-{nonce}");
+        let pointer_key = format!("{}/gcs-pointer-{nonce}", cfg.key_prefix);
         written.push(pointer_key.clone());
         let seed = format!("probe-gcs-pointer-seed-{nonce}").into_bytes();
         state.pace(cfg.same_key_spacing).await;
@@ -1865,8 +1885,8 @@ mod profiles {
         ProbeConfig {
             race_width: 3,
             race_rounds,
-            unproven_round_retries: 3,
             same_key_spacing: Duration::ZERO,
+            ..ProbeConfig::for_provider(ProviderKind::Gcs)
         }
     }
 
@@ -2373,5 +2393,446 @@ mod probe {
         let observed = st.get_pointer(&key).await.expect("get").expect("exists");
         eprintln!("revision from GET: {:?}", observed.0);
         let _ = st.store.delete(&key).await;
+    }
+}
+
+#[cfg(test)]
+mod gcs_live {
+    //! The Cloud Storage profile against a real bucket.
+    //!
+    //! This is the deployment gate itself, run against the provider it was
+    //! written for — the scripted-store tests prove how the profile *judges*
+    //! answers, and only a live bucket proves which answers Cloud Storage
+    //! actually gives.
+    //!
+    //! Talks to a real bucket, so it is `#[ignore]`d and additionally gated on
+    //! `BUZZ_GCS_LIVE=1`; a bare `--ignored` run without credentials skips
+    //! rather than fails.
+    //!
+    //! ```bash
+    //! BUZZ_GCS_LIVE=1 \
+    //! BUZZ_GCS_TEST_BUCKET=my-disposable-bucket \
+    //!   cargo test -p buzz-relay --lib api::git::store::gcs_live -- --ignored --nocapture
+    //! ```
+    //!
+    //! Credentials come from Application Default Credentials, exactly as in
+    //! production. Every test works under its own `a3/<uuid>/` namespace: the
+    //! probe run asserts the probe's own cleanup pass emptied it, and the
+    //! git-facade runs delete what they wrote whether they passed or not.
+
+    use std::panic::AssertUnwindSafe;
+
+    use buzz_object_store::{GcsObjectStore, GcsStoreConfig};
+    use futures_util::FutureExt;
+
+    use super::*;
+
+    /// Every key left under `prefix`.
+    async fn remaining(store: &Arc<GcsObjectStore>, prefix: &str) -> Vec<String> {
+        let mut token = None;
+        let mut keys = Vec::new();
+        loop {
+            let page = store
+                .list_page(prefix, token, 1000)
+                .await
+                .expect("list the probe namespace");
+            keys.extend(page.objects.into_iter().map(|(key, _)| key));
+            token = page.next_continuation_token;
+            if token.is_none() {
+                return keys;
+            }
+        }
+    }
+
+    /// Connect to the test bucket, or `None` when this environment has not
+    /// opted in to live tests.
+    async fn live_backend() -> Option<Arc<GcsObjectStore>> {
+        // The relay installs this in `main` before any TLS request; a test
+        // binary must do the same, because both ring and aws-lc-rs are in the
+        // build graph and rustls will not choose between them.
+        static PROVIDER: std::sync::Once = std::sync::Once::new();
+        PROVIDER.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+
+        if std::env::var("BUZZ_GCS_LIVE").as_deref() != Ok("1") {
+            eprintln!("skipping: set BUZZ_GCS_LIVE=1 to run against a live bucket");
+            return None;
+        }
+        let bucket = match std::env::var("BUZZ_GCS_TEST_BUCKET") {
+            Ok(bucket) if !bucket.is_empty() => bucket,
+            _ => panic!("BUZZ_GCS_LIVE=1 requires BUZZ_GCS_TEST_BUCKET"),
+        };
+
+        // Connecting runs the provider's admission check: a bucket with
+        // versioning or soft delete never reaches these tests at all.
+        Some(Arc::new(
+            GcsObjectStore::connect(&GcsStoreConfig::new(bucket))
+                .await
+                .expect("connect to the test bucket"),
+        ))
+    }
+
+    /// Run one git-facade test under its own namespace, then remove what it
+    /// wrote whether it passed or not.
+    ///
+    /// A panicking body would otherwise leak into a bucket shared with every
+    /// other run — and a failing test is precisely the one that gets re-run.
+    async fn with_git_store<F>(test: &str, body: F)
+    where
+        F: AsyncFnOnce(&GitStore, &str),
+    {
+        let Some(backend) = live_backend().await else {
+            return;
+        };
+        let prefix = format!("a4/{}/{test}", uuid::Uuid::new_v4());
+        let store = GitStore::new(backend.clone());
+
+        let outcome = AssertUnwindSafe(body(&store, &prefix)).catch_unwind().await;
+
+        let keys = remaining(&backend, &prefix).await;
+        let cleanup = if keys.is_empty() {
+            Ok(Default::default())
+        } else {
+            backend.delete_objects(&keys).await
+        };
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+        let cleanup = cleanup.expect("bulk delete for cleanup");
+        assert!(
+            cleanup.failed.is_empty(),
+            "cleanup left objects behind: {:?}",
+            cleanup.failed
+        );
+        assert!(
+            remaining(&backend, &prefix).await.is_empty(),
+            "the namespace must be empty after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live GCS bucket (BUZZ_GCS_LIVE=1)"]
+    async fn the_cloud_storage_profile_admits_a_real_bucket() {
+        let Some(backend) = live_backend().await else {
+            return;
+        };
+        let prefix = format!("a3/{}", uuid::Uuid::new_v4());
+        let cfg = ProbeConfig::for_provider(ProviderKind::Gcs).under_key_prefix(&prefix);
+        let spacing = cfg.same_key_spacing;
+
+        let report = GitStore::new(backend.clone())
+            .run_conformance_probe(cfg)
+            .await
+            .expect("Cloud Storage satisfies the conditional-write axioms");
+        eprintln!("✓ probe report: {report:?}");
+
+        assert_eq!(report.profile, ProviderKind::Gcs);
+        assert_eq!(report.race_width, 3);
+        assert_eq!(report.race_rounds, 2);
+        let gap = report
+            .min_same_key_gap
+            .expect("the paced profile reports the interval it observed");
+        assert!(
+            gap >= spacing,
+            "same-key rounds were {gap:?} apart, inside the configured {spacing:?}"
+        );
+
+        // The bucket is shared with other runs, so an unremoved probe object
+        // would be invisible until it was large.
+        let leaked = remaining(&backend, &prefix).await;
+        assert_eq!(report.cleanup_failures, 0, "cleanup reported failures");
+        assert!(leaked.is_empty(), "probe objects left behind: {leaked:?}");
+    }
+
+    /// The publication cycle a push performs, against a real bucket.
+    ///
+    /// Create the pointer under the create-only precondition, read body and
+    /// revision from one response, swap on the revision that read returned, and
+    /// then replay the superseded revision — which must lose rather than
+    /// overwrite. The last assertion is the one that matters most: an absent
+    /// pointer reads as `None`, distinct from every failure, because a pointer
+    /// read that could not be answered must never be mistaken for an empty
+    /// repository.
+    #[tokio::test]
+    #[ignore = "requires a live GCS bucket (BUZZ_GCS_LIVE=1)"]
+    async fn the_pointer_cycle_publishes_exactly_one_state() {
+        with_git_store("pointer-cycle", async |store, prefix| {
+            let key = format!("{prefix}/pointers/repo");
+
+            assert!(
+                store
+                    .get_pointer(&key)
+                    .await
+                    .expect("reading an absent pointer is not an error")
+                    .is_none(),
+                "an unpublished repository is `None`, never an error and never empty bytes"
+            );
+
+            let ConditionalWrite::Committed(created) = store
+                .put_pointer(&key, b"{\"refs\":0}", WriteCondition::Absent)
+                .await
+                .expect("create the pointer")
+            else {
+                panic!("creating an absent pointer must commit");
+            };
+
+            let (observed, body) = store
+                .get_pointer(&key)
+                .await
+                .expect("pointer read")
+                .expect("the pointer exists");
+            assert_eq!(body.as_ref(), b"{\"refs\":0}");
+            assert_eq!(
+                observed, created,
+                "the revision a read reports must be the one the write committed"
+            );
+
+            let ConditionalWrite::Committed(swapped) = store
+                .put_pointer(
+                    &key,
+                    b"{\"refs\":1}",
+                    WriteCondition::Matches(observed.clone()),
+                )
+                .await
+                .expect("swap on the observed revision")
+            else {
+                panic!("a writer holding the current revision must commit");
+            };
+            assert_ne!(swapped, created, "a commit mints a new revision");
+
+            assert_eq!(
+                store
+                    .put_pointer(&key, b"{\"refs\":99}", WriteCondition::Matches(observed))
+                    .await
+                    .expect("replay the superseded revision"),
+                ConditionalWrite::Conflict,
+                "a superseded revision must lose rather than overwrite"
+            );
+            assert_eq!(
+                store.get(&key).await.expect("read the published state"),
+                &b"{\"refs\":1}"[..],
+                "the losing writer must not have published anything"
+            );
+        })
+        .await;
+    }
+
+    /// Content addressing end to end: what a push writes, what a hydrate reads,
+    /// and what happens when the bytes are not what the key says they are.
+    ///
+    /// The idx sidecar is the one object here whose key is *not* its own digest
+    /// — it is derived from the pack digest so a hydrate can find it without
+    /// changing manifest bytes — so it gets its own miss/hit assertions. The
+    /// corruption arm is the point of the whole discipline: bytes that do not
+    /// hash to their key are a detected error on read, not silent corruption
+    /// handed to git.
+    #[tokio::test]
+    #[ignore = "requires a live GCS bucket (BUZZ_GCS_LIVE=1)"]
+    async fn content_addressed_objects_round_trip_and_corruption_is_detected() {
+        with_git_store("content-addressing", async |store, prefix| {
+            // Production derives these keys from the bytes, so a test cannot
+            // place them under its own namespace without going around the
+            // facade. Writing them where production would and cleaning up by
+            // exact key keeps the write path honest.
+            let pack_bytes = b"PACK\x00\x00\x00\x02 pretend pack payload".to_vec();
+            let pack_key = store.put_pack(&pack_bytes).await.expect("write the pack");
+            let pack_digest = pack_key
+                .strip_prefix("packs/")
+                .expect("a pack key is namespaced")
+                .to_string();
+            assert_eq!(
+                pack_key,
+                GitStore::content_key("packs", &pack_bytes),
+                "the facade, not the caller, derives the key from the bytes"
+            );
+            assert_eq!(
+                store
+                    .get_verified(&pack_key, &pack_digest)
+                    .await
+                    .expect("verified read"),
+                pack_bytes,
+                "a hydrate reads the pack back byte-exact"
+            );
+
+            assert!(
+                store
+                    .get_idx(&pack_digest, 1 << 20)
+                    .await
+                    .expect("an idx miss is not an error")
+                    .is_none(),
+                "a missing idx is a cache miss the hydrate regenerates"
+            );
+            let idx_bytes = b"\xfftOc\x00\x00\x00\x02 pretend idx".to_vec();
+            let idx_key = store
+                .put_idx(&pack_digest, &idx_bytes)
+                .await
+                .expect("write the idx sidecar");
+            assert_eq!(idx_key, format!("idx/{pack_digest}"));
+            assert_eq!(
+                store
+                    .get_idx(&pack_digest, 1 << 20)
+                    .await
+                    .expect("idx read")
+                    .expect("the idx exists"),
+                idx_bytes
+            );
+
+            let manifest_bytes = format!("{{\"packs\":[\"{pack_key}\"]}}").into_bytes();
+            let manifest_key = store
+                .put_manifest(&manifest_bytes)
+                .await
+                .expect("write the manifest");
+            let manifest_digest = manifest_key
+                .strip_prefix("manifests/")
+                .expect("a manifest key is namespaced")
+                .to_string();
+            assert_eq!(
+                store
+                    .get_verified_limited(&manifest_key, &manifest_digest, 1 << 20)
+                    .await
+                    .expect("bounded verified read"),
+                manifest_bytes
+            );
+            assert!(
+                matches!(
+                    store
+                        .get_verified_limited(&manifest_key, &manifest_digest, 4)
+                        .await,
+                    Err(StoreError::ObjectTooLarge { .. })
+                ),
+                "a bounded read rejects an oversized object before transferring it"
+            );
+
+            assert!(
+                matches!(
+                    store.get(&format!("{prefix}/packs/absent")).await,
+                    Err(StoreError::NotFound(_))
+                ),
+                "a missing object is a not-found, never empty bytes"
+            );
+
+            // Corruption: bytes that do not hash to the key they sit under.
+            // Production cannot produce this (writes are create-only and the
+            // facade derives the key), so the test writes through the backend
+            // directly — which is exactly the shape of a backend that returned
+            // the wrong object.
+            let claimed = b"the bytes this key names".to_vec();
+            let corrupt_key = GitStore::content_key(&format!("{prefix}/packs"), &claimed);
+            let claimed_digest = corrupt_key
+                .rsplit('/')
+                .next()
+                .expect("a content key ends in its digest")
+                .to_string();
+            store
+                .store
+                .put(&corrupt_key, b"different bytes", "application/x-git-pack")
+                .await
+                .expect("plant mismatched bytes");
+
+            let error = store
+                .get_verified(&corrupt_key, &claimed_digest)
+                .await
+                .expect_err("a verified read must reject bytes that do not hash to their key");
+            let StoreError::DigestMismatch {
+                key,
+                expected,
+                actual,
+            } = &error
+            else {
+                panic!("corruption must surface as a digest mismatch, not {error:?}");
+            };
+            assert_eq!(key, &corrupt_key);
+            assert_eq!(expected, &claimed_digest);
+            assert_ne!(actual, expected, "the report names the digest it computed");
+
+            // Only the corruption arm's key is under the test namespace; the
+            // rest live where production writes them, so remove them by hand.
+            let planted = [pack_key, idx_key, manifest_key];
+            let outcome = store
+                .store
+                .delete_objects(&planted)
+                .await
+                .expect("remove the objects written outside the test namespace");
+            assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        })
+        .await;
+    }
+
+    /// A chunked repository seed: one writer, one pointer, many sequential
+    /// transitions, faster than the published per-object write ceiling.
+    ///
+    /// This is the mirror's initial seed of a large repository — roughly 4.5k
+    /// refs at 200 refs per chunk, each chunk a pointer transition predicated
+    /// on the revision the previous one committed. Cloud Storage documents one
+    /// write per second to a single object name, so the sequence deliberately
+    /// exceeds it. Every transition must still commit: throttling is pacing,
+    /// absorbed inside the provider's bounded policy, and must never reach the
+    /// caller as a failed push or be mistaken for a lost race in a sequence
+    /// that has exactly one entrant.
+    #[tokio::test]
+    #[ignore = "requires a live GCS bucket (BUZZ_GCS_LIVE=1)"]
+    async fn a_chunked_seed_commits_every_sequential_transition() {
+        /// One more than the ~23 chunks a 4.5k-ref seed needs.
+        const CHUNKS: usize = 24;
+
+        with_git_store("chunked-seed", async |store, prefix| {
+            let key = format!("{prefix}/pointers/seed");
+
+            let ConditionalWrite::Committed(mut revision) = store
+                .put_pointer(&key, b"{\"chunk\":0,\"refs\":0}", WriteCondition::Absent)
+                .await
+                .expect("create the pointer")
+            else {
+                panic!("creating an absent pointer must commit");
+            };
+
+            let mut revisions = vec![revision.clone()];
+            let started = Instant::now();
+            for chunk in 1..=CHUNKS {
+                let body = format!("{{\"chunk\":{chunk},\"refs\":{}}}", chunk * 200);
+                let outcome = store
+                    .put_pointer(
+                        &key,
+                        body.as_bytes(),
+                        WriteCondition::Matches(revision.clone()),
+                    )
+                    .await;
+                revision = match outcome {
+                    Ok(ConditionalWrite::Committed(next)) => next,
+                    Ok(ConditionalWrite::Conflict) => panic!(
+                        "chunk {chunk} lost a race it was the only entrant in — throttling was \
+                         misclassified as a lost CAS"
+                    ),
+                    Err(StoreError::Backend(ObjectStoreError::Throttled { .. })) => panic!(
+                        "chunk {chunk} surfaced throttling as a push failure; pacing belongs \
+                         inside the provider's bounded policy, never at the caller"
+                    ),
+                    Err(other) => panic!("chunk {chunk} failed: {other}"),
+                };
+                revisions.push(revision.clone());
+            }
+            let elapsed = started.elapsed();
+
+            let mut distinct = revisions.clone();
+            distinct.dedup();
+            assert_eq!(
+                distinct.len(),
+                revisions.len(),
+                "every transition must publish a fresh revision"
+            );
+            assert_eq!(
+                store.get(&key).await.expect("read the published state"),
+                &format!("{{\"chunk\":{CHUNKS},\"refs\":{}}}", CHUNKS * 200).into_bytes()[..],
+                "the last chunk must be the published state"
+            );
+
+            eprintln!(
+                "chunked seed: {CHUNKS} sequential pointer transitions committed in {elapsed:?} \
+                 ({:.2} transitions/sec), zero failures",
+                CHUNKS as f64 / elapsed.as_secs_f64()
+            );
+        })
+        .await;
     }
 }

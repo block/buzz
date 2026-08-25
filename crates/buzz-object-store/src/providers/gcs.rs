@@ -79,6 +79,14 @@ const BULK_DELETE_CONCURRENCY: usize = 12;
 /// response stall a request for minutes.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
+/// Floor on the pause after a throttled request that carried no `Retry-After`.
+///
+/// Cloud Storage documents a maximum of one write per second to a single object
+/// name. A writer already being throttled on one key therefore cannot succeed
+/// by retrying sooner, and would only spend its bounded attempt budget — which
+/// is what turns absorbed backpressure into a failed push.
+const MIN_THROTTLE_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Longest provider detail kept on an error.
 ///
 /// Cloud Storage error bodies are JSON diagnostics, but they can echo request
@@ -89,8 +97,16 @@ const MAX_ERROR_DETAIL: usize = 512;
 /// Bounded retry policy for one [`GcsObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcsRetryConfig {
-    /// Total attempts, including the first. `1` disables retries.
+    /// Attempts allowed while the backend is failing, including the first.
+    /// `1` disables retries.
     pub max_attempts: u32,
+    /// Attempts allowed while the backend is throttling, including the first.
+    ///
+    /// Larger than `max_attempts` because a 429 is not a failure: it is the
+    /// service asking to be approached more slowly, at a published rate. Giving
+    /// up on it turns backpressure the caller should have absorbed into a
+    /// failed write.
+    pub max_throttled_attempts: u32,
     /// Backoff ceiling used for the first retry, doubled thereafter.
     pub initial_backoff: Duration,
     /// Ceiling on any single computed backoff.
@@ -101,6 +117,7 @@ impl Default for GcsRetryConfig {
     fn default() -> Self {
         Self {
             max_attempts: 6,
+            max_throttled_attempts: 12,
             initial_backoff: Duration::from_millis(200),
             max_backoff: Duration::from_secs(8),
         }
@@ -221,9 +238,9 @@ impl GcsObjectStore {
                 "gcs bucket must be configured".to_string(),
             ));
         }
-        if config.retry.max_attempts == 0 {
+        if config.retry.max_attempts == 0 || config.retry.max_throttled_attempts == 0 {
             return Err(ObjectStoreError::Config(
-                "gcs retry max_attempts must be at least 1".to_string(),
+                "gcs retry max_attempts and max_throttled_attempts must be at least 1".to_string(),
             ));
         }
 
@@ -278,66 +295,32 @@ impl GcsObjectStore {
     async fn with_retries<T, F, Fut>(
         &self,
         operation: &'static str,
-        key: &str,
+        _key: &str,
         mut attempt: F,
     ) -> Result<T, ObjectStoreError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, ObjectStoreError>>,
     {
-        for attempt_index in 0..self.retry.max_attempts {
+        let mut budget = RetryBudget::new(&self.retry);
+        loop {
             match attempt().await {
                 Ok(value) => return Ok(value),
-                Err(error) => match self.retry_delay(&error, attempt_index) {
-                    Some(delay) if attempt_index + 1 < self.retry.max_attempts => {
+                Err(error) => match budget.next_delay(&error) {
+                    Some(delay) => {
                         tracing::debug!(
                             provider = "gcs",
                             operation,
-                            attempt = attempt_index + 1,
+                            attempt = budget.attempts(),
                             delay_ms = delay.as_millis() as u64,
                             "retrying object store operation"
                         );
                         tokio::time::sleep(delay).await;
                     }
-                    _ => return Err(error),
+                    None => return Err(error),
                 },
             }
         }
-        // Unreachable while `max_attempts >= 1`, which the constructor enforces.
-        Err(ObjectStoreError::TransportRetryable {
-            operation,
-            message: format!("retry budget exhausted for {key:?}"),
-        })
-    }
-
-    /// How long to wait before retrying, or `None` when the error is final.
-    fn retry_delay(&self, error: &ObjectStoreError, attempt_index: u32) -> Option<Duration> {
-        match error {
-            ObjectStoreError::Throttled { retry_after, .. } => Some(
-                retry_after
-                    .map(|hint| hint.min(MAX_RETRY_AFTER))
-                    .unwrap_or_else(|| self.backoff(attempt_index)),
-            ),
-            ObjectStoreError::TransportRetryable { .. }
-            | ObjectStoreError::TransportAmbiguous { .. } => Some(self.backoff(attempt_index)),
-            _ => None,
-        }
-    }
-
-    /// Capped exponential backoff with full jitter.
-    ///
-    /// Full jitter (a uniform draw from `[1ms, cap]`) rather than the raw
-    /// exponent: a hot pointer is written by several racers at once, and
-    /// unjittered backoff would keep them synchronised into the same retry
-    /// instants.
-    fn backoff(&self, attempt_index: u32) -> Duration {
-        let cap = self
-            .retry
-            .initial_backoff
-            .saturating_mul(1u32 << attempt_index.min(16))
-            .min(self.retry.max_backoff);
-        let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX).max(1);
-        Duration::from_millis(1 + rand::random::<u64>() % cap_ms)
     }
 
     /// One conditional-write attempt, carrying `precondition` verbatim.
@@ -389,6 +372,88 @@ impl GcsObjectStore {
             _ => Ok(ConditionalWrite::Conflict),
         }
     }
+}
+
+/// One operation's progress through the bounded retry policy.
+///
+/// Throttling and transient failure are counted separately on purpose.
+/// A 5xx or a dropped connection is the backend failing, and a caller waiting
+/// on a long series of them is waiting for nothing. A 429 is the backend
+/// working correctly and asking to be approached more slowly, with a published
+/// recovery interval — a sole writer pushing a repository in chunks has to wait
+/// its turn, and giving up on it would turn absorbed backpressure into a failed
+/// push. So throttling gets its own, larger allowance.
+struct RetryBudget<'a> {
+    retry: &'a GcsRetryConfig,
+    failures: u32,
+    throttles: u32,
+}
+
+impl<'a> RetryBudget<'a> {
+    fn new(retry: &'a GcsRetryConfig) -> Self {
+        Self {
+            retry,
+            failures: 0,
+            throttles: 0,
+        }
+    }
+
+    /// Attempts made so far.
+    fn attempts(&self) -> u32 {
+        self.failures
+    }
+
+    /// Record `error` and return how long to wait, or `None` to give up and
+    /// return it to the caller.
+    fn next_delay(&mut self, error: &ObjectStoreError) -> Option<Duration> {
+        let attempt_index = self.failures;
+        self.failures += 1;
+
+        match error {
+            ObjectStoreError::Throttled { retry_after, .. } => {
+                self.throttles += 1;
+                if self.throttles >= self.retry.max_throttled_attempts {
+                    return None;
+                }
+                Some(match retry_after {
+                    Some(hint) => (*hint).min(MAX_RETRY_AFTER),
+                    // Cloud Storage publishes a one-write-per-second ceiling
+                    // per object name. Once a writer is being throttled on a
+                    // single key, retrying sooner than that cannot succeed — it
+                    // only spends the budget — so the throttle path takes a
+                    // floor the transient path does not.
+                    None => backoff(self.retry, attempt_index).max(MIN_THROTTLE_BACKOFF),
+                })
+            }
+            ObjectStoreError::TransportRetryable { .. }
+            | ObjectStoreError::TransportAmbiguous { .. } => {
+                if self.failures - self.throttles >= self.retry.max_attempts {
+                    return None;
+                }
+                Some(backoff(self.retry, attempt_index))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Capped exponential backoff with equal jitter.
+///
+/// The wait is half the exponent plus a uniform draw over the other half,
+/// rather than a uniform draw over the whole of it. Both forms de-synchronise
+/// racers on a hot pointer, which is the point of jitter, but full jitter also
+/// makes very short waits likely — and against a hard per-object rate limit a
+/// short wait cannot succeed, so it burns an attempt from a bounded budget for
+/// nothing. Keeping the lower half fixed means every retry is meaningfully
+/// later than the one before it.
+fn backoff(retry: &GcsRetryConfig, attempt_index: u32) -> Duration {
+    let cap = retry
+        .initial_backoff
+        .saturating_mul(1u32 << attempt_index.min(16))
+        .min(retry.max_backoff);
+    let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX).max(2);
+    let fixed = cap_ms / 2;
+    Duration::from_millis(fixed + rand::random::<u64>() % (cap_ms - fixed))
 }
 
 /// The resource name both Cloud Storage clients address a bucket by.
@@ -590,8 +655,9 @@ impl ObjectStore for GcsObjectStore {
         // Set once an attempt fails without a classified answer. From then on a
         // 412 is no longer self-evidently someone else's commit.
         let mut outcome_unknown = false;
+        let mut budget = RetryBudget::new(&self.retry);
 
-        for attempt_index in 0..self.retry.max_attempts {
+        loop {
             let error = match self
                 .write_once(
                     "put_conditional",
@@ -616,26 +682,21 @@ impl ObjectStore for GcsObjectStore {
 
             // Retrying always replays `precondition` verbatim: the loop never
             // relaxes a compare-and-swap into a blind overwrite.
-            match self.retry_delay(&error, attempt_index) {
-                Some(delay) if attempt_index + 1 < self.retry.max_attempts => {
+            match budget.next_delay(&error) {
+                Some(delay) => {
                     tracing::debug!(
                         provider = "gcs",
                         operation = "put_conditional",
-                        attempt = attempt_index + 1,
+                        attempt = budget.attempts(),
                         delay_ms = delay.as_millis() as u64,
                         outcome_unknown,
                         "retrying conditional write with its original precondition"
                     );
                     tokio::time::sleep(delay).await;
                 }
-                _ => return Err(error),
+                None => return Err(error),
             }
         }
-
-        Err(ObjectStoreError::TransportRetryable {
-            operation: "put_conditional",
-            message: "retry budget exhausted".to_string(),
-        })
     }
 
     async fn get(&self, key: &str) -> Result<Bytes, ObjectStoreError> {
@@ -1120,6 +1181,8 @@ mod tests {
 
     #[test]
     fn retry_after_seconds_are_honoured_and_capped() {
+        let retry = GcsRetryConfig::default();
+
         let err = classify("put_conditional", "pointers/x", throttled_error("3"));
         assert!(matches!(
             err,
@@ -1128,11 +1191,132 @@ mod tests {
                 ..
             } if d == Duration::from_secs(3)
         ));
+        assert_eq!(
+            RetryBudget::new(&retry).next_delay(&err),
+            Some(Duration::from_secs(3)),
+            "an advertised backoff is used verbatim"
+        );
 
-        let store_retry = GcsRetryConfig::default();
-        let hint = Duration::from_secs(3600).min(MAX_RETRY_AFTER);
-        assert_eq!(hint, MAX_RETRY_AFTER);
-        assert!(store_retry.max_backoff < MAX_RETRY_AFTER);
+        let absurd = classify("put_conditional", "pointers/x", throttled_error("86400"));
+        assert_eq!(
+            RetryBudget::new(&retry).next_delay(&absurd),
+            Some(MAX_RETRY_AFTER),
+            "one response must not stall a request indefinitely"
+        );
+    }
+
+    /// Cloud Storage caps writes to one per second per object name, so a
+    /// throttled writer that retries sooner cannot succeed — it only spends an
+    /// attempt from a bounded budget. Live testing found exactly this: with a
+    /// sub-second first retry the budget ran out and absorbed backpressure
+    /// surfaced as a failed write.
+    #[test]
+    fn throttling_without_a_hint_waits_at_least_the_per_object_write_interval() {
+        let retry = GcsRetryConfig::default();
+        let throttled = ObjectStoreError::Throttled {
+            operation: "put_conditional",
+            retry_after: None,
+        };
+        let mut budget = RetryBudget::new(&retry);
+        for attempt in 1..retry.max_throttled_attempts {
+            let delay = budget
+                .next_delay(&throttled)
+                .expect("throttling stays retryable within its own budget");
+            assert!(
+                delay >= MIN_THROTTLE_BACKOFF,
+                "attempt {attempt} would retry after {delay:?}, sooner than the per-object \
+                 write interval"
+            );
+        }
+        assert!(
+            budget.next_delay(&throttled).is_none(),
+            "the throttle budget is bounded"
+        );
+    }
+
+    /// Throttling and transient failure draw on separate allowances. A long
+    /// series of 429s must not consume the budget reserved for a genuinely
+    /// failing backend, and vice versa — otherwise a paced writer and a broken
+    /// one are indistinguishable to the policy.
+    #[test]
+    fn throttling_and_transient_failure_have_independent_budgets() {
+        let retry = GcsRetryConfig::default();
+        assert!(
+            retry.max_throttled_attempts > retry.max_attempts,
+            "backpressure deserves more patience than failure"
+        );
+        let throttled = ObjectStoreError::Throttled {
+            operation: "put_conditional",
+            retry_after: None,
+        };
+        let transient = ObjectStoreError::TransportRetryable {
+            operation: "put_conditional",
+            message: "503".into(),
+        };
+
+        // Spend the throttle allowance down to its last attempt, then show the
+        // transient allowance is still whole.
+        let mut budget = RetryBudget::new(&retry);
+        for _ in 1..retry.max_throttled_attempts {
+            assert!(budget.next_delay(&throttled).is_some());
+        }
+        for _ in 1..retry.max_attempts {
+            assert!(
+                budget.next_delay(&transient).is_some(),
+                "throttling must not have eaten the transient budget"
+            );
+        }
+        assert!(
+            budget.next_delay(&transient).is_none(),
+            "the transient budget is bounded"
+        );
+    }
+
+    /// Equal jitter: every wait is at least half its exponential cap, and never
+    /// more than the cap. Full jitter would satisfy the upper bound alone while
+    /// making near-zero waits common.
+    #[test]
+    fn backoff_grows_and_never_collapses_to_zero() {
+        let retry = GcsRetryConfig::default();
+        let mut previous_floor = Duration::ZERO;
+        for attempt in 0..6 {
+            let cap = retry
+                .initial_backoff
+                .saturating_mul(1 << attempt)
+                .min(retry.max_backoff);
+            for _ in 0..64 {
+                let delay = backoff(&retry, attempt);
+                assert!(delay <= cap, "attempt {attempt}: {delay:?} exceeds {cap:?}");
+                assert!(
+                    delay >= cap / 2,
+                    "attempt {attempt}: {delay:?} is below half of {cap:?}"
+                );
+            }
+            assert!(cap >= previous_floor, "backoff must not shrink");
+            previous_floor = cap;
+        }
+    }
+
+    /// Only backpressure and unknown outcomes are retried. A stale generation,
+    /// a missing object, or a permission failure is the caller's answer on the
+    /// first attempt.
+    #[test]
+    fn classified_final_answers_are_not_retried() {
+        let retry = GcsRetryConfig::default();
+        for error in [
+            ObjectStoreError::NotFound { key: "k".into() },
+            ObjectStoreError::Conflict { key: "k".into() },
+            ObjectStoreError::Provider {
+                operation: "put",
+                message: "403".into(),
+            },
+            ObjectStoreError::Config("bad".into()),
+        ] {
+            assert!(
+                RetryBudget::new(&retry).next_delay(&error).is_none(),
+                "{error} must not be retried"
+            );
+        }
     }
 
     /// An HTTP-date `Retry-After` is not misread as a duration; the caller
