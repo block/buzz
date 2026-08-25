@@ -347,7 +347,7 @@ function MessageComposerImpl({
       restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
-      if (newlyPinnedPubkeys.length === 0) return;
+      if (!keepMentionedAgentsPinned || newlyPinnedPubkeys.length === 0) return;
       const sentChannelId = channelId;
       if (restoreAddressedAgentMentionsFrameRef.current !== null) {
         cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
