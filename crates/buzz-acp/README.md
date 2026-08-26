@@ -119,6 +119,38 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
+### Native agent jobs (opt-in)
+
+Native jobs use durable kinds `43001`–`43006` to suspend a delegating turn and
+wake it only when a typed terminal result arrives. They are off by default, so
+existing agents retain the message-based behavior.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BUZZ_ACP_NATIVE_JOBS` | no | `false` | Exact `true` enables native jobs for this harness. |
+| `BUZZ_ACP_NATIVE_JOB_ROLE` | when enabled | — | `manager`, `research`, `builder`, `qa`, `screenshots`, `memory`, `git`, or `translation`. Specialist roles use worker behavior. |
+| `BUZZ_ACP_DELEGATION_TARGETS` | manager | — | JSON object mapping configured specialist roles (for ATLAS: `research`, `builder`, `qa`, `screenshots`, `memory`, `git`, and `translation`) to exact public keys. |
+| `BUZZ_ACP_NATIVE_JOB_DELEGATOR` | worker | — | Exact manager public key this worker accepts. |
+| `BUZZ_ACP_NATIVE_JOB_DEADLINE_SECS` | no | `900` | Deadline attached to newly delegated jobs (30–86400 seconds). |
+| `BUZZ_ACP_NATIVE_JOB_HYBRID` | no | `false` | Exact `true` enables the opt-in deterministic Helpdesk article path. Routine Memory, structural QA, and Git jobs complete as host workers without ACP/model turns; predictable stage transitions are host-routed. |
+| `BUZZ_ACP_HYBRID_MEMORY_INDEX` | hybrid Memory | — | Absolute path to the compact authoritative Memory JSON index. |
+| `BUZZ_ACP_HYBRID_ALLOWED_ROOTS` | hybrid Manager/QA/Git | — | Platform path-list of exact roots deterministic checks may inspect. Requests outside these roots fail closed. |
+
+The terminal assistant message must be either ordinary owner-facing prose
+(manager only) or exactly `BUZZ_ACTION_V1` followed by one typed JSON action.
+Translation workers are the narrow exception: they return only
+`PASS`, `REVIEW_NEEDED`, or `FAIL` plus at most one bounded finding, and the
+host constructs their terminal protocol envelope.
+The host publishes delegation, accepted, result, cancellation, and error
+events; agents do not poll, send completion messages, or confirm publication.
+Status events are displayed to clients but never invoke a model. Keep evidence
+bodies in durable artifacts and send only compact references in job payloads.
+Hybrid execution uses the same typed job events and is also off by default. It
+recognizes only a bounded `helpdesk_article_v1` state marker in the task
+constraints; other native jobs and every non-native agent keep their existing
+behavior. Deterministic Git operations set `GIT_OPTIONAL_LOCKS=0`, never fetch,
+and never mutate the repository.
+
 ### Parallel Agents & Heartbeat
 
 | Flag | Env Var | Default | Description |

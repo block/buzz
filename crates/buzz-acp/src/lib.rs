@@ -4,6 +4,8 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod hybrid;
+mod jobs;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -21,8 +23,9 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_JOB_ACCEPTED, KIND_JOB_CANCEL, KIND_JOB_ERROR, KIND_JOB_PROGRESS, KIND_JOB_REQUEST,
+    KIND_JOB_RESULT, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -57,6 +60,25 @@ use uuid::Uuid;
 /// name (e.g., `buzz-acp --verbose models`) are not supported.
 fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
+}
+
+fn extend_channel_filters_for_native_jobs(
+    filters: &mut HashMap<Uuid, config::ChannelFilter>,
+    native_jobs: &jobs::NativeJobsConfig,
+) {
+    if !native_jobs.enabled {
+        return;
+    }
+    for filter in filters.values_mut() {
+        let Some(kinds) = filter.kinds.as_mut() else {
+            continue;
+        };
+        for kind in native_jobs.subscription_kinds() {
+            if !kinds.contains(kind) {
+                kinds.push(*kind);
+            }
+        }
+    }
 }
 
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
@@ -1676,6 +1698,34 @@ fn idle_pool_sleep_due(
 }
 
 #[cfg(test)]
+mod native_job_subscription_tests {
+    use super::*;
+
+    #[test]
+    fn native_job_kinds_are_added_to_wire_subscription() {
+        let channel_id = Uuid::new_v4();
+        let mut filters = HashMap::from([(
+            channel_id,
+            config::ChannelFilter {
+                kinds: Some(vec![KIND_STREAM_MESSAGE]),
+                require_mention: true,
+            },
+        )]);
+        let native_jobs = jobs::NativeJobsConfig::enabled_for_test();
+
+        extend_channel_filters_for_native_jobs(&mut filters, &native_jobs);
+
+        let kinds = filters[&channel_id].kinds.as_ref().unwrap();
+        for kind in native_jobs.subscription_kinds() {
+            assert!(
+                kinds.contains(kind),
+                "wire subscription omitted kind {kind}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod inactivity_tests {
     use super::*;
 
@@ -1943,6 +1993,8 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let native_jobs = jobs::NativeJobsConfig::from_env()
+        .map_err(|error| anyhow::anyhow!("native jobs configuration error: {error}"))?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -2098,7 +2150,7 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
-    let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
+    let mut rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
             vec![SubscriptionRule {
                 name: "mentions".into(),
@@ -2134,8 +2186,23 @@ async fn tokio_main() -> Result<()> {
             config::load_rules(&config.config_path)?
         }
     };
+    if native_jobs.enabled {
+        for rule in &mut rules {
+            for kind in native_jobs.subscription_kinds() {
+                if !rule.kinds.contains(kind) {
+                    rule.kinds.push(*kind);
+                }
+            }
+        }
+        tracing::info!(
+            role = ?native_jobs.role,
+            worker_role = ?native_jobs.worker_role,
+            "native agent jobs enabled"
+        );
+    }
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    extend_channel_filters_for_native_jobs(&mut channel_filters, &native_jobs);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2221,6 +2288,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        native_jobs,
     });
 
     if !config.memory_enabled {
@@ -2630,6 +2698,81 @@ async fn tokio_main() -> Result<()> {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
+                            if ctx.native_jobs.enabled
+                                && matches!(kind_u32, KIND_JOB_ACCEPTED | KIND_JOB_PROGRESS)
+                            {
+                                // Host-generated lifecycle events are visible in
+                                // clients but never wake an agent/model.
+                                continue;
+                            }
+                            let native_job_authorized = ctx.native_jobs.enabled
+                                && matches!(
+                                    kind_u32,
+                                    KIND_JOB_REQUEST
+                                        | KIND_JOB_RESULT
+                                        | KIND_JOB_ERROR
+                                        | KIND_JOB_CANCEL
+                                );
+                            if native_job_authorized
+                                && !ctx.native_jobs.claim_inbound_event(&buzz_event.event)
+                            {
+                                tracing::debug!(
+                                    kind = kind_u32,
+                                    "dropping unauthorized or duplicate native job event"
+                                );
+                                continue;
+                            }
+                            if native_job_authorized {
+                                match hybrid::try_route_manager_result(
+                                    &ctx.native_jobs,
+                                    &ctx.rest_client,
+                                    &buzz_event,
+                                )
+                                .await
+                                {
+                                    Ok(true) => continue,
+                                    Ok(false) => {}
+                                    Err(error) => tracing::warn!(
+                                        "hybrid manager routing failed; waking Manager safely: {error}"
+                                    ),
+                                }
+                                match hybrid::try_handle_deterministic_request(
+                                    &ctx.native_jobs,
+                                    &ctx.rest_client,
+                                    &buzz_event,
+                                )
+                                .await
+                                {
+                                    Ok(true) => continue,
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "hybrid deterministic dispatch failed; refusing model fallback: {error}"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            if ctx.native_jobs.enabled && kind_u32 == KIND_JOB_CANCEL {
+                                if let Err(error) = jobs::publish_cancelled(
+                                    &ctx.native_jobs,
+                                    &ctx.rest_client,
+                                    buzz_event.channel_id,
+                                    &buzz_event.event,
+                                )
+                                .await
+                                {
+                                    tracing::warn!("native job cancellation publish failed: {error}");
+                                    continue;
+                                }
+                                let _ = signal_in_flight_task(
+                                    &mut pool,
+                                    buzz_event.channel_id,
+                                    ControlSignal::Cancel,
+                                );
+                                continue;
+                            }
+
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
                             {
@@ -2865,7 +3008,7 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
-                            {
+                            if !native_job_authorized {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
@@ -3144,15 +3287,75 @@ async fn tokio_main() -> Result<()> {
 
         match pool_event {
             Some(PoolEvent::Result(result)) => {
+                let mut result = *result;
                 // Stop typing indicator for the completed channel.
                 if let PromptSource::Channel(ch) = &result.source {
                     typing_channels.remove(ch);
+                }
+                if ctx.native_jobs.enabled && !matches!(result.outcome, PromptOutcome::Ok(_)) {
+                    if let Some(batch) = result
+                        .batch
+                        .as_ref()
+                        .filter(|batch| jobs::is_native_job_batch(batch))
+                    {
+                        let error = format!(
+                            "native turn ended without a terminal result ({})",
+                            prompt_outcome_label(&result.outcome)
+                        );
+                        jobs::publish_turn_error(&ctx.native_jobs, &ctx.rest_client, batch, &error)
+                            .await;
+                        result.agent.state.invalidate(&result.source);
+                        // Native jobs fail terminally. Do not let the ordinary
+                        // chat retry queue replay the task and spend more model
+                        // calls after its manager has already been resumed.
+                        result.batch = None;
+                    }
+                }
+                if ctx.native_jobs.enabled && matches!(result.outcome, PromptOutcome::Ok(_)) {
+                    if let Some(batch) = result.batch.as_ref() {
+                        let terminal_result = match result.agent.acp.take_final_assistant_message()
+                        {
+                            Some(output) => {
+                                jobs::handle_terminal_output(
+                                    &ctx.native_jobs,
+                                    &ctx.rest_client,
+                                    batch,
+                                    &output,
+                                )
+                                .await
+                            }
+                            None if jobs::compact_prompt(batch).is_some() => Err(anyhow::anyhow!(
+                                "native turn produced no terminal assistant output"
+                            )),
+                            None => Ok(jobs::NativeTurnEffect {
+                                handled: false,
+                                invalidate_session: false,
+                            }),
+                        };
+                        match terminal_result {
+                            Ok(effect) if effect.invalidate_session => {
+                                result.agent.state.invalidate(&result.source);
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!("native job terminal action failed: {error}");
+                                jobs::publish_turn_error(
+                                    &ctx.native_jobs,
+                                    &ctx.rest_client,
+                                    batch,
+                                    &error.to_string(),
+                                )
+                                .await;
+                                result.agent.state.invalidate(&result.source);
+                            }
+                        }
+                    }
                 }
                 if handle_prompt_result(
                     &mut pool,
                     &mut queue,
                     &config,
-                    *result,
+                    result,
                     &mut heartbeat_in_flight,
                     &removed_channels,
                     &mut crash_history,
@@ -3842,6 +4045,18 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+fn prompt_outcome_label(outcome: &PromptOutcome) -> &'static str {
+    match outcome {
+        PromptOutcome::Ok(_) => "completed",
+        PromptOutcome::Error(_) => "error",
+        PromptOutcome::AgentExited => "agent_exited",
+        PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
+        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
+        PromptOutcome::Cancelled => "cancelled",
+        PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
+    }
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3920,106 +4135,111 @@ fn handle_prompt_result(
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
-    if let Some(batch) = result.batch.take() {
-        // Don't requeue batches for channels the agent was removed from —
-        // those events are stale and should be silently dropped.
-        if !removed_channels.contains(&batch.channel_id) {
-            if matches!(
-                result.outcome,
-                PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
-            ) {
-                // Cancel re-prompt: store as cancelled events so flush_next()
-                // merges them into the next FlushBatch.cancelled_events,
-                // enabling the annotated merged-prompt format. The batch's
-                // cancel_reason (set by the pool task per the control signal)
-                // selects steer vs interrupt framing. It is always set on this
-                // path; if somehow unset, fall back to the gentler Steer framing
-                // — consistent with MergeFraming::for_reason(None) and the
-                // system default — rather than telling the agent to supersede.
-                //
-                // CancelDrainTimeout shares this path with Cancelled: a failed
-                // 5s drain after a control-signal cancel is a cleanup-deadline
-                // problem, not the deterministic hard-cap death below — the
-                // original batch must survive with no retry/dead-letter
-                // accounting, same as a clean cancel.
-                let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
-                queue.requeue_as_cancelled(batch, reason);
-            } else if matches!(
-                result.outcome,
-                PromptOutcome::Timeout(TimeoutKind::Hard {
-                    recently_active: false
-                })
-            ) {
-                tracing::error!(
-                    channel_id = %batch.channel_id,
-                    events = batch.events.len(),
-                    "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
-                    batch.events.len(),
-                );
-                let content = format!(
+    if !matches!(result.outcome, PromptOutcome::Ok(_)) {
+        if let Some(batch) = result.batch.take() {
+            // Don't requeue batches for channels the agent was removed from —
+            // those events are stale and should be silently dropped.
+            if !removed_channels.contains(&batch.channel_id) {
+                if matches!(
+                    result.outcome,
+                    PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
+                ) {
+                    // Cancel re-prompt: store as cancelled events so flush_next()
+                    // merges them into the next FlushBatch.cancelled_events,
+                    // enabling the annotated merged-prompt format. The batch's
+                    // cancel_reason (set by the pool task per the control signal)
+                    // selects steer vs interrupt framing. It is always set on this
+                    // path; if somehow unset, fall back to the gentler Steer framing
+                    // — consistent with MergeFraming::for_reason(None) and the
+                    // system default — rather than telling the agent to supersede.
+                    //
+                    // CancelDrainTimeout shares this path with Cancelled: a failed
+                    // 5s drain after a control-signal cancel is a cleanup-deadline
+                    // problem, not the deterministic hard-cap death below — the
+                    // original batch must survive with no retry/dead-letter
+                    // accounting, same as a clean cancel.
+                    let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
+                    queue.requeue_as_cancelled(batch, reason);
+                } else if matches!(
+                    result.outcome,
+                    PromptOutcome::Timeout(TimeoutKind::Hard {
+                        recently_active: false
+                    })
+                ) {
+                    tracing::error!(
+                        channel_id = %batch.channel_id,
+                        events = batch.events.len(),
+                        "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
+                        batch.events.len(),
+                    );
+                    let content = format!(
                     "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                     config.max_turn_duration_secs
                 );
-                spawn_failure_notice(rest_client, &batch, content);
-                hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
-            } else if matches!(
-                result.outcome,
-                PromptOutcome::Timeout(TimeoutKind::Hard {
-                    recently_active: true
-                })
-            ) {
-                tracing::warn!(
-                    channel_id = %batch.channel_id,
-                    events = batch.events.len(),
-                    "hard-cap timeout with recent activity — requeueing for retry"
-                );
-                if let Some(dead) = queue.requeue(batch) {
-                    let content = format!(
+                    spawn_failure_notice(rest_client, &batch, content);
+                    hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                } else if matches!(
+                    result.outcome,
+                    PromptOutcome::Timeout(TimeoutKind::Hard {
+                        recently_active: true
+                    })
+                ) {
+                    tracing::warn!(
+                        channel_id = %batch.channel_id,
+                        events = batch.events.len(),
+                        "hard-cap timeout with recent activity — requeueing for retry"
+                    );
+                    if let Some(dead) = queue.requeue(batch) {
+                        let content = format!(
                         "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                         config.max_turn_duration_secs
                     );
-                    spawn_failure_notice(rest_client, &dead, content);
-                    hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
-                } else {
-                    hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
-                }
-            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
-                // Auth errors are non-retryable: the token won't self-repair
-                // between retries, so requeueing only wastes attempt slots and
-                // delays the visible failure. Dead-letter immediately and tell
-                // the user to re-authenticate the CLI.
-                tracing::warn!(
-                    channel_id = %batch.channel_id,
-                    events = batch.events.len(),
-                    "dead-lettering batch immediately — non-retryable auth error"
-                );
-                let content = "⚠️ I couldn't process the last request: authentication failed. \
+                        spawn_failure_notice(rest_client, &dead, content);
+                        hard_timeout_fate_suffix =
+                            Some(" — dead-lettered (retry budget exhausted)");
+                    } else {
+                        hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                    }
+                } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
+                    // Auth errors are non-retryable: the token won't self-repair
+                    // between retries, so requeueing only wastes attempt slots and
+                    // delays the visible failure. Dead-letter immediately and tell
+                    // the user to re-authenticate the CLI.
+                    tracing::warn!(
+                        channel_id = %batch.channel_id,
+                        events = batch.events.len(),
+                        "dead-lettering batch immediately — non-retryable auth error"
+                    );
+                    let content = "⚠️ I couldn't process the last request: authentication failed. \
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
                     and then re-send."
-                    .to_string();
-                spawn_failure_notice(rest_client, &batch, content);
-            } else if let Some(dead) = queue.requeue(batch) {
-                let reason = match &result.outcome {
-                    PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
-                    PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
-                        "the turn exceeded the maximum duration".to_string()
-                    }
-                    PromptOutcome::AgentExited => "the agent process exited".to_string(),
-                    PromptOutcome::Error(e) => format!("{e}"),
-                    _ => "repeated failures".to_string(),
-                };
-                let content = format!(
+                        .to_string();
+                    spawn_failure_notice(rest_client, &batch, content);
+                } else if let Some(dead) = queue.requeue(batch) {
+                    let reason = match &result.outcome {
+                        PromptOutcome::Timeout(TimeoutKind::Idle) => {
+                            "the turn timed out".to_string()
+                        }
+                        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
+                            "the turn exceeded the maximum duration".to_string()
+                        }
+                        PromptOutcome::AgentExited => "the agent process exited".to_string(),
+                        PromptOutcome::Error(e) => format!("{e}"),
+                        _ => "repeated failures".to_string(),
+                    };
+                    let content = format!(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
-                spawn_failure_notice(rest_client, &dead, content);
+                    spawn_failure_notice(rest_client, &dead, content);
+                }
+            } else {
+                tracing::debug!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dropping failed batch for removed channel"
+                );
+                hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
             }
-        } else {
-            tracing::debug!(
-                channel_id = %batch.channel_id,
-                events = batch.events.len(),
-                "dropping failed batch for removed channel"
-            );
-            hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
         }
     }
 

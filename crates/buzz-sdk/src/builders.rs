@@ -244,6 +244,129 @@ pub fn build_message(
         .allow_self_tagging())
 }
 
+/// Build a native agent job request (kind 43001).
+pub fn build_agent_job_request(
+    channel_id: Uuid,
+    assignee_pubkey: &str,
+    delegator_pubkey: &str,
+    request: &buzz_core::agent_job::JobRequest,
+) -> Result<EventBuilder, SdkError> {
+    let assignee = check_pubkey_hex(assignee_pubkey, "assignee_pubkey")?;
+    let delegator = check_pubkey_hex(delegator_pubkey, "delegator_pubkey")?;
+    let content = serde_json::to_string(request)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    buzz_core::agent_job::parse_job_request(&content)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let task_id = request.task_id.to_string();
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &assignee])?,
+        tag(&["task", &task_id])?,
+        tag(&["root", &request.root_task_id])?,
+        tag(&["role", &request.assigned_role])?,
+        tag(&["delegator", &delegator])?,
+    ];
+    Ok(EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_JOB_REQUEST as u16),
+        content,
+    )
+    .tags(tags))
+}
+
+/// Build a native agent job accepted or progress event (kind 43002/43003).
+pub fn build_agent_job_status(
+    kind: u32,
+    channel_id: Uuid,
+    recipient_pubkey: &str,
+    root_task_id: &str,
+    request_event_id: &str,
+    status: &buzz_core::agent_job::JobStatus,
+) -> Result<EventBuilder, SdkError> {
+    if !matches!(
+        kind,
+        buzz_core::kind::KIND_JOB_ACCEPTED | buzz_core::kind::KIND_JOB_PROGRESS
+    ) {
+        return Err(SdkError::InvalidInput(
+            "job status kind must be 43002 or 43003".into(),
+        ));
+    }
+    let recipient = check_pubkey_hex(recipient_pubkey, "recipient_pubkey")?;
+    let content =
+        serde_json::to_string(status).map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    buzz_core::agent_job::parse_job_status(&content)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let task_id = status.task_id.to_string();
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &recipient])?,
+        tag(&["task", &task_id])?,
+        tag(&["root", root_task_id])?,
+        tag(&["request", request_event_id])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content).tags(tags))
+}
+
+/// Build a native agent job result or error event (kind 43004/43006).
+pub fn build_agent_job_result(
+    kind: u32,
+    channel_id: Uuid,
+    recipient_pubkey: &str,
+    root_task_id: &str,
+    request_event_id: &str,
+    result: &buzz_core::agent_job::JobResult,
+) -> Result<EventBuilder, SdkError> {
+    if !matches!(
+        kind,
+        buzz_core::kind::KIND_JOB_RESULT | buzz_core::kind::KIND_JOB_ERROR
+    ) {
+        return Err(SdkError::InvalidInput(
+            "job terminal kind must be 43004 or 43006".into(),
+        ));
+    }
+    let recipient = check_pubkey_hex(recipient_pubkey, "recipient_pubkey")?;
+    let content =
+        serde_json::to_string(result).map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    buzz_core::agent_job::parse_job_result(&content)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let task_id = result.task_id.to_string();
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &recipient])?,
+        tag(&["task", &task_id])?,
+        tag(&["root", root_task_id])?,
+        tag(&["request", request_event_id])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content).tags(tags))
+}
+
+/// Build a native agent job cancellation event (kind 43005).
+pub fn build_agent_job_cancel(
+    channel_id: Uuid,
+    recipient_pubkey: &str,
+    root_task_id: &str,
+    request_event_id: &str,
+    cancel: &buzz_core::agent_job::JobCancel,
+) -> Result<EventBuilder, SdkError> {
+    let recipient = check_pubkey_hex(recipient_pubkey, "recipient_pubkey")?;
+    let content =
+        serde_json::to_string(cancel).map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    buzz_core::agent_job::parse_job_cancel(&content)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let task_id = cancel.task_id.to_string();
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &recipient])?,
+        tag(&["task", &task_id])?,
+        tag(&["root", root_task_id])?,
+        tag(&["request", request_event_id])?,
+    ];
+    Ok(EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_JOB_CANCEL as u16),
+        content,
+    )
+    .tags(tags))
+}
+
 /// Build an encrypted agent observer frame (kind 24200).
 ///
 /// `recipient_pubkey` is the cleartext `p` tag used by the relay for owner-only
@@ -4866,5 +4989,46 @@ mod tests {
 
         assert_eq!(accept_count, 11, "expected 11 accept cases");
         assert_eq!(reject_count, 20, "expected 20 reject cases");
+    }
+
+    #[test]
+    fn native_job_request_has_compact_routing_tags() {
+        let assignee = keys().public_key().to_hex();
+        let delegator = keys().public_key().to_hex();
+        let request = buzz_core::agent_job::JobRequest {
+            v: buzz_core::agent_job::AGENT_JOB_VERSION,
+            task_id: Uuid::new_v4(),
+            root_task_id: event_id().to_hex(),
+            parent_task_id: None,
+            assigned_role: "research".into(),
+            objective: "Verify one fact".into(),
+            evidence_refs: vec![],
+            result_contract: buzz_core::agent_job::ResultContract {
+                kind: "evidence_packet".into(),
+                required: vec!["summary".into()],
+            },
+            constraints: vec!["read-only".into()],
+            budget: buzz_core::agent_job::JobBudget {
+                deadline_at: "2026-08-21T12:00:00Z".into(),
+                max_model_calls: Some(3),
+                max_output_bytes: 8192,
+            },
+            attempt: 1,
+        };
+
+        let event = sign(build_agent_job_request(uuid(), &assignee, &delegator, &request).unwrap());
+        assert_eq!(
+            event.kind,
+            Kind::Custom(buzz_core::kind::KIND_JOB_REQUEST as u16)
+        );
+        assert!(event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.first().map(String::as_str) == Some("task")
+                && parts.get(1).map(String::as_str) == Some(request.task_id.to_string().as_str())
+        }));
+        assert_eq!(
+            buzz_core::agent_job::parse_job_request(&event.content).unwrap(),
+            request
+        );
     }
 }

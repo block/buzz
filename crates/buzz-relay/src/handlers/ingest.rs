@@ -21,20 +21,21 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_JOB_ACCEPTED, KIND_JOB_CANCEL, KIND_JOB_ERROR,
+    KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -153,6 +154,78 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
         })?;
         buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
             .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    }
+    Ok(())
+}
+
+fn job_tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+    event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().map(String::as_str) == Some(name))
+            .then(|| parts.get(1).map(String::as_str))
+            .flatten()
+    })
+}
+
+fn validate_agent_job_event(event: &Event, kind: u32) -> Result<(), IngestError> {
+    for required in ["h", "p", "task", "root"] {
+        if job_tag(event, required).is_none() {
+            return Err(IngestError::Rejected(format!(
+                "invalid: agent job event requires {required} tag"
+            )));
+        }
+    }
+    let task_tag = job_tag(event, "task").ok_or_else(|| {
+        IngestError::Rejected("invalid: agent job event requires task tag".into())
+    })?;
+    let payload_task = match kind {
+        KIND_JOB_REQUEST => {
+            for required in ["role", "delegator"] {
+                if job_tag(event, required).is_none() {
+                    return Err(IngestError::Rejected(format!(
+                        "invalid: job request requires {required} tag"
+                    )));
+                }
+            }
+            let author = event.pubkey.to_hex();
+            if job_tag(event, "delegator") != Some(author.as_str()) {
+                return Err(IngestError::Rejected(
+                    "invalid: job request delegator must match author".into(),
+                ));
+            }
+            buzz_core::agent_job::parse_job_request(&event.content).map(|payload| payload.task_id)
+        }
+        KIND_JOB_ACCEPTED | KIND_JOB_PROGRESS => {
+            if job_tag(event, "request").is_none() {
+                return Err(IngestError::Rejected(
+                    "invalid: job status requires request tag".into(),
+                ));
+            }
+            buzz_core::agent_job::parse_job_status(&event.content).map(|payload| payload.task_id)
+        }
+        KIND_JOB_RESULT | KIND_JOB_ERROR => {
+            if job_tag(event, "request").is_none() {
+                return Err(IngestError::Rejected(
+                    "invalid: job result requires request tag".into(),
+                ));
+            }
+            buzz_core::agent_job::parse_job_result(&event.content).map(|payload| payload.task_id)
+        }
+        KIND_JOB_CANCEL => {
+            if job_tag(event, "request").is_none() {
+                return Err(IngestError::Rejected(
+                    "invalid: job cancel requires request tag".into(),
+                ));
+            }
+            buzz_core::agent_job::parse_job_cancel(&event.content).map(|payload| payload.task_id)
+        }
+        _ => return Ok(()),
+    }
+    .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+    if payload_task.to_string() != task_tag {
+        return Err(IngestError::Rejected(
+            "invalid: task tag does not match payload task_id".into(),
+        ));
     }
     Ok(())
 }
@@ -481,7 +554,13 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_DIFF
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
-        | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
+        | KIND_FORUM_COMMENT
+        | KIND_JOB_REQUEST
+        | KIND_JOB_ACCEPTED
+        | KIND_JOB_PROGRESS
+        | KIND_JOB_RESULT
+        | KIND_JOB_CANCEL
+        | KIND_JOB_ERROR => Ok(Scope::MessagesWrite),
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
@@ -716,6 +795,12 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
             | KIND_FORUM_COMMENT
+            | KIND_JOB_REQUEST
+            | KIND_JOB_ACCEPTED
+            | KIND_JOB_PROGRESS
+            | KIND_JOB_RESULT
+            | KIND_JOB_CANCEL
+            | KIND_JOB_ERROR
             // NIP-29 admin kinds (except CREATE_GROUP which creates the channel)
             | KIND_NIP29_PUT_USER
             | KIND_NIP29_REMOVE_USER
@@ -2250,6 +2335,17 @@ async fn ingest_event_inner(
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
     };
+    if matches!(
+        kind_u32,
+        KIND_JOB_REQUEST
+            | KIND_JOB_ACCEPTED
+            | KIND_JOB_PROGRESS
+            | KIND_JOB_RESULT
+            | KIND_JOB_CANCEL
+            | KIND_JOB_ERROR
+    ) {
+        validate_agent_job_event(&event, kind_u32)?;
+    }
     // NIP-43: relay admin commands are global — channel-scoped tokens cannot
     // issue them even if the event has no `h` tag (is_global_only_kind strips
     // channel_id, but we still need to reject the token itself).
@@ -3286,6 +3382,80 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    fn job_request_event_with(delegator: &nostr::Keys) -> Event {
+        let assignee = nostr::Keys::generate();
+        let request = buzz_core::agent_job::JobRequest {
+            v: buzz_core::agent_job::AGENT_JOB_VERSION,
+            task_id: Uuid::new_v4(),
+            root_task_id: "owner-event".into(),
+            parent_task_id: None,
+            assigned_role: "research".into(),
+            objective: "Verify one fact".into(),
+            evidence_refs: vec![],
+            result_contract: buzz_core::agent_job::ResultContract {
+                kind: "evidence_packet".into(),
+                required: vec!["summary".into()],
+            },
+            constraints: vec!["read-only".into()],
+            budget: buzz_core::agent_job::JobBudget {
+                deadline_at: "2026-08-21T12:00:00Z".into(),
+                max_model_calls: Some(3),
+                max_output_bytes: 8192,
+            },
+            attempt: 1,
+        };
+        buzz_sdk::build_agent_job_request(
+            Uuid::new_v4(),
+            &assignee.public_key().to_hex(),
+            &delegator.public_key().to_hex(),
+            &request,
+        )
+        .unwrap()
+        .sign_with_keys(delegator)
+        .unwrap()
+    }
+
+    fn job_request_event() -> Event {
+        job_request_event_with(&nostr::Keys::generate())
+    }
+
+    #[test]
+    fn native_job_events_are_scoped_and_validated() {
+        let event = job_request_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_JOB_REQUEST, &event).unwrap(),
+            Scope::MessagesWrite
+        );
+        assert!(requires_h_channel_scope(KIND_JOB_REQUEST));
+        assert!(validate_agent_job_event(&event, KIND_JOB_REQUEST).is_ok());
+    }
+
+    #[test]
+    fn native_job_rejects_task_tag_mismatch() {
+        let delegator = nostr::Keys::generate();
+        let original = job_request_event_with(&delegator);
+        let tags = original
+            .tags
+            .iter()
+            .map(|tag| {
+                let parts = tag.as_slice();
+                if parts.first().map(String::as_str) == Some("task") {
+                    nostr::Tag::parse(["task", &Uuid::new_v4().to_string()]).unwrap()
+                } else {
+                    tag.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let event = EventBuilder::new(original.kind, original.content)
+            .tags(tags)
+            .sign_with_keys(&delegator)
+            .unwrap();
+        assert!(matches!(
+            validate_agent_job_event(&event, KIND_JOB_REQUEST),
+            Err(IngestError::Rejected(message)) if message.contains("task tag")
+        ));
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
