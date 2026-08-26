@@ -354,7 +354,7 @@ export function ChannelMenuButton({
       {showsUnreadCount ? (
         <UnreadCountBadge
           channelName={channel.name}
-          className="ml-auto bg-notification text-notification-foreground"
+          className="ml-auto"
           count={unreadCount}
         />
       ) : hasThreadUnread ? (
