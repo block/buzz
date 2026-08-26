@@ -422,7 +422,7 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
-  /** Inbound author gate mode. Omitted = `"owner-only"` (server default). */
+  /** Omitted uses the linked persona default, then `"owner-only"`. */
   respondTo?: RespondToMode;
   /**
    * Hex pubkeys to allow when `respondTo === "allowlist"`. Validated &

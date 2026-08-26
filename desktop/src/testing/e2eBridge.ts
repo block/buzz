@@ -370,6 +370,13 @@ type E2eConfig = {
     /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
      *  deliver live reply/aux events while an older response is in flight. */
     threadRepliesDelayMs?: number;
+    /** Hold every `get_thread_replies` response until
+     *  `__BUZZ_E2E_RELEASE_THREAD_REPLIES__()` is called. Unlike
+     *  `threadRepliesDelayMs` (a timer that self-heals inside Playwright's
+     *  auto-retry window), this is a manual gate: the thread-aux backfill
+     *  provably never lands until the test releases it, so a spec can assert
+     *  the panel's head state before any backfill can heal it. */
+    deferThreadReplies?: boolean;
     usersBatchDelayMs?: number;
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
@@ -1442,6 +1449,12 @@ declare global {
     __BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?: () => number;
     /** Release link-preview uploads held before mock-native registration. */
     __BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?: () => number;
+    /** Flush every `get_thread_replies` call held by `deferThreadReplies`.
+     *  Returns the number of held requests released. */
+    __BUZZ_E2E_RELEASE_THREAD_REPLIES__?: () => number;
+    /** Number of `get_thread_replies` calls currently held by
+     *  `deferThreadReplies`. */
+    __BUZZ_E2E_THREAD_REPLIES_PENDING__?: () => number;
     /** Uploads that passed mock-native registration and began relay work. */
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
   }
@@ -1551,6 +1564,7 @@ type DeferredGetEvent = {
 let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
+let deferredThreadRepliesQueue: Array<() => void> = [];
 let cancelledMediaUploadIds = new Set<string>();
 let deferNextChannelsRead = false;
 let deferredChannelsReadResolve: (() => void) | null = null;
@@ -5185,6 +5199,11 @@ async function handleGetThreadReplies(
   const delayMs = config?.mock?.threadRepliesDelayMs ?? 0;
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  if (config?.mock?.deferThreadReplies) {
+    await new Promise<void>((resolve) => {
+      deferredThreadRepliesQueue.push(resolve);
+    });
   }
 
   return { events: page, next_cursor: nextCursor };
@@ -10746,6 +10765,7 @@ export function maybeInstallE2eTauriMocks() {
   deferredSendMessageLiveEchoes.length = 0;
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
+  deferredThreadRepliesQueue = [];
   cancelledMediaUploadIds = new Set<string>();
   window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ = 0;
   window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
@@ -10758,6 +10778,13 @@ export function maybeInstallE2eTauriMocks() {
     for (const release of queued) release();
     return queued.length;
   };
+  window.__BUZZ_E2E_RELEASE_THREAD_REPLIES__ = () => {
+    const queued = deferredThreadRepliesQueue.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
+  window.__BUZZ_E2E_THREAD_REPLIES_PENDING__ = () =>
+    deferredThreadRepliesQueue.length;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;

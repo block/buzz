@@ -994,13 +994,21 @@ pub enum ConversationContext {
     /// Thread context for a reply event.
     Thread {
         messages: Vec<ContextMessage>,
+        /// Exact visible count when complete; otherwise a proven lower bound.
         total: usize,
+        /// Whether the fetched context included the thread-opening event.
+        /// A reply-only window cannot be treated as complete even when it was
+        /// not capped by the configured message limit.
+        root_present: bool,
+        /// Whether replies exceeded the configured display window.
         truncated: bool,
     },
     /// DM conversation history.
     Dm {
         messages: Vec<ContextMessage>,
+        /// Exact visible count when below the fetch limit; otherwise a lower bound.
         total: usize,
+        /// Whether the fetch filled its configured window and may omit history.
         truncated: bool,
     },
 }
@@ -1148,7 +1156,9 @@ pub(crate) fn format_event_block(
     let thread = parse_thread_tags(&be.event);
     let mut parsed_parts = Vec::new();
     if let Some(ref p) = thread.parent_event_id {
-        parsed_parts.push(format!("parent={p}"));
+        if thread.root_event_id.as_ref() != Some(p) {
+            parsed_parts.push(format!("parent={p}"));
+        }
     }
     if let Some(ref r) = thread.root_event_id {
         parsed_parts.push(format!("root={r}"));
@@ -1349,14 +1359,21 @@ fn format_context_hints(
     channel_info: Option<&PromptChannelInfo>,
     thread_tags: &ThreadTags,
     is_dm: bool,
-    has_conversation_context: bool,
-    conversation_context_had_delivered_events: bool,
+    conversation_context_status: ConversationContextStatus,
     reply_anchor: Option<&str>,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
         None => channel_id.to_string(),
     };
+    let has_conversation_context = matches!(
+        conversation_context_status,
+        ConversationContextStatus::Complete | ConversationContextStatus::Included
+    );
+    let complete_conversation_context =
+        conversation_context_status == ConversationContextStatus::Complete;
+    let conversation_context_had_delivered_events =
+        conversation_context_status == ConversationContextStatus::PreviouslyDelivered;
 
     // DM check comes first — a DM reply has both thread tags AND is_dm=true,
     // and the scope should be "dm" (not "thread") because the agent is in a DM.
@@ -1364,7 +1381,11 @@ fn format_context_hints(
         let is_reply = thread_tags.root_event_id.is_some();
         // DM replies use thread command because /messages excludes thread replies.
         // DM non-replies use get for recent conversation.
-        let ctx_hint = if has_conversation_context && is_reply {
+        let ctx_hint = if complete_conversation_context && is_reply {
+            "Thread context included below."
+        } else if complete_conversation_context {
+            "Conversation context included below."
+        } else if has_conversation_context && is_reply {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if has_conversation_context {
             "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
@@ -1396,7 +1417,9 @@ fn format_context_hints(
         }
         crate::prompt_framing::semantic_section("context", &s)
     } else if let Some(ref root) = thread_tags.root_event_id {
-        let ctx_hint = if has_conversation_context {
+        let ctx_hint = if complete_conversation_context {
+            "Thread context included below."
+        } else if has_conversation_context {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if conversation_context_had_delivered_events {
             "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read it."
@@ -1437,6 +1460,86 @@ fn format_context_hints(
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ConversationContextStatus {
+    Complete,
+    Included,
+    PreviouslyDelivered,
+    Absent,
+}
+
+/// Whether the fetched context covers every event rendered in this turn.
+///
+/// Thread context is fetched for the last event's root only, so a mixed batch
+/// must keep the retrieval hint. A thread window that omitted its root is also
+/// incomplete even when it did not hit the reply limit. DM history covers only
+/// top-level DM events, not reply threads.
+fn conversation_context_covers_batch(
+    batch: &FlushBatch,
+    conversation_context: Option<&ConversationContext>,
+) -> bool {
+    match conversation_context {
+        Some(ConversationContext::Thread {
+            root_present: true, ..
+        }) => {
+            let Some(expected_root) = batch
+                .events
+                .last()
+                .and_then(|event| parse_thread_tags(&event.event).root_event_id)
+            else {
+                return false;
+            };
+
+            batch
+                .cancelled_events
+                .iter()
+                .chain(&batch.events)
+                .all(|event| {
+                    parse_thread_tags(&event.event).root_event_id.as_deref()
+                        == Some(expected_root.as_str())
+                })
+        }
+        Some(ConversationContext::Dm { .. }) => batch
+            .cancelled_events
+            .iter()
+            .chain(&batch.events)
+            .all(|event| parse_thread_tags(&event.event).root_event_id.is_none()),
+        _ => false,
+    }
+}
+
+fn conversation_context_status(
+    batch: &FlushBatch,
+    conversation_context: Option<&ConversationContext>,
+    conversation_context_had_delivered_events: bool,
+) -> ConversationContextStatus {
+    let window_is_complete = matches!(
+        conversation_context,
+        Some(
+            ConversationContext::Thread {
+                truncated: false,
+                ..
+            } | ConversationContext::Dm {
+                truncated: false,
+                ..
+            }
+        )
+    );
+
+    if window_is_complete
+        && conversation_context_covers_batch(batch, conversation_context)
+        && !conversation_context_had_delivered_events
+    {
+        ConversationContextStatus::Complete
+    } else if conversation_context.is_some() {
+        ConversationContextStatus::Included
+    } else if conversation_context_had_delivered_events {
+        ConversationContextStatus::PreviouslyDelivered
+    } else {
+        ConversationContextStatus::Absent
+    }
+}
+
 /// Format a conversation context section (thread or DM).
 fn format_conversation_context(
     ctx: &ConversationContext,
@@ -1447,6 +1550,7 @@ fn format_conversation_context(
             messages,
             total,
             truncated,
+            ..
         } => ("thread-context", messages, total, truncated),
         ConversationContext::Dm {
             messages,
@@ -1682,8 +1786,11 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         args.channel_info,
         &thread_tags,
         is_dm,
-        args.conversation_context.is_some(),
-        args.conversation_context_had_delivered_events,
+        conversation_context_status(
+            batch,
+            args.conversation_context,
+            args.conversation_context_had_delivered_events,
+        ),
         reply_anchor.as_deref(),
     ));
 
@@ -2812,6 +2919,7 @@ mod tests {
                 timestamp: "2024-01-01T00:00:00Z".into(),
             }],
             total: 1,
+            root_present: true,
             truncated: false,
         };
 
@@ -3425,16 +3533,12 @@ mod tests {
     }
 
     #[test]
-    fn test_format_prompt_with_thread_context() {
+    fn test_thread_context_retrieval_hint_only_when_needed() {
         let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
         let event = make_event_with_tags(
             "yes go ahead",
-            vec![vec![
-                "e".into(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                "".into(),
-                "reply".into(),
-            ]],
+            vec![vec!["e".into(), root.clone(), "".into(), "reply".into()]],
         );
         let batch = FlushBatch {
             channel_id: ch,
@@ -3446,7 +3550,7 @@ mod tests {
             cancelled_events: vec![],
             cancel_reason: None,
         };
-        let ctx = ConversationContext::Thread {
+        let mut ctx = ConversationContext::Thread {
             messages: vec![
                 ContextMessage {
                     event_id: String::new(),
@@ -3461,11 +3565,12 @@ mod tests {
                     content: "yes go ahead".into(),
                 },
             ],
-            total: 5,
-            truncated: true,
+            total: 2,
+            root_present: true,
+            truncated: false,
         };
 
-        let prompt = format_prompt(
+        let complete_prompt = format_prompt(
             &batch,
             &FormatPromptArgs {
                 conversation_context: Some(&ctx),
@@ -3473,9 +3578,145 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.contains("<thread-context included=\"2\" total=\"5\" truncated=\"true\">"));
-        assert!(prompt.contains("Let's refactor auth"));
-        assert!(prompt.contains("Thread context included below"));
+        assert!(complete_prompt.contains("Thread context included below."));
+        assert!(!complete_prompt.contains("buzz messages thread"));
+        assert!(!complete_prompt.contains("full history"));
+        assert!(complete_prompt
+            .contains("<thread-context included=\"2\" total=\"2\" truncated=\"false\">"));
+        assert!(complete_prompt.contains("Let's refactor auth"));
+        assert!(complete_prompt.contains(&format!(
+            "IMPORTANT: For ordinary replies in this turn, use `--reply-to {root}`"
+        )));
+
+        let prompt_with_prior_delivery = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                conversation_context_had_delivered_events: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(prompt_with_prior_delivery.contains("buzz messages thread"));
+        assert!(prompt_with_prior_delivery
+            .contains("<thread-context included=\"2\" total=\"2\" truncated=\"false\">"));
+        assert!(prompt_with_prior_delivery.contains("Let's refactor auth"));
+
+        if let ConversationContext::Thread {
+            total, truncated, ..
+        } = &mut ctx
+        {
+            *total = 5;
+            *truncated = true;
+        }
+        let truncated_prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(truncated_prompt
+            .contains("<thread-context included=\"2\" total=\"5\" truncated=\"true\">"));
+        assert!(truncated_prompt.contains("buzz messages thread"));
+        assert!(truncated_prompt.contains("for full history if truncated"));
+
+        if let ConversationContext::Thread {
+            total,
+            root_present,
+            truncated,
+            ..
+        } = &mut ctx
+        {
+            *total = 2;
+            *root_present = false;
+            *truncated = false;
+        }
+        let missing_root_prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(missing_root_prompt
+            .contains("<thread-context included=\"2\" total=\"2\" truncated=\"false\">"));
+        assert!(missing_root_prompt.contains("Let's refactor auth"));
+        assert!(missing_root_prompt.contains("buzz messages thread"));
+    }
+
+    #[test]
+    fn test_thread_context_retrieval_hint_requires_batch_coverage() {
+        let ch = Uuid::new_v4();
+        let root_a = "a".repeat(64);
+        let root_b = "b".repeat(64);
+        let reply = |content: &str, root: &str| BatchEvent {
+            event: make_event_with_tags(
+                content,
+                vec![vec!["e".into(), root.into(), "".into(), "reply".into()]],
+            ),
+            prompt_tag: "@mention".into(),
+            received_at: Instant::now(),
+        };
+        let ctx = ConversationContext::Thread {
+            messages: vec![ContextMessage {
+                event_id: root_b.clone(),
+                pubkey: "npub1xyz".into(),
+                timestamp: "2026-03-15T16:30:00Z".into(),
+                content: "thread B root question".into(),
+            }],
+            total: 1,
+            root_present: true,
+            truncated: false,
+        };
+
+        let mixed_batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                reply("older reply in thread A", &root_a),
+                reply("newer reply in thread B", &root_b),
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let mixed_prompt = format_prompt(
+            &mixed_batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(mixed_prompt
+            .contains("<thread-context included=\"1\" total=\"1\" truncated=\"false\">"));
+        assert!(mixed_prompt.contains("thread B root question"));
+        assert!(mixed_prompt.contains("older reply in thread A"));
+        assert!(mixed_prompt.contains("newer reply in thread B"));
+        assert!(mixed_prompt.contains("buzz messages thread"));
+
+        let same_thread_batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                reply("older reply in thread B", &root_b),
+                reply("newer reply in thread B", &root_b),
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let same_thread_prompt = format_prompt(
+            &same_thread_batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(same_thread_prompt
+            .contains("<thread-context included=\"1\" total=\"1\" truncated=\"false\">"));
+        assert!(same_thread_prompt.contains("thread B root question"));
+        assert!(!same_thread_prompt.contains("buzz messages thread"));
     }
 
     #[test]
@@ -3519,6 +3760,9 @@ mod tests {
         )
         .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
+        assert!(prompt.contains("Conversation context included below."));
+        assert!(!prompt.contains("buzz messages get"));
+        assert!(!prompt.contains("full history"));
         assert!(prompt
             .contains("<conversation-context included=\"1\" total=\"1\" truncated=\"false\">"));
         assert!(prompt.contains("Can you deploy?"));
@@ -3553,6 +3797,7 @@ mod tests {
                 content: "follow up".into(),
             }],
             total: 1,
+            root_present: true,
             truncated: false,
         };
         let profiles = HashMap::from([
@@ -3731,7 +3976,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_prompt_dm_reply_hints_get_thread() {
+    fn test_format_prompt_dm_reply_with_complete_thread_context_omits_retrieval_hint() {
         let ch = Uuid::new_v4();
         // DM reply event — has thread e-tags.
         let event = make_event_with_tags(
@@ -3768,6 +4013,7 @@ mod tests {
                 content: "Should I deploy?".into(),
             }],
             total: 1,
+            root_present: true,
             truncated: false,
         };
 
@@ -3785,11 +4031,9 @@ mod tests {
             prompt.contains("Scope: dm"),
             "DM reply should have Scope: dm, got:\n{prompt}"
         );
-        // Hint should point to the thread command, not get.
-        assert!(
-            prompt.contains("buzz messages thread"),
-            "DM reply hint should mention `buzz messages thread`, got:\n{prompt}"
-        );
+        assert!(prompt.contains("Thread context included below."));
+        assert!(!prompt.contains("buzz messages thread"));
+        assert!(!prompt.contains("full history"));
         // Thread structural info should be present.
         assert!(
             prompt.contains(
@@ -3798,6 +4042,7 @@ mod tests {
             "DM reply should include thread root"
         );
         // Thread context should be included.
+        assert!(prompt.contains("<thread-context included=\"1\" total=\"1\" truncated=\"false\">"));
         assert!(prompt.contains("Should I deploy?"));
     }
 
@@ -4001,6 +4246,67 @@ mod tests {
             prompt.contains("Tags:"),
             "tags should always be included, even for stream messages"
         );
+    }
+
+    #[test]
+    fn test_format_event_block_only_omits_parent_when_it_duplicates_root() {
+        let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let mention = "c".repeat(64);
+
+        let direct_event = make_event_with_tags(
+            "direct reply",
+            vec![
+                vec!["e".into(), root.clone(), "".into(), "reply".into()],
+                vec!["p".into(), mention.clone()],
+            ],
+        );
+        let direct_event_id = direct_event.id.to_hex();
+        let direct_block = format_event_block(
+            ch,
+            None,
+            &BatchEvent {
+                event: direct_event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            },
+            None,
+        );
+
+        assert!(direct_block.contains(&format!("Event ID: {direct_event_id}")));
+        assert!(direct_block.contains("From:"));
+        assert!(direct_block.contains(&format!(
+            "Tags: [[\"e\",\"{root}\",\"\",\"reply\"],[\"p\",\"{mention}\"]]"
+        )));
+        assert!(direct_block.contains(&format!("Parsed: root={root}, mentions=[{mention}]")));
+        assert!(!direct_block.contains(&format!("parent={root}")));
+
+        let nested_event = make_event_with_tags(
+            "nested reply",
+            vec![
+                vec!["e".into(), root.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent.clone(), "".into(), "reply".into()],
+                vec!["p".into(), mention.clone()],
+            ],
+        );
+        let nested_block = format_event_block(
+            ch,
+            None,
+            &BatchEvent {
+                event: nested_event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            },
+            None,
+        );
+
+        assert!(nested_block.contains(&format!(
+            "Tags: [[\"e\",\"{root}\",\"\",\"root\"],[\"e\",\"{parent}\",\"\",\"reply\"],[\"p\",\"{mention}\"]]"
+        )));
+        assert!(nested_block.contains(&format!(
+            "Parsed: parent={parent}, root={root}, mentions=[{mention}]"
+        )));
     }
 
     #[test]
