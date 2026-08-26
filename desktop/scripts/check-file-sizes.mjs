@@ -5,7 +5,13 @@ import { runFileSizeCheck } from "../../scripts/check-file-sizes-core.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 
-const MAX_LINES = 1000;
+// Raised from 1000 to 1300 (0.5.20-1). The 1000-line cap forced brittle
+// `biome-ignore` line-squashing on a handful of monolithic hooks/components and
+// fired on every upstream catch-up against upstream's own file growth, where
+// extraction just re-conflicts on the next merge. A file already at/over the
+// baseline still may not grow past its baseline (see allowedLineCount), so this
+// only widens the ceiling for genuinely new growth, not the ratchet itself.
+const MAX_LINES = 1300;
 
 const rules = [
   { root: "src-tauri/src", extensions: new Set([".rs"]), maxLines: MAX_LINES },
