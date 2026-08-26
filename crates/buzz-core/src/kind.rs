@@ -438,6 +438,9 @@ pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 
+/// Ephemeral, relay-authored hint that a durable workflow delivery is ready.
+pub const KIND_WORKFLOW_AGENT_WAKE: u32 = 24620;
+
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
@@ -692,6 +695,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
+    KIND_WORKFLOW_AGENT_WAKE,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,

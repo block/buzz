@@ -42,6 +42,8 @@ pub mod relay;
 pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+/// Canonical durable workflow message-delivery protocol vocabulary.
+pub mod workflow_delivery;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

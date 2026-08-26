@@ -17,6 +17,12 @@ pub mod mentions;
 pub mod nip_oa;
 
 pub use builders::*;
+/// Durable workflow delivery protocol types and wake builders.
+pub use buzz_core::workflow_delivery::{
+    message_v1_targets, WorkflowDeliveryBinding, WorkflowDeliveryCause, WorkflowDeliveryError,
+    WorkflowDeliveryId, WorkflowDeliveryWake, WORKFLOW_DELIVERY_TARGET,
+    WORKFLOW_DELIVERY_TARGET_MARKER, WORKFLOW_DELIVERY_WAKE_TAG,
+};
 
 /// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;
