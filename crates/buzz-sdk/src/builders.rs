@@ -542,6 +542,15 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
+/// Build a channel websites list event (kind 40150).
+pub fn build_set_channel_websites(
+    channel_id: Uuid,
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+    Ok(EventBuilder::new(Kind::Custom(40150), content).tags(tags))
+}
+
 /// Build a NIP-01 profile metadata event (kind 0).
 ///
 /// Only present (Some) fields are included in the JSON object.

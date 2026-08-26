@@ -19,6 +19,8 @@ import {
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
 import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailability";
+import type { ChannelWebsite } from "@/features/channels/lib/channelWebsites";
+import { ChannelWebsiteOverflowMenuItems } from "@/features/channels/ui/ChannelWebsiteOverflowMenuItems";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -33,21 +35,27 @@ import {
 import { AddChannelBotDialog } from "./AddChannelBotDialog";
 
 type ChannelMembersBarProps = {
+  activeWebsite?: ChannelWebsite | null;
   channel: Channel;
   currentPubkey?: string;
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
+  onOpenWebsiteExternal?: () => void;
+  onRefreshWebsite?: () => void;
   onToggleMembers: () => void;
   variant?: "inline" | "compact";
 };
 
 export function ChannelMembersBar({
+  activeWebsite = null,
   channel,
   currentPubkey,
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
+  onOpenWebsiteExternal,
+  onRefreshWebsite,
   onToggleMembers,
   variant = "inline",
 }: ChannelMembersBarProps) {
@@ -187,6 +195,17 @@ export function ChannelMembersBar({
     />
   );
 
+  const websiteOverflowMenuItems =
+    activeWebsite && onRefreshWebsite && onOpenWebsiteExternal ? (
+      <ChannelWebsiteOverflowMenuItems
+        onOpenExternal={onOpenWebsiteExternal}
+        onRefresh={onRefreshWebsite}
+        showSeparator
+      />
+    ) : null;
+
+  const showWebsiteOverflowMenu = websiteOverflowMenuItems !== null;
+
   const controls =
     variant === "compact" ? (
       <DropdownMenu modal={false}>
@@ -202,6 +221,7 @@ export function ChannelMembersBar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48" forceMount>
+          {websiteOverflowMenuItems}
           <DropdownMenuItem
             data-testid="channel-members-trigger"
             onSelect={onToggleMembers}
@@ -222,6 +242,50 @@ export function ChannelMembersBar({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    ) : showWebsiteOverflowMenu ? (
+      <div className="flex items-center gap-[6px]">
+        <Tooltip disableHoverableContent>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={`View channel members (${memberCount})`}
+              className="h-8 px-2.5"
+              data-testid="channel-members-trigger"
+              onClick={onToggleMembers}
+              type="button"
+              variant="outline"
+            >
+              <Users />
+              <span className="min-w-[1ch] text-sm font-medium tabular-nums">
+                {memberCount}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Channel members</TooltipContent>
+        </Tooltip>
+
+        {huddleIndicator}
+
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label="Channel actions"
+              data-testid="channel-management-trigger"
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <EllipsisVertical />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            {websiteOverflowMenuItems}
+            <DropdownMenuItem onSelect={onManageChannel}>
+              <Settings2 />
+              Manage channel
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     ) : (
       <div className="flex items-center gap-[6px]">
         <Tooltip disableHoverableContent>

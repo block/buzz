@@ -14140,6 +14140,21 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "set_window_vibrancy":
         return null;
+      case "show_channel_embed":
+        return null;
+      case "set_channel_embed_bounds":
+        return null;
+      case "hide_channel_embed":
+        return null;
+      case "get_channel_websites":
+        return {
+          content: "",
+          event_id: null,
+          updated_at: null,
+          author: null,
+        };
+      case "set_channel_websites":
+        return { ok: true, event_id: "mock-channel-websites-event" };
       case "plugin:window|is_fullscreen":
         return false;
       // Settings reads the app version through the app plugin. Without this the

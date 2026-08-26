@@ -27,6 +27,9 @@ import type {
   SearchMessagesResponse,
   SetCanvasInput,
   SetCanvasResult,
+  ChannelWebsitesResponse,
+  SetChannelWebsitesInput,
+  SetChannelWebsitesResult,
   ThreadCursor,
   ThreadRepliesResponse,
   CreateManagedAgentInput,
@@ -419,6 +422,32 @@ export async function setCanvas(
   input: SetCanvasInput,
 ): Promise<SetCanvasResult> {
   const response = await invokeTauri<RawSetCanvasResult>("set_canvas", {
+    channelId: input.channelId,
+    content: input.content,
+  });
+  return {
+    ok: response.ok,
+    eventId: response.event_id,
+  };
+}
+
+export async function getChannelWebsites(
+  channelId: string,
+): Promise<ChannelWebsitesResponse> {
+  const response = await invokeTauri<RawCanvasResponse>("get_channel_websites", {
+    channelId,
+  });
+  return {
+    content: response.content,
+    updatedAt: response.updated_at ?? null,
+    author: response.author ?? null,
+  };
+}
+
+export async function setChannelWebsites(
+  input: SetChannelWebsitesInput,
+): Promise<SetChannelWebsitesResult> {
+  const response = await invokeTauri<RawSetCanvasResult>("set_channel_websites", {
     channelId: input.channelId,
     content: input.content,
   });

@@ -48,6 +48,7 @@ import {
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
 import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import { ChannelWebsitePane } from "@/features/channels/ui/ChannelWebsitePane";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useSearchHighlightProps } from "@/features/channels/ui/useSearchHighlightProps";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
@@ -68,6 +69,8 @@ const HUDDLE_TRANSCRIPT_ROOT_STYLE = {
   "--channel-top-chrome-height": "0.25rem",
 } as React.CSSProperties;
 export const ChannelPane = React.memo(function ChannelPane({
+  activeWebsite = null,
+  websiteReloadKey = 0,
   activeChannel,
   agentPubkeys,
   agentPubkeysPending = false,
@@ -593,7 +596,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden"
       style={isHuddleTranscript ? HUDDLE_TRANSCRIPT_ROOT_STYLE : undefined}
     >
-      {!isSinglePanelView && !isHuddleTranscript ? (
+      {!isSinglePanelView && !isHuddleTranscript && !activeWebsite ? (
         <div
           aria-hidden="true"
           className={cn(
@@ -627,11 +630,18 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {isHuddleTranscript ? null : header}
+          {activeWebsite ? (
+            <ChannelWebsitePane
+              key={`${activeWebsite.id}:${activeWebsite.url}:${websiteReloadKey}`}
+              website={activeWebsite}
+            />
+          ) : null}
           {isHuddleTranscript && huddleThreadRepliesError ? (
             <div className="px-5 pt-3">
               <ThreadRepliesErrorCard onRetry={onRetryHuddleThreadReplies} />
             </div>
           ) : null}
+          {activeWebsite ? null : (
           <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col">
             <MessageTimeline
               ref={messageTimelineRef}
@@ -822,6 +832,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               <DropZoneOverlay className="z-50 rounded-2xl bg-primary/20 backdrop-blur-sm" />
             ) : null}
           </div>
+          )}
         </section>
       ) : null}
       {/*

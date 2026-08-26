@@ -14,6 +14,7 @@ import {
   getCanvas,
   getChannelDetails,
   getChannelMembers,
+  getChannelWebsites,
   getChannels,
   hideDm,
   joinChannel,
@@ -22,11 +23,17 @@ import {
   invokeTauri,
   removeChannelMember,
   setCanvas,
+  setChannelWebsites,
   setChannelPurpose,
   setChannelTopic,
   unarchiveChannel,
   updateChannel,
 } from "@/shared/api/tauri";
+import {
+  parseChannelWebsitesContent,
+  serializeChannelWebsites,
+  type ChannelWebsite,
+} from "@/features/channels/lib/channelWebsites";
 import type {
   AddChannelMembersInput,
   Channel,
@@ -963,6 +970,47 @@ export function useSetCanvasMutation(channelId: string | null) {
       if (channelId) {
         void queryClient.invalidateQueries({
           queryKey: ["channel-canvas", channelId],
+        });
+      }
+    },
+  });
+}
+
+// ── Channel websites (kind:40150) ───────────────────────────────────────────
+export function useChannelWebsitesQuery(
+  channelId: string | null,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["channel-websites", channelId],
+    queryFn: async () => {
+      if (!channelId) {
+        return Promise.reject(new Error("No channel selected"));
+      }
+      const response = await getChannelWebsites(channelId);
+      return parseChannelWebsitesContent(response.content ?? "");
+    },
+    enabled: enabled && channelId !== null,
+  });
+}
+
+export function useSetChannelWebsitesMutation(channelId: string | null) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (websites: readonly ChannelWebsite[]) => {
+      if (!channelId) {
+        return Promise.reject(new Error("No channel selected"));
+      }
+      return setChannelWebsites({
+        channelId,
+        content: serializeChannelWebsites(websites),
+      });
+    },
+    onSuccess: () => {
+      if (channelId) {
+        void queryClient.invalidateQueries({
+          queryKey: ["channel-websites", channelId],
         });
       }
     },

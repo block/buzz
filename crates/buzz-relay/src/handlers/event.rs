@@ -39,7 +39,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
         13534..=13535 => kind.to_string(),
         20000..=29999 => kind.to_string(),
         30023 | 30315 | 39000..=39003 => kind.to_string(),
-        40002..=40100 => kind.to_string(),
+        40002..=40150 => kind.to_string(),
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),
         44100..=44101 => kind.to_string(),
@@ -1170,7 +1170,7 @@ mod tests {
     use std::sync::Arc;
 
     use buzz_core::kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
+        KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_CHANNEL_WEBSITES, KIND_FORUM_COMMENT, KIND_FORUM_POST,
         KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
     };
     use buzz_core::observer::{
@@ -1224,6 +1224,7 @@ mod tests {
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_DIFF,
             KIND_CANVAS,
+            KIND_CHANNEL_WEBSITES,
             KIND_FORUM_POST,
             KIND_FORUM_VOTE,
             KIND_FORUM_COMMENT,
