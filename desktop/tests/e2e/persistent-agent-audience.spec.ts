@@ -690,7 +690,7 @@ test("always-mentioned agents remain selected without replaying their animation 
   ).toHaveCount(1);
 });
 
-test("the unfocused main composer keeps its mention menu closed during a thread send", async ({
+test("the unfocused main composer keeps its dismissed mention menu closed through a thread send", async ({
   page,
 }) => {
   await installAudienceFixtures(page, { sendMessageDelayMs: 500 });
@@ -741,6 +741,18 @@ test("the unfocused main composer keeps its mention menu closed during a thread 
     "false",
   );
   await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+
+  // Refocusing the drafted composer must not resurrect the menu the user
+  // dismissed with Escape: the setEditable toggles around the send used to
+  // emit a phantom update that replayed the stale "@Morgarita" query and
+  // flipped the mention state back open, so a bare click brought the menu
+  // back without any typing.
+  await mainInput.click();
+  await expect(mainInput).toBeFocused();
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  expect(await mainComposer.getAttribute("data-mention-menu-reopened")).toBe(
+    "false",
+  );
 });
 
 test("a failed always-mentioned send shakes the composer avatar without replaying its selection animation", async ({
