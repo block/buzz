@@ -1302,20 +1302,24 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("http://", "ws://")
 }
 
-/// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Normalize raw event JSON array into the canonical Nostr event shape.
+/// String signatures are preserved; absent or non-string signatures remain absent.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
                 "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
+            });
+            if let Some(sig) = e.get("sig").and_then(|v| v.as_str()) {
+                event["sig"] = serde_json::json!(sig);
+            }
+            event
         })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_default()
@@ -2304,9 +2308,41 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        BuzzClient,
+        normalize_events, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn normalize_events_preserves_the_complete_signed_event_shape() {
+        let signed_event = EventBuilder::new(Kind::TextNote, "signed content")
+            .tags([Tag::parse(["h", "channel-id"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut event = serde_json::to_value(&signed_event).unwrap();
+        event["relay_internal"] = serde_json::json!("excluded");
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&normalize_events(&[event])).unwrap();
+        let normalized = &output[0];
+        let round_tripped: nostr::Event = serde_json::from_value(normalized.clone()).unwrap();
+
+        assert_eq!(round_tripped, signed_event);
+        round_tripped.verify().unwrap();
+        assert!(normalized.get("sig").is_some());
+        assert!(normalized.get("relay_internal").is_none());
+    }
+
+    #[test]
+    fn normalize_events_omits_missing_or_non_string_signatures() {
+        let output: Vec<serde_json::Value> = serde_json::from_str(&normalize_events(&[
+            serde_json::json!({}),
+            serde_json::json!({"sig": 42}),
+        ]))
+        .unwrap();
+
+        assert!(output[0].get("sig").is_none());
+        assert!(output[1].get("sig").is_none());
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {

@@ -51,7 +51,7 @@ Manage your repository's enforced branch and tag rules with `repos protect list|
 
 Output varies by command group — `--help` shows flags but not response shapes.
 
-**Read commands** (messages, channels, users, feed, workflows): normalized JSON arrays with `sig` stripped. Fields: `{id, pubkey, kind, content, created_at, tags}` for events; command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), workflows (`{workflow_id, content, created_at, pubkey}`).
+**Read commands** return JSON arrays. Event reads (`messages get/thread/search`, `feed get`) return normalized, complete signed Nostr events with `{id, pubkey, kind, content, created_at, tags, sig}`. Other reads use command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), and workflows (`{workflow_id, content, created_at, pubkey}`).
 
 **Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
 
