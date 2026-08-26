@@ -1,6 +1,4 @@
 import * as React from "react";
-// TEMPORARY diagnostic import — remove with the NOTIFY-DM logging before release.
-import { invoke } from "@tauri-apps/api/core";
 
 import {
   activateDesktopNotificationTarget,
@@ -115,25 +113,16 @@ export function useAppShellDesktopNotifications({
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
-      // TEMPORARY diagnostic — remove before release.
-      const dmLog = (reason: string) =>
-        void invoke("debug_append_relay_log", {
-          line: `NOTIFY-DM channel=${channel.id} ${reason}`,
-        }).catch(() => {});
+      if (!enabled) return;
+      if (!notificationSettings.desktopEnabled) return;
 
-      if (!enabled) {
-        dmLog("BAIL not-enabled");
-        return;
-      }
-      if (!notificationSettings.desktopEnabled) {
-        dmLog("BAIL desktop-disabled");
-        return;
-      }
-      if (!notificationSettings.slotAlertsEnabled.dm) {
-        dmLog("BAIL dm-slot-off");
-        return;
-      }
-
+      // The DM desktop toast follows the same rule as channel/mention toasts:
+      // deliver whenever desktop alerts are on (muted channels are excluded
+      // upstream). `slotAlertsEnabled.dm` is a per-category SOUND flag, surfaced
+      // only under Settings > Notifications > Sound, so it must NOT gate the
+      // toast — gating it here made DMs silently stop toasting whenever the DM
+      // sound row was off, unlike channels/mentions which never checked it. It
+      // now gates only the sound, below.
       const channelName = channel.name?.trim() || "Direct message";
       const { title, body } = formatMessageNotification({
         source: "dm",
@@ -142,7 +131,6 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
-      dmLog(`SENDING title=${JSON.stringify(title)}`);
       void sendDesktopNotification({
         title,
         body,
@@ -151,9 +139,11 @@ export function useAppShellDesktopNotifications({
           name: channelName,
         }),
       }).then((didSend) => {
-        dmLog(`sendDesktopNotification didSend=${didSend}`);
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+        if (
+          notificationSettings.slotAlertsEnabled.dm &&
+          shouldPlayNotificationSound(channel.id, silentChannelIds)
+        ) {
           playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
         }
         void requestDockBounce();
@@ -164,12 +154,9 @@ export function useAppShellDesktopNotifications({
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
       if (!enabled) return;
-      if (
-        !notificationSettings.desktopEnabled ||
-        !notificationSettings.slotAlertsEnabled.thread_reply
-      ) {
-        return;
-      }
+      if (!notificationSettings.desktopEnabled) return;
+      // As with DMs, `slotAlertsEnabled.thread_reply` is a per-category SOUND
+      // flag and must not gate the toast — it gates only the sound, below.
 
       // Replies that @-mention the user are owned by the home-feed mention
       // path — skip them here so they don't notify (and sound) twice.
@@ -196,7 +183,10 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
+        if (
+          notificationSettings.slotAlertsEnabled.thread_reply &&
+          shouldPlayNotificationSound(channelId, silentChannelIds)
+        ) {
           playNotificationSound(
             resolveSlotSound(notificationSettings, "thread_reply"),
           );
