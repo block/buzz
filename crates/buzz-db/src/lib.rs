@@ -957,16 +957,6 @@ impl Db {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
     }
 
-    /// Validate the minimum deletion fence catalog required by serving paths.
-    pub async fn validate_deletion_serving_catalog(&self) -> Result<()> {
-        self.deletion_store().validate_serving_catalog().await
-    }
-
-    /// Validate the exact live community-deletion tenant catalog for destruction.
-    pub async fn validate_deletion_catalog(&self) -> Result<()> {
-        self.deletion_store().validate_catalog().await
-    }
-
     /// Returns pool utilisation stats for metrics emission.
     ///
     /// `size`  — total connections (idle + active)
@@ -994,11 +984,6 @@ impl Db {
             idle: p.num_idle() as u32,
             max: self.read_max_connections,
         })
-    }
-
-    /// Return the shared durable whole-community deletion adapter.
-    pub fn deletion_store(&self) -> deletion::DeletionStore {
-        deletion::DeletionStore::new(self.pool.clone())
     }
 
     /// Begin a database transaction for atomic multi-statement operations.
