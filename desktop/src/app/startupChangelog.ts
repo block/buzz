@@ -16,6 +16,7 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
       "Codex Agent 可以读取更长的历史记录，并保持同一 task 只对应一个有效实例。",
       "更新日志改为按日期展示，并仅保留最新日期往前 10 个自然日。",
       "修复手动安装时旧 Buzz 进程未退出、导致主程序没有被新版本覆盖的问题。",
+      "重新发布 Buzz Codex Lab v0.5.15，替换此前未正确覆盖主程序的安装包。",
     ],
   },
   {
