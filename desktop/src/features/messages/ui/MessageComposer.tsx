@@ -46,11 +46,9 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { cn } from "@/shared/lib/cn";
-import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
-import { EmojiAutocomplete } from "./EmojiAutocomplete";
-import { MentionAutocomplete } from "./MentionAutocomplete";
+import { MessageComposerAutocompletes } from "./MessageComposerAutocompletes";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
@@ -840,47 +838,22 @@ function MessageComposerImpl({
             }}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
-            <EmojiAutocomplete
-              isEditorFocused={richText.isFocused}
-              onSelect={applyEmojiInsert}
-              selectedIndex={emojiAutocomplete.emojiSelectedIndex}
-              suggestions={
-                emojiAutocomplete.isEmojiAutocompleteOpen
-                  ? emojiAutocomplete.emojiSuggestions
-                  : []
-              }
-            />
-            <ChannelAutocomplete
-              isEditorFocused={richText.isFocused}
-              onSelect={applyChannelInsert}
-              selectedIndex={channelLinks.channelSelectedIndex}
-              suggestions={
-                channelLinks.isChannelOpen
-                  ? channelLinks.channelSuggestions
-                  : []
-              }
-            />
-            <MentionAutocomplete
+            <MessageComposerAutocompletes
+              audienceControlsEnabled={Boolean(
+                audienceScope && editTarget == null,
+              )}
+              channelLinks={channelLinks}
+              emojiAutocomplete={emojiAutocomplete}
               isEditorFocused={richText.isFocused}
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
               lockedAgentPubkeys={lockedAgentPubkeys}
+              mentions={mentions}
               openOptionsRequest={openMentionOptionsRequest}
-              onKeepMentionedAgentsPinnedChange={
-                audienceScope && editTarget == null
-                  ? setKeepMentionedAgentsPinned
-                  : undefined
-              }
+              onChannelSelect={applyChannelInsert}
+              onEmojiSelect={applyEmojiInsert}
+              onMentionSelect={selectMentionSuggestion}
               onOptionsRevealComplete={completeMentionOptionsReveal}
-              onToggleAlwaysAddressAgent={
-                audienceScope && editTarget == null
-                  ? toggleAlwaysAddressAgent
-                  : undefined
-              }
-              onFetchMore={mentions.fetchMoreSuggestions}
-              onDismiss={mentions.cancelMentionAutocomplete}
-              onSelect={selectMentionSuggestion}
-              selectedIndex={mentions.mentionSelectedIndex}
-              suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
+              onToggleAlwaysAddressAgent={toggleAlwaysAddressAgent}
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
