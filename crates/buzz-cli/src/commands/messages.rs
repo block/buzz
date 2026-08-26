@@ -647,7 +647,8 @@ pub async fn cmd_send_message(
         ));
     }
 
-    // Upload files and build imeta tags
+    // Upload files and build imeta tags. Images/video use embedded markdown;
+    // generic attachments use plain links so Desktop renders a file card.
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
     for file_path in &p.files {
@@ -655,14 +656,32 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
+        let filename = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let mut imeta = crate::client::build_imeta_tag(&desc);
+        imeta.push(format!("filename {filename}"));
+        media_tags.push(imeta);
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
-        } else {
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else if desc.mime_type.starts_with("image/") {
             media_content.push_str("\n![image](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else {
+            let escaped = filename
+                .replace('\\', "\\\\")
+                .replace('[', "\\[")
+                .replace(']', "\\]");
+            media_content.push_str("\n[");
+            media_content.push_str(&escaped);
+            media_content.push_str("](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
         }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
