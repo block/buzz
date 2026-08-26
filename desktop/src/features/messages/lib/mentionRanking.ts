@@ -4,7 +4,7 @@ export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
   isMember: boolean;
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "scope";
   personaId?: string | null;
   personaName?: string | null;
   pubkey?: string;
@@ -23,6 +23,10 @@ function getMentionCandidateGroupRank(
   candidate: MentionCandidateForRanking,
   activePersonaIds: ReadonlySet<string>,
 ) {
+  // `@channel` / `@here` sit above everything else: they're short, high-intent,
+  // and the reason a user opened the popup after typing `@c`/`@h`.
+  if (candidate.kind === "scope") return -1;
+
   if (candidate.isMember) return 0;
 
   const isRunnablePersona =

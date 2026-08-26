@@ -6,11 +6,13 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { TeamMentionMember } from "./mentionCandidates";
 
 export type MentionSuggestionCandidate = {
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "scope";
   pubkey?: string;
   personaId?: string | null;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
+  scope?: "channel" | "here";
+  description?: string;
   avatarUrl?: string | null;
   isAgent: boolean;
   isManagedAgent?: boolean;
@@ -46,6 +48,8 @@ export function mapMentionCandidateToSuggestion(opts: {
     personaId: candidate.personaId ?? undefined,
     teamId: candidate.teamId,
     teamMembers: candidate.teamMembers,
+    scope: candidate.scope,
+    description: candidate.description,
     kind: candidate.kind,
     displayName: label,
     avatarUrl:
@@ -68,6 +72,7 @@ export function mapMentionCandidateToSuggestion(opts: {
         : undefined,
     notInChannel:
       candidate.kind !== "team" &&
+      candidate.kind !== "scope" &&
       channelType !== "dm" &&
       candidate.isMember === false,
     ownerLabel,

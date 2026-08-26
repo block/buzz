@@ -49,6 +49,7 @@ import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   appendUniqueName,
+  buildGlobalMentionScopeCandidates,
   buildTeamMentionCandidates,
   formatSearchUserDisplayName,
   formatSearchUserSecondaryLabel,
@@ -439,6 +440,17 @@ export function useMentions(
     ],
     [mentionCandidates, personasQuery.data, teamsQuery.data],
   );
+  // `@channel` / `@here` entries, ranked above everyone else. Kept out of
+  // `searchableNames` below (which only feeds multi-word prefix detection) —
+  // they're single tokens the `@`-prefix fast path already recognises.
+  const globalMentionScopeCandidates = React.useMemo(
+    () => buildGlobalMentionScopeCandidates(options?.channelType),
+    [options?.channelType],
+  );
+  const rankableCandidates = React.useMemo(
+    () => [...globalMentionScopeCandidates, ...mentionCandidatesWithTeams],
+    [globalMentionScopeCandidates, mentionCandidatesWithTeams],
+  );
   const ownerPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -519,7 +531,7 @@ export function useMentions(
     }
 
     return rankMentionCandidates(
-      mentionCandidatesWithTeams,
+      rankableCandidates,
       mentionQuery,
       activePersonaIds,
     )
@@ -539,7 +551,7 @@ export function useMentions(
     activePersonaIds,
     agentDirectoriesReady,
     currentPubkey,
-    mentionCandidatesWithTeams,
+    rankableCandidates,
     mentionQuery,
     options?.channelType,
     ownerProfilesQuery.data?.profiles,
@@ -564,14 +576,14 @@ export function useMentions(
     if (userSearchQuery.isFetching) {
       return filterCachedAgentSuggestions(
         previousSuggestionsRef.current,
-        mentionCandidatesWithTeams,
+        rankableCandidates,
       );
     }
 
     return [];
   }, [
     matchingSuggestions,
-    mentionCandidatesWithTeams,
+    rankableCandidates,
     mentionQuery,
     userSearchQuery.isFetching,
   ]);
@@ -602,6 +614,22 @@ export function useMentions(
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
+      }
+
+      // `@channel` / `@here` are pure text markers — no pubkey or persona to
+      // track. Insert the literal words and let the send path detect them
+      // (see `detectMentionScope`). Nothing goes into the mention maps.
+      if (suggestion.kind === "scope") {
+        setMentionQuery(null);
+        setMentionSelectedIndex(0);
+        const scopeStartIndex =
+          flushedMentionStartIndexRef.current ?? mentionStartIndex;
+        flushedMentionStartIndexRef.current = null;
+        return {
+          replaceFromOffset: scopeStartIndex,
+          replaceToOffset: selectionEnd,
+          insertText: `@${suggestion.displayName} `,
+        };
       }
 
       const displayName = suggestion.displayName;
@@ -913,7 +941,7 @@ export function useMentions(
             latestValueRef,
             latestCursorRef,
             searchableNamesLowerRef,
-            candidates: mentionCandidatesWithTeams,
+            candidates: rankableCandidates,
             activePersonaIds,
             agentProvenanceReady: agentDirectoriesReady,
             channelType: options?.channelType,
@@ -949,7 +977,7 @@ export function useMentions(
       cancelMentionAutocomplete,
       currentPubkey,
       isMentionOpen,
-      mentionCandidatesWithTeams,
+      rankableCandidates,
       mentionSelectedIndex,
       options?.channelType,
       ownerProfilesQuery.data?.profiles,

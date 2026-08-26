@@ -3,9 +3,14 @@ import type {
   AgentPersona,
   AgentTeam,
   ChannelRole,
+  ChannelType,
   UserSearchResult,
 } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import {
+  MENTION_SCOPE_CHANNEL,
+  MENTION_SCOPE_HERE,
+} from "./globalMentions.mjs";
 
 export function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -33,11 +38,15 @@ export type TeamMentionMember = {
 };
 
 export type MentionCandidate = {
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "scope";
   pubkey?: string;
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
+  /** For a `"scope"` candidate: the global-mention scope it inserts. */
+  scope?: "channel" | "here";
+  /** For a `"scope"` candidate: the one-line explanation shown beneath it. */
+  description?: string;
   displayName: string | null;
   avatarUrl?: string | null;
   isMember: boolean;
@@ -49,6 +58,54 @@ export type MentionCandidate = {
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
 };
+
+/**
+ * The `@channel` / `@here` autocomplete entries.
+ *
+ * These are synthetic — they carry no pubkey or persona. Selecting one just
+ * inserts the literal `@channel ` / `@here ` text; the send path detects that
+ * text (see `detectMentionScope` in `hooks.ts`) and attaches the
+ * `mention-scope` tag. `displayName` is the word inserted after the `@`.
+ */
+export const GLOBAL_MENTION_SCOPES: ReadonlyArray<{
+  scope: "channel" | "here";
+  displayName: string;
+  description: string;
+}> = [
+  {
+    scope: MENTION_SCOPE_CHANNEL,
+    displayName: "channel",
+    description: "Notify everyone in this channel",
+  },
+  {
+    scope: MENTION_SCOPE_HERE,
+    displayName: "here",
+    description: "Notify members who are online",
+  },
+];
+
+/**
+ * Build the `@channel` / `@here` candidates for a channel.
+ *
+ * Global mentions only make sense in a channel, never a DM, so this returns
+ * nothing outside a channel. Membership/permission is deliberately not gated:
+ * the app lets everyone use these scopes.
+ */
+export function buildGlobalMentionScopeCandidates(
+  channelType: ChannelType | null | undefined,
+): MentionCandidate[] {
+  if (channelType == null || channelType === "dm") {
+    return [];
+  }
+  return GLOBAL_MENTION_SCOPES.map((entry) => ({
+    kind: "scope" as const,
+    scope: entry.scope,
+    displayName: entry.displayName,
+    description: entry.description,
+    isMember: false,
+    isAgent: false,
+  }));
+}
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (

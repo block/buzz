@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bot, Users } from "lucide-react";
+import { Bot, Megaphone, Users } from "lucide-react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 
@@ -19,7 +19,11 @@ export type MentionSuggestion = {
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
-  kind?: "identity" | "persona" | "team";
+  kind?: "identity" | "persona" | "team" | "scope";
+  /** For a `"scope"` suggestion: the global-mention scope it inserts. */
+  scope?: "channel" | "here";
+  /** For a `"scope"` suggestion: the one-line explanation shown beneath it. */
+  description?: string;
   displayName: string;
   avatarUrl?: string | null;
   isAgent?: boolean;
@@ -108,6 +112,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             suggestion.pubkey ??
             (suggestion.personaId ? `persona-${suggestion.personaId}` : null) ??
             (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
+            (suggestion.kind === "scope"
+              ? `scope-${suggestion.displayName}`
+              : null) ??
             suggestion.displayName;
           const hasNameCollision =
             (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
@@ -145,6 +152,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                   <Users aria-hidden="true" className="h-4 w-4" />
                 </span>
+              ) : suggestion.kind === "scope" ? (
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                  <Megaphone aria-hidden="true" className="h-4 w-4" />
+                </span>
               ) : (
                 <UserAvatar
                   avatarUrl={suggestion.avatarUrl ?? null}
@@ -156,11 +167,18 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span
                   className="min-w-0 break-words font-medium leading-snug"
-                  title={suggestion.displayName}
+                  title={
+                    suggestion.kind === "scope"
+                      ? `@${suggestion.displayName}`
+                      : suggestion.displayName
+                  }
                 >
-                  {suggestion.displayName}
+                  {suggestion.kind === "scope"
+                    ? `@${suggestion.displayName}`
+                    : suggestion.displayName}
                 </span>
-                {suggestion.kind === "team" ||
+                {suggestion.kind === "scope" ||
+                suggestion.kind === "team" ||
                 suggestion.isAgent ||
                 suggestion.role ||
                 ownerLabel ||
@@ -173,7 +191,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         : "text-muted-foreground",
                     )}
                   >
-                    {suggestion.kind === "team" ? (
+                    {suggestion.kind === "scope" ? (
+                      <span
+                        className="min-w-0 truncate"
+                        title={suggestion.description}
+                      >
+                        {suggestion.description}
+                      </span>
+                    ) : suggestion.kind === "team" ? (
                       <span className="inline-flex shrink-0 items-center gap-1">
                         <Users aria-hidden="true" className="h-3.5 w-3.5" />
                         team · {suggestion.teamMembers?.length ?? 0} agents
