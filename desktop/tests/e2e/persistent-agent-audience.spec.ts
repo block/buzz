@@ -500,7 +500,7 @@ test("the mention button opens settings and can undo an address", async ({
   ).toHaveCount(0);
 });
 
-test("always-mentioned agents remain in the mention button while Enter-send resolves", async ({
+test("always-mentioned agents remain selected without replaying their animation while Enter-send resolves", async ({
   page,
 }) => {
   await installAudienceFixtures(page, {
@@ -549,7 +549,7 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
     .not.toContain("");
   await expect(avatar).toHaveAttribute(
     "data-pulse-version",
-    String(initialPulseVersion + 1),
+    String(initialPulseVersion),
     { timeout: 500 },
   );
   await expect(
@@ -587,7 +587,7 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   ).toHaveCount(1);
 });
 
-test("a failed always-mentioned send shakes the composer avatar", async ({
+test("a failed always-mentioned send shakes the composer avatar without replaying its selection animation", async ({
   page,
 }) => {
   await installAudienceFixtures(page, {
@@ -610,7 +610,7 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
 
   await expect(avatar).toHaveAttribute(
     "data-pulse-version",
-    String(initialPulseVersion + 1),
+    String(initialPulseVersion),
     { timeout: 500 },
   );
   await expect(input).toHaveText("@Morgarita please retry");

@@ -341,7 +341,6 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
-    onAddressedAgentsSendStarted: addressPulse.pulseMany,
     onAddressedAgentsComposerCleared: (pubkeys) =>
       restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
