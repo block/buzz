@@ -1767,54 +1767,6 @@ impl Db {
         relay_admin_actions::update_feedback_status(&self.pool, id, status).await
     }
 
-    /// Return the current owner of git repo name `repo_id` in `community`, or
-    /// `None` if unreserved. See [`git_repo::repo_name_owner`].
-    #[datastore_span(name = "repo_name_owner", system = "postgresql")]
-    pub async fn repo_name_owner(
-        &self,
-        community: CommunityId,
-        repo_id: &str,
-    ) -> Result<Option<String>> {
-        git_repo::repo_name_owner(&self.pool, community, repo_id).await
-    }
-
-    /// Reserve a git repo name for `owner_pubkey` in `community` (NIP-34).
-    ///
-    /// See [`git_repo::reserve_repo_name`] for the outcome semantics. The
-    /// per-pubkey quota is enforced by the caller against `count_repos_for_owner`.
-    #[datastore_span(name = "reserve_repo_name", system = "postgresql")]
-    pub async fn reserve_repo_name(
-        &self,
-        community: CommunityId,
-        repo_id: &str,
-        owner_pubkey: &str,
-    ) -> Result<git_repo::ReserveOutcome> {
-        git_repo::reserve_repo_name(&self.pool, community, repo_id, owner_pubkey).await
-    }
-
-    /// Count git repos reserved by `owner_pubkey` in `community` (quota check).
-    #[datastore_span(name = "count_repos_for_owner", system = "postgresql")]
-    pub async fn count_repos_for_owner(
-        &self,
-        community: CommunityId,
-        owner_pubkey: &str,
-    ) -> Result<i64> {
-        git_repo::count_repos_for_owner(&self.pool, community, owner_pubkey).await
-    }
-
-    /// Release a git repo name reservation held by `owner_pubkey` (rollback).
-    ///
-    /// Returns the number of rows removed (0 or 1). See [`git_repo::release_repo_name`].
-    #[datastore_span(name = "release_repo_name", system = "postgresql")]
-    pub async fn release_repo_name(
-        &self,
-        community: CommunityId,
-        repo_id: &str,
-        owner_pubkey: &str,
-    ) -> Result<u64> {
-        git_repo::release_repo_name(&self.pool, community, repo_id, owner_pubkey).await
-    }
-
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
     #[datastore_span(name = "is_archived", system = "postgresql")]
     pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {

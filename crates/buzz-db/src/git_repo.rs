@@ -16,10 +16,11 @@
 //! idempotent re-announce (same owner) from a collision (different owner), and
 //! backs the per-pubkey quota via `COUNT`.
 
+use buzz_datastore_tracing::datastore_span;
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
-use crate::CommunityId;
+use crate::{CommunityId, Db};
 
 /// Outcome of a name-reservation attempt.
 ///
@@ -179,12 +180,62 @@ pub async fn release_repo_name(
     Ok(result.rows_affected())
 }
 
+impl Db {
+    /// Return the current owner of git repo name `repo_id` in `community`, or
+    /// `None` if unreserved. See [`repo_name_owner`].
+    #[datastore_span(name = "repo_name_owner", system = "postgresql")]
+    pub async fn repo_name_owner(
+        &self,
+        community: CommunityId,
+        repo_id: &str,
+    ) -> Result<Option<String>> {
+        repo_name_owner(&self.pool, community, repo_id).await
+    }
+
+    /// Reserve a git repo name for `owner_pubkey` in `community` (NIP-34).
+    ///
+    /// See [`reserve_repo_name`] for the outcome semantics. The per-pubkey
+    /// quota is enforced by the caller against `count_repos_for_owner`.
+    #[datastore_span(name = "reserve_repo_name", system = "postgresql")]
+    pub async fn reserve_repo_name(
+        &self,
+        community: CommunityId,
+        repo_id: &str,
+        owner_pubkey: &str,
+    ) -> Result<ReserveOutcome> {
+        reserve_repo_name(&self.pool, community, repo_id, owner_pubkey).await
+    }
+
+    /// Count git repos reserved by `owner_pubkey` in `community` (quota check).
+    #[datastore_span(name = "count_repos_for_owner", system = "postgresql")]
+    pub async fn count_repos_for_owner(
+        &self,
+        community: CommunityId,
+        owner_pubkey: &str,
+    ) -> Result<i64> {
+        count_repos_for_owner(&self.pool, community, owner_pubkey).await
+    }
+
+    /// Release a git repo name reservation held by `owner_pubkey` (rollback).
+    ///
+    /// Returns the number of rows removed (0 or 1). See [`release_repo_name`].
+    #[datastore_span(name = "release_repo_name", system = "postgresql")]
+    pub async fn release_repo_name(
+        &self,
+        community: CommunityId,
+        repo_id: &str,
+        owner_pubkey: &str,
+    ) -> Result<u64> {
+        release_repo_name(&self.pool, community, repo_id, owner_pubkey).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use uuid::Uuid;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
