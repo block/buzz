@@ -201,6 +201,12 @@ impl SubjectClassContract {
         if !bounded(&resource_owner_values) || !bounded(&client_subject_values) {
             return Err(IssuerPolicyError::NonExclusiveSubjectClass);
         }
+        // These value sets are consumed as membership sets during
+        // classification, so caller order and duplicates carry no semantics.
+        // Canonicalize before storage so the derived policy ID is invariant
+        // under permutation and duplication (NIP-FI.md "Policy identity").
+        let resource_owner_values = canonical_set(resource_owner_values);
+        let client_subject_values = canonical_set(client_subject_values);
         if resource_owner_values
             .iter()
             .any(|v| client_subject_values.contains(v))
@@ -285,6 +291,23 @@ impl TokenClass {
             Self::AccessTokenAtJwt { .. } => "at+jwt",
             Self::DedicatedNipFi => "nip-fi+jwt",
             Self::NamedCompatibility { .. } => "named-compat",
+        }
+    }
+
+    /// Canonicalize the set-valued fields the verifier reads as membership
+    /// sets. Only [`Self::NamedCompatibility`]'s required/forbidden claim lists
+    /// vary by caller order or duplication; the subject-class value sets are
+    /// already canonicalized in [`SubjectClassContract::new`].
+    fn canonicalized(self) -> Self {
+        match self {
+            Self::NamedCompatibility {
+                required_claims,
+                forbidden_claims,
+            } => Self::NamedCompatibility {
+                required_claims: canonical_set(required_claims),
+                forbidden_claims: canonical_set(forbidden_claims),
+            },
+            other => other,
         }
     }
 }
@@ -417,6 +440,16 @@ impl IssuerPolicy {
             }
         }
 
+        // The verifier consumes audiences, algorithms, and the compatibility
+        // claim lists as membership sets, so caller order and duplicates carry
+        // no accepted-assertion semantics. Canonicalize before storage and ID
+        // derivation so the policy ID is invariant under permutation and
+        // duplication (NIP-FI.md "Policy identity and snapshots"). Subject-class
+        // value sets are already canonicalized in `SubjectClassContract::new`.
+        let audiences = canonical_set(audiences);
+        let algorithms = canonical_algorithm_set(algorithms);
+        let token_class = token_class.canonicalized();
+
         let id = derive_assertion_policy_id(
             &issuer,
             &audiences,
@@ -535,6 +568,24 @@ impl IssuerRegistry {
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()
     }
+}
+
+/// Sort and deduplicate a set-valued list of strings into its canonical form.
+/// Membership-set fields (audiences, subject-class values, compatibility claim
+/// names) hash and compare identically under any caller permutation or
+/// duplication once canonicalized.
+fn canonical_set(mut values: Vec<String>) -> Vec<String> {
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+/// Canonicalize a set-valued algorithm list, ordered by its stable wire tag so
+/// the derived policy ID is invariant under permutation and duplication.
+fn canonical_algorithm_set(mut algorithms: Vec<Algorithm>) -> Vec<Algorithm> {
+    algorithms.sort_unstable_by_key(|a| algorithm_tag(*a));
+    algorithms.dedup();
+    algorithms
 }
 
 /// Whether an algorithm is an accepted asymmetric signature algorithm.

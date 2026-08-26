@@ -181,19 +181,23 @@ impl RevalidationDependencies {
 
 /// A closed, deterministically encoded set of authorization claims/capabilities
 /// captured from the assertion. Only claim names the policy explicitly reads
-/// enter it; unchecked claims never do. The canonical encoding sorts by claim
-/// name so equal authoritative input yields byte-equal capabilities.
+/// enter it; unchecked claims never do. The canonical encoding sorts by
+/// `(name, value)` and deduplicates so equal authoritative input yields
+/// byte-equal capabilities regardless of token order or repetition.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct CanonicalCapabilities {
-    // Sorted by key for a deterministic canonical encoding.
+    // Sorted by (key, value) and deduplicated for a deterministic canonical
+    // encoding.
     entries: Vec<(String, String)>,
 }
 
 impl CanonicalCapabilities {
-    /// Build from a set of `(claim_name, value)` pairs, sorted canonically.
-    /// Duplicate names are rejected by the caller before sealing.
-    pub(super) fn from_sorted(mut entries: Vec<(String, String)>) -> Self {
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+    /// Build from a set of `(claim_name, value)` pairs, canonicalized by
+    /// `(name, value)` order with duplicates removed. Membership-set semantics:
+    /// a repeated pair carries no more authority than a single occurrence.
+    pub(super) fn from_pairs(mut entries: Vec<(String, String)>) -> Self {
+        entries.sort();
+        entries.dedup();
         Self { entries }
     }
 

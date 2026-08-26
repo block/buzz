@@ -4,10 +4,12 @@
 //! [`VerifiedAssertion`]. Multi-issuer selection happens here: the exact `iss`
 //! carried by the token selects one [`IssuerPolicy`] and its key source; there
 //! is no single-global-issuer assumption. Almost every failure collapses to the
-//! public [`DenialClass::EvidenceRejected`] class; the sole exception is
-//! [`VerifierError::KeySourceUnavailable`], an unreadable authoritative
-//! dependency that maps to [`DenialClass::AuthorizationUnavailable`] so a
-//! missing key snapshot never masquerades as rejected evidence. The granular
+//! public [`DenialClass::EvidenceRejected`] class; the exceptions are the
+//! unreadable required current dependencies
+//! [`VerifierError::KeySourceUnavailable`] and
+//! [`VerifierError::StatusWitnessUnavailable`], which map to
+//! [`DenialClass::AuthorizationUnavailable`] so a missing authoritative
+//! dependency never masquerades as rejected evidence. The granular
 //! [`VerifierError`] variants are for access-controlled logs and metrics only.
 //!
 //! Corrections applied to the mined #1476 verifier, per the settled spec:
@@ -384,7 +386,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
 
 /// A closed, stable verifier failure carrying no credential material. Almost
 /// every variant maps to the public [`DenialClass::EvidenceRejected`] class;
-/// [`Self::KeySourceUnavailable`] maps to
+/// [`Self::KeySourceUnavailable`] and [`Self::StatusWitnessUnavailable`] map to
 /// [`DenialClass::AuthorizationUnavailable`] instead (see [`Self::denial_class`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum VerifierError {
@@ -457,13 +459,18 @@ pub enum VerifierError {
 
 impl VerifierError {
     /// The public denial class. Almost every verifier failure is evidence
-    /// rejection (malformed, invalid, or expired evidence); the sole exception
-    /// is [`Self::KeySourceUnavailable`], an unreadable authoritative
-    /// dependency that maps to [`DenialClass::AuthorizationUnavailable`] so a
-    /// missing key snapshot never masquerades as rejected evidence.
+    /// rejection (malformed, invalid, or expired evidence). The exceptions are
+    /// the two unreadable required current dependencies —
+    /// [`Self::KeySourceUnavailable`] (no verification-key snapshot) and
+    /// [`Self::StatusWitnessUnavailable`] (no current-status witness) — which
+    /// map to [`DenialClass::AuthorizationUnavailable`] (503) so that a missing
+    /// authoritative dependency never masquerades as rejected evidence
+    /// (NIP-FI.md, rejection table).
     pub const fn denial_class(self) -> DenialClass {
         match self {
-            Self::KeySourceUnavailable => DenialClass::AuthorizationUnavailable,
+            Self::KeySourceUnavailable | Self::StatusWitnessUnavailable => {
+                DenialClass::AuthorizationUnavailable
+            }
             _ => DenialClass::EvidenceRejected,
         }
     }
@@ -670,7 +677,7 @@ fn capture_capabilities(
             entries.push(("scope".to_owned(), token.to_owned()));
         }
     }
-    CanonicalCapabilities::from_sorted(entries)
+    CanonicalCapabilities::from_pairs(entries)
 }
 
 fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {

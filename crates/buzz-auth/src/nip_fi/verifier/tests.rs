@@ -117,6 +117,60 @@ fn dedicated_policy(issuer: &str) -> IssuerPolicy {
     .expect("valid policy")
 }
 
+fn dedicated_policy_with_audiences(audiences: Vec<String>) -> IssuerPolicy {
+    IssuerPolicy::new(
+        ISSUER.to_owned(),
+        audiences,
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        "sub".to_owned(),
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        None,
+    )
+    .expect("valid policy")
+}
+
+fn dedicated_policy_with_algorithms(algorithms: Vec<Algorithm>) -> IssuerPolicy {
+    IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        "sub".to_owned(),
+        algorithms,
+        false,
+        60,
+        3600,
+        None,
+    )
+    .expect("valid policy")
+}
+
+fn named_compat_policy_with(
+    required_claims: Vec<String>,
+    forbidden_claims: Vec<String>,
+) -> IssuerPolicy {
+    IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::NamedCompatibility {
+            required_claims,
+            forbidden_claims,
+        },
+        FreshnessClass::OfflineJwt,
+        "sub".to_owned(),
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        None,
+    )
+    .expect("valid policy")
+}
+
 fn verifier_with(policy: IssuerPolicy) -> FederatedAssertionVerifier<StaticIssuerKeySource> {
     let mut registry = IssuerRegistry::new();
     let issuer = policy.issuer().to_owned();
@@ -741,10 +795,12 @@ fn current_status_policy_denies_without_witness() {
     .expect("valid current-status policy");
     let verifier = verifier_with(policy);
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-    assert_eq!(
-        verifier.verify(&token).unwrap_err(),
-        VerifierError::StatusWitnessUnavailable
-    );
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::StatusWitnessUnavailable);
+    // An unreadable required current dependency is authorization-unavailable
+    // (503), never rejected evidence (403): the token may be perfectly valid.
+    assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
+    assert_eq!(err.denial_class().http_status(), 503);
 }
 
 #[test]
@@ -810,6 +866,122 @@ fn assertion_policy_id_moves_with_subject_class_contract() {
     );
     assert_ne!(base.id(), different_values.id());
     assert_ne!(base.id(), different_posture.id());
+}
+
+#[test]
+fn assertion_policy_id_is_invariant_under_audience_permutation_and_duplicates() {
+    // Audiences are consumed as a membership set, so caller order and
+    // duplicates carry no semantics and must not move the policy ID.
+    let base = dedicated_policy_with_audiences(vec![
+        "https://a.example".to_owned(),
+        "https://b.example".to_owned(),
+    ]);
+    let permuted = dedicated_policy_with_audiences(vec![
+        "https://b.example".to_owned(),
+        "https://a.example".to_owned(),
+    ]);
+    let duplicated = dedicated_policy_with_audiences(vec![
+        "https://b.example".to_owned(),
+        "https://a.example".to_owned(),
+        "https://a.example".to_owned(),
+    ]);
+    assert_eq!(base.id(), permuted.id());
+    assert_eq!(base.id(), duplicated.id());
+    // A different audience set still moves the ID.
+    let different = dedicated_policy_with_audiences(vec!["https://a.example".to_owned()]);
+    assert_ne!(base.id(), different.id());
+}
+
+#[test]
+fn assertion_policy_id_is_invariant_under_algorithm_permutation_and_duplicates() {
+    let base = dedicated_policy_with_algorithms(vec![Algorithm::ES256, Algorithm::RS256]);
+    let permuted = dedicated_policy_with_algorithms(vec![Algorithm::RS256, Algorithm::ES256]);
+    let duplicated = dedicated_policy_with_algorithms(vec![
+        Algorithm::RS256,
+        Algorithm::ES256,
+        Algorithm::RS256,
+    ]);
+    assert_eq!(base.id(), permuted.id());
+    assert_eq!(base.id(), duplicated.id());
+    let different = dedicated_policy_with_algorithms(vec![Algorithm::ES256]);
+    assert_ne!(base.id(), different.id());
+}
+
+#[test]
+fn assertion_policy_id_is_invariant_under_subject_class_value_permutation_and_duplicates() {
+    let base = access_token_policy_with(
+        SubjectClassContract::new(
+            "sub_type".to_owned(),
+            vec!["user".to_owned(), "owner".to_owned()],
+            vec!["client".to_owned()],
+            ClientSubjectPosture::Reject,
+        )
+        .unwrap(),
+    );
+    let permuted = access_token_policy_with(
+        SubjectClassContract::new(
+            "sub_type".to_owned(),
+            vec!["owner".to_owned(), "user".to_owned(), "user".to_owned()],
+            vec!["client".to_owned()],
+            ClientSubjectPosture::Reject,
+        )
+        .unwrap(),
+    );
+    assert_eq!(base.id(), permuted.id());
+}
+
+#[test]
+fn assertion_policy_id_is_invariant_under_compat_claim_permutation_and_duplicates() {
+    let base = named_compat_policy_with(
+        vec!["client_id".to_owned(), "scope".to_owned()],
+        vec!["nonce".to_owned(), "at_hash".to_owned()],
+    );
+    let permuted = named_compat_policy_with(
+        vec![
+            "scope".to_owned(),
+            "client_id".to_owned(),
+            "client_id".to_owned(),
+        ],
+        vec!["at_hash".to_owned(), "nonce".to_owned()],
+    );
+    assert_eq!(base.id(), permuted.id());
+    let different = named_compat_policy_with(
+        vec!["client_id".to_owned()],
+        vec!["nonce".to_owned(), "at_hash".to_owned()],
+    );
+    assert_ne!(base.id(), different.id());
+}
+
+// ---- Canonical scope capture ---------------------------------------------
+
+#[test]
+fn scope_capture_is_canonical_under_order_and_duplicates() {
+    // The `scope` claim is a space-delimited set: equivalent scope sets must
+    // seal byte-equal capabilities regardless of token order or repetition.
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let a = verifier
+        .verify(&mint(
+            Some("nip-fi+jwt"),
+            TEST_KID,
+            json!({ "sub": "u", "scope": "read write admin" }),
+        ))
+        .expect("verifies");
+    let b = verifier
+        .verify(&mint(
+            Some("nip-fi+jwt"),
+            TEST_KID,
+            json!({ "sub": "u", "scope": "admin write read write" }),
+        ))
+        .expect("verifies");
+    assert_eq!(a.capabilities().entries(), b.capabilities().entries());
+    assert_eq!(
+        a.capabilities().entries(),
+        &[
+            ("scope".to_owned(), "admin".to_owned()),
+            ("scope".to_owned(), "read".to_owned()),
+            ("scope".to_owned(), "write".to_owned()),
+        ]
+    );
 }
 
 #[test]
