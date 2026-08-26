@@ -8,6 +8,21 @@
 //! - Events table is partitioned by month on `created_at`.
 //! - No FK references to partitioned tables.
 //! - Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time).
+//!
+//! ## Runtime and store ownership
+//! This crate intentionally keeps database runtime and Buzz domain persistence
+//! together while maintaining an internal boundary between them:
+//!
+//! - Runtime concerns own pool construction, writer/replica routing, transaction
+//!   creation, session invariants, metrics, and health support.
+//! - Store concerns own domain-specific SQL, row mapping, locking, mutation
+//!   rules, indexes, and focused persistence tests.
+//!
+//! Transaction-required store operations accept [`sqlx::Transaction`] so their
+//! composition requirement is visible in the type. Private connection helpers
+//! are reserved for SQL primitives that are valid on any same-session
+//! connection. New domains should prove this boundary incrementally instead of
+//! exposing raw pools or introducing broad store traits.
 
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
@@ -17,6 +32,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Channel and membership persistence.
 pub mod channel;
+/// Community lifecycle and host-map persistence.
+pub mod community;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.
 pub mod deletion;
 /// Direct message channel persistence.
@@ -33,6 +50,7 @@ pub mod git_repo;
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+mod observability;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
@@ -45,6 +63,8 @@ pub mod reaction;
 pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
+/// Replaceable-event persistence and coordinate locking.
+pub mod replaceable;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
 /// Thread metadata persistence.
@@ -56,6 +76,11 @@ pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
 
+pub use community::{
+    ArchivedCommunityRecord, CommunityRecord, CreateCommunityWithOwnerResult,
+    CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord,
+    UnarchivedCommunityRecord,
+};
 pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
 
@@ -68,37 +93,12 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
-pub(crate) fn event_replacement_lock_key(
-    community_id: CommunityId,
-    kind: i32,
-    pubkey: &[u8],
-    coordinate: Option<&[u8]>,
-) -> i64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    let kind_bytes = kind.to_le_bytes();
-    for bytes in [
-        community_id.as_uuid().as_bytes().as_slice(),
-        kind_bytes.as_slice(),
-        pubkey,
-    ] {
-        for byte in bytes {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    if let Some(coordinate) = coordinate {
-        for byte in coordinate {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    hash as i64
-}
-
 /// Extract p-tag mentions from an event and insert into the `event_mentions` table.
 ///
-/// Called after event insertion. Failures are logged but do not block event storage.
-/// Uses `INSERT ... ON CONFLICT DO NOTHING` so duplicate inserts are silently skipped.
+/// This pool-owning wrapper propagates failures to its caller. Replacement writes
+/// use the transaction-bound helper below so event storage and mention indexing
+/// commit or roll back together. Duplicate inserts are silently skipped with
+/// `INSERT ... ON CONFLICT DO NOTHING`.
 pub async fn insert_mentions(
     pool: &PgPool,
     community_id: CommunityId,
@@ -574,79 +574,6 @@ impl Default for DbConfig {
     }
 }
 
-/// Community host-map row returned by [`Db::lookup_community_by_host`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommunityRecord {
-    /// Stable server-resolved community id.
-    pub id: CommunityId,
-    /// Normalized host that maps to this community.
-    pub host: String,
-}
-
-/// Community row returned by idempotent community ensure/create operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnsuredCommunityRecord {
-    /// Stable server-resolved community id.
-    pub id: CommunityId,
-    /// Normalized host that maps to this community.
-    pub host: String,
-    /// True only when this call inserted the `communities` row.
-    pub created: bool,
-}
-
-/// Community row returned by an atomic create-with-owner operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreatedCommunityRecord {
-    /// Stable server-resolved community id.
-    pub id: CommunityId,
-    /// Normalized host stored for the community.
-    pub host: String,
-}
-
-/// Result of atomically creating a community with its initial owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateCommunityWithOwnerResult {
-    /// The community was created, or an identical retried create found it.
-    Created(CreatedCommunityRecord),
-    /// The host already belongs to another owner.
-    HostExists,
-    /// The intended owner already owns the maximum number of communities.
-    LimitReached,
-}
-
-/// Community row returned by operator-plane ownership reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnedCommunityRecord {
-    /// Stable server-resolved community id.
-    pub id: CommunityId,
-    /// Normalized host that maps to this community.
-    pub host: String,
-    /// When the community row was created.
-    pub created_at: DateTime<Utc>,
-    /// When the community was archived; absent while active.
-    pub archived_at: Option<DateTime<Utc>>,
-}
-
-/// Community row returned by an owner-authorized archive operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchivedCommunityRecord {
-    /// Stable server-resolved community id.
-    pub id: CommunityId,
-    /// Reserved canonical host.
-    pub host: String,
-    /// Durable first-archive timestamp.
-    pub archived_at: DateTime<Utc>,
-}
-
-/// Community row returned by an owner-authorized unarchive operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnarchivedCommunityRecord {
-    /// Stable server-resolved community id.
-    pub id: CommunityId,
-    /// Reserved canonical host restored to active admission.
-    pub host: String,
-}
-
 /// Token summary returned by [`Db::list_active_tokens`].
 #[derive(Debug, Clone)]
 pub struct TokenSummary {
@@ -786,7 +713,7 @@ impl Db {
         };
         let aurora_identity = self.reader_aurora_identity.clone();
         tokio::spawn(async move {
-            match read_pool.acquire().await {
+            match observability::acquire(&read_pool, observability::PoolRole::Reader).await {
                 Ok(mut conn) => {
                     tracing::info!("read replica reachable at boot");
                     match replica_fence::reader_supports_aurora_identity(&mut conn).await {
@@ -928,7 +855,7 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn = match read_pool.acquire().await {
+        let conn = match observability::acquire(read_pool, observability::PoolRole::Reader).await {
             Ok(conn) => conn,
             Err(sqlx::Error::PoolTimedOut) => {
                 tracing::warn!("reader pool acquire timed out; routing to writer");
@@ -1104,7 +1031,8 @@ impl Db {
         &self,
         lock_key: i64,
     ) -> Result<Option<UsageMetricsLeader>> {
-        let mut connection = self.pool.acquire().await?;
+        let mut connection =
+            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_key)
             .fetch_one(&mut *connection)
@@ -1251,466 +1179,11 @@ impl Db {
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
     /// The transaction holds an owned pool handle, not a borrow.
     pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        self.pool.begin().await.map_err(Into::into)
-    }
-
-    /// Returns the community mapped to a normalized request host, if one exists.
-    ///
-    /// The caller owns host normalization and turns `None` into the fail-closed
-    /// request/connection error. buzz-db only reads the durable host map.
-    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
-    pub async fn lookup_community_by_host(
-        &self,
-        normalized_host: &str,
-    ) -> Result<Option<CommunityRecord>> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|row| {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
-
-            Ok(CommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
-            })
-        })
-        .transpose()
-    }
-
-    /// Returns whether a community id still exists in the active lifecycle state.
-    #[datastore_span(name = "is_community_active", system = "postgresql")]
-    pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
-        let active = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
-        )
-        .bind(community_id.as_uuid())
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(active)
-    }
-
-    /// Returns a community by host regardless of lifecycle state. Operator-plane only.
-    #[datastore_span(
-        name = "lookup_community_by_host_for_management",
-        system = "postgresql"
-    )]
-    pub async fn lookup_community_by_host_for_management(
-        &self,
-        normalized_host: &str,
-    ) -> Result<Option<CommunityRecord>> {
-        let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
-            .bind(normalized_host)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|row| {
-            Ok(CommunityRecord {
-                id: CommunityId::from_uuid(row.try_get("id")?),
-                host: row.try_get("host")?,
-            })
-        })
-        .transpose()
-    }
-
-    /// Lists communities where `owner_pubkey` currently holds the `owner` role.
-    ///
-    /// This is an operator-plane helper, not a tenant-scoped data-plane read:
-    /// callers must gate it on deployment-level operator auth before exposing it.
-    #[datastore_span(name = "list_communities_owned_by", system = "postgresql")]
-    pub async fn list_communities_owned_by(
-        &self,
-        owner_pubkey: &str,
-    ) -> Result<Vec<OwnedCommunityRecord>> {
-        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
-        let rows = sqlx::query(
-            r#"
-            SELECT c.id, c.host, c.created_at, c.archived_at
-            FROM communities c
-            JOIN relay_members rm ON rm.community_id = c.id
-            WHERE rm.pubkey = $1
-              AND rm.role = 'owner'
-            ORDER BY c.created_at ASC, c.host ASC
-            "#,
-        )
-        .bind(owner_pubkey)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                let id: Uuid = row.try_get("id")?;
-                let host: String = row.try_get("host")?;
-                let created_at: DateTime<Utc> = row.try_get("created_at")?;
-                let archived_at: Option<DateTime<Utc>> = row.try_get("archived_at")?;
-                Ok(OwnedCommunityRecord {
-                    id: CommunityId::from_uuid(id),
-                    host,
-                    created_at,
-                    archived_at,
-                })
-            })
-            .collect()
-    }
-
-    /// Returns the normalized host mapped to a community id, if the community
-    /// exists.
-    ///
-    /// The reverse of [`lookup_community_by_host`]: used by side-effect
-    /// producers that already hold a server-resolved `CommunityId` (e.g. the
-    /// workflow action sink running a run owned by some community) and need a
-    /// fully-formed [`buzz_core::tenant::TenantContext`] — host included — to
-    /// fan out under *that* community rather than the deployment default. The
-    /// community is authoritative; the host is read back for labelling only and
-    /// is never used to re-derive the community.
-    #[datastore_span(name = "lookup_community_host", system = "postgresql")]
-    pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
-        let row = sqlx::query(
-            r#"
-            SELECT host
-            FROM communities
-            WHERE id = $1
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|row| {
-            let host: String = row.try_get("host")?;
-            Ok(host)
-        })
-        .transpose()
-    }
-
-    /// Returns the community's workspace icon (NIP-11 `icon`), if set.
-    ///
-    /// Set by relay admins/owners via the kind:9033 command; the value is
-    /// validated and size-capped at that write path.
-    #[datastore_span(name = "get_community_icon", system = "postgresql")]
-    pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
-        let row = sqlx::query(
-            r#"
-            SELECT icon
-            FROM communities
-            WHERE id = $1
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row
-            .map(|row| row.try_get::<Option<String>, _>("icon"))
-            .transpose()?
-            .flatten()
-            .filter(|icon| !icon.is_empty()))
-    }
-
-    /// Sets or clears (`None`) the community's workspace icon.
-    #[datastore_span(name = "set_community_icon", system = "postgresql")]
-    pub async fn set_community_icon(
-        &self,
-        community_id: CommunityId,
-        icon: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE communities
-            SET icon = $2
-            WHERE id = $1
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(icon)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Ensure a configured community host exists and return its row.
-    ///
-    /// This is the startup/config seeding path for N=1 deployments. Migrations
-    /// create the schema only; deployment-specific hosts are not hardcoded into
-    /// schema history.
-    #[datastore_span(name = "ensure_configured_community", system = "postgresql")]
-    pub async fn ensure_configured_community(
-        &self,
-        normalized_host: &str,
-    ) -> Result<EnsuredCommunityRecord> {
-        let row = sqlx::query(
-            r#"
-            INSERT INTO communities (host)
-            VALUES ($1)
-            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
-            WHERE communities.deletion_state = 'active'
-              AND communities.deleted_at IS NULL
-            RETURNING id, host, (xmax = 0) AS created
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| {
-            DbError::AccessDenied(format!(
-                "community host {normalized_host:?} is permanently tombstoned"
-            ))
-        })?;
-
-        let id: Uuid = row.try_get("id")?;
-        let host: String = row.try_get("host")?;
-        let created: bool = row.try_get("created")?;
-
-        Ok(EnsuredCommunityRecord {
-            id: CommunityId::from_uuid(id),
-            host,
-            created,
-        })
-    }
-
-    /// Atomically creates a community and its initial owner.
-    ///
-    /// Holds a per-owner advisory lock while enforcing the ownership limit.
-    /// Identical create retries return the original record; host collisions and
-    /// limit failures remain distinguishable to the operator API.
-    #[datastore_span(name = "create_community_with_owner", system = "postgresql")]
-    pub async fn create_community_with_owner(
-        &self,
-        normalized_host: &str,
-        owner_pubkey: &str,
-    ) -> Result<CreateCommunityWithOwnerResult> {
-        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
-        let mut tx = self.pool.begin().await?;
-
-        // Serialize on the owner pubkey so concurrent creates to the same
-        // owner cannot both pass the ownership count check.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(relay_members::owner_count_advisory_lock_key(&owner_pubkey))
-            .execute(&mut *tx)
-            .await?;
-
-        let row = sqlx::query(
-            r#"
-            INSERT INTO communities (host)
-            VALUES ($1)
-            ON CONFLICT (lower(host)) DO NOTHING
-            RETURNING id, host
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let (id, host) = if let Some(row) = row {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
-
-            // Enforce the limit before inserting the new owner row.
-            let owned_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
-            )
-            .bind(&owner_pubkey)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            if owned_count >= relay_members::max_communities_per_owner() {
-                tx.rollback().await?;
-                return Ok(CreateCommunityWithOwnerResult::LimitReached);
-            }
-
-            sqlx::query(
-                "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
-            )
-            .bind(id)
-            .bind(&owner_pubkey)
-            .execute(&mut *tx)
-            .await?;
-            (id, host)
-        } else {
-            let existing = sqlx::query(
-                r#"
-                SELECT c.id, c.host
-                FROM communities c
-                JOIN relay_members rm ON rm.community_id = c.id
-                WHERE lower(c.host) = lower($1)
-                  AND lower(rm.pubkey) = lower($2)
-                  AND rm.role = 'owner'
-                  AND c.archived_at IS NULL
-                  AND c.deletion_state = 'active'
-                  AND c.deleted_at IS NULL
-                "#,
-            )
-            .bind(normalized_host)
-            .bind(&owner_pubkey)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(existing) = existing else {
-                tx.rollback().await?;
-                return Ok(CreateCommunityWithOwnerResult::HostExists);
-            };
-            (existing.try_get("id")?, existing.try_get("host")?)
-        };
-
-        tx.commit().await?;
-        Ok(CreateCommunityWithOwnerResult::Created(
-            CreatedCommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
-            },
-        ))
-    }
-
-    /// Idempotently archives a community when the asserted pubkey is its current owner.
-    #[datastore_span(name = "archive_community_owned_by", system = "postgresql")]
-    pub async fn archive_community_owned_by(
-        &self,
-        normalized_host: &str,
-        owner_pubkey: &str,
-        protected_deployment_host: &str,
-    ) -> Result<Option<ArchivedCommunityRecord>> {
-        let row = sqlx::query(
-            r#"UPDATE communities c
-               SET archived_at = COALESCE(c.archived_at, now())
-               FROM relay_members rm
-               WHERE lower(c.host) = lower($1)
-                 AND rm.community_id = c.id
-                 AND lower(rm.pubkey) = lower($2)
-                 AND rm.role = 'owner'
-                 AND lower(c.host) <> lower($3)
-                 AND c.deletion_state = 'active'
-                 AND c.deleted_at IS NULL
-               RETURNING c.id, c.host, c.archived_at"#,
-        )
-        .bind(normalized_host)
-        .bind(owner_pubkey)
-        .bind(protected_deployment_host)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            Ok(ArchivedCommunityRecord {
-                id: CommunityId::from_uuid(row.try_get("id")?),
-                host: row.try_get("host")?,
-                archived_at: row.try_get("archived_at")?,
-            })
-        })
-        .transpose()
-    }
-
-    /// Idempotently restores a community when the asserted pubkey is its current owner.
-    #[datastore_span(name = "unarchive_community_owned_by", system = "postgresql")]
-    pub async fn unarchive_community_owned_by(
-        &self,
-        normalized_host: &str,
-        owner_pubkey: &str,
-    ) -> Result<Option<UnarchivedCommunityRecord>> {
-        let row = sqlx::query(
-            r#"UPDATE communities c
-               SET archived_at = NULL
-               FROM relay_members rm
-               WHERE lower(c.host) = lower($1)
-                 AND rm.community_id = c.id
-                 AND lower(rm.pubkey) = lower($2)
-                 AND rm.role = 'owner'
-                 AND c.deletion_state = 'active'
-                 AND c.deleted_at IS NULL
-               RETURNING c.id, c.host"#,
-        )
-        .bind(normalized_host)
-        .bind(owner_pubkey)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            Ok(UnarchivedCommunityRecord {
-                id: CommunityId::from_uuid(row.try_get("id")?),
-                host: row.try_get("host")?,
-            })
-        })
-        .transpose()
-    }
-
-    /// Returns the community that owns a channel, if the channel exists.
-    ///
-    /// Internal relay producers use this to derive tenant context from the row
-    /// they are acting on, rather than falling back to an implicit default.
-    #[datastore_span(name = "community_of_channel", system = "postgresql")]
-    pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
-        let row = sqlx::query(
-            r#"
-            SELECT community_id
-            FROM channels
-            WHERE id = $1
-              AND deleted_at IS NULL
-            "#,
-        )
-        .bind(channel_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|row| {
-            let id: Uuid = row.try_get("community_id")?;
-            Ok(CommunityId::from_uuid(id))
-        })
-        .transpose()
-    }
-
-    /// Batched version of [`Self::community_of_channel`]: given a list of
-    /// channel UUIDs, returns a map from channel id → owning community
-    /// for every channel that exists (soft-deletes excluded).
-    ///
-    /// Used by the runtime conformance read-seam emitters in `buzz-relay`:
-    /// after a `query_events`/`get_events_by_ids` returns N rows, the
-    /// emitter collects distinct `channel_id`s, calls this once, then
-    /// projects each row's true community label independently of the
-    /// fetch query's WHERE clause. That independence is what makes the
-    /// `Inv_NonInterference` / `Inv_ReadConfinement` gate non-vacuous —
-    /// a mutation that dropped `community_id = $X` from the fetch query
-    /// would still let this helper return the row's true label, and the
-    /// checker would see the mismatch.
-    ///
-    /// Channels missing from the result map (deleted or never existed)
-    /// are intentionally not present rather than mapped to a default —
-    /// callers MUST treat "channel-id not in map" as a coverage breach,
-    /// never as "use the resolved community".
-    #[datastore_span(name = "communities_of_channels", system = "postgresql")]
-    pub async fn communities_of_channels(
-        &self,
-        channel_ids: &[Uuid],
-    ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
-        if channel_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let rows = sqlx::query(
-            r#"
-            SELECT id, community_id
-            FROM channels
-            WHERE id = ANY($1)
-              AND deleted_at IS NULL
-            "#,
-        )
-        .bind(channel_ids)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut out = std::collections::HashMap::with_capacity(rows.len());
-        for row in rows {
-            let ch: Uuid = row.try_get("id")?;
-            let cm: Uuid = row.try_get("community_id")?;
-            out.insert(ch, CommunityId::from_uuid(cm));
-        }
-        Ok(out)
+        let connection =
+            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
+        sqlx::Transaction::begin(connection, None)
+            .await
+            .map_err(Into::into)
     }
 
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
@@ -4854,139 +4327,6 @@ impl Db {
         Ok(result.rows_affected())
     }
 
-    /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
-    /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).
-    ///
-    /// Keeps only the event with the highest `created_at` per (kind, pubkey, channel_id).
-    /// Same-second ties are broken by lowest event `id` (NIP-16 deterministic ordering).
-    /// Returns `(event, false)` for stale writes and duplicate IDs — callers should
-    /// skip fan-out/dispatch when `was_inserted` is false.
-    #[datastore_span(name = "replace_addressable_event", system = "postgresql")]
-    pub async fn replace_addressable_event(
-        &self,
-        community_id: CommunityId,
-        event: &nostr::Event,
-        channel_id: Option<Uuid>,
-    ) -> Result<(StoredEvent, bool)> {
-        let kind_i32 = buzz_core::kind::event_kind_i32(event);
-        let pubkey_bytes = event.pubkey.to_bytes();
-        let created_at_secs = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
-            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-
-        // Collisions only cause extra serialization; they cannot change behavior.
-        let lock_key = event_replacement_lock_key(
-            community_id,
-            kind_i32,
-            pubkey_bytes.as_slice(),
-            channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
-        );
-
-        let mut tx = self.pool.begin().await?;
-
-        // Serialize all writers for the same (kind, pubkey, channel_id) tuple.
-        // Advisory lock is transaction-scoped — released on commit/rollback.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
-
-        // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
-        // historical data where prior bugs may have left multiple live rows.
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id IS NOT DISTINCT FROM $4 \
-             AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(channel_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        // Stale-write protection: reject if incoming is not newer.
-        // NIP-16: created_at is second-resolution. On same-second tie, lowest
-        // event id (lexicographic) wins — deterministic across relays.
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                tx.rollback().await?;
-                let received_at = chrono::Utc::now();
-                return Ok((
-                    StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                    false,
-                ));
-            }
-        }
-
-        // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
-        sqlx::query(
-            "UPDATE events SET deleted_at = NOW() \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id IS NOT DISTINCT FROM $4 \
-             AND deleted_at IS NULL",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(channel_id)
-        .execute(&mut *tx)
-        .await?;
-
-        // Insert the new event inside the same transaction.
-        let sig_bytes = event.sig.serialize();
-        let tags_json = serde_json::to_value(&event.tags)?;
-        let received_at = chrono::Utc::now();
-        let d_tag = crate::event::extract_d_tag(event);
-
-        let insert_result = sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(community_id.as_uuid())
-        .bind(event.id.as_bytes().as_slice())
-        .bind(pubkey_bytes.as_slice())
-        .bind(created_at)
-        .bind(kind_i32)
-        .bind(&tags_json)
-        .bind(&event.content)
-        .bind(sig_bytes.as_slice())
-        .bind(received_at)
-        .bind(channel_id)
-        .bind(d_tag.as_deref())
-        .execute(&mut *tx)
-        .await?;
-
-        let was_inserted = insert_result.rows_affected() > 0;
-        if !was_inserted {
-            // ON CONFLICT fired — the event ID already exists. Rollback the
-            // soft-delete so we don't lose the previous replaceable event.
-            tx.rollback().await?;
-            return Ok((
-                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                false,
-            ));
-        }
-
-        // The replaceable event and its denormalized mention index are one
-        // authoritative discovery write. An indexing error must roll back the
-        // new event and restore the previously-live event.
-        crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
-
-        tx.commit().await?;
-
-        Ok((
-            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-            true,
-        ))
-    }
-
     /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
     /// from the canonical membership rows for `community_id`.
     ///
@@ -5058,19 +4398,32 @@ impl Db {
         let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
         let pubkey_bytes = relay_keypair.public_key().to_bytes();
 
-        let lock_key =
-            event_replacement_lock_key(community_id, kind_i32, pubkey_bytes.as_slice(), None);
+        let lock_key = replaceable::event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            None,
+        );
 
-        let mut tx = self.pool.begin().await?;
+        let (mut tx, transaction_timer) = observability::begin_transaction(
+            &self.pool,
+            observability::TransactionOperation::PublishNip43MembershipLocked,
+        )
+        .await?;
+        let (event, received_at, was_inserted, member_count) = transaction_timer
+            .observe(async {
 
         // Acquire the per-community snapshot lock BEFORE reading members.
         // This serializes the entire read-build-write cycle: a concurrent
         // publication will block here until our transaction commits, then
         // read the updated membership state.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
+        observability::observe_advisory_lock(
+            observability::LockType::Membership,
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx),
+        )
+        .await?;
 
         // Read current members inside the locked transaction.
         let rows = sqlx::query(
@@ -5145,262 +4498,25 @@ impl Db {
         .await?;
 
         let was_inserted = insert_result.rows_affected() > 0;
-        if !was_inserted {
-            tx.rollback().await?;
-            return Ok((
-                StoredEvent::with_received_at(event, received_at, None, false),
-                false,
-                member_count,
-            ));
-        }
-
-        tx.commit().await?;
-
-        if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
-            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-        }
-
-        Ok((
-            StoredEvent::with_received_at(event, received_at, None, true),
-            true,
-            member_count,
-        ))
-    }
-
-    /// Atomically replace a NIP-33 parameterized replaceable event (kind 30000–39999).
-    ///
-    /// Keeps only the event with the highest `created_at` per `(kind, pubkey, d_tag)`.
-    /// Same-second ties are broken by lowest event `id` (deterministic ordering).
-    /// The entire check → retire old payload → insert runs in a single transaction
-    /// with an advisory lock to prevent concurrent-insert races. NIP-RS read-state
-    /// coordinates hard-delete the superseded payload and preserve a compact
-    /// ordering watermark. Buzz mesh status coordinates also hard-delete their
-    /// superseded heartbeat payload because only the live head has product
-    /// value; other NIP-33 kinds retain soft-deleted history.
-    ///
-    /// **Channel policy:** NIP-33 replacement keys on `(kind, pubkey, d_tag)` globally —
-    /// `channel_id` is NOT part of the replacement key. This matches the Nostr spec:
-    /// an author's parameterized replaceable event is a single global resource identified
-    /// by its d-tag, regardless of which channel it was submitted to. The `channel_id`
-    /// parameter is stored on the new row for query scoping but does not affect replacement.
-    ///
-    /// Note: `replace_addressable_event()` keys on `channel_id` because it serves
-    /// relay-signed NIP-29 group metadata (kind 39000–39002) where the relay is the
-    /// author and channel_id distinguishes groups. User-submitted NIP-33 events use
-    /// this function instead, where the author's pubkey + d-tag is the natural key.
-    #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
-    pub async fn replace_parameterized_event(
-        &self,
-        community_id: CommunityId,
-        event: &nostr::Event,
-        d_tag: &str,
-        channel_id: Option<Uuid>,
-    ) -> Result<(StoredEvent, bool)> {
-        let kind_i32 = buzz_core::kind::event_kind_i32(event);
-        let pubkey_bytes = event.pubkey.to_bytes();
-        let created_at_secs = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
-            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-
-        let lock_key = event_replacement_lock_key(
-            community_id,
-            kind_i32,
-            pubkey_bytes.as_slice(),
-            Some(d_tag.as_bytes()),
-        );
-
-        let mut tx = self.pool.begin().await?;
-
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
-
-        let d_tag_count = event
-            .tags
-            .iter()
-            .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "d"))
-            .count();
-        let has_exact_d_tag = event.tags.iter().any(|tag| {
-            let parts = tag.as_slice();
-            parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
-        });
-        let read_state_t_tag_count = event
-            .tags
-            .iter()
-            .filter(|tag| {
-                let parts = tag.as_slice();
-                parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
-            })
-            .count();
-        let is_nip_rs = kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
-            && d_tag_count == 1
-            && has_exact_d_tag
-            && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
-                slot.len() == 32
-                    && slot
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            })
-            && read_state_t_tag_count == 1;
-        let is_buzz_mesh_status = kind_i32 == buzz_core::kind::KIND_BOOKMARK_SET as i32
-            && d_tag.starts_with("buzz-mesh-member-status:")
-            && event.tags.iter().any(|tag| {
-                let parts = tag.as_slice();
-                parts.len() == 2 && parts[0] == "k" && parts[1] == "buzz-mesh-status"
-            });
-        let hard_delete_superseded = is_nip_rs || is_buzz_mesh_status;
-
-        // Check the live head and, for NIP-RS, the compact historical ordering
-        // watermark. The watermark remains after a NIP-09 coordinate deletion,
-        // preventing a previously accepted signed blob from being resurrected.
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let watermark: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = if is_nip_rs {
-            sqlx::query_as(
-                "SELECT created_at, event_id FROM parameterized_event_watermarks \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
-            )
-            .bind(community_id.as_uuid())
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .fetch_optional(&mut *tx)
-            .await?
+        if was_inserted {
+            tx.commit().await?;
         } else {
-            None
-        };
-
-        // Stale-write protection: reject if either durable ordering source
-        // dominates the incoming tuple. Equal timestamps use lowest event id.
-        let incoming_id = event.id.as_bytes().as_slice();
-        let dominated =
-            existing
-                .iter()
-                .chain(watermark.iter())
-                .any(|(accepted_ts, accepted_id)| {
-                    created_at < *accepted_ts
-                        || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
-                });
-        if dominated {
             tx.rollback().await?;
-            let received_at = chrono::Utc::now();
-            return Ok((
-                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                false,
-            ));
         }
-
-        if existing.is_some() {
-            if is_nip_rs {
-                // Migration 0011 rejects regex-coordinate hard deletes from
-                // pre-fix writers. Authorize only this corrected NIP-RS delete,
-                // transaction-locally so pooled connections cannot leak it.
-                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            let statement = if hard_delete_superseded {
-                "DELETE FROM events \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-            } else {
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-            };
-            sqlx::query(statement)
-                .bind(community_id.as_uuid())
-                .bind(kind_i32)
-                .bind(pubkey_bytes.as_slice())
-                .bind(d_tag)
-                .execute(&mut *tx)
-                .await?;
-
-            if hard_delete_superseded {
-                if let Some((_, existing_id)) = &existing {
-                    // Event first, mentions second: migration 0009's live-event
-                    // fence uses this global lock order to avoid deadlocks.
-                    sqlx::query(
-                        "DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2",
-                    )
-                    .bind(community_id.as_uuid())
-                    .bind(existing_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
-        }
-
-        // Insert the new event inside the transaction.
-        let sig_bytes = event.sig.serialize();
-        let tags_json = serde_json::to_value(&event.tags)?;
-        let received_at = chrono::Utc::now();
-
-        let insert_result = sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(community_id.as_uuid())
-        .bind(event.id.as_bytes().as_slice())
-        .bind(pubkey_bytes.as_slice())
-        .bind(created_at)
-        .bind(kind_i32)
-        .bind(&tags_json)
-        .bind(&event.content)
-        .bind(sig_bytes.as_slice())
-        .bind(received_at)
-        .bind(channel_id)
-        .bind(d_tag)
-        .bind(event::extract_not_before(event))
-        .execute(&mut *tx)
-        .await?;
-
-        let was_inserted = insert_result.rows_affected() > 0;
-        if !was_inserted {
-            tx.rollback().await?;
-            return Ok((
-                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                false,
-            ));
-        }
-
-        if is_nip_rs {
-            sqlx::query(
-                "INSERT INTO parameterized_event_watermarks \
-                     (community_id, kind, pubkey, d_tag, created_at, event_id) \
-                 VALUES ($1, $2, $3, $4, $5, $6) \
-                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
-                     created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
-            )
-            .bind(community_id.as_uuid())
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .bind(created_at)
-            .bind(incoming_id)
-            .execute(&mut *tx)
+        Ok::<_, DbError>((event, received_at, was_inserted, member_count))
+            })
             .await?;
-        }
 
-        tx.commit().await?;
-
-        // Mentions are a denormalized index — safe outside the transaction.
-        if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
-            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        if was_inserted {
+            if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
         }
 
         Ok((
-            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-            true,
+            StoredEvent::with_received_at(event, received_at, None, was_inserted),
+            was_inserted,
+            member_count,
         ))
     }
 }
@@ -5480,17 +4596,10 @@ fn parse_api_token_row(row: sqlx::postgres::PgRow) -> Result<ApiTokenRecord> {
 
 #[cfg(test)]
 mod tests {
-    //! Pin the load-bearing contract for `Db::communities_of_channels`:
-    //! a channel id that does NOT exist MUST be absent from the result
-    //! map, never mapped to a default. The relay-side read-row emitter
-    //! relies on this — a missing entry triggers `MissingLookup →
-    //! ImplBug{row_community_lookup_missing} → CoverageBreach`. If this
-    //! helper ever started returning a default/zero entry for unknown
-    //! channels, that fail-closed chain would go blind.
     use super::*;
     use buzz_core::CommunityId;
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::{Acquire, PgPool};
+    use sqlx::PgPool;
     use uuid::Uuid;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
@@ -5625,226 +4734,6 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn addressable_replacement_rolls_back_when_mention_indexing_fails() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "atomic_addressable").await;
-        let db = Db::from_pool(pool.clone());
-        let community_uuid = Uuid::new_v4();
-        let channel = Uuid::new_v4();
-        let keys = Keys::generate();
-        let owner_keys = Keys::generate();
-        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
-        let community = CommunityId::from_uuid(community_uuid);
-        let member = owner_keys.public_key().to_hex();
-        let tags = || {
-            vec![
-                Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
-                Tag::parse(["p", member.as_str(), "", "owner"]).expect("p tag"),
-            ]
-        };
-        let base = Timestamp::now().as_secs();
-        let old = EventBuilder::new(Kind::Custom(39002), "old")
-            .tags(tags())
-            .custom_created_at(Timestamp::from(base))
-            .sign_with_keys(&keys)
-            .expect("sign old");
-        db.replace_addressable_event(community, &old, Some(channel))
-            .await
-            .expect("insert old roster");
-
-        sqlx::query(
-            "CREATE FUNCTION reject_test_mention() RETURNS trigger AS $$ \
-             BEGIN RAISE EXCEPTION 'injected mention failure'; END; \
-             $$ LANGUAGE plpgsql",
-        )
-        .execute(&pool)
-        .await
-        .expect("create failure function");
-        sqlx::query(
-            "CREATE TRIGGER reject_test_mention BEFORE INSERT ON event_mentions \
-             FOR EACH ROW EXECUTE FUNCTION reject_test_mention()",
-        )
-        .execute(&pool)
-        .await
-        .expect("install failure injection");
-
-        let new = EventBuilder::new(Kind::Custom(39002), "new")
-            .tags(tags())
-            .custom_created_at(Timestamp::from(base + 1))
-            .sign_with_keys(&keys)
-            .expect("sign new");
-        let error = db
-            .replace_addressable_event(community, &new, Some(channel))
-            .await
-            .expect_err("mention failure must fail replacement");
-        assert!(error.to_string().contains("injected mention failure"));
-
-        let live_id: Vec<u8> = sqlx::query_scalar(
-            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
-             AND kind=39002 AND deleted_at IS NULL",
-        )
-        .bind(community.as_uuid())
-        .bind(channel)
-        .fetch_one(&pool)
-        .await
-        .expect("query live roster");
-        assert_eq!(live_id, old.id.as_bytes(), "old roster must remain live");
-        let new_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
-                .bind(community.as_uuid())
-                .bind(new.id.as_bytes().as_slice())
-                .fetch_one(&pool)
-                .await
-                .expect("count rolled-back event");
-        assert_eq!(new_rows, 0, "new roster must roll back with its index");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn stale_legacy_roster_cannot_replace_new_locked_snapshot() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (setup_pool, scratch_name) = create_scratch_db(&admin, "mixed_roster_writer").await;
-        let base_url = admin_url().await;
-        let slash = base_url.rfind('/').expect("database URL has path segment");
-        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(Duration::from_secs(1))
-            .connect(&scratch_url)
-            .await
-            .expect("connect one-connection scratch pool");
-        setup_pool.close().await;
-        let db = Db::from_pool(pool.clone());
-        let community_uuid = Uuid::new_v4();
-        let community = CommunityId::from_uuid(community_uuid);
-        let channel = Uuid::new_v4();
-        let relay_keys = Keys::generate();
-        let owner_keys = Keys::generate();
-        let owner = owner_keys.public_key().to_bytes();
-        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
-
-        // This is the old pod's unlocked capture A. It remains in process memory
-        // while a role-only canonical mutation advances and the new pod publishes B.
-        let base = Timestamp::now().as_secs();
-        let roster = |members: &[(&[u8], &str)], timestamp| {
-            let tags =
-                std::iter::once(Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"))
-                    .chain(members.iter().map(|(member, role)| {
-                        Tag::parse(["p", hex::encode(member).as_str(), "", *role]).expect("p tag")
-                    }))
-                    .collect::<Vec<_>>();
-            EventBuilder::new(Kind::Custom(39002), "")
-                .tags(tags)
-                .custom_created_at(Timestamp::from(timestamp))
-                .sign_with_keys(&relay_keys)
-                .expect("sign roster")
-        };
-
-        let newcomer = Keys::generate().public_key().to_bytes();
-        sqlx::query(
-            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
-             VALUES ($1, $2, $3, 'member', $4)",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(newcomer.as_slice())
-        .bind(owner.as_slice())
-        .execute(&pool)
-        .await
-        .expect("seed member before legacy capture");
-        let stale_a = roster(
-            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "member")],
-            base + 2,
-        );
-
-        sqlx::query(
-            "UPDATE channel_members SET role = 'admin' \
-             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(newcomer.as_slice())
-        .execute(&pool)
-        .await
-        .expect("commit newer canonical role");
-
-        let relay_pubkey = relay_keys.public_key().to_bytes();
-        let mut snapshot = db
-            .lock_member_snapshot(community, channel, &relay_pubkey)
-            .await
-            .expect("new writer captures locked roster B");
-        let fresh_b = roster(
-            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "admin")],
-            base + 1,
-        );
-        assert!(
-            snapshot
-                .replace_member_event(community, channel, &fresh_b)
-                .await
-                .expect("new writer publishes B")
-                .1
-        );
-        snapshot
-            .release()
-            .await
-            .expect("commit B and release locks");
-
-        // The legacy canonical path takes the replacement key, soft-deletes B,
-        // then attempts its newer-timestamp stale A. Migration 0032 rejects the
-        // INSERT; transaction rollback must restore B. A one-connection pool
-        // proves the lock order does not turn this compatibility path into a
-        // self-deadlock.
-        let error = tokio::time::timeout(
-            Duration::from_secs(3),
-            db.replace_addressable_event(community, &stale_a, Some(channel)),
-        )
-        .await
-        .expect("legacy replacement must not deadlock")
-        .expect_err("stale captured roster A must be rejected");
-        assert!(
-            matches!(
-                error,
-                DbError::Sqlx(sqlx::Error::Database(ref db_error))
-                    if db_error.code().as_deref() == Some("23514")
-            ),
-            "expected roster fence check violation, got {error:?}"
-        );
-
-        let live_ids: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
-             AND kind=39002 AND pubkey=$3 AND deleted_at IS NULL",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(relay_pubkey.as_slice())
-        .fetch_all(&pool)
-        .await
-        .expect("load live roster heads");
-        assert_eq!(live_ids, vec![fresh_b.id.as_bytes().to_vec()]);
-        let stale_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
-                .bind(community_uuid)
-                .bind(stale_a.id.as_bytes().as_slice())
-                .fetch_one(&pool)
-                .await
-                .expect("count rejected stale roster");
-        assert_eq!(stale_rows, 0, "stale roster insert must roll back");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn desired_schema_rejects_stale_legacy_roster_role() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -5939,152 +4828,6 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_rs_replacement_hard_deletes_payload_and_watermark_rejects_replay() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let db = setup_db().await;
-        let community = CommunityId::from_uuid(make_community(&db.pool).await);
-        let keys = Keys::generate();
-        let d_tag = format!("read-state:{}", "a".repeat(32));
-        let tags = vec![
-            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
-            Tag::parse(["t", "read-state"]).expect("t tag"),
-        ];
-        let base = Timestamp::now().as_secs();
-        let old = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "old")
-            .tags(tags.clone())
-            .custom_created_at(Timestamp::from(base))
-            .sign_with_keys(&keys)
-            .expect("sign old");
-        let new = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "new")
-            .tags(tags)
-            .custom_created_at(Timestamp::from(base + 1))
-            .sign_with_keys(&keys)
-            .expect("sign new");
-
-        assert!(
-            db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("insert old")
-                .1
-        );
-        assert!(
-            db.replace_parameterized_event(community, &new, &d_tag, None)
-                .await
-                .expect("replace with new")
-                .1
-        );
-
-        let rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(&d_tag)
-        .fetch_one(&db.pool)
-        .await
-        .expect("count NIP-RS rows");
-        assert_eq!(rows, 1, "superseded payload must be physically deleted");
-
-        sqlx::query(
-            "UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(&d_tag)
-        .execute(&db.pool)
-        .await
-        .expect("simulate NIP-09 coordinate deletion");
-
-        assert!(
-            !db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("replay old")
-                .1
-        );
-        let live: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(&d_tag)
-        .fetch_one(&db.pool)
-        .await
-        .expect("count live NIP-RS rows");
-        assert_eq!(live, 0, "watermark must block stale resurrection");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn mesh_status_replacement_keeps_one_physical_row() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let db = setup_db().await;
-        let community = CommunityId::from_uuid(make_community(&db.pool).await);
-        let keys = Keys::generate();
-        let d_tag = "buzz-mesh-member-status:owner-test";
-        let tags = vec![
-            Tag::parse(["d", d_tag]).expect("d tag"),
-            Tag::parse(["k", "buzz-mesh-status"]).expect("k tag"),
-        ];
-        let base = Timestamp::now().as_secs();
-        for (offset, content) in [(0, "running"), (1, "running-again"), (2, "stopped")] {
-            let event = EventBuilder::new(
-                Kind::Custom(buzz_core::kind::KIND_BOOKMARK_SET as u16),
-                content,
-            )
-            .tags(tags.clone())
-            .custom_created_at(Timestamp::from(base + offset))
-            .sign_with_keys(&keys)
-            .expect("sign mesh status");
-            assert!(
-                db.replace_parameterized_event(community, &event, d_tag, None)
-                    .await
-                    .expect("replace mesh status")
-                    .1
-            );
-        }
-
-        let (rows, live): (i64, i64) = sqlx::query_as(
-            "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
-             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(d_tag)
-        .fetch_one(&db.pool)
-        .await
-        .expect("count mesh status rows");
-        assert_eq!((rows, live), (1, 1));
-
-        sqlx::query(
-            "UPDATE events SET deleted_at=NOW() \
-             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(d_tag)
-        .execute(&db.pool)
-        .await
-        .expect("simulate old relay soft delete");
-        let rows_after_legacy_delete: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM events \
-             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(d_tag)
-        .fetch_one(&db.pool)
-        .await
-        .expect("count rows after old relay soft delete");
-        assert_eq!(
-            rows_after_legacy_delete, 0,
-            "migration trigger must purge soft-deleted mesh status"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn coordinate_delete_spares_head_newer_than_the_deletion() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -6150,246 +4893,6 @@ mod tests {
             current_deleted,
             "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn duplicate_nip_rs_discriminator_tags_keep_legacy_retention() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let db = setup_db().await;
-        let community = CommunityId::from_uuid(make_community(&db.pool).await);
-        let keys = Keys::generate();
-        let base = Timestamp::now().as_secs();
-
-        for (case, tags) in [
-            (
-                "duplicate-d",
-                vec![
-                    Tag::parse(["d", &format!("read-state:{}", "c".repeat(32))])
-                        .expect("first d tag"),
-                    Tag::parse(["d", &format!("read-state:{}", "d".repeat(32))])
-                        .expect("second d tag"),
-                    Tag::parse(["t", "read-state"]).expect("t tag"),
-                ],
-            ),
-            (
-                "duplicate-t",
-                vec![
-                    Tag::parse(["d", &format!("read-state:{}", "e".repeat(32))]).expect("d tag"),
-                    Tag::parse(["t", "read-state"]).expect("first t tag"),
-                    Tag::parse(["t", "read-state"]).expect("second t tag"),
-                ],
-            ),
-        ] {
-            let d_tag = tags
-                .iter()
-                .find_map(|tag| {
-                    let parts = tag.as_slice();
-                    (parts.first().is_some_and(|part| part == "d") && parts.len() >= 2)
-                        .then(|| parts[1].clone())
-                })
-                .expect("first d-tag value");
-            let old = EventBuilder::new(
-                Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
-                format!("{case}-old"),
-            )
-            .tags(tags.clone())
-            .custom_created_at(Timestamp::from(base))
-            .sign_with_keys(&keys)
-            .expect("sign old event");
-            let new = EventBuilder::new(
-                Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
-                format!("{case}-new"),
-            )
-            .tags(tags)
-            .custom_created_at(Timestamp::from(base + 1))
-            .sign_with_keys(&keys)
-            .expect("sign new event");
-
-            assert!(
-                db.replace_parameterized_event(community, &old, &d_tag, None)
-                    .await
-                    .expect("insert old event")
-                    .1
-            );
-            assert!(
-                db.replace_parameterized_event(community, &new, &d_tag, None)
-                    .await
-                    .expect("replace with new event")
-                    .1
-            );
-
-            let (rows, live): (i64, i64) = sqlx::query_as(
-                "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
-                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
-            )
-            .bind(community.as_uuid())
-            .bind(keys.public_key().to_bytes())
-            .bind(&d_tag)
-            .fetch_one(&db.pool)
-            .await
-            .expect("count retained rows");
-            assert_eq!((rows, live), (2, 1), "{case} must retain legacy history");
-
-            let watermarks: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM parameterized_event_watermarks \
-                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
-            )
-            .bind(community.as_uuid())
-            .bind(keys.public_key().to_bytes())
-            .bind(&d_tag)
-            .fetch_one(&db.pool)
-            .await
-            .expect("count watermarks");
-            assert_eq!(watermarks, 0, "{case} must not create a watermark");
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let db = setup_db().await;
-        let community = CommunityId::from_uuid(make_community(&db.pool).await);
-        let keys = Keys::generate();
-        let base = Timestamp::now().as_secs();
-        let conforming_d = format!("read-state:{}", "6".repeat(32));
-        let conforming = EventBuilder::new(
-            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
-            "fenced-conforming",
-        )
-        .tags(vec![
-            Tag::parse(["d", conforming_d.as_str()]).expect("d tag"),
-            Tag::parse(["t", "read-state"]).expect("t tag"),
-        ])
-        .custom_created_at(Timestamp::from(base))
-        .sign_with_keys(&keys)
-        .expect("sign conforming event");
-        assert!(
-            db.replace_parameterized_event(community, &conforming, &conforming_d, None)
-                .await
-                .expect("insert conforming event")
-                .1
-        );
-        sqlx::query(
-            "INSERT INTO event_mentions \
-             (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
-             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
-        )
-        .bind(community.as_uuid())
-        .bind("6".repeat(64))
-        .bind(conforming.id.as_bytes().as_slice())
-        .bind(conforming.created_at.as_secs() as f64)
-        .execute(&db.pool)
-        .await
-        .expect("insert mention");
-
-        // Model ce10's first destructive statement. RAISE aborts the transaction,
-        // so its later mention delete and incoming insert can never commit.
-        let mut old_writer = db.pool.begin().await.expect("begin old-writer tx");
-        let rejected = sqlx::query(
-            "DELETE FROM events WHERE community_id=$1 AND kind=30078 \
-             AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
-        )
-        .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(&conforming_d)
-        .execute(&mut *old_writer)
-        .await;
-        assert!(rejected.is_err(), "old-writer hard delete must be rejected");
-        old_writer.rollback().await.expect("rollback rejected tx");
-        let preserved: (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM events WHERE community_id=$1 AND id=$2), \
-                    (SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2)",
-        )
-        .bind(community.as_uuid())
-        .bind(conforming.id.as_bytes().as_slice())
-        .fetch_one(&db.pool)
-        .await
-        .expect("count preserved payload and mention");
-        assert_eq!(preserved, (1, 1));
-
-        let nonconforming_d = format!("read-state:{}", "7".repeat(32));
-        let nonconforming = EventBuilder::new(
-            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
-            "fenced-nonconforming",
-        )
-        .tags(vec![
-            Tag::parse(["d", nonconforming_d.as_str()]).expect("first d tag"),
-            Tag::parse(["d", "other"]).expect("second d tag"),
-            Tag::parse(["t", "read-state"]).expect("t tag"),
-        ])
-        .custom_created_at(Timestamp::from(base + 1))
-        .sign_with_keys(&keys)
-        .expect("sign nonconforming event");
-        assert!(
-            db.replace_parameterized_event(community, &nonconforming, &nonconforming_d, None,)
-                .await
-                .expect("insert nonconforming event")
-                .1
-        );
-        let rejected_nonconforming = sqlx::query(
-            "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
-        )
-        .bind(community.as_uuid())
-        .bind(nonconforming.id.as_bytes().as_slice())
-        .bind(nonconforming.created_at.as_secs() as f64)
-        .execute(&db.pool)
-        .await;
-        assert!(
-            rejected_nonconforming.is_err(),
-            "fence must cover a nonconforming OLD row at a regex coordinate"
-        );
-
-        let unrelated_d = format!("read-state:{}", "8".repeat(32));
-        let unrelated = EventBuilder::new(Kind::Custom(30023), "unrelated")
-            .tags(vec![Tag::parse(["d", unrelated_d.as_str()]).expect("d tag")])
-            .custom_created_at(Timestamp::from(base + 2))
-            .sign_with_keys(&keys)
-            .expect("sign unrelated event");
-        assert!(
-            db.replace_parameterized_event(community, &unrelated, &unrelated_d, None)
-                .await
-                .expect("insert unrelated event")
-                .1
-        );
-        let unrelated_delete = sqlx::query(
-            "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
-        )
-        .bind(community.as_uuid())
-        .bind(unrelated.id.as_bytes().as_slice())
-        .bind(unrelated.created_at.as_secs() as f64)
-        .execute(&db.pool)
-        .await
-        .expect("delete unrelated event");
-        assert_eq!(unrelated_delete.rows_affected(), 1);
-
-        // Check both transaction exits on one physical session; pool selection
-        // cannot accidentally hide a leaked session-local authorization value.
-        let mut conn = db.pool.acquire().await.expect("acquire dedicated session");
-        for commit in [true, false] {
-            let mut tx = conn.begin().await.expect("begin GUC transaction");
-            let value: String =
-                sqlx::query_scalar("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-                    .fetch_one(&mut *tx)
-                    .await
-                    .expect("set transaction-local GUC");
-            assert_eq!(value, "on");
-            if commit {
-                tx.commit().await.expect("commit GUC transaction");
-            } else {
-                tx.rollback().await.expect("rollback GUC transaction");
-            }
-            let leaked: Option<String> = sqlx::query_scalar(
-                "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .expect("read GUC after transaction");
-            assert_ne!(leaked.as_deref(), Some("on"));
-        }
     }
 
     #[tokio::test]
@@ -6755,297 +5258,6 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn lookup_community_by_host_matches_case_insensitive_host_index() {
-        let db = setup_db().await;
-        let id = Uuid::new_v4();
-        let lower_host = format!("lookup-community-{}.example", id.simple());
-        let stored_host = lower_host.to_uppercase();
-
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(id)
-            .bind(&stored_host)
-            .execute(&db.pool)
-            .await
-            .expect("insert mixed-case community host");
-
-        let found = db
-            .lookup_community_by_host(&lower_host)
-            .await
-            .expect("lookup lower-case host")
-            .expect("community found by lower-case host");
-        assert_eq!(found.id, CommunityId::from_uuid(id));
-        assert_eq!(found.host, stored_host);
-
-        let found = db
-            .lookup_community_by_host(&stored_host)
-            .await
-            .expect("lookup stored-case host")
-            .expect("community found by stored-case host");
-        assert_eq!(found.id, CommunityId::from_uuid(id));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn create_community_with_owner_is_atomic_and_create_only() {
-        let db = setup_db().await;
-        let host = format!("create-only-{}.example", Uuid::new_v4().simple());
-        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-        let created = db
-            .create_community_with_owner(&host, owner)
-            .await
-            .expect("create community");
-        let CreateCommunityWithOwnerResult::Created(created) = created else {
-            panic!("expected new community");
-        };
-        assert_eq!(created.host, host);
-        let owner_role: Option<String> = sqlx::query_scalar(
-            "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
-        )
-        .bind(created.id.as_uuid())
-        .bind(owner)
-        .fetch_optional(&db.pool)
-        .await
-        .expect("owner role");
-        assert_eq!(owner_role.as_deref(), Some("owner"));
-
-        let retry = db
-            .create_community_with_owner(&host.to_ascii_uppercase(), owner)
-            .await
-            .expect("same-owner retry");
-        assert_eq!(
-            retry,
-            CreateCommunityWithOwnerResult::Created(created.clone()),
-            "retry returns the original row"
-        );
-
-        let collision = db
-            .create_community_with_owner(&host, other)
-            .await
-            .expect("collision result");
-        assert_eq!(collision, CreateCommunityWithOwnerResult::HostExists);
-        let roles: Vec<(String, String)> = sqlx::query_as(
-            "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
-        )
-        .bind(created.id.as_uuid())
-        .fetch_all(&db.pool)
-        .await
-        .expect("community roles");
-        assert_eq!(roles, vec![(owner.to_string(), "owner".to_string())]);
-
-        db.bootstrap_owner(created.id, other)
-            .await
-            .expect("rotate owner");
-        let post_rotation_retry = db
-            .create_community_with_owner(&host, owner)
-            .await
-            .expect("post-rotation retry");
-        assert_eq!(
-            post_rotation_retry,
-            CreateCommunityWithOwnerResult::HostExists
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn unarchive_community_owned_by_restores_admission_idempotently() {
-        let db = setup_db().await;
-        let host = format!("unarchive-{}.example", Uuid::new_v4().simple());
-        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let created = db
-            .create_community_with_owner(&host, &owner)
-            .await
-            .expect("create community");
-        let CreateCommunityWithOwnerResult::Created(created) = created else {
-            panic!("expected new community");
-        };
-
-        let archived = db
-            .archive_community_owned_by(&host, &owner, "protected.example")
-            .await
-            .expect("archive community")
-            .expect("owned community");
-        assert_eq!(archived.id, created.id);
-        assert!(
-            db.lookup_community_by_host(&host)
-                .await
-                .expect("active lookup")
-                .is_none(),
-            "archived communities must fail admission"
-        );
-        assert!(db
-            .unarchive_community_owned_by(&host, &outsider)
-            .await
-            .expect("wrong-owner unarchive")
-            .is_none());
-        assert!(db
-            .unarchive_community_owned_by("missing.example", &owner)
-            .await
-            .expect("unknown-host unarchive")
-            .is_none());
-
-        let restored = db
-            .unarchive_community_owned_by(&host.to_ascii_uppercase(), &owner)
-            .await
-            .expect("unarchive community")
-            .expect("owned community");
-        assert_eq!(restored.id, created.id);
-        assert_eq!(restored.host, host);
-        assert_eq!(
-            db.lookup_community_by_host(&host)
-                .await
-                .expect("restored lookup")
-                .expect("active community")
-                .id,
-            created.id
-        );
-        assert_eq!(
-            db.get_relay_member(created.id, &owner)
-                .await
-                .expect("owner lookup")
-                .expect("owner remains")
-                .role,
-            "owner"
-        );
-
-        let retry = db
-            .unarchive_community_owned_by(&host, &owner)
-            .await
-            .expect("idempotent retry")
-            .expect("owned community");
-        assert_eq!(retry, restored);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn create_community_with_owner_enforces_per_owner_limit() {
-        let db = setup_db().await;
-        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
-
-        // Create 3 communities for this owner (the max).
-        for i in 0..3 {
-            let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
-            assert!(matches!(
-                db.create_community_with_owner(&host, &owner)
-                    .await
-                    .expect("create community"),
-                CreateCommunityWithOwnerResult::Created(_)
-            ));
-        }
-
-        let host = format!("limit-test-3-{}.example", Uuid::new_v4().simple());
-        assert_eq!(
-            db.create_community_with_owner(&host, &owner)
-                .await
-                .expect("create community call"),
-            CreateCommunityWithOwnerResult::LimitReached
-        );
-        assert!(
-            db.lookup_community_by_host(&host)
-                .await
-                .expect("look up rolled-back fresh host")
-                .is_none(),
-            "limit rejection must roll back the fresh community row"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn concurrent_same_owner_create_returns_the_winning_row_to_both_callers() {
-        let db = setup_db().await;
-        let host = format!("concurrent-create-{}.example", Uuid::new_v4().simple());
-        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-        let (first, second) = tokio::join!(
-            db.create_community_with_owner(&host, owner),
-            db.create_community_with_owner(&host, owner),
-        );
-        let first = first.expect("first concurrent create");
-        let second = second.expect("second concurrent create");
-
-        assert!(matches!(first, CreateCommunityWithOwnerResult::Created(_)));
-        assert_eq!(first, second, "conflict loser re-reads the winning row");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn ensure_configured_community_reports_insert_winner() {
-        let db = setup_db().await;
-        let host = format!("ensure-community-{}.example", Uuid::new_v4().simple());
-
-        let first = db
-            .ensure_configured_community(&host)
-            .await
-            .expect("first ensure");
-        assert!(first.created, "first ensure should report created");
-        assert_eq!(first.host, host);
-
-        let second = db
-            .ensure_configured_community(&host)
-            .await
-            .expect("second ensure");
-        assert!(!second.created, "second ensure should report existed");
-        assert_eq!(second.id, first.id);
-        assert_eq!(second.host, host);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn list_communities_owned_by_returns_only_owner_rows() {
-        let db = setup_db().await;
-        let community_a = CommunityId::from_uuid(make_community(&db.pool).await);
-        let community_b = CommunityId::from_uuid(make_community(&db.pool).await);
-        let community_c = CommunityId::from_uuid(make_community(&db.pool).await);
-        // Unique per run: `list_communities_owned_by` is keyed only by pubkey,
-        // so a shared fixed pubkey picks up communities leaked by sibling
-        // ignored tests running against the same database.
-        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let owner = owner.as_str();
-        let other = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let other = other.as_str();
-
-        db.bootstrap_owner(community_a, owner)
-            .await
-            .expect("owner A");
-        db.bootstrap_owner(community_b, other)
-            .await
-            .expect("other owner B");
-        db.add_relay_member(community_c, owner, "admin", None)
-            .await
-            .expect("admin C");
-
-        let owned = db
-            .list_communities_owned_by(owner)
-            .await
-            .expect("list owned communities");
-
-        assert_eq!(owned.len(), 1);
-        assert_eq!(owned[0].id, community_a);
-    }
-
-    async fn insert_channel(pool: &PgPool, community_id: Uuid, channel_id: Uuid) {
-        let creator: Vec<u8> = vec![0u8; 32];
-        sqlx::query(
-            r#"
-            INSERT INTO channels
-                (id, community_id, name, channel_type, visibility, created_by)
-            VALUES
-                ($1, $2, $3, 'stream'::channel_type, 'open'::channel_visibility, $4)
-            "#,
-        )
-        .bind(channel_id)
-        .bind(community_id)
-        .bind(format!("ch-{}", channel_id.simple()))
-        .bind(&creator)
-        .execute(pool)
-        .await
-        .expect("insert channel");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn allowlist_is_scoped_to_community() {
         let db = setup_db().await;
         let community_a = CommunityId::from_uuid(make_community(&db.pool).await);
@@ -7108,48 +5320,6 @@ mod tests {
             .is_pubkey_allowed(community_a, &pubkey)
             .await
             .expect("A not allowed after remove"));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn communities_of_channels_present_for_existing_absent_for_missing() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let existing = Uuid::new_v4();
-        insert_channel(&db.pool, community, existing).await;
-
-        // Channel that is NOT inserted — the load-bearing case.
-        let missing = Uuid::new_v4();
-
-        let result = db
-            .communities_of_channels(&[existing, missing])
-            .await
-            .expect("communities_of_channels");
-
-        // (1) Existing channel → present with its true community.
-        assert_eq!(
-            result.get(&existing).copied(),
-            Some(CommunityId::from_uuid(community)),
-            "existing channel must map to its true community",
-        );
-
-        // (2) Missing channel → ABSENT from the map (never defaulted).
-        // This is the contract the relay-side `MissingLookup → ImplBug`
-        // fail-closed guard-rail depends on. If this assertion ever
-        // weakens to `result.get(&missing) != Some(community)`, the
-        // mutate-bite below stops biting.
-        assert!(
-            !result.contains_key(&missing),
-            "missing channel must be absent from the result map, got {:?}",
-            result.get(&missing),
-        );
-
-        // (3) Map size matches: exactly one entry, the existing one.
-        assert_eq!(
-            result.len(),
-            1,
-            "result map must contain only existing channels"
-        );
     }
 
     /// BUG-5 regression: the `reactions` table is community-scoped

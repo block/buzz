@@ -134,24 +134,138 @@ export function UserProfilePopover({
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const profileQuery = useUserProfileQuery(open ? pubkey : undefined);
-  const usersBatchQuery = useUsersBatchQuery(open ? [pubkey] : [], {
-    enabled: open,
-  });
-  const relayAgentsQuery = useRelayAgentsQuery({
-    enabled: open,
-  });
-  const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: open,
-  });
-  const presenceQuery = usePresenceQuery(open ? [pubkey] : [], {
-    enabled: open,
-  });
-  const userStatusQuery = useUserStatusQuery(open ? [pubkey] : []);
-
-  const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const { openProfilePanel } = useProfilePanel();
   const canOpenProfilePanel = enableProfilePanel && Boolean(openProfilePanel);
+
+  const clearHoverTimer = React.useCallback(() => {
+    if (hoverTimerRef.current !== null) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  }, []);
+
+  const handleTriggerMouseEnter = React.useCallback(() => {
+    if (!enableHoverPopover) {
+      return;
+    }
+    clearHoverTimer();
+    hoverTimerRef.current = setTimeout(() => {
+      setOpen(true);
+    }, DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS);
+  }, [clearHoverTimer, enableHoverPopover]);
+
+  const handleMouseLeave = React.useCallback(() => {
+    clearHoverTimer();
+    hoverTimerRef.current = setTimeout(() => {
+      setOpen(false);
+    }, HOVER_CLOSE_DELAY_MS);
+  }, [clearHoverTimer]);
+
+  const handleContentMouseEnter = React.useCallback(() => {
+    clearHoverTimer();
+  }, [clearHoverTimer]);
+
+  const handleTriggerClick = React.useCallback(
+    (event: React.MouseEvent) => {
+      clearHoverTimer();
+      if (canOpenProfilePanel && openProfilePanel) {
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        openProfilePanel(pubkey);
+      }
+    },
+    [canOpenProfilePanel, clearHoverTimer, openProfilePanel, pubkey],
+  );
+
+  React.useEffect(() => {
+    return clearHoverTimer;
+  }, [clearHoverTimer]);
+
+  const TriggerElement = triggerElement;
+  return (
+    <Popover onOpenChange={setOpen} open={open}>
+      <PopoverAnchor asChild>
+        <TriggerElement
+          aria-label={triggerAriaLabel}
+          role={canOpenProfilePanel ? "button" : undefined}
+          tabIndex={canOpenProfilePanel ? 0 : undefined}
+          onClick={handleTriggerClick}
+          onKeyDown={(e) => {
+            if (
+              (e.key === "Enter" || e.key === " ") &&
+              canOpenProfilePanel &&
+              openProfilePanel
+            ) {
+              e.preventDefault();
+              e.stopPropagation();
+              clearHoverTimer();
+              setOpen(false);
+              openProfilePanel(pubkey);
+            }
+          }}
+          onMouseEnter={handleTriggerMouseEnter}
+          onMouseLeave={handleMouseLeave}
+          className={cn(
+            "inline-flex",
+            canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
+          )}
+        >
+          {children}
+        </TriggerElement>
+      </PopoverAnchor>
+      {open ? (
+        <UserProfilePopoverBody
+          botIdenticonValue={botIdenticonValue}
+          canOpenProfilePanel={canOpenProfilePanel}
+          onBeforeAction={clearHoverTimer}
+          onContentMouseEnter={handleContentMouseEnter}
+          onMouseLeave={handleMouseLeave}
+          onTriggerClick={handleTriggerClick}
+          pubkey={pubkey}
+          role={role}
+          setOpen={setOpen}
+        />
+      ) : null}
+    </Popover>
+  );
+}
+
+/**
+ * Everything behind the popover surface: seven query subscriptions, agent
+ * classification, and the interaction actions. Mounted only while the
+ * popover is open — the trigger shell above stays cheap enough for grids
+ * that render hundreds of instances (~40ms per card when this was eager).
+ */
+function UserProfilePopoverBody({
+  botIdenticonValue,
+  canOpenProfilePanel,
+  onBeforeAction,
+  onContentMouseEnter,
+  onMouseLeave,
+  onTriggerClick,
+  pubkey,
+  role,
+  setOpen,
+}: {
+  botIdenticonValue?: string;
+  canOpenProfilePanel: boolean;
+  onBeforeAction: () => void;
+  onContentMouseEnter: () => void;
+  onMouseLeave: () => void;
+  onTriggerClick: (event: React.MouseEvent) => void;
+  pubkey: string;
+  role?: string;
+  setOpen: (open: boolean) => void;
+}) {
+  const profileQuery = useUserProfileQuery(pubkey);
+  const usersBatchQuery = useUsersBatchQuery([pubkey]);
+  const relayAgentsQuery = useRelayAgentsQuery();
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const presenceQuery = usePresenceQuery([pubkey]);
+  const userStatusQuery = useUserStatusQuery([pubkey]);
+
+  const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const relayAgent = relayAgentsQuery.data?.find((a) => a.pubkey === pubkey);
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
@@ -160,7 +274,7 @@ export function UserProfilePopover({
   const ownerPubkey = profile?.ownerPubkey ?? null;
   const ownerProfileQuery = useUsersBatchQuery(
     ownerPubkey ? [ownerPubkey] : [],
-    { enabled: open && Boolean(ownerPubkey) },
+    { enabled: Boolean(ownerPubkey) },
   );
   const normalizedPubkey = normalizePubkey(pubkey);
   const isAgentByOaOwner = Boolean(
@@ -173,7 +287,6 @@ export function UserProfilePopover({
     isAgentByProfileOwner ||
     isAgentByOaOwner;
   const isAgentClassificationPending =
-    open &&
     role !== "bot" &&
     (profileQuery.isPending ||
       relayAgentsQuery.isPending ||
@@ -234,48 +347,10 @@ export function UserProfilePopover({
     return map;
   }, [channelsQuery.data]);
 
-  const clearHoverTimer = React.useCallback(() => {
-    if (hoverTimerRef.current !== null) {
-      clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-  }, []);
-
-  const handleTriggerMouseEnter = React.useCallback(() => {
-    if (!enableHoverPopover) {
-      return;
-    }
-    clearHoverTimer();
-    hoverTimerRef.current = setTimeout(() => {
-      setOpen(true);
-    }, DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS);
-  }, [clearHoverTimer, enableHoverPopover]);
-
-  const handleMouseLeave = React.useCallback(() => {
-    clearHoverTimer();
-    hoverTimerRef.current = setTimeout(() => {
-      setOpen(false);
-    }, HOVER_CLOSE_DELAY_MS);
-  }, [clearHoverTimer]);
-
-  const handleContentMouseEnter = React.useCallback(() => {
-    clearHoverTimer();
-  }, [clearHoverTimer]);
-
-  const handleTriggerClick = React.useCallback(
-    (event: React.MouseEvent) => {
-      clearHoverTimer();
-      if (canOpenProfilePanel && openProfilePanel) {
-        event.preventDefault();
-        event.stopPropagation();
-        setOpen(false);
-        openProfilePanel(pubkey);
-      }
-    },
-    [canOpenProfilePanel, clearHoverTimer, openProfilePanel, pubkey],
+  const closeProfileActions = React.useCallback(
+    () => setOpen(false),
+    [setOpen],
   );
-
-  const closeProfileActions = React.useCallback(() => setOpen(false), []);
   const {
     handleHuddle,
     handleMessage,
@@ -290,19 +365,14 @@ export function UserProfilePopover({
       wave: showHumanProfileActions,
     },
     effectivePubkey: pubkey,
-    enabled: open,
+    enabled: true,
     isBot: isBotProfile,
     isSelf,
-    onBeforeAction: clearHoverTimer,
+    onBeforeAction: onBeforeAction,
     onClose: closeProfileActions,
     viewerIsOwner,
   });
 
-  React.useEffect(() => {
-    return clearHoverTimer;
-  }, [clearHoverTimer]);
-
-  const TriggerElement = triggerElement;
   const profileHeaderContent = (
     <>
       <ProfileAvatarWithStatus
@@ -349,220 +419,187 @@ export function UserProfilePopover({
   );
 
   return (
-    <Popover onOpenChange={setOpen} open={open}>
-      <PopoverAnchor asChild>
-        <TriggerElement
-          aria-label={triggerAriaLabel}
-          role={canOpenProfilePanel ? "button" : undefined}
-          tabIndex={canOpenProfilePanel ? 0 : undefined}
-          onClick={handleTriggerClick}
-          onKeyDown={(e) => {
-            if (
-              (e.key === "Enter" || e.key === " ") &&
-              canOpenProfilePanel &&
-              openProfilePanel
-            ) {
-              e.preventDefault();
-              e.stopPropagation();
-              clearHoverTimer();
-              setOpen(false);
-              openProfilePanel(pubkey);
-            }
-          }}
-          onMouseEnter={handleTriggerMouseEnter}
-          onMouseLeave={handleMouseLeave}
-          className={cn(
-            "inline-flex",
-            canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
-          )}
-        >
-          {children}
-        </TriggerElement>
-      </PopoverAnchor>
-      <PopoverContent
-        align="start"
-        className="w-80"
-        data-testid="user-profile-popover"
-        onMouseEnter={handleContentMouseEnter}
-        onMouseLeave={handleMouseLeave}
-        // This is a hover card: moving focus into its first button on open
-        // makes the profile header look keyboard-selected before the user has
-        // interacted with it. Keep focus on the trigger; Tab still enters the
-        // card and shows its normal focus treatment when needed.
-        onOpenAutoFocus={(event) => event.preventDefault()}
-        side="top"
-        sideOffset={8}
-      >
-        <div className="flex flex-col gap-3">
-          {canOpenProfilePanel ? (
-            <button
-              className="flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring [&_*]:cursor-pointer"
-              onClick={handleTriggerClick}
-              type="button"
-            >
-              {profileHeaderContent}
-            </button>
-          ) : (
-            <div className="flex w-full min-w-0 items-center gap-3 text-left text-foreground">
-              {profileHeaderContent}
-            </div>
-          )}
+    <PopoverContent
+      align="start"
+      className="w-80"
+      data-testid="user-profile-popover"
+      onMouseEnter={onContentMouseEnter}
+      onMouseLeave={onMouseLeave}
+      // This is a hover card: moving focus into its first button on open
+      // makes the profile header look keyboard-selected before the user has
+      // interacted with it. Keep focus on the trigger; Tab still enters the
+      // card and shows its normal focus treatment when needed.
+      onOpenAutoFocus={(event) => event.preventDefault()}
+      side="top"
+      sideOffset={8}
+    >
+      <div className="flex flex-col gap-3">
+        {canOpenProfilePanel ? (
+          <button
+            className="flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring [&_*]:cursor-pointer"
+            onClick={onTriggerClick}
+            type="button"
+          >
+            {profileHeaderContent}
+          </button>
+        ) : (
+          <div className="flex w-full min-w-0 items-center gap-3 text-left text-foreground">
+            {profileHeaderContent}
+          </div>
+        )}
 
-          {isBotProfile && (managedAgent || relayAgent) ? (
-            <div className="flex flex-wrap gap-1.5">
-              {managedAgent?.agentCommand ? (
-                <InfoBadge>{runtimeLabel(managedAgent.agentCommand)}</InfoBadge>
-              ) : relayAgent?.agentType ? (
-                <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
-              ) : null}
-              {managedAgent?.model ? (
-                <InfoBadge>
-                  {resolveModelLabel(
-                    managedAgent.model,
-                    null,
-                    managedAgent.provider,
-                  )}
-                </InfoBadge>
-              ) : null}
-              {managedAgent?.acpCommand ? (
-                <InfoBadge>ACP: {managedAgent.acpCommand}</InfoBadge>
-              ) : null}
-            </div>
-          ) : null}
+        {isBotProfile && (managedAgent || relayAgent) ? (
+          <div className="flex flex-wrap gap-1.5">
+            {managedAgent?.agentCommand ? (
+              <InfoBadge>{runtimeLabel(managedAgent.agentCommand)}</InfoBadge>
+            ) : relayAgent?.agentType ? (
+              <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
+            ) : null}
+            {managedAgent?.model ? (
+              <InfoBadge>
+                {resolveModelLabel(
+                  managedAgent.model,
+                  null,
+                  managedAgent.provider,
+                )}
+              </InfoBadge>
+            ) : null}
+            {managedAgent?.acpCommand ? (
+              <InfoBadge>ACP: {managedAgent.acpCommand}</InfoBadge>
+            ) : null}
+          </div>
+        ) : null}
 
-          {activeTurns.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {activeTurns.map(({ channelId, anchorAt }) => (
-                <PopoverWorkingBadge
-                  key={channelId}
-                  name={channelIdToName[channelId] ?? channelId}
-                  anchorAt={anchorAt}
-                />
-              ))}
-            </div>
-          ) : null}
-
-          {canViewActivity ? (
-            <button
-              className="flex w-full items-center gap-2 rounded-lg border border-border/60 px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/50"
-              data-testid={`user-profile-view-activity-${pubkey}`}
-              onClick={() => {
-                setOpen(false);
-                openAgentActivity(pubkey);
-              }}
-              type="button"
-            >
-              <Activity className="h-4 w-4 text-muted-foreground" />
-              View activity log
-            </button>
-          ) : null}
-
-          {hasUserStatus || showAnyProfileActions ? (
-            <>
-              <div
-                aria-hidden="true"
-                className="my-1 border-t border-border/60"
+        {activeTurns.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {activeTurns.map(({ channelId, anchorAt }) => (
+              <PopoverWorkingBadge
+                key={channelId}
+                name={channelIdToName[channelId] ?? channelId}
+                anchorAt={anchorAt}
               />
-              {hasUserStatus ? (
-                <StatusLine>
-                  {userStatus?.emoji ? (
-                    <StatusEmoji
-                      className="h-3.5 w-3.5 shrink-0"
-                      value={userStatus.emoji}
-                    />
-                  ) : null}
-                  {userStatusText ? (
-                    <span className="truncate">{userStatusText}</span>
-                  ) : null}
-                </StatusLine>
-              ) : null}
-              {showAnyProfileActions ? (
-                <div className="flex gap-2">
-                  {showHumanProfileActions ? (
-                    <Button
-                      aria-label="Wave"
-                      className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
-                      data-testid={`user-profile-popover-wave-${pubkey}`}
-                      disabled={pendingAction !== null || isOpeningDm}
-                      onClick={() => {
-                        void handleWave();
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      {pendingAction === "wave" ? (
-                        <Spinner
-                          aria-hidden="true"
-                          className="h-3.5 w-3.5 border-2"
-                        />
-                      ) : (
-                        <span
-                          aria-hidden="true"
-                          className="buzz-wave-hand text-sm leading-none"
-                        >
-                          👋
-                        </span>
-                      )}
-                    </Button>
-                  ) : null}
-                  {showMessageAction ? (
-                    <Button
-                      className="min-w-0 flex-1"
-                      data-testid={`user-profile-popover-message-${pubkey}`}
-                      disabled={pendingAction !== null || isOpeningDm}
-                      onClick={() => {
-                        void handleMessage();
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      {pendingAction === "message" ? (
-                        <Spinner
-                          aria-hidden="true"
-                          className="h-3.5 w-3.5 border-2"
-                        />
-                      ) : (
-                        <MessageSquare />
-                      )}
-                      Message
-                    </Button>
-                  ) : null}
-                  {showHuddleAction ? (
-                    <Button
-                      className="min-w-0 flex-1"
-                      data-testid={`user-profile-popover-huddle-${pubkey}`}
-                      disabled={
-                        pendingAction !== null ||
-                        isOpeningDm ||
-                        isStartingHuddle
-                      }
-                      onClick={() => {
-                        void handleHuddle();
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      {pendingAction === "huddle" ? (
-                        <Spinner
-                          aria-hidden="true"
-                          className="h-3.5 w-3.5 border-2"
-                        />
-                      ) : (
-                        <Headphones />
-                      )}
-                      Huddle
-                    </Button>
-                  ) : null}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      </PopoverContent>
-    </Popover>
+            ))}
+          </div>
+        ) : null}
+
+        {canViewActivity ? (
+          <button
+            className="flex w-full items-center gap-2 rounded-lg border border-border/60 px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/50"
+            data-testid={`user-profile-view-activity-${pubkey}`}
+            onClick={() => {
+              setOpen(false);
+              openAgentActivity(pubkey);
+            }}
+            type="button"
+          >
+            <Activity className="h-4 w-4 text-muted-foreground" />
+            View activity log
+          </button>
+        ) : null}
+
+        {hasUserStatus || showAnyProfileActions ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="my-1 border-t border-border/60"
+            />
+            {hasUserStatus ? (
+              <StatusLine>
+                {userStatus?.emoji ? (
+                  <StatusEmoji
+                    className="h-3.5 w-3.5 shrink-0"
+                    value={userStatus.emoji}
+                  />
+                ) : null}
+                {userStatusText ? (
+                  <span className="truncate">{userStatusText}</span>
+                ) : null}
+              </StatusLine>
+            ) : null}
+            {showAnyProfileActions ? (
+              <div className="flex gap-2">
+                {showHumanProfileActions ? (
+                  <Button
+                    aria-label="Wave"
+                    className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
+                    data-testid={`user-profile-popover-wave-${pubkey}`}
+                    disabled={pendingAction !== null || isOpeningDm}
+                    onClick={() => {
+                      void handleWave();
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {pendingAction === "wave" ? (
+                      <Spinner
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 border-2"
+                      />
+                    ) : (
+                      <span
+                        aria-hidden="true"
+                        className="buzz-wave-hand text-sm leading-none"
+                      >
+                        👋
+                      </span>
+                    )}
+                  </Button>
+                ) : null}
+                {showMessageAction ? (
+                  <Button
+                    className="min-w-0 flex-1"
+                    data-testid={`user-profile-popover-message-${pubkey}`}
+                    disabled={pendingAction !== null || isOpeningDm}
+                    onClick={() => {
+                      void handleMessage();
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {pendingAction === "message" ? (
+                      <Spinner
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 border-2"
+                      />
+                    ) : (
+                      <MessageSquare />
+                    )}
+                    Message
+                  </Button>
+                ) : null}
+                {showHuddleAction ? (
+                  <Button
+                    className="min-w-0 flex-1"
+                    data-testid={`user-profile-popover-huddle-${pubkey}`}
+                    disabled={
+                      pendingAction !== null || isOpeningDm || isStartingHuddle
+                    }
+                    onClick={() => {
+                      void handleHuddle();
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {pendingAction === "huddle" ? (
+                      <Spinner
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 border-2"
+                      />
+                    ) : (
+                      <Headphones />
+                    )}
+                    Huddle
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+    </PopoverContent>
   );
 }
 

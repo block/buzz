@@ -14,6 +14,7 @@ use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
+use crate::permission::PermissionDecision;
 
 use crate::types::{
     AgentError, CacheTotalState, ContentBlock, HistoryItem, PricingIdentity, ProviderStop,
@@ -142,6 +143,14 @@ pub struct RunCtx<'a> {
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
     pub mcp: &'a Arc<McpRegistry>,
+    /// Process-wide permission broker (owned by `App`). Every LLM-issued MCP
+    /// tool call asks the client to authorize it through this broker before
+    /// executing. Shared across all sessions so the global admission cap bounds
+    /// simultaneously-outstanding asks process-wide.
+    pub permissions: &'a Arc<crate::permission::PermissionBroker>,
+    /// ACP protocol version negotiated at `initialize`, fixed for the
+    /// connection. Selects the `session/request_permission` wire shape.
+    pub protocol_version: u32,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     pub skills: &'a [SkillEntry],
     pub wire: &'a WireSender,
@@ -882,8 +891,10 @@ impl RunCtx<'_> {
                 total: MAX_TOOL_RESULT_BYTES,
                 text: self.cfg.max_tool_result_text_bytes,
             };
-            let cancel = self.cancel.clone();
+            let mut cancel = self.cancel.clone();
             let sem = Arc::clone(&sem);
+            let permissions = Arc::clone(self.permissions);
+            let protocol_version = self.protocol_version;
             set.spawn(async move {
                 // Acquire a permit; if the semaphore is closed (cancel),
                 // emit a terminal wire update and skip the call.
@@ -894,6 +905,37 @@ impl RunCtx<'_> {
                         return (i, InvokeOutcome::Failed("cancelled".into()));
                     }
                 };
+                // Argument-shape validation BEFORE the ask: a malformed
+                // non-object argument can never execute, so reject it locally
+                // without prompting the user to approve a doomed call.
+                if let Err(e) = crate::mcp::validate_arg_shape(&call.name, &call.arguments) {
+                    let msg = e.to_string();
+                    emit_failed(&wire, &session_id, &call, &msg).await;
+                    return (i, InvokeOutcome::Failed(msg));
+                }
+                // Ask the client to authorize this call. The broker owns the
+                // full correlation lifecycle and races cancellation internally;
+                // every non-authorizing outcome fails closed.
+                match permissions
+                    .request_permission(&wire, protocol_version, &session_id, &call, &mut cancel)
+                    .await
+                {
+                    PermissionDecision::Allowed => {}
+                    PermissionDecision::Denied(msg) => {
+                        emit_failed(&wire, &session_id, &call, msg).await;
+                        return (i, InvokeOutcome::Failed(msg.into()));
+                    }
+                    PermissionDecision::Cancelled => {
+                        emit_failed(&wire, &session_id, &call, "cancelled").await;
+                        return (i, InvokeOutcome::Failed("cancelled".into()));
+                    }
+                }
+                // Cancellation recheck: a cancel may have landed while we
+                // waited for approval. Do not start the call in that case.
+                if *cancel.borrow() {
+                    emit_failed(&wire, &session_id, &call, "cancelled").await;
+                    return (i, InvokeOutcome::Failed("cancelled".into()));
+                }
                 emit_in_progress(&wire, &session_id, &call).await;
                 let outcome = invoke_tool_inner(&mcp, &call, timeout, budget, cancel).await;
                 match &outcome {

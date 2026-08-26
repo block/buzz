@@ -2609,6 +2609,8 @@ mod tests {
             max_context_tokens: 200_000,
             max_handoffs: 1,
             max_parallel_tools: 1,
+            max_pending_permissions: 32,
+            permission_timeout: Duration::from_secs(330),
             hook_timeout: Duration::from_secs(1),
             stop_max_rejections: 0,
             require_reply: false,

@@ -461,6 +461,7 @@ function InboxMessageDetailPane({
         author: editTarget.authorLabel,
         body: editTarget.content,
         id: editTarget.id,
+        isThreadReply: false,
         imetaMedia: imetaMediaFromTags(editTarget.tags),
         ...editMentionState,
       }

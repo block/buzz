@@ -70,6 +70,7 @@ import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
+const MEMBER_ROW_ESTIMATE_PX = 60;
 type AddMemberSearchCandidate = UserSearchResult & {
   isManagedAgent?: boolean;
   isMember?: boolean;
@@ -141,9 +142,6 @@ export function MembersSidebar({
   relayUrl,
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
-  const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
-    enabled: open,
-  });
   const queryClient = useQueryClient();
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -470,6 +468,18 @@ export function MembersSidebar({
       ),
     [managedAgentsQuery.data],
   );
+  const hasLocalManagedMember = React.useMemo(
+    () =>
+      [...bots, ...archived].some(
+        (member) =>
+          managedAgentByPubkey.get(normalizePubkey(member.pubkey))?.backend
+            .type === "local",
+      ),
+    [archived, bots, managedAgentByPubkey],
+  );
+  const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
+    enabled: open && Boolean(relayUrl) && hasLocalManagedMember,
+  });
   const controllableManagedBots = React.useMemo(
     () =>
       bots.flatMap((member) => {
@@ -636,57 +646,62 @@ export function MembersSidebar({
         ? managedAgentPairAction(managedAgentRuntime)
         : undefined;
     return (
-      <div className="content-visibility-auto" key={member.pubkey}>
-        <MembersSidebarMemberCard
-          canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
-          canModerate={canModerate && member.pubkey !== currentPubkey}
-          canRemoveMember={canRemoveMember(member)}
-          isActionPending={
-            isActionPending ||
-            changeRoleMutation.isPending ||
-            isModerationPending
-          }
-          isArchived={isArchived}
-          managedAgent={managedAgent}
-          managedAgentRuntime={managedAgentRuntime}
-          member={member}
-          memberIsBot={memberIsBot}
-          memberAvatarLabel={
-            member.displayName ?? truncatePubkey(member.pubkey)
-          }
-          memberLabel={formatMemberName(member, currentPubkey)}
-          moderationState={moderationStateByPubkey.get(
-            normalizePubkey(member.pubkey),
-          )}
-          onBan={onBan}
-          onChangeRole={(m, role) => {
-            void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
-          }}
-          onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
-          onManagedAgentAction={(agent) => {
-            void handleAgentLifecycleAction(agent, managedAgentRuntime);
-          }}
-          onOpenProfile={handleOpenProfile}
-          onRemoveMember={handleRemoveMember}
-          onTimeout={onTimeout}
-          onUnban={onUnban}
-          onUntimeout={onUntimeout}
-          onViewActivity={
-            onViewActivity
-              ? (pubkey: string) => {
-                  onOpenChange(false);
-                  onViewActivity(pubkey);
-                }
-              : undefined
-          }
-          pairAction={pairAction}
-          presenceStatus={
-            memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
-          }
-          profileAvatarUrl={memberProfile?.avatarUrl ?? null}
-          showOtherSetupMarker={showOtherSetupMarker}
-          viewerIsOwner={viewerIsOwner}
-        />
+      <MembersSidebarMemberCard
+        canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
+        canModerate={canModerate && member.pubkey !== currentPubkey}
+        canRemoveMember={canRemoveMember(member)}
+        isActionPending={
+          isActionPending || changeRoleMutation.isPending || isModerationPending
+        }
+        isArchived={isArchived}
+        managedAgent={managedAgent}
+        managedAgentRuntime={managedAgentRuntime}
+        member={member}
+        memberIsBot={memberIsBot}
+        memberAvatarLabel={member.displayName ?? truncatePubkey(member.pubkey)}
+        memberLabel={formatMemberName(member, currentPubkey)}
+        moderationState={moderationStateByPubkey.get(
+          normalizePubkey(member.pubkey),
+        )}
+        onBan={onBan}
+        onChangeRole={(m, role) => {
+          void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
+        }}
+        onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
+        onManagedAgentAction={(agent) => {
+          void handleAgentLifecycleAction(agent, managedAgentRuntime);
+        }}
+        onOpenProfile={handleOpenProfile}
+        onRemoveMember={handleRemoveMember}
+        onTimeout={onTimeout}
+        onUnban={onUnban}
+        onUntimeout={onUntimeout}
+        onViewActivity={
+          onViewActivity
+            ? (pubkey: string) => {
+                onOpenChange(false);
+                onViewActivity(pubkey);
+              }
+            : undefined
+        }
+        pairAction={pairAction}
+        presenceStatus={
+          memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
+        }
+        profileAvatarUrl={memberProfile?.avatarUrl ?? null}
+        showOtherSetupMarker={showOtherSetupMarker}
+        viewerIsOwner={viewerIsOwner}
+      />
+    );
+  }
+
+  function renderDeferredMemberCard(
+    member: ChannelMember,
+    memberIsBot: boolean,
+  ) {
+    return (
+      <div className="content-visibility-auto-member-row" key={member.pubkey}>
+        {renderMemberCard(member, memberIsBot)}
       </div>
     );
   }
@@ -771,7 +786,7 @@ export function MembersSidebar({
                 {normalizedSearchQuery ? (
                   <div>
                     {filteredActiveMembers.map((member) =>
-                      renderMemberCard(member, isBot(member)),
+                      renderDeferredMemberCard(member, isBot(member)),
                     )}
                     {canAddMembers ? (
                       <>
@@ -815,6 +830,7 @@ export function MembersSidebar({
                 ) : filteredActiveMembers.length > 0 ? (
                   <VirtualizedList
                     className="h-[calc(100%_-_2.25rem)]"
+                    estimateSize={MEMBER_ROW_ESTIMATE_PX}
                     getItemKey={(member) => member.pubkey}
                     items={filteredActiveMembers}
                     renderItem={(member) =>
@@ -858,7 +874,7 @@ export function MembersSidebar({
                     data-testid="members-sidebar-archived-list"
                   >
                     {filteredArchivedMembers.map((member) =>
-                      renderMemberCard(member, isBot(member)),
+                      renderDeferredMemberCard(member, isBot(member)),
                     )}
                     {filteredArchivedMembers.length === 0 ? (
                       <p className="text-sm text-muted-foreground">

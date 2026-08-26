@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use super::human_floor::HumanFloor;
 use super::jitter::{PeerJitterBuffer, SAMPLE_RATE_HZ};
 use super::relay_api::{WsStream, REMOTE_SPEECH_THRESHOLD};
-use super::wire::{FrameHeader, FLAG_DTX, V2_HEADER_LEN};
+use super::wire::{parse_relay_frame, FLAG_DTX};
 
 /// Speaker-tick window for emitting `huddle-active-speakers`. Active set is
 /// cleared each tick — peers that didn't send a frame in the last window are
@@ -44,6 +44,9 @@ const SPEAKER_LEVEL_TICK_MS: u64 = 50;
 /// Per-peer arrival window for the TTS interrupt frame counter.
 const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 const REMOTE_RELEASE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+/// Match Mobile's speaking treatment: an open microphone can emit continuous
+/// non-DTX Opus for room tone, so packet type alone is not evidence of speech.
+const REMOTE_SPEECH_LEVEL_DBOV: i8 = -55;
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
 const PLAYOUT_TICK_MS: u64 = 10;
 
@@ -86,19 +89,30 @@ fn normalized_speaker_level(level_dbov: i8) -> f32 {
     ((f32::from(level_dbov) + 60.0) / 48.0).clamp(0.0, 1.0)
 }
 
+fn is_remote_speech_frame(is_dtx: bool, level_dbov: i8) -> bool {
+    !is_dtx && level_dbov >= REMOTE_SPEECH_LEVEL_DBOV
+}
+
 fn update_remote_release_deadline(
     peer: u8,
-    is_dtx: bool,
+    is_speech: bool,
     remote_floor_owners: &std::collections::HashSet<u8>,
     deadlines: &mut std::collections::HashMap<u8, tokio::time::Instant>,
     now: tokio::time::Instant,
 ) {
-    if !is_dtx {
-        deadlines.remove(&peer);
-    } else if remote_floor_owners.contains(&peer) {
-        deadlines
-            .entry(peer)
-            .or_insert(now + REMOTE_RELEASE_DEBOUNCE);
+    if remote_floor_owners.contains(&peer) {
+        if is_speech {
+            // Refresh from audible speech itself. Some mobile capture paths
+            // stop producing packets once speech ends, so waiting for a DTX
+            // or quiet packet can otherwise hold the human floor forever.
+            deadlines.insert(peer, now + REMOTE_RELEASE_DEBOUNCE);
+        } else {
+            // Preserve the deadline from the last audible frame. Continuous
+            // room-tone packets must not keep extending the human floor.
+            deadlines
+                .entry(peer)
+                .or_insert(now + REMOTE_RELEASE_DEBOUNCE);
+        }
     }
 }
 
@@ -149,18 +163,11 @@ fn is_agent_peer(
     })
 }
 
-/// Whether `peer_idx` is currently occupied at exactly `epoch`, per the
-/// authoritative roster. A frame is deliverable only when both match: an index
-/// absent from the roster is stale, and a slot reused by a later occupant has
-/// advanced its epoch, so a departed occupant's in-flight frame is fenced
-/// rather than mis-attributed to the new occupant. A legacy relay omits the
-/// epoch, which degrades to `0` on both sides, making the fence a no-op.
-fn is_current_occupant(
-    peer_idx: u8,
-    epoch: u8,
-    index_to_epoch: &std::collections::HashMap<u8, u8>,
-) -> bool {
-    index_to_epoch.get(&peer_idx) == Some(&epoch)
+/// Whether `peer_idx` is currently occupied per the authoritative roster.
+/// Protocol v2 media carries only the peer index, so roster presence is the
+/// strongest routing boundary available until the relay supports v3 epochs.
+fn is_current_occupant(peer_idx: u8, index_to_epoch: &std::collections::HashMap<u8, u8>) -> bool {
+    index_to_epoch.contains_key(&peer_idx)
 }
 
 fn same_occupancy(
@@ -196,7 +203,7 @@ fn f32_samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
 /// Per-frame seq/timestamp come from the v2 wire header (sender-authored).
-/// The relay forwards `peer_index | epoch | header | opus_bytes` opaquely; we
+/// The relay forwards `peer_index | header | opus_bytes` opaquely; we
 /// parse the header here and pass the sender's own monotonic seq + 48 kHz media
 /// timestamp into NetEq.
 struct PeerSlot {
@@ -422,22 +429,19 @@ pub(crate) async fn run_playout_recv_loop(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(WsMsg::Binary(data))) => {
-                        // Wire shape (v2): [peer_index: u8][epoch: u8][header: 8 bytes][opus payload...]
-                        // The minimum size is 2 (peer_index + epoch) + 8 (header) + ≥1 Opus byte.
-                        if data.len() <= 2 + V2_HEADER_LEN {
+                        // Wire shape (v2): [peer_index: u8][header: 8 bytes][opus payload...]
+                        // The minimum size is 1 (peer index) + 8 (header) + ≥1 Opus byte.
+                        let Some((peer_idx, header, opus_bytes)) = parse_relay_frame(&data) else {
+                            eprintln!(
+                                "buzz-desktop: dropping malformed v2 audio relay frame ({} bytes)",
+                                data.len(),
+                            );
                             continue;
-                        }
-                        let peer_idx = data[0];
-                        let epoch = data[1];
-                        // Fence the peer-index reuse race: a frame authored by a
-                        // departed occupant that arrives after its index is
-                        // reassigned carries the old epoch. Drop it rather than
-                        // mis-attribute stale audio (and the new occupant's
-                        // human/agent STT policy) to whoever grabbed the index.
-                        // An index absent from the roster is also stale. A slot
-                        // with no known epoch (legacy relay) degrades to 0 on
-                        // both sides, so the fence is a no-op there.
-                        if !is_current_occupant(peer_idx, epoch, &index_to_epoch) {
+                        };
+                        // Protocol v2 has no media epoch. Drop frames for slots
+                        // absent from the control roster; delayed frames after
+                        // an index is reassigned cannot be fenced until v3.
+                        if !is_current_occupant(peer_idx, &index_to_epoch) {
                             continue;
                         }
                         // Suppress only an agent stream synthesized and
@@ -446,35 +450,21 @@ pub(crate) async fn run_playout_recv_loop(
                         if is_locally_synthesized_peer(peer_idx, &local_tts_publishers) {
                             continue;
                         }
-                        let after_idx = &data[2..];
-                        let Some((header, opus_bytes)) = FrameHeader::parse(after_idx)
-                        else {
-                            // Malformed v2 frame: header parse only fails when
-                            // the slice is too short, which `if data.len() <= ...`
-                            // already guards. Defensive log + drop.
-                            eprintln!(
-                                "buzz-desktop: dropping malformed audio frame from peer {peer_idx} ({} bytes)",
-                                data.len(),
-                            );
-                            continue;
-                        };
-                        if opus_bytes.is_empty() {
-                            continue;
-                        }
                         let is_dtx = (header.flags & FLAG_DTX) != 0;
-                        // Only count non-DTX arrivals toward the UI's
-                        // active-speaker set. DTX/comfort packets are emitted
-                        // by an idle peer to keep the codec alive — they
-                        // don't mean the peer is speaking, and shouldn't
-                        // make their tile flash for the 500 ms speaker tick.
+                        let is_remote_speech =
+                            is_remote_speech_frame(is_dtx, header.level_dbov);
+                        // Only count audible arrivals toward the UI's
+                        // active-speaker set. An open mobile microphone can
+                        // continuously emit non-DTX room tone, so require an
+                        // audible level before treating a packet as speech.
                         update_remote_release_deadline(
                             peer_idx,
-                            is_dtx,
+                            is_remote_speech,
                             &remote_floor_owners,
                             &mut remote_release_deadlines,
                             tokio::time::Instant::now(),
                         );
-                        if !is_dtx {
+                        if is_remote_speech {
                             active_indices.insert(peer_idx);
                             let level = normalized_speaker_level(header.level_dbov);
                             speaker_levels
@@ -522,7 +512,7 @@ pub(crate) async fn run_playout_recv_loop(
                         // Count only remote-human speech toward floor onset.
                         // Agent audio still plays, but it must not acquire the
                         // human floor or suppress another agent's response.
-                        if !is_dtx && remote_human {
+                        if is_remote_speech && remote_human {
                             if last_frame_reset.elapsed() >= FRAME_WINDOW {
                                 frame_counts.clear();
                                 last_frame_reset = tokio::time::Instant::now();
@@ -532,6 +522,14 @@ pub(crate) async fn run_playout_recv_loop(
                             if *count >= REMOTE_SPEECH_THRESHOLD {
                                 human_floor.enter_remote(peer_idx);
                                 remote_floor_owners.insert(peer_idx);
+                                // The threshold-crossing frame is processed
+                                // before this peer becomes an owner. Arm its
+                                // release here so silence need not arrive in a
+                                // later packet to let queued TTS continue.
+                                remote_release_deadlines.insert(
+                                    peer_idx,
+                                    tokio::time::Instant::now() + REMOTE_RELEASE_DEBOUNCE,
+                                );
                                 if tts_active.load(Ordering::Acquire) {
                                     tts_cancel.store(true, Ordering::Release);
                                 }
@@ -672,18 +670,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn continuous_dtx_does_not_extend_remote_floor_deadline() {
+    fn continuous_silence_does_not_extend_remote_floor_deadline() {
         let peer = 7;
         let started = tokio::time::Instant::now();
         let owners = std::collections::HashSet::from([peer]);
         let mut deadlines = std::collections::HashMap::new();
 
-        update_remote_release_deadline(peer, true, &owners, &mut deadlines, started);
+        update_remote_release_deadline(peer, false, &owners, &mut deadlines, started);
         let armed = deadlines[&peer];
         for elapsed_ms in [100, 200, 300, 400] {
             update_remote_release_deadline(
                 peer,
-                true,
+                false,
                 &owners,
                 &mut deadlines,
                 started + std::time::Duration::from_millis(elapsed_ms),
@@ -703,16 +701,46 @@ mod tests {
     }
 
     #[test]
-    fn dtx_from_non_owner_does_not_arm_remote_floor_deadline() {
+    fn last_speech_frame_arms_remote_floor_release_without_follow_up_audio() {
+        let peer = 7;
+        let started = tokio::time::Instant::now();
+        let owners = std::collections::HashSet::from([peer]);
+        let mut deadlines = std::collections::HashMap::new();
+
+        update_remote_release_deadline(peer, true, &owners, &mut deadlines, started);
+        let armed = started + REMOTE_RELEASE_DEBOUNCE;
+        assert_eq!(deadlines[&peer], armed);
+
+        let human_floor = HumanFloor::new();
+        human_floor.enter_remote(peer);
+        let mut owners = owners;
+        release_expired_remote_floors(armed, &mut owners, &mut deadlines, &human_floor);
+
+        assert!(!human_floor.is_blocked());
+        assert!(owners.is_empty());
+        assert!(deadlines.is_empty());
+    }
+
+    #[test]
+    fn silence_from_non_owner_does_not_arm_remote_floor_deadline() {
         let mut deadlines = std::collections::HashMap::new();
         update_remote_release_deadline(
             7,
-            true,
+            false,
             &std::collections::HashSet::new(),
             &mut deadlines,
             tokio::time::Instant::now(),
         );
         assert!(deadlines.is_empty());
+    }
+
+    #[test]
+    fn remote_speech_requires_non_dtx_audio_above_the_activity_floor() {
+        assert!(!is_remote_speech_frame(true, 0));
+        assert!(!is_remote_speech_frame(false, -127));
+        assert!(!is_remote_speech_frame(false, -56));
+        assert!(is_remote_speech_frame(false, -55));
+        assert!(is_remote_speech_frame(false, -12));
     }
 
     #[test]
@@ -771,34 +799,16 @@ mod tests {
         );
     }
 
-    /// Causal regression for the peer-index reuse race (Jude's blocking
-    /// finding): a frame authored by a departed occupant that arrives after
-    /// its slot is reassigned to a new occupant carries the stale epoch and
-    /// must be fenced, never mis-attributed to the new occupant.
     #[test]
-    fn stale_epoch_frame_is_fenced_after_its_index_is_reused() {
+    fn v2_media_is_routed_only_for_current_roster_indices() {
         let mut index_to_epoch = std::collections::HashMap::new();
-        // Slot 3 first occupied at epoch 0.
         index_to_epoch.insert(3_u8, 0_u8);
         assert!(
-            is_current_occupant(3, 0, &index_to_epoch),
+            is_current_occupant(3, &index_to_epoch),
             "current occupant's frame is delivered"
         );
-
-        // The occupant departs and a new peer reuses slot 3 at epoch 1.
-        index_to_epoch.insert(3, 1);
         assert!(
-            !is_current_occupant(3, 0, &index_to_epoch),
-            "in-flight frame from the departed occupant (epoch 0) is fenced"
-        );
-        assert!(
-            is_current_occupant(3, 1, &index_to_epoch),
-            "the new occupant's frame (epoch 1) is delivered"
-        );
-
-        // A frame for an index absent from the roster is stale.
-        assert!(
-            !is_current_occupant(9, 0, &index_to_epoch),
+            !is_current_occupant(9, &index_to_epoch),
             "frame for an unoccupied index is dropped"
         );
     }

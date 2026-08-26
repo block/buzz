@@ -35,6 +35,7 @@ import { AddChannelBotDialog } from "./AddChannelBotDialog";
 type ChannelMembersBarProps = {
   channel: Channel;
   currentPubkey?: string;
+  endActions?: React.ReactNode;
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
@@ -45,6 +46,7 @@ type ChannelMembersBarProps = {
 export function ChannelMembersBar({
   channel,
   currentPubkey,
+  endActions,
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
@@ -189,39 +191,42 @@ export function ChannelMembersBar({
 
   const controls =
     variant === "compact" ? (
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label="Channel actions"
-            data-testid="channel-actions-menu-trigger"
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <EllipsisVertical />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48" forceMount>
-          <DropdownMenuItem
-            data-testid="channel-members-trigger"
-            onSelect={onToggleMembers}
-          >
-            <Users />
-            <span>Members</span>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {memberCount}
-            </span>
-          </DropdownMenuItem>
-          {huddleIndicator}
-          <DropdownMenuItem
-            data-testid="channel-management-trigger"
-            onSelect={onManageChannel}
-          >
-            <Settings2 />
-            <span>Manage channel</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className="flex items-center gap-[6px]">
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label="Channel actions"
+              data-testid="channel-actions-menu-trigger"
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <EllipsisVertical />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48" forceMount>
+            <DropdownMenuItem
+              data-testid="channel-members-trigger"
+              onSelect={onToggleMembers}
+            >
+              <Users />
+              <span>Members</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {memberCount}
+              </span>
+            </DropdownMenuItem>
+            {huddleIndicator}
+            <DropdownMenuItem
+              data-testid="channel-management-trigger"
+              onSelect={onManageChannel}
+            >
+              <Settings2 />
+              <span>Manage channel</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {endActions}
+      </div>
     ) : (
       <div className="flex items-center gap-[6px]">
         <Tooltip disableHoverableContent>
@@ -260,6 +265,8 @@ export function ChannelMembersBar({
           </TooltipTrigger>
           <TooltipContent>Channel settings</TooltipContent>
         </Tooltip>
+
+        {endActions}
       </div>
     );
 

@@ -90,6 +90,31 @@ test("buildProjectReadModels resolves repositories with a deterministic selectio
     projects[0].repositoryRelayHints[backendAddress],
     "wss://relay.example",
   );
+  assert.equal(
+    projects[0].projectChannelId,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  assert.deepEqual(projects[0].relatedChannelIds, []);
+});
+
+test("buildProjectReadModels keeps extra related channel ids", () => {
+  const relatedA = "22222222-2222-4222-8222-222222222222";
+  const relatedB = "33333333-3333-4333-8333-333333333333";
+  const home = "11111111-1111-4111-8111-111111111111";
+  const projects = buildProjectReadModels({
+    projectEvents: [
+      projectEvent([
+        ["buzz-related-channel", relatedA],
+        ["buzz-related-channel", home],
+        ["buzz-related-channel", relatedB],
+        ["buzz-related-channel", relatedA],
+      ]),
+    ],
+    repositoryEvents: [],
+    relayOrigin: RELAY_ORIGIN,
+  });
+
+  assert.deepEqual(projects[0].relatedChannelIds, [relatedA, relatedB]);
 });
 
 test("buildProjectReadModels keeps unclaimed repositories as implicit projects", () => {
@@ -192,6 +217,44 @@ test("selectProjectRepository honors a request and falls back to primary", () =>
     "backend",
   );
   assert.equal(selectProjectRepository(projects[0], null)?.dtag, "backend");
+});
+
+test("buildProjectReadModels keeps the viewer's own unlisted project", () => {
+  const repoAddress = `30617:${PROJECT_OWNER}:secret`;
+  const unlisted = {
+    ...projectEvent([["a", repoAddress]]),
+    tags: [
+      ["d", "secret"],
+      ["name", "Secret"],
+      ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
+      ["buzz-visibility", "unlisted"],
+      ["a", repoAddress],
+    ],
+  };
+  const asStranger = buildProjectReadModels({
+    projectEvents: [unlisted],
+    repositoryEvents: [repositoryEvent(PROJECT_OWNER, "secret")],
+    relayOrigin: RELAY_ORIGIN,
+  });
+  const asOwner = buildProjectReadModels({
+    projectEvents: [unlisted],
+    repositoryEvents: [repositoryEvent(PROJECT_OWNER, "secret")],
+    relayOrigin: RELAY_ORIGIN,
+    viewerPubkey: PROJECT_OWNER,
+  });
+
+  assert.equal(
+    asStranger.some((project) => project.dtag === "secret" && !project.legacy),
+    false,
+  );
+  assert.equal(
+    asStranger.some((project) => project.legacy && project.dtag === "secret"),
+    true,
+  );
+  assert.equal(asOwner.length, 1);
+  assert.equal(asOwner[0]?.legacy, false);
+  assert.equal(asOwner[0]?.dtag, "secret");
+  assert.equal(asOwner[0]?.visibility, "unlisted");
 });
 
 function coordinateParts(coordinate) {

@@ -1,3 +1,7 @@
+import * as React from "react";
+
+import { useNow } from "@/shared/lib/useNow";
+
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -13,20 +17,7 @@ import type {
   Repository,
 } from "@/features/projects/hooks";
 import type { ProjectsOverviewAgentContextItem } from "@/features/projects/lib/projectDetailAgentContext";
-import {
-  commitShareLink,
-  issueShareLink,
-  projectShareLink,
-  pullRequestShareLink,
-} from "@/features/projects/lib/projectShareLinks";
-import {
-  selectionItemFromCommit,
-  selectionItemFromProject,
-  selectionItemFromReview,
-  selectionItemFromTask,
-  type ProjectSelectionItem,
-} from "@/features/projects/lib/projectSelection";
-import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
+import { matchesProjectsSearch } from "@/features/projects/lib/projectsSearch";
 import {
   formatExactTimestamp,
   markdownToPlainText,
@@ -45,7 +36,6 @@ import {
   PROJECT_EVENT_VISUALS,
   type ProjectEventKind,
 } from "./ProjectEventTypeIcon";
-import { ProjectEntitySelectControl } from "./ProjectEntityListRow";
 
 type ActivityKind = ProjectEventKind;
 
@@ -103,6 +93,7 @@ type ProjectsActivityFeedProps = {
   profiles?: UserProfileLookup;
   projects: Project[];
   pullRequests: ProjectPullRequestListItem[];
+  searchQuery?: string;
   snapshots?: Record<string, ProjectRepoSnapshot>;
 };
 
@@ -111,54 +102,6 @@ const WEEK_SECONDS = 7 * 24 * 60 * 60;
 
 function contentPreview(content: string) {
   return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
-}
-
-function activitySelectionItem(
-  item: ProjectActivityItem,
-): ProjectSelectionItem | null {
-  const project = item.target.project;
-  const repository =
-    item.target.type === "issue" || item.target.type === "pull-request"
-      ? item.target.repository
-      : project.repositories[0];
-  const channelId = repository?.channelId ?? project.projectChannelId;
-  if (item.target.type === "commit") {
-    return selectionItemFromCommit({
-      author: item.actorPubkey,
-      channelId,
-      commitHash: item.target.commitHash,
-      projectId: project.id,
-      shareLink: repository
-        ? commitShareLink(repository, item.target.commitHash)
-        : null,
-      title: item.title,
-    });
-  }
-  if (item.target.type === "issue") {
-    return selectionItemFromTask({
-      author: item.target.issue.author,
-      channelId,
-      id: item.target.issue.id,
-      shareLink: issueShareLink(item.target.issue),
-      title: item.target.issue.title,
-    });
-  }
-  if (item.target.type === "pull-request") {
-    return selectionItemFromReview({
-      author: item.target.pullRequest.author,
-      channelId,
-      id: item.target.pullRequest.id,
-      shareLink: pullRequestShareLink(item.target.pullRequest),
-      title: item.target.pullRequest.title,
-    });
-  }
-  return selectionItemFromProject({
-    channelId: project.projectChannelId,
-    id: project.id,
-    owner: project.owner,
-    shareLink: projectShareLink(project),
-    title: project.name,
-  });
 }
 
 function buildActivityItems({
@@ -181,7 +124,7 @@ function buildActivityItems({
       actorName: null,
       action: "created the repository",
       title: project.name,
-      body: contentPreview(project.description),
+      body: project.description,
       detail: null,
       target: { type: "project", project },
     });
@@ -228,7 +171,7 @@ function buildActivityItems({
       actorName: null,
       action: "opened a review in",
       title: pullRequest.title,
-      body: contentPreview(pullRequest.content),
+      body: pullRequest.content,
       detail: pullRequest.status,
       target,
     });
@@ -241,7 +184,7 @@ function buildActivityItems({
         actorName: null,
         action: "updated a review in",
         title: pullRequest.title,
-        body: contentPreview(update.content),
+        body: update.content,
         detail: update.commit?.slice(0, 7) ?? null,
         target,
       });
@@ -275,7 +218,7 @@ function buildActivityItems({
                 ? "requested review in"
                 : "commented on a review in",
         title: pullRequest.title,
-        body: contentPreview(comment.content),
+        body: comment.content,
         detail:
           kind === "approval"
             ? "Approved"
@@ -297,7 +240,7 @@ function buildActivityItems({
       actorName: null,
       action: "created a task in",
       title: issue.title,
-      body: contentPreview(issue.content),
+      body: issue.content,
       detail: issue.status,
       target,
     });
@@ -310,16 +253,26 @@ function buildActivityItems({
         actorName: null,
         action: "commented on a task in",
         title: issue.title,
-        body: contentPreview(comment.content),
+        body: comment.content,
         detail: null,
         target,
       });
     }
   }
 
-  return items
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, ACTIVITY_LIMIT);
+  return (
+    items
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .slice(0, ACTIVITY_LIMIT)
+      // Bodies are carried raw until here so the markdown flattening runs for
+      // the rendered window only — every issue/PR/comment in the community
+      // used to be flattened just to be sorted and discarded.
+      .map((item) =>
+        item.body === null
+          ? item
+          : { ...item, body: contentPreview(item.body) },
+      )
+  );
 }
 
 export function buildProjectsActivityAgentContextItems(
@@ -358,8 +311,8 @@ function startOfWeek(timestamp: number) {
   return Math.floor(date.getTime() / 1_000);
 }
 
-function groupActivityItems(items: ProjectActivityItem[]) {
-  const thisWeek = startOfWeek(Math.floor(Date.now() / 1_000));
+function groupActivityItems(items: ProjectActivityItem[], nowMs: number) {
+  const thisWeek = startOfWeek(Math.floor(nowMs / 1_000));
   const lastWeek = thisWeek - WEEK_SECONDS;
   const groups: ProjectActivityGroup[] = [
     { key: "this-week", label: "This week", items: [] },
@@ -388,7 +341,6 @@ function ActivityCard({
   onOpen,
   onOpenProject,
   profiles,
-  rangeItems,
 }: {
   compact: boolean;
   isFirst: boolean;
@@ -397,7 +349,6 @@ function ActivityCard({
   onOpen: () => void;
   onOpenProject: () => void;
   profiles?: UserProfileLookup;
-  rangeItems: ProjectSelectionItem[];
 }) {
   const visual = PROJECT_EVENT_VISUALS[item.kind];
   const TypeIcon = visual.icon;
@@ -407,21 +358,12 @@ function ActivityCard({
   const actorLabel = item.actorPubkey
     ? resolveUserLabel({ profiles, pubkey: item.actorPubkey })
     : item.actorName || "Someone";
-  const selection = useProjectSelection();
-  const selectionItem = activitySelectionItem(item);
-  const selected = Boolean(
-    selectionItem && selection?.isSelected(selectionItem.id),
-  );
-  const showSelectControl = Boolean(selectionItem && selection && selected);
-
   return (
     <div
       className={cn(
         "group relative block w-full rounded-xl bg-transparent text-left transition-colors hover:bg-muted/20",
         compact ? "py-3 pr-3" : "py-4 pr-4",
-        selected && "bg-muted/40",
       )}
-      data-selected={selected ? "true" : undefined}
       data-testid="projects-activity-card"
     >
       <button
@@ -431,27 +373,6 @@ function ActivityCard({
         type="button"
       />
       <div className="pointer-events-none relative flex min-w-0 items-start gap-3">
-        {selectionItem && selection ? (
-          <span
-            className={cn(
-              "mt-0.5 flex w-4 shrink-0 justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
-              showSelectControl && "opacity-100",
-            )}
-          >
-            <ProjectEntitySelectControl
-              checked={selected}
-              label={`Select ${selectionItem.title}`}
-              onToggle={({ shiftKey }) =>
-                selection.toggle(selectionItem, {
-                  rangeItems,
-                  shiftKey,
-                })
-              }
-            />
-          </span>
-        ) : (
-          <span className="w-4 shrink-0" />
-        )}
         {/* Avatar gutter: a vertical spine runs through the avatar centers
             to connect consecutive cards. Segments extend into the card's
             vertical padding so they meet the neighbouring card's segments;
@@ -596,13 +517,38 @@ function ActivityCard({
 
 /** Mixed GitHub-style workspace activity shown beneath the overview callouts. */
 export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
-  const items = buildActivityItems(props);
-  const groups = groupActivityItems(items);
-  const rangeItems = groups.flatMap((group) =>
-    group.items.flatMap((item) => {
-      const selectionItem = activitySelectionItem(item);
-      return selectionItem ? [selectionItem] : [];
-    }),
+  const { issues, projects, pullRequests, snapshots } = props;
+  // Memoized: this feed re-renders with every parent state change (profiles
+  // landing, selection, hover), and an unmemoized rebuild re-flattened and
+  // re-sorted the whole community's activity each time.
+  const allItems = React.useMemo(
+    () => buildActivityItems({ issues, projects, pullRequests, snapshots }),
+    [issues, projects, pullRequests, snapshots],
+  );
+  const items = React.useMemo(
+    () =>
+      allItems.filter((item) => {
+        const repository =
+          item.target.type === "issue" || item.target.type === "pull-request"
+            ? item.target.repository.name
+            : null;
+        return matchesProjectsSearch(props.searchQuery ?? "", [
+          item.action,
+          item.body,
+          item.detail,
+          item.target.project.name,
+          item.title,
+          repository,
+        ]);
+      }),
+    [allItems, props.searchQuery],
+  );
+  // Week buckets are clock-derived; ticked so the memo cannot freeze "This
+  // week" across a week boundary. Coarse cadence — the boundary moves weekly.
+  const now = useNow(600_000);
+  const groups = React.useMemo(
+    () => groupActivityItems(items, now),
+    [items, now],
   );
 
   if (props.isLoading && items.length === 0) {
@@ -610,13 +556,16 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
   }
 
   if (items.length === 0) {
+    const searching = Boolean(props.searchQuery?.trim());
     return (
       <div className="rounded-xl border border-dashed border-border/60 px-4 py-12 text-center">
         <p className="text-sm font-medium text-foreground">
-          No project activity yet
+          {searching ? "No matching activity" : "No project activity yet"}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Commits, reviews, review decisions, and tasks will appear here.
+          {searching
+            ? "Try a different search."
+            : "Commits, reviews, review decisions, and tasks will appear here."}
         </p>
       </div>
     );
@@ -670,7 +619,6 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
                       props.onOpenProject(item.target.project)
                     }
                     profiles={props.profiles}
-                    rangeItems={rangeItems}
                   />
                 </div>
               );

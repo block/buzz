@@ -44,13 +44,13 @@ test("agent picker preference skips people", async () => {
   assert.equal(view.result.current.mentionSelectedIndex, 1);
 });
 
-test("primary+Shift+Enter opens the picker or toggles in place", async () => {
+test("primary+Shift+M addresses the default agent or toggles the tray selection", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAlwaysAddressShortcut } = await import(
     "./useAlwaysAddressShortcut.ts"
   );
   const { isMacPlatform } = await import("@/shared/lib/platform");
-  const opened = [];
+  const selected = [];
   const toggled = [];
   const suggestion = {
     displayName: "Agent Ada",
@@ -59,8 +59,9 @@ test("primary+Shift+Enter opens the picker or toggles in place", async () => {
   };
   const createEvent = () => ({
     altKey: false,
+    code: "KeyM",
     ctrlKey: !isMacPlatform(),
-    key: "Enter",
+    key: "M",
     metaKey: isMacPlatform(),
     preventDefault() {},
     repeat: false,
@@ -71,24 +72,123 @@ test("primary+Shift+Enter opens the picker or toggles in place", async () => {
       useAlwaysAddressShortcut({
         enabled: true,
         mentions: {
+          getDefaultAgentSuggestion: () => suggestion,
           isMentionOpen,
           mentionSelectedIndex: 0,
           suggestions: [suggestion],
         },
-        onOpenPicker: (insertTrigger) => opened.push(insertTrigger),
+        onOpenPicker: () => {},
+        onSelect: (value) => selected.push(value),
         onToggle: (value) => toggled.push(value),
       }),
     { initialProps: { isMentionOpen: false } },
   );
 
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(opened, [false]);
-  assert.deepEqual(toggled, []);
+  assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(selected, []);
 
   view.rerender({ isMentionOpen: true });
   act(() => assert.equal(view.result.current(createEvent()), true));
   assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(selected, [suggestion]);
 
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion, suggestion]);
+  assert.deepEqual(toggled, [suggestion]);
+  assert.deepEqual(selected, [suggestion, suggestion]);
+});
+
+test("primary+Shift+M removes the current locked agent before choosing a new default", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAlwaysAddressShortcut } = await import(
+    "./useAlwaysAddressShortcut.ts"
+  );
+  const { isMacPlatform } = await import("@/shared/lib/platform");
+  const lockedAgent = {
+    avatarUrl: null,
+    displayName: "Agent Ada",
+    pubkey: "agent-a",
+  };
+  const defaultAgent = {
+    displayName: "Agent Bea",
+    isAgent: true,
+    pubkey: "agent-b",
+  };
+  const toggled = [];
+  const { result } = renderHook(() =>
+    useAlwaysAddressShortcut({
+      enabled: true,
+      lockedAgent,
+      mentions: {
+        getDefaultAgentSuggestion: () => defaultAgent,
+        isMentionOpen: false,
+        mentionSelectedIndex: 0,
+        suggestions: [],
+      },
+      onOpenPicker: () => {},
+      onSelect: () => {},
+      onToggle: (value) => toggled.push(value),
+    }),
+  );
+
+  act(() =>
+    assert.equal(
+      result.current({
+        altKey: false,
+        code: "KeyM",
+        ctrlKey: !isMacPlatform(),
+        key: "m",
+        metaKey: isMacPlatform(),
+        preventDefault() {},
+        repeat: false,
+        shiftKey: true,
+      }),
+      true,
+    ),
+  );
+
+  assert.deepEqual(toggled, [{ ...lockedAgent, isAgent: true }]);
+});
+
+test("primary+Shift+M opens the picker when no default agent is ready", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAlwaysAddressShortcut } = await import(
+    "./useAlwaysAddressShortcut.ts"
+  );
+  const { isMacPlatform } = await import("@/shared/lib/platform");
+  let opened = 0;
+  const { result } = renderHook(() =>
+    useAlwaysAddressShortcut({
+      enabled: true,
+      mentions: {
+        getDefaultAgentSuggestion: () => null,
+        isMentionOpen: false,
+        mentionSelectedIndex: 0,
+        suggestions: [],
+      },
+      onOpenPicker: () => {
+        opened += 1;
+      },
+      onSelect: () => {},
+      onToggle: () => {},
+    }),
+  );
+
+  act(() =>
+    assert.equal(
+      result.current({
+        altKey: false,
+        code: "KeyM",
+        ctrlKey: !isMacPlatform(),
+        key: "m",
+        metaKey: isMacPlatform(),
+        preventDefault() {},
+        repeat: false,
+        shiftKey: true,
+      }),
+      true,
+    ),
+  );
+
+  assert.equal(opened, 1);
 });

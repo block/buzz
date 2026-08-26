@@ -75,6 +75,8 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Relay image eligibility contract
+        run: scripts/test-relay-image-eligibility-workflow.sh
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
       - name: OSS desktop promotion contract
@@ -87,6 +89,10 @@ jobs:
           scripts/test-mobile-release-candidate-publisher.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Rust cache contract
+        run: |
+          scripts/test-rust-cache-contract.sh
+          scripts/test-rust-cache-contract-regressions.sh
       - name: File size policy
         run: just file-size-check
 
@@ -101,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Format check
@@ -123,8 +129,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
+          key: sherpa-cache-v1
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -147,7 +154,7 @@ jobs:
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: desktop/src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -340,7 +347,7 @@ jobs:
           key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
         with:
           workspaces: |
@@ -522,6 +529,7 @@ jobs:
             REDIS_URL=redis://localhost:6379 \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
+            BUZZ_RELAY_PRIVATE_KEY="$(openssl rand -hex 32)" \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
             BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000 \
@@ -674,6 +682,31 @@ jobs:
           VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
+      - name: Replaceable persistence PostgreSQL tests
+        # Transaction, concurrency, and mention-index coverage for the
+        # replaceable-event store seam. These tests require real Postgres and
+        # are ignored by the infrastructure-free unit-test job.
+        run: |
+          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)'
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E "${filter}" \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Database pressure observability PostgreSQL tests
+        # Explicit pool acquisition and advisory-lock metrics require real
+        # Postgres and are ignored by the infrastructure-free unit-test job.
+        run: |
+          filter='package(buzz-db) and test(/observability::tests::(pool_acquire_records_success_timeout_and_error_with_wait_time|advisory_lock_records_success_contention_timeout_and_error)/)'
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E "${filter}" \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Start relay
         run: |
           chmod +x ./target/ci/buzz-relay
@@ -682,6 +715,7 @@ jobs:
             REDIS_URL=redis://localhost:6379 \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
+            BUZZ_RELAY_PRIVATE_KEY="$(openssl rand -hex 32)" \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
             BUZZ_GIT_PROBE_WRITERS=8 \
@@ -763,7 +797,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
       # Reuse the relay + git-credential-nostr built by Desktop E2E Relay
@@ -952,7 +986,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           key: cross-${{ matrix.target }}
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -993,7 +1027,7 @@ jobs:
       # toolchain (1.95.0 + clippy via profile = default) comes from the
       # repo-root rust-toolchain.toml, which the runner's preinstalled rustup
       # honors on demand; the host triple already is x86_64-pc-windows-msvc.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: |
             .
@@ -1070,7 +1104,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: desktop/src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}

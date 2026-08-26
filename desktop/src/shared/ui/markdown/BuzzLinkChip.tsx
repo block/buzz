@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 import { InlineChip } from "@/shared/ui/InlineChip";
 import {
   inlineChipIconClasses,
+  inlineChipLeadingEnd,
   type InlineChipIconKind,
   truncateInlineChipLabel,
   WRAPPING_INLINE_CHIP_CLASSES,
@@ -72,12 +73,21 @@ function wrappingChipContent(
 ): React.ReactNode {
   if (typeof children !== "string" || children.length === 0) return children;
 
-  const separatorIndex = children.search(/[-\s]/u);
-  const leadingEnd =
-    separatorIndex < 0
-      ? Array.from(children)[0]?.length
-      : separatorIndex + (children[separatorIndex] === "-" ? 1 : 0);
-  if (!leadingEnd) return children;
+  const leadingEnd = inlineChipLeadingEnd(children);
+  if (!leadingEnd) {
+    return (
+      <>
+        <span
+          aria-hidden="true"
+          className={cn(
+            "inline-chip-leading-fragment",
+            inlineChipIconClasses(icon),
+          )}
+        />
+        {children}
+      </>
+    );
+  }
 
   return (
     <>
