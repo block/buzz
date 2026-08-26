@@ -1901,6 +1901,18 @@ pub enum CmlEventsCmd {
         #[arg(long)]
         prev: Option<String>,
     },
+    /// Fetch a task's CML events and print the observation-time workstream card
+    Card {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+        /// Observation time as unix seconds (default: now)
+        #[arg(long)]
+        as_of: Option<u64>,
+    },
 }
 
 /// Subcommands for `buzz pack`.
@@ -2153,6 +2165,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         prev.as_deref(),
                     )
                     .await
+                }
+                CmlEventsCmd::Card {
+                    channel,
+                    task,
+                    as_of,
+                } => {
+                    commands::cml::cmd_events_card(&client, channel.as_str(), task.as_str(), as_of)
+                        .await
                 }
             },
         },

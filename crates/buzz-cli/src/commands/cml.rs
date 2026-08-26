@@ -147,6 +147,54 @@ pub async fn cmd_events_reduce(
     Ok(())
 }
 
+/// Project a reduced CML task into its [`buzz_core::cml_view::WorkstreamCard`]
+/// serialized as one line of JSON, as observed at `observed_at`.
+///
+/// Liveness, lease, and short-SHA derivation are delegated to
+/// `buzz_core::cml_view::project_workstream_card` so the core reducer stays
+/// the single authority for those rules. The rendered card never contains
+/// absolute paths or full commit SHAs.
+pub fn render_workstream_card(
+    task: &buzz_core::cml::CmlTask,
+    observed_at: u64,
+) -> Result<String, CliError> {
+    let card = buzz_core::cml_view::project_workstream_card(task, observed_at);
+    serde_json::to_string(&card)
+        .map_err(|error| CliError::Other(format!("serialize card: {error}")))
+}
+
+/// Run `buzz cml events card` — print a task's observation-time card.
+///
+/// Fetches the task's lifecycle events, reduces them, and renders the
+/// workstream card observed at `as_of`, defaulting to the current
+/// wall-clock time when `as_of` is `None`.
+pub async fn cmd_events_card(
+    client: &crate::client::BuzzClient,
+    channel: &str,
+    task: &str,
+    as_of: Option<u64>,
+) -> Result<(), CliError> {
+    let channel_id = uuid::Uuid::parse_str(channel)
+        .map_err(|error| CliError::Usage(format!("invalid channel UUID: {error}")))?;
+    let task_id = uuid::Uuid::parse_str(task)
+        .map_err(|error| CliError::Usage(format!("invalid task UUID: {error}")))?;
+    let events = fetch_cml_events(client, channel_id, task_id).await?;
+    let reduced = buzz_core::cml_event::reduce_cml_events(&events)
+        .map_err(|error| CliError::Usage(format!("reduction failed: {error}")))?;
+    let observed_at = as_of.unwrap_or_else(now_secs);
+    let card = render_workstream_card(&reduced.task, observed_at)?;
+    println!("{card}");
+    Ok(())
+}
+
+/// Current wall-clock unix seconds; 0 if the system clock predates the epoch.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 async fn fetch_cml_events(
     client: &crate::client::BuzzClient,
     channel: uuid::Uuid,
@@ -178,7 +226,7 @@ async fn fetch_cml_events(
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_input, validate_input};
+    use super::{canonicalize_input, render_workstream_card, validate_input};
 
     const VALID: &str = r#"{
       "acceptance": [], "blockers": [], "evidence": [],
@@ -190,6 +238,26 @@ mod tests {
       "runtime":{"host_id":null,"last_heartbeat_at":null,"presence":"offline","ttl_seconds":180},
       "status":"proposed","title":"CML","updated_at":1787673000,"version":1
     }"#;
+
+    /// A working task with a live worker: heartbeat at 1787673000, TTL 180,
+    /// lease held by the assigned worker until 1787674000, head commit set.
+    fn live_task_json() -> String {
+        let planner = "a".repeat(64);
+        let worker = "b".repeat(64);
+        format!(
+            r#"{{
+      "acceptance": [], "blockers": [], "evidence": [],
+      "git": {{"base_sha":"1111111111111111111111111111111111111111","branch":"feat/cml","head_sha":"2222222222222222222222222222222222222222","repo":"block/buzz","worktree_alias":"buzz-cml"}},
+      "id":"cdd4722d-7481-4d01-9c0a-423b4454c179",
+      "lease":{{"id":"lease-1","holder":"{worker}","issued_at":1787673000,"expires_at":1787674000}},
+      "objective":"One outcome","priority":"P1","protocol":"buzz-cml",
+      "review":{{"max_rounds":3,"round":0}},
+      "roles":{{"fixer":null,"planner":"{planner}","reviewer":null,"worker":"{worker}"}},
+      "runtime":{{"host_id":"h_0123456789abcdef","last_heartbeat_at":1787673000,"presence":"online","ttl_seconds":180}},
+      "status":"working","title":"CML","updated_at":1787673000,"version":1
+    }}"#
+        )
+    }
 
     #[test]
     fn local_validate_accepts_valid_cml_and_rejects_unknown_fields() {
@@ -204,5 +272,71 @@ mod tests {
         let second = canonicalize_input(&first).expect("canonicalize again");
         assert_eq!(first, second);
         assert!(first.ends_with('\n'));
+    }
+
+    #[test]
+    fn card_projects_live_task_values_at_observation_time() {
+        let task = buzz_core::cml::parse_cml(&live_task_json()).expect("valid live CML");
+        let card = render_workstream_card(&task, 1787673060).expect("render card");
+        assert!(card.contains(r#""title":"CML""#), "card: {card}");
+        assert!(card.contains(r#""status":"working""#), "card: {card}");
+        assert!(card.contains(r#""liveness":"online""#), "card: {card}");
+        assert!(card.contains(r#""live_claim":true"#), "card: {card}");
+        assert!(card.contains(r#""base_short":"1111111""#), "card: {card}");
+        assert!(card.contains(r#""head_short":"2222222""#), "card: {card}");
+        assert!(
+            card.contains(r#""worktree_alias":"buzz-cml""#),
+            "card: {card}"
+        );
+        assert!(!card.contains('\n'), "card must be a single line: {card}");
+    }
+
+    #[test]
+    fn card_liveness_follows_observation_time_not_snapshot_presence() {
+        let task = buzz_core::cml::parse_cml(&live_task_json()).expect("valid live CML");
+        // Snapshot stores presence "online" at updated_at 1787673000; the card
+        // must recompute against the observation instant instead of echoing it.
+        let stale = render_workstream_card(&task, 1787673300).expect("render card");
+        assert!(stale.contains(r#""liveness":"stale""#), "card: {stale}");
+        assert!(stale.contains(r#""live_claim":false"#), "card: {stale}");
+        let dead = render_workstream_card(&task, 1787674000).expect("render card");
+        assert!(dead.contains(r#""liveness":"offline""#), "card: {dead}");
+        assert!(dead.contains(r#""live_claim":false"#), "card: {dead}");
+        assert!(dead.contains(r#""status":"working""#), "card: {dead}");
+    }
+
+    #[test]
+    fn card_renders_null_head_when_no_head_commit_exists() {
+        let task = buzz_core::cml::parse_cml(VALID).expect("valid CML");
+        let card = render_workstream_card(&task, 1787674000).expect("render card");
+        assert!(card.contains(r#""head_short":null"#), "card: {card}");
+        assert!(card.contains(r#""liveness":"offline""#), "card: {card}");
+        assert!(card.contains(r#""status":"proposed""#), "card: {card}");
+        assert!(
+            card.contains(r#""worktree_alias":"buzz-cml""#),
+            "card: {card}"
+        );
+    }
+
+    #[test]
+    fn card_never_leaks_absolute_paths_or_full_shas() {
+        let task = buzz_core::cml::parse_cml(&live_task_json()).expect("valid live CML");
+        let card = render_workstream_card(&task, 1787673060).expect("render card");
+        assert!(!card.contains("/private/tmp"), "card: {card}");
+        assert!(!card.contains("/Users/"), "card: {card}");
+        assert!(!card.contains("/tmp/"), "card: {card}");
+        assert!(
+            !card.contains("1111111111111111111111111111111111111111"),
+            "full base SHA must not appear: {card}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&card).expect("card is JSON");
+        let base_short = value["base_short"]
+            .as_str()
+            .expect("base_short is a string");
+        assert_eq!(base_short.len(), 7, "card: {card}");
+        let head_short = value["head_short"]
+            .as_str()
+            .expect("head_short is a string");
+        assert_eq!(head_short.len(), 7, "card: {card}");
     }
 }
