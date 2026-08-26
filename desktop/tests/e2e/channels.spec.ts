@@ -1133,6 +1133,15 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
 
   await input.fill(retryMessage);
   const retryBaseline = commandsAfterFailure.length;
+  // The first send left the cursor parked over the bottom-right error toast,
+  // which overlaps the send button. Sonner pauses its dismiss timer while the
+  // toaster is hovered, so move the cursor away and let the transient toast
+  // clear before retrying — otherwise the retry click is intercepted for the
+  // full timeout.
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, {
+    timeout: 10_000,
+  });
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");

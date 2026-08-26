@@ -1879,6 +1879,394 @@ test("emoji picker inserts emoji into the draft and keeps focus in the composer"
   await expect(input).toHaveText("Ship🚀 now");
 });
 
+test("relay GIF capability gates the composer picker", async ({ page }) => {
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({ supported_extensions: [] }),
+      contentType: "application/nostr+json",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const pickerButton = page.getByTestId("composer-emoji-button");
+  await expect(pickerButton).toHaveAccessibleName("Insert emoji");
+  await pickerButton.click();
+  await expect(page.getByRole("tab", { name: "GIFs" })).toHaveCount(0);
+});
+
+test("relay GIF search selects content-only media and reports the share", async ({
+  page,
+}) => {
+  const searchBodies: Array<{
+    customer_id: string;
+    locale: string;
+    query: string;
+  }> = [];
+  const shareBodies: Array<{ customer_id: string; slug: string }> = [];
+  const gifUrl = "https://static.klipy.com/e2e-ship-it.gif";
+  const previewUrl = "https://static.klipy.com/e2e-ship-it.webp";
+
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/search", async (route) => {
+    searchBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: [
+            {
+              id: null,
+              file: {
+                md: {
+                  gif: { height: 180, size: 42, url: gifUrl, width: 320 },
+                },
+                sm: {
+                  webp: {
+                    height: 90,
+                    size: 12,
+                    url: previewUrl,
+                    width: 160,
+                  },
+                },
+              },
+              slug: "e2e-ship-it",
+              title: "Ship it",
+              type: "gif",
+            },
+          ],
+        },
+      }),
+      contentType: "application/json",
+    });
+  });
+  await page.route("http://localhost:3000/gifs/share", async (route) => {
+    shareBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("https://static.klipy.com/e2e-ship-it.*", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const pickerButton = page.getByTestId("composer-emoji-button");
+  await expect(pickerButton).toHaveAccessibleName("Insert emoji or GIF");
+  await pickerButton.click();
+  await page.getByRole("tab", { name: "GIFs" }).click();
+
+  await expect.poll(() => searchBodies.map(({ query }) => query)).toContain("");
+  await expect(
+    page.getByRole("button", { name: "Choose Ship it" }),
+  ).toBeVisible();
+
+  await page.getByRole("searchbox", { name: "Search KLIPY" }).fill("celebrate");
+  await expect
+    .poll(() => searchBodies.map(({ query }) => query))
+    .toContain("celebrate");
+  await page.getByRole("button", { name: "Choose Ship it" }).click();
+
+  await expect(page.getByTestId("composer-media-attachment")).toBeVisible();
+  await expect
+    .poll(() => shareBodies)
+    .toEqual([
+      {
+        customer_id: searchBodies.at(-1)?.customer_id,
+        slug: "e2e-ship-it",
+      },
+    ]);
+
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("composer-media-attachment")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate((expectedUrl) => {
+        return Boolean(
+          (
+            window as Window & {
+              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+                content?: string;
+                kind?: number;
+              }>;
+            }
+          ).__BUZZ_E2E_SIGNED_EVENTS__?.some(
+            (event) => event.kind === 9 && event.content?.includes(expectedUrl),
+          ),
+        );
+      }, gifUrl),
+    )
+    .toBe(true);
+  const matchingEvent = await page.evaluate((expectedUrl) => {
+    return (
+      window as Window & {
+        __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+          content?: string;
+          kind?: number;
+          tags?: string[][];
+        }>;
+      }
+    ).__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.kind === 9 && event.content?.includes(expectedUrl),
+    );
+  }, gifUrl);
+  expect(matchingEvent?.content).toBe(`![image](${gifUrl})`);
+  expect(matchingEvent?.tags?.some((tag) => tag[0] === "imeta")).toBe(false);
+});
+
+async function routeGifMocks(page: import("@playwright/test").Page) {
+  const gifs = [
+    {
+      animated: "https://static.klipy.com/e2e-party.gif",
+      poster: "https://static.klipy.com/e2e-party.jpg",
+      slug: "e2e-party",
+      title: "Party parrot",
+    },
+    {
+      animated: "https://static.klipy.com/e2e-thumbs-up.gif",
+      poster: "https://static.klipy.com/e2e-thumbs-up.jpg",
+      slug: "e2e-thumbs-up",
+      title: "Thumbs up",
+    },
+  ];
+
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/search", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: gifs.map((gif) => ({
+            id: null,
+            file: {
+              md: {
+                gif: { height: 180, size: 42, url: gif.animated, width: 320 },
+              },
+              sm: {
+                jpg: { height: 90, size: 8, url: gif.poster, width: 160 },
+                webp: {
+                  height: 90,
+                  size: 12,
+                  url: `${gif.animated.replace(/\.gif$/, ".webp")}`,
+                  width: 160,
+                },
+              },
+            },
+            slug: gif.slug,
+            title: gif.title,
+            type: "gif",
+          })),
+        },
+      }),
+      contentType: "application/json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/share", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+  await page.route("https://static.klipy.com/e2e-*", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  return gifs;
+}
+
+async function openGifGrid(page: import("@playwright/test").Page) {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("composer-emoji-button").click();
+  await page.getByRole("tab", { name: "GIFs" }).click();
+  await expect(page.getByTestId("klipy-gif-grid")).toBeVisible();
+}
+
+test("reduced-motion GIF grid renders static posters, not animated previews", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const gifs = await routeGifMocks(page);
+  await openGifGrid(page);
+
+  const grid = page.getByTestId("klipy-gif-grid");
+  // Each GIF stays identifiable and selectable by its accessible name.
+  for (const gif of gifs) {
+    await expect(
+      grid.getByRole("button", { name: `Choose ${gif.title}` }),
+    ).toBeVisible();
+  }
+
+  const sources = await grid
+    .locator("img")
+    .evaluateAll((imgs) =>
+      imgs.map((img) => (img as HTMLImageElement).getAttribute("src")),
+    );
+  // The static poster is shown; no animated preview URL enters the DOM.
+  expect(sources).toEqual(gifs.map((gif) => gif.poster));
+  for (const gif of gifs) {
+    expect(sources).not.toContain(gif.animated);
+    expect(sources.some((src) => src?.endsWith(".webp"))).toBe(false);
+  }
+});
+
+test("reduced-motion GIF grid falls back to a named static placeholder", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  // A GIF with no jpg asset: reduced motion must not fall back to animation.
+  await page.route("http://localhost:3000/gifs/search", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: [
+            {
+              id: null,
+              file: {
+                md: {
+                  gif: {
+                    height: 180,
+                    size: 42,
+                    url: "https://static.klipy.com/e2e-no-poster.gif",
+                    width: 320,
+                  },
+                },
+                sm: {
+                  webp: {
+                    height: 90,
+                    size: 12,
+                    url: "https://static.klipy.com/e2e-no-poster.webp",
+                    width: 160,
+                  },
+                },
+              },
+              slug: "e2e-no-poster",
+              title: "No poster clip",
+              type: "gif",
+            },
+          ],
+        },
+      }),
+      contentType: "application/json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/share", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+
+  await openGifGrid(page);
+
+  const grid = page.getByTestId("klipy-gif-grid");
+  await expect(
+    grid.getByRole("button", { name: "Choose No poster clip" }),
+  ).toBeVisible();
+  await expect(grid.getByTestId("klipy-gif-static-placeholder")).toHaveText(
+    "No poster clip",
+  );
+  await expect(grid.locator("img")).toHaveCount(0);
+});
+
+test("normal-motion GIF grid renders animated previews", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const gifs = await routeGifMocks(page);
+  await openGifGrid(page);
+
+  const sources = await page
+    .getByTestId("klipy-gif-grid")
+    .locator("img")
+    .evaluateAll((imgs) =>
+      imgs.map((img) => (img as HTMLImageElement).getAttribute("src")),
+    );
+  // Animated `.webp` previews are used; static jpg posters stay out of the DOM.
+  expect(sources.every((src) => src?.endsWith(".webp"))).toBe(true);
+  for (const gif of gifs) {
+    expect(sources).not.toContain(gif.poster);
+  }
+});
+
+test("selected GIFs keep distinct accessible names in the composer and lightbox", async ({
+  page,
+}) => {
+  const gifs = await routeGifMocks(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  // Select two differently titled GIFs.
+  for (const gif of gifs) {
+    await page.getByTestId("composer-emoji-button").click();
+    await page.getByRole("tab", { name: "GIFs" }).click();
+    await page
+      .getByTestId("klipy-gif-grid")
+      .getByRole("button", { name: `Choose ${gif.title}` })
+      .click();
+  }
+
+  const thumbnails = page.getByTestId("composer-media-attachment");
+  await expect(thumbnails).toHaveCount(2);
+
+  // Composer thumbnails carry distinct accessible names from the GIF titles.
+  for (const gif of gifs) {
+    await expect(
+      thumbnails.getByRole("button", { name: gif.title, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Remove ${gif.title}` }),
+    ).toHaveCount(1);
+  }
+
+  // Each lightbox dialog is titled by the same GIF name.
+  for (const gif of gifs) {
+    await thumbnails
+      .getByRole("button", { name: gif.title, exact: true })
+      .click();
+    await expect(
+      page.getByRole("dialog", { name: `${gif.title} preview` }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+});
+
 test("empty message cannot be sent", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();

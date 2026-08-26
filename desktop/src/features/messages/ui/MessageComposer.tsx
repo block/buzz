@@ -170,33 +170,32 @@ function MessageComposerImpl({
     media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
   const backgroundUpload = useBackgroundMediaUpload();
-  const { trackAuthoredContent: trackDraftAuthoredContent } =
-    useDraftPersistLifecycle({
-      effectiveDraftKey,
-      channelId,
-      loadDraft: drafts.loadDraft,
-      persistDraft: drafts.persistDraft,
-      getMentionRefs: mentions.getDraftMentionRefs,
-      restoreMentionRefs: mentions.restoreDraftMentionRefs,
-      livePendingImeta: media.pendingImeta,
-      setPendingImeta: media.setPendingImeta,
-      getQueuedAttachments: () => media.queuedAttachmentsRef.current,
-      saveQueuedAttachmentsForDraft,
-      clearQueuedAttachments: media.clearQueuedAttachments,
-      restoreQueuedAttachments: media.restoreQueuedAttachments,
-      takeQueuedAttachmentsForDraft,
-      setContent: (content) => {
-        setComposerContent(content);
-        richText.setContent(content);
-      },
-      clearContent: () => {
-        setComposerContent("");
-        richText.clearContent();
-      },
-      setSpoileredAttachmentUrls,
-      spoileredAttachmentUrlsRef,
-      syncComposerContentFromEditor,
-    });
+  const { trackAuthoredContent } = useDraftPersistLifecycle({
+    effectiveDraftKey,
+    channelId,
+    loadDraft: drafts.loadDraft,
+    persistDraft: drafts.persistDraft,
+    getMentionRefs: mentions.getDraftMentionRefs,
+    restoreMentionRefs: mentions.restoreDraftMentionRefs,
+    livePendingImeta: media.pendingImeta,
+    setPendingImeta: media.setPendingImeta,
+    getQueuedAttachments: () => media.queuedAttachmentsRef.current,
+    saveQueuedAttachmentsForDraft,
+    clearQueuedAttachments: media.clearQueuedAttachments,
+    restoreQueuedAttachments: media.restoreQueuedAttachments,
+    takeQueuedAttachmentsForDraft,
+    setContent: (content) => {
+      setComposerContent(content);
+      richText.setContent(content);
+    },
+    clearContent: () => {
+      setComposerContent("");
+      richText.clearContent();
+    },
+    setSpoileredAttachmentUrls,
+    spoileredAttachmentUrlsRef,
+    syncComposerContentFromEditor,
+  });
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
     media.setUploadState({ status: "idle" });
@@ -273,7 +272,7 @@ function MessageComposerImpl({
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
-      trackDraftAuthoredContent(text);
+      trackAuthoredContent(text);
       contentRef.current = text;
       setComposerContentFromText(text);
       setPreviewContent(linkPreviewContent);
@@ -347,7 +346,7 @@ function MessageComposerImpl({
       restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
-      if (newlyPinnedPubkeys.length === 0) return;
+      if (!keepMentionedAgentsPinned || newlyPinnedPubkeys.length === 0) return;
       const sentChannelId = channelId;
       if (restoreAddressedAgentMentionsFrameRef.current !== null) {
         cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
@@ -969,6 +968,7 @@ function MessageComposerImpl({
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={composerDisabled}
+              gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending || mentionSendFlow.isPreparingMentionSend}

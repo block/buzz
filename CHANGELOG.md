@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.20
+
+### Desktop and shared changes
+
+- feat(desktop): add KLIPY GIF search to composers ([#5554](https://github.com/block/buzz/pull/5554)) ([`8471049c430073474939336dfc6aa98272bc8762`](https://github.com/block/buzz/commit/8471049c430073474939336dfc6aa98272bc8762))
+- fix(desktop): respect automatic mention preference after send ([#6837](https://github.com/block/buzz/pull/6837)) ([`e8cd7516e6df62c2a9025d7a821bf98e0e8f83b4`](https://github.com/block/buzz/commit/e8cd7516e6df62c2a9025d7a821bf98e0e8f83b4))
+
+### Other repository changes
+
+- fix(release): attribute desktop candidates to the operator ([#6831](https://github.com/block/buzz/pull/6831)) ([`820a8589971df49bb9285a236ce1e2955a301abd`](https://github.com/block/buzz/commit/820a8589971df49bb9285a236ce1e2955a301abd))
+- fix(ci): check out source in docker.yml merge job ([#6833](https://github.com/block/buzz/pull/6833)) ([`cae7f826b39b38e7d49a90d342499234dec007bf`](https://github.com/block/buzz/commit/cae7f826b39b38e7d49a90d342499234dec007bf))
+
+[Compare desktop-v0.5.19...desktop-v0.5.20](https://github.com/block/buzz/compare/desktop-v0.5.19...desktop-v0.5.20)
+
 ## v0.5.19
 
 ### Desktop and shared changes

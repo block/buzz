@@ -6,7 +6,7 @@ import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
-import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
+import { Selection, TextSelection } from "@tiptap/pm/state";
 import type { ResolvedPos } from "@tiptap/pm/model";
 
 import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
@@ -34,6 +34,7 @@ import { buildPlainTextProjection } from "./plainTextProjection";
 import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
+import { LinkPasteTrailingSpace } from "./linkPasteTrailingSpace";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -135,63 +136,6 @@ export type RichTextEditorOptions = {
    */
   onLinkShortcut?: () => boolean;
 };
-
-const PASTED_LINK_AT_END_RE =
-  /(?:^|\s)((?:https?:\/\/|www\.)[^\s]+|(?:github\.com|linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s]+)$/i;
-
-function shouldAppendSpaceAfterPaste(text: string): boolean {
-  const trimmedEnd = text.trimEnd();
-  if (!trimmedEnd || trimmedEnd.length !== text.length) return false;
-  return PASTED_LINK_AT_END_RE.test(trimmedEnd);
-}
-
-const LinkPasteTrailingSpace = Extension.create({
-  name: "linkPasteTrailingSpace",
-
-  addProseMirrorPlugins() {
-    return [
-      new Plugin({
-        props: {
-          handlePaste(view, event) {
-            const pastedText = event.clipboardData?.getData("text/plain") ?? "";
-            if (!shouldAppendSpaceAfterPaste(pastedText)) return false;
-
-            window.setTimeout(() => {
-              if (!view.dom.isConnected) return;
-              const { state } = view;
-              if (!state.selection.empty) return;
-
-              const from = state.selection.from;
-              if (from < state.doc.content.size) {
-                const nextText = state.doc.textBetween(
-                  from,
-                  Math.min(state.doc.content.size, from + 1),
-                  "\n",
-                  "\n",
-                );
-                if (/^\s$/.test(nextText)) return;
-              }
-
-              let transaction = state.tr.insertText(" ", from, from);
-              const linkMark = state.schema.marks.link;
-              if (linkMark) {
-                transaction = transaction.removeMark(from, from + 1, linkMark);
-              }
-              transaction = transaction.setSelection(
-                TextSelection.create(transaction.doc, from + 1),
-              );
-              transaction.setStoredMarks([]);
-              view.dispatch(transaction.scrollIntoView());
-              view.focus();
-            }, 0);
-
-            return false;
-          },
-        },
-      }),
-    ];
-  },
-});
 
 /**
  * Creates and manages a Tiptap editor configured for Markdown output.
@@ -478,7 +422,13 @@ export function useRichTextEditor({
         }).configure({
           openOnClick: false,
           autolink: true,
-          linkOnPaste: true,
+          // The composer's own paste handler owns every selected-text link
+          // paste (`createComposerLinkPasteHandler`). TipTap's `linkOnPaste`
+          // recognises the same URLs one layer down, and when our handler
+          // declines a selection it can't link cleanly, `linkOnPaste` still
+          // fires and partially links it. No ordering trick removes a second
+          // handler — the only fix is not to register it.
+          linkOnPaste: false,
           // Allow Buzz message links through TipTap's URL sanitiser.
           // http(s) and mailto are accepted by default; non-listed protocols are
           // stripped on paste/typed input.
