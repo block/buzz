@@ -1497,6 +1497,12 @@ test("create channel exposes templates when the library is empty", async ({
   const templateContainer = page.getByTestId(
     "create-channel-template-container",
   );
+  await expect(
+    page.getByTestId("create-channel-channel-type").getByRole("button"),
+  ).toHaveText(["Temporary", "Ongoing"]);
+  await expect(
+    page.getByTestId("create-channel-permissions").getByRole("button"),
+  ).toHaveText(["Private", "Public"]);
   await expect(templateContainer).toContainText("TemplateOptional");
   const typeBox = await typeContainer.boundingBox();
   const visibilityBox = await visibilityContainer.boundingBox();

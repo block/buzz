@@ -13,8 +13,8 @@ import { cn } from "@/shared/lib/cn";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
 
 const VISIBILITY_OPTIONS = [
-  { value: "open", label: "Public", Icon: Globe },
   { value: "private", label: "Private", Icon: Lock },
+  { value: "open", label: "Public", Icon: Globe },
 ] as const;
 
 export function ChannelPermissionsSettings({
