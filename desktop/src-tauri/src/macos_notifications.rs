@@ -196,7 +196,13 @@ fn request_notification_access_sync() -> Result<NotificationPermissionState, Str
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            // Badge must be requested here even though the dock badge is set via
+            // NSDockTile: once an app registers with UNUserNotificationCenter,
+            // macOS suppresses its dock badge (and hides the "Badge app icon"
+            // toggle in System Settings) unless Badge was part of the grant.
+            UNAuthorizationOptions::Alert
+                | UNAuthorizationOptions::Sound
+                | UNAuthorizationOptions::Badge,
             &handler,
         );
 
