@@ -70,6 +70,8 @@ pub mod relay_invite;
 pub mod relay_members;
 /// Deployment-global operator/moderator roster persistence.
 pub mod relay_operators;
+/// Event-reminder delivery query, claim, and release persistence.
+pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
 /// Replica freshness fence for keyset-cursor read routing.
@@ -92,6 +94,7 @@ pub use community::{
 };
 pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use reminder::DueReminder;
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
@@ -1766,65 +1769,6 @@ impl Db {
             }
         }
         Ok(outcome)
-    }
-
-    /// Query due reminders ready for delivery.
-    #[datastore_span(name = "query_due_reminders", system = "postgresql")]
-    pub async fn query_due_reminders(
-        &self,
-        now_secs: i64,
-        batch_limit: i64,
-    ) -> Result<Vec<event::DueReminder>> {
-        event::query_due_reminders(&self.pool, now_secs, batch_limit).await
-    }
-
-    /// Atomically claim a due reminder for delivery (cross-pod dedup).
-    #[datastore_span(name = "claim_due_reminder", system = "postgresql")]
-    pub async fn claim_due_reminder(
-        &self,
-        community_id: CommunityId,
-        event_id: &[u8],
-        event_created_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool> {
-        event::claim_due_reminder(&self.pool, community_id, event_id, event_created_at).await
-    }
-
-    /// Atomically claim a due reminder using a caller-supplied delivery stamp.
-    #[datastore_span(name = "claim_due_reminder_with_stamp", system = "postgresql")]
-    pub async fn claim_due_reminder_with_stamp(
-        &self,
-        community_id: CommunityId,
-        event_id: &[u8],
-        event_created_at: chrono::DateTime<chrono::Utc>,
-        delivery_stamp: i64,
-    ) -> Result<bool> {
-        event::claim_due_reminder_with_stamp(
-            &self.pool,
-            community_id,
-            event_id,
-            event_created_at,
-            delivery_stamp,
-        )
-        .await
-    }
-
-    /// Release a claimed due reminder after a publish failure.
-    #[datastore_span(name = "release_due_reminder", system = "postgresql")]
-    pub async fn release_due_reminder(
-        &self,
-        community_id: CommunityId,
-        event_id: &[u8],
-        event_created_at: chrono::DateTime<chrono::Utc>,
-        delivery_stamp: i64,
-    ) -> Result<bool> {
-        event::release_due_reminder(
-            &self.pool,
-            community_id,
-            event_id,
-            event_created_at,
-            delivery_stamp,
-        )
-        .await
     }
 
     /// Ensure a user record exists (upsert).
