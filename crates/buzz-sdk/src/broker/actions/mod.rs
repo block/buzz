@@ -75,19 +75,35 @@ pub const RESPOND_TO_MODES: [&str; 2] = ["owner-only", "anyone"];
 /// A public key in lowercase hex — the only identity this contract has.
 ///
 /// #6467 asks for identity to be separable from signing. This type is that
-/// separation made structural: it holds 64 hex characters of public key and has
-/// no counterpart in this module for the corresponding secret.
+/// separation made structural: it holds a public key and has no counterpart in
+/// this module for the corresponding secret.
+///
+/// # A value of this type is a real public key
+///
+/// 64 hex characters is a *shape*, not a key. The x coordinate of a
+/// secp256k1 point is what a pubkey is, and most 32-byte values are not one —
+/// `ffff…ff` is 64 valid hex characters and lies on no curve. Accepting shape
+/// alone would make this type's name a claim it does not check, and would push
+/// the first real rejection out to whichever consumer eventually converts the
+/// string to a key: a host resolving a mention, a relay filter, a signature
+/// check. That consumer fails at a point where the request has already been
+/// accepted, so [`Self::parse`] requires the point here instead.
+///
+/// The curve check is the `nostr` crate's, which this crate already depends on
+/// for events and signatures, so the contract and the events it carries agree on
+/// what a key is by construction rather than by two parallel implementations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PubkeyHex(String);
 
 impl PubkeyHex {
-    /// Parse a 64-character hex public key, normalizing to lowercase.
+    /// Parse a 64-character hex x-only public key, normalizing to lowercase.
     ///
     /// # Errors
     ///
     /// Returns [`SdkError::InvalidInput`] unless `value` is exactly 64 hex
-    /// characters.
+    /// characters **and** those bytes are a point on secp256k1. See the type
+    /// docs for why the curve check belongs here.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, SdkError> {
         let value = value.as_ref().trim();
         if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -95,7 +111,16 @@ impl PubkeyHex {
                 "pubkey must be 64 hex characters".into(),
             ));
         }
-        Ok(Self(value.to_ascii_lowercase()))
+        let value = value.to_ascii_lowercase();
+        // `PublicKey::from_hex` only decodes hex; `xonly` is the conversion that
+        // actually rejects a value that is not on the curve. Doing only the
+        // former here would leave this check believing it had run.
+        nostr::PublicKey::from_hex(&value)
+            .and_then(|key| key.xonly().map(|_| ()))
+            .map_err(|_| {
+                SdkError::InvalidInput("pubkey is not a valid secp256k1 x-only public key".into())
+            })?;
+        Ok(Self(value))
     }
 
     /// The hex representation.

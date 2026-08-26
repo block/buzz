@@ -287,54 +287,62 @@ impl BrokerRequest {
         self.action.action()
     }
 
-    /// Validate and normalize, then serialize once into the bytes every attempt
-    /// will send.
+    /// Validate and normalize into the only form execution-side code accepts.
     ///
-    /// This re-validates even though [`Self::new`] already did. That is not
-    /// redundant: every field of this struct is public and the type is
-    /// [`Deserialize`], so a value can reach here without ever passing through
-    /// [`Self::new`] — built with a struct literal, parsed from JSON, or mutated
-    /// after construction. Freezing bytes is the last point where anything can
-    /// be checked, so it normalizes here too and serializes the normalized copy.
-    /// Both paths therefore satisfy the same invariant: the frozen body contains
-    /// exactly what validation approved.
+    /// This is the **one normalization door**. It consumes the request, so the
+    /// un-normalized value is gone rather than sitting beside its normalized
+    /// copy waiting to be executed by mistake.
     ///
-    /// # Errors
+    /// # Why there is no `validate(&self)`
     ///
-    /// Returns [`SdkError`] when [`Self::validate`] fails, or
-    /// [`SdkError::InvalidInput`] if serialization fails.
-    pub fn prepare(mut self) -> Result<PreparedRequest, SdkError> {
-        self.validate_envelope()?;
-        self.action = self.action.validated()?;
-        let body = serde_json::to_vec(&self).map_err(|e| {
-            SdkError::InvalidInput(format!("broker request is not serializable: {e}"))
-        })?;
-        Ok(PreparedRequest {
-            request: self,
-            body,
-        })
-    }
-
-    /// Validate every field the host must agree on before executing anything.
+    /// There used to be, and it was a trap. It called the arguments' own
+    /// `validated()`, which *computes* a normalized copy, and then threw that
+    /// copy away and returned `Ok(())`. A hand-built request targeting
+    /// `"  helper  "` therefore validated successfully and still carried the
+    /// padding, so a host that trusted the verdict and executed the struct
+    /// looked up a name the validator never approved. [`Self::prepare`] was
+    /// safe, but a host cannot force its callers through the client's outgoing
+    /// path.
     ///
-    /// Callers validate before sending; the host revalidates on receipt,
-    /// because only the host's verdict is authoritative.
+    /// A check that returns a verdict about a value it does not change can
+    /// always drift from the value the caller keeps holding. So the verdict and
+    /// the normalized value are now the same thing: the only way to learn that a
+    /// request is valid is to receive the normalized [`ValidatedRequest`], and
+    /// the only way to execute one is to have it. "Validated but not
+    /// normalized" is unrepresentable rather than merely discouraged.
     ///
     /// # Errors
     ///
     /// Returns [`SdkError`] for a wrong `type`, an unsupported
     /// `protocolVersion` or `actionVersion`, a malformed `requestId`, or
     /// arguments that fail their own validation.
-    pub fn validate(&self) -> Result<(), SdkError> {
+    pub fn validated(mut self) -> Result<ValidatedRequest, SdkError> {
         self.validate_envelope()?;
-        self.action.validate()
+        self.action = self.action.validated()?;
+        Ok(ValidatedRequest(self))
+    }
+
+    /// Validate and normalize, then serialize once into the bytes every attempt
+    /// will send.
+    ///
+    /// A convenience for the client path; it is exactly
+    /// [`Self::validated`] followed by [`ValidatedRequest::prepare`], so the
+    /// bytes are frozen from the normalized value and there is no second
+    /// normalization to keep in step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when [`Self::validated`] fails, or
+    /// [`SdkError::InvalidInput`] if serialization fails.
+    pub fn prepare(self) -> Result<PreparedRequest, SdkError> {
+        self.validated()?.prepare()
     }
 
     /// Validate everything except the action arguments.
     ///
-    /// Split out so [`Self::prepare`] can check the envelope and then take the
-    /// normalized arguments from a single `validated` call, rather than
-    /// validating the arguments twice on the way to freezing bytes.
+    /// Split out so [`Self::validated`] can check the envelope and then take the
+    /// normalized arguments from a single `validated` call on the arguments,
+    /// rather than validating them twice.
     fn validate_envelope(&self) -> Result<(), SdkError> {
         if self.r#type != BROKER_REQUEST_TYPE {
             return Err(SdkError::InvalidInput(format!(
@@ -393,18 +401,90 @@ pub fn validate_request_id(request_id: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// A [`BrokerRequest`] that has been validated **and normalized**.
+///
+/// This is the type execution-side code accepts. Holding one is proof that every
+/// field passed its validator *and* that the value carries what the validator
+/// approved — not the caller's spelling of it. The two facts are inseparable
+/// because there is one way to obtain this type, [`BrokerRequest::validated`],
+/// which normalizes on the way through.
+///
+/// # Why the inner request is not reachable
+///
+/// The field is private and there is no accessor returning `&BrokerRequest`,
+/// only [`Self::action`] and the metadata below. A borrow of the inner value
+/// would let execution-side code clone it, mutate a public field, and execute
+/// the result — which is the "validated but not normalized" state this type
+/// exists to make unrepresentable. [`Self::into_request`] exists for a host that
+/// genuinely needs to move the whole envelope onward; it consumes the wrapper,
+/// so what it yields is no longer evidence of anything.
+///
+/// A host that receives bytes builds one the same way a client does: parse a
+/// [`BrokerRequest`], call [`BrokerRequest::validated`], execute what comes
+/// back. Only the host's verdict is authoritative, so it revalidates regardless
+/// of what the client did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedRequest(BrokerRequest);
+
+impl ValidatedRequest {
+    /// The action to execute, with its normalized arguments.
+    #[must_use]
+    pub fn args(&self) -> &ActionArgs {
+        &self.0.action
+    }
+
+    /// The action being invoked.
+    #[must_use]
+    pub fn action(&self) -> Action {
+        self.0.action()
+    }
+
+    /// The idempotency key the host keys replay on.
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        &self.0.request_id
+    }
+
+    /// Freeze the normalized request into the bytes every attempt will send.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidInput`] if serialization fails.
+    pub fn prepare(self) -> Result<PreparedRequest, SdkError> {
+        let body = serde_json::to_vec(&self.0).map_err(|e| {
+            SdkError::InvalidInput(format!("broker request is not serializable: {e}"))
+        })?;
+        Ok(PreparedRequest {
+            request: self.0,
+            body,
+        })
+    }
+
+    /// Consume this wrapper, yielding the normalized envelope.
+    ///
+    /// For a host that needs to move the whole request onward. The result is a
+    /// plain [`BrokerRequest`] with public fields, so it is no longer evidence
+    /// that anything was validated — which is why this consumes rather than
+    /// borrows.
+    #[must_use]
+    pub fn into_request(self) -> BrokerRequest {
+        self.0
+    }
+}
+
 /// A validated request together with the exact bytes to send.
 ///
 /// This is what [`BrokerClient::send`] takes, so the retry contract is
 /// structural rather than documented: the first attempt and every retry send
 /// `body` verbatim, and no implementation gets the chance to reserialize.
 ///
-/// Construct one with [`BrokerRequest::prepare`]. The typed [`BrokerRequest`] is
-/// retained privately and **deliberately not exposed**: an implementation that
-/// could reach the typed value could serialize it again, which is exactly the
-/// possibility freezing the bytes removes. What an implementation legitimately
-/// needs is correlation metadata, so that — and only that — is public:
-/// [`Self::request_id`] and [`Self::action`].
+/// Construct one with [`ValidatedRequest::prepare`], or with
+/// [`BrokerRequest::prepare`] which is the two steps together. The typed
+/// [`BrokerRequest`] is retained privately and **deliberately not exposed**: an
+/// implementation that could reach the typed value could serialize it again,
+/// which is exactly the possibility freezing the bytes removes. What an
+/// implementation legitimately needs is correlation metadata, so that — and only
+/// that — is public: [`Self::request_id`] and [`Self::action`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRequest {
     request: BrokerRequest,

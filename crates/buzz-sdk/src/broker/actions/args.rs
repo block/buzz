@@ -561,16 +561,15 @@ impl ActionArgs {
         }
     }
 
-    /// Validate the arguments in place.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the per-action validation error.
-    pub fn validate(&self) -> Result<(), SdkError> {
-        self.validated().map(|_| ())
-    }
-
     /// Return a normalized copy with every field validated.
+    ///
+    /// There is deliberately no `validate(&self)` beside this. One existed and
+    /// was the lower half of the same trap [`crate::broker::BrokerRequest::validated`]
+    /// describes: it called this method, dropped the normalized copy, and
+    /// returned `Ok(())` — so a caller could hold a padded value that had just
+    /// been pronounced valid. A verdict about a value nobody replaces is a
+    /// verdict that can drift from the value in hand, so the normalized copy is
+    /// the only thing this layer returns.
     ///
     /// # Errors
     ///

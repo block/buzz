@@ -222,7 +222,7 @@ fn every_action_round_trips_through_a_request_envelope() {
         let parsed: BrokerRequest = serde_json::from_value(json)
             .unwrap_or_else(|e| panic!("{} must deserialize: {e}", action.as_str()));
         assert_eq!(parsed, request);
-        parsed.validate().expect("round-tripped request is valid");
+        parsed.validated().expect("round-tripped request is valid");
     }
 }
 
@@ -724,7 +724,7 @@ fn envelope_metadata_must_match_this_protocol_version() {
     for bad in [0_u16, 2, 999] {
         let mut request = BrokerRequest::new("req-1", args()).unwrap();
         request.protocol_version = bad;
-        let error = request.validate().unwrap_err().to_string();
+        let error = request.validated().unwrap_err().to_string();
         assert!(error.contains("protocolVersion"), "unexpected: {error}");
 
         let mut response = BrokerResponse::new("req-1", failed());
@@ -734,12 +734,12 @@ fn envelope_metadata_must_match_this_protocol_version() {
 
     let mut wrong_action_version = BrokerRequest::new("req-1", args()).unwrap();
     wrong_action_version.action_version = 7;
-    let error = wrong_action_version.validate().unwrap_err().to_string();
+    let error = wrong_action_version.validated().unwrap_err().to_string();
     assert!(error.contains("actionVersion"), "unexpected: {error}");
 
     let mut wrong_request_type = BrokerRequest::new("req-1", args()).unwrap();
     wrong_request_type.r#type = BROKER_RESULT_TYPE.into();
-    assert!(wrong_request_type.validate().is_err());
+    assert!(wrong_request_type.validated().is_err());
 
     let mut wrong_response_type = BrokerResponse::new("req-1", failed());
     wrong_response_type.r#type = BROKER_REQUEST_TYPE.into();
@@ -1202,6 +1202,88 @@ fn pubkey_hex_rejects_anything_but_a_public_key() {
     assert!(serde_json::from_value::<PubkeyHex>(serde_json::json!("nothex")).is_err());
 }
 
+/// 64 hex characters is a *shape*; a public key is a point on secp256k1. Most
+/// 32-byte values are not one, so accepting shape alone let this type's name
+/// promise something it never checked, and deferred the first real rejection to
+/// whichever consumer eventually converted the string to a key — by which point
+/// the request had already been accepted.
+///
+/// The fixtures are ordered the way the type is used: the real key must pass
+/// untouched first, so a rejection below is about the curve check and not about a
+/// probe that would have failed for any input.
+#[test]
+fn a_pubkey_must_be_a_point_on_the_curve_not_merely_hex() {
+    /// The check this type now delegates to, spelled out independently: a value
+    /// is a key only if it converts to an x-only key, which is what `xonly`
+    /// does. `from_hex` alone is a hex decode and answers nothing — asking only
+    /// it is how the gap survived a `nostr`-backed check in the first place.
+    fn is_a_point(hex: &str) -> bool {
+        nostr::PublicKey::from_hex(hex)
+            .and_then(|key| key.xonly().map(|_| ()))
+            .is_ok()
+    }
+
+    // A real key passes, in both spellings, and is unchanged by the new check.
+    assert!(is_a_point(PUBKEY), "fixture must be a real point");
+    assert_eq!(
+        PubkeyHex::parse(PUBKEY).expect("a real key parses"),
+        pubkey()
+    );
+    assert_eq!(
+        PubkeyHex::parse(PUBKEY.to_ascii_uppercase()).expect("case is still normalized"),
+        pubkey()
+    );
+
+    // Well-formed hex that is not on the curve. Each is asserted to be a
+    // non-point first, so the rejection cannot be for an unrelated reason.
+    //
+    // The last fixture is the important one: `x = 5` is a perfectly in-range
+    // field element, so it is not rejected for overflowing the field the way the
+    // first three are — there is simply no y with y² = x³ + 7. A check that
+    // only bounds the value against the field prime would accept it, so this is
+    // what pins the test to a real curve check rather than a range check.
+    for junk in [
+        "f".repeat(64),
+        "0".repeat(64),
+        // The field prime p itself: out of range by exactly one.
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f".into(),
+        format!("{:0>64}", 5),
+    ] {
+        assert!(
+            !is_a_point(&junk),
+            "fixture \"{junk}\" must not be a valid point"
+        );
+        let error = PubkeyHex::parse(&junk)
+            .expect_err("64 hex characters that are not a point must be rejected")
+            .to_string();
+        assert!(
+            error.contains("x-only"),
+            "rejection must name the curve, not the shape: {error}"
+        );
+        // The serde door takes the same check: `PubkeyHex` deserializes through
+        // `parse`, so a host cannot ship a non-point where a constructor would
+        // have refused one.
+        assert!(
+            serde_json::from_value::<PubkeyHex>(serde_json::json!(junk)).is_err(),
+            "the wire door must reject the non-point \"{junk}\" too"
+        );
+        // And through a payload, since that is the shape a host actually sends.
+        // The honest form parses, so this rejects for the key and not the shape.
+        let target = |value: &str| {
+            serde_json::json!({
+                "action": "agents.delete",
+                "args": { "target": { "pubkey": value } },
+            })
+        };
+        serde_json::from_value::<ActionArgs>(target(PUBKEY))
+            .expect("a real key in a target payload must parse");
+        assert!(
+            serde_json::from_value::<ActionArgs>(target(&junk)).is_err(),
+            "an agents.delete target must reject the non-point \"{junk}\""
+        );
+    }
+}
+
 // ── Argument validation ─────────────────────────────────────────────────────
 
 /// Boundaries of every shared validator, in one table.
@@ -1305,6 +1387,99 @@ fn validators_accept_and_reject_at_their_boundaries() {
     }
     .validated()
     .is_err());
+}
+
+/// Validation must be **inseparable from normalization**: there must be no way
+/// to learn that a request is valid while still holding the un-normalized value.
+///
+/// The bug this pins: `validate(&self)` called the arguments' `validated()`,
+/// which *computes* a normalized copy, then dropped the copy and returned
+/// `Ok(())`. A hand-built request targeting `"  helper  "` therefore passed
+/// validation and still carried the padding, so a host that trusted the verdict
+/// and executed the struct looked up a name the validator never approved.
+/// `prepare()` was safe, but a host cannot force its callers through the client's
+/// outgoing path.
+///
+/// The fix is typed, so this test asserts the *shape* of the API and not just one
+/// call's behaviour: the only route to a verdict is `validated()`, which consumes
+/// the request and hands back a `ValidatedRequest` whose arguments are already
+/// normalized. The un-normalized value is gone rather than sitting beside its
+/// approved copy. That the old method no longer exists is enforced at compile
+/// time by every other caller in this file having had to change.
+#[test]
+fn a_request_cannot_be_validated_without_being_normalized() {
+    let padded = || {
+        ActionArgs::AgentsDelete(AgentsDeleteArgs {
+            target: AgentTarget::Name("  helper  ".into()),
+        })
+    };
+    let trimmed = ActionArgs::AgentsDelete(AgentsDeleteArgs {
+        target: AgentTarget::Name("helper".into()),
+    });
+
+    // A request built by hand, bypassing `new` — the shape the reviewer used.
+    let hand_built = BrokerRequest {
+        r#type: BROKER_REQUEST_TYPE.into(),
+        protocol_version: BROKER_PROTOCOL_VERSION,
+        request_id: "req-trap".into(),
+        action_version: 1,
+        action: padded(),
+    };
+    let validated = hand_built
+        .validated()
+        .expect("a padded name is valid, just not canonical");
+
+    // The verdict and the normalized value are the same object, so an executor
+    // holding the verdict cannot be holding the padding.
+    assert_eq!(
+        validated.args(),
+        &trimmed,
+        "a validated request must carry the normalized arguments"
+    );
+    assert_eq!(validated.action(), Action::AgentsDelete);
+    assert_eq!(validated.request_id(), "req-trap");
+
+    // Freezing from the verdict carries the normalized value onto the wire.
+    let body = String::from_utf8(
+        validated
+            .clone()
+            .prepare()
+            .expect("prepares")
+            .body()
+            .to_vec(),
+    )
+    .expect("body is utf8");
+    assert!(
+        body.contains(r#""name":"helper""#) && !body.contains("  helper  "),
+        "frozen body still carries the unnormalized name: {body}"
+    );
+
+    // Moving the envelope onward yields the normalized request, not the input.
+    assert_eq!(validated.into_request().action, trimmed);
+
+    // The envelope is still checked, so `validated` is not merely a normalizer:
+    // an invalid envelope produces no verdict at all.
+    let bad_version = BrokerRequest {
+        r#type: BROKER_REQUEST_TYPE.into(),
+        protocol_version: 99,
+        request_id: "req-trap".into(),
+        action_version: 1,
+        action: padded(),
+    };
+    assert!(bad_version.validated().is_err());
+
+    // And arguments that cannot be normalized are rejected rather than
+    // normalized to something the caller did not ask for.
+    let empty_name = BrokerRequest {
+        r#type: BROKER_REQUEST_TYPE.into(),
+        protocol_version: BROKER_PROTOCOL_VERSION,
+        request_id: "req-trap".into(),
+        action_version: 1,
+        action: ActionArgs::AgentsDelete(AgentsDeleteArgs {
+            target: AgentTarget::Name("   ".into()),
+        }),
+    };
+    assert!(empty_name.validated().is_err());
 }
 
 /// Validation normalizes, so the frozen body must carry the normalized value —
