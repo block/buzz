@@ -410,6 +410,54 @@ test("renders nothing while the editor is unfocused", async () => {
   );
   assert.ok(view.getByTestId("mention-autocomplete-layer"));
 });
+
+test("container presses do not blur the editor out from under the overlay", async () => {
+  const React = await import("react");
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const mention = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  const selected = [];
+  const pinnedChanges = [];
+  const view = render(
+    React.createElement(MentionAutocomplete, {
+      suggestions: [mention],
+      selectedIndex: 0,
+      isEditorFocused: true,
+      onSelect: (value) => selected.push(value),
+      keepMentionedAgentsPinned: true,
+      onKeepMentionedAgentsPinnedChange: (value) => pinnedChanges.push(value),
+    }),
+  );
+
+  // fireEvent returns false when the dispatched event was canceled, which is
+  // what keeps a contenteditable from losing focus on mousedown.
+  assert.equal(
+    fireEvent.mouseDown(view.getByTestId("mention-autocomplete")),
+    false,
+  );
+
+  const options = view.getByRole("button", { name: "Options" });
+  assert.equal(fireEvent.mouseDown(options.parentElement), false);
+
+  // A label hands focus to its control from the click default action, which
+  // no mousedown guard can cancel, so the label drives the switch itself.
+  fireEvent.click(options);
+  assert.equal(
+    fireEvent.click(view.getByText("Automatically mention agents")),
+    false,
+  );
+  assert.deepEqual(pinnedChanges, [false]);
+
+  // The row buttons must keep selecting: preventing mousedown on the
+  // containers, not pointerdown, leaves their compatibility events intact.
+  fireEvent.mouseDown(view.getByRole("button", { name: "Mention Agent Ada" }));
+  assert.deepEqual(selected, [mention]);
+});
+
 function suggestion(agentProvenance) {
   return {
     pubkey: "1".repeat(64),

@@ -48,6 +48,7 @@ export const ChannelAutocomplete = React.memo(function ChannelAutocomplete({
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
     >
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown here (scrollbar, padding ring) blurs the editor, and the focus gate above would unmount the overlay mid-press. */}
       <div
         className={cn(
           "max-h-48 overflow-y-auto rounded-xl p-1",
@@ -57,6 +58,7 @@ export const ChannelAutocomplete = React.memo(function ChannelAutocomplete({
             : "origin-bottom slide-in-from-bottom-1",
           POPOVER_SURFACE_CLASS,
         )}
+        onMouseDown={(event) => event.preventDefault()}
         ref={listRef}
         style={POPOVER_SHADOW_STYLE}
       >

@@ -755,6 +755,44 @@ test("the unfocused main composer keeps its dismissed mention menu closed throug
   );
 });
 
+test("pressing a mention overlay's own container keeps it open", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await composer.getByTestId("message-insert-mention").click();
+  const list = composer.getByTestId("mention-autocomplete");
+  await expect(list).toBeVisible();
+  await expect(input).toBeFocused();
+
+  // A mousedown landing on the list container itself — its padding ring here,
+  // a native scrollbar on platforms that render one — steals focus from the
+  // editor unless the default is prevented, and the focus gate would then
+  // unmount the menu mid-press.
+  const listBox = await list.boundingBox();
+  if (!listBox) throw new Error("mention list is not laid out");
+  await list.click({ position: { x: 2, y: listBox.height / 2 } });
+  await expect(input).toBeFocused();
+  await expect(list).toBeVisible();
+
+  // Same hazard on the options surface, where it needs no exotic scrollbar
+  // setting to reproduce: the switch's label text is a container press, so the
+  // overlay used to vanish before the forwarded click reached the switch.
+  await composer.getByTestId("mention-options-trigger").click();
+  const preference = composer.getByTestId("mention-keep-agents-pinned-toggle");
+  await expect(preference).toHaveAttribute("data-state", "checked");
+  await composer
+    .getByText("Automatically mention agents", { exact: true })
+    .click();
+  await expect(preference).toHaveAttribute("data-state", "unchecked");
+  await expect(input).toBeFocused();
+  await expect(list).toBeVisible();
+});
+
 test("a failed always-mentioned send shakes the composer avatar without replaying its selection animation", async ({
   page,
 }) => {

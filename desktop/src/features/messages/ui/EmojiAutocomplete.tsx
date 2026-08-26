@@ -57,6 +57,7 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
     >
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown here blurs the editor, and the focus gate above would unmount the overlay mid-press. The scroll element lives inside VirtualizedList, but its mousedown bubbles to this wrapper and preventDefault acts on the same event, so scrollbar presses are covered too. */}
       <div
         className={cn(
           "rounded-xl p-1",
@@ -67,6 +68,7 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
           POPOVER_SURFACE_CLASS,
         )}
         data-testid="emoji-autocomplete"
+        onMouseDown={(event) => event.preventDefault()}
         style={POPOVER_SHADOW_STYLE}
       >
         <VirtualizedList

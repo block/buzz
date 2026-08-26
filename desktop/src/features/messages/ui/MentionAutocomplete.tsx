@@ -178,12 +178,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       <div className="w-full max-w-2xl">
         {onKeepMentionedAgentsPinnedChange ? (
           <div className="mb-2 flex justify-end">
+            {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown on this surface (its padding, the switch's label) blurs the editor, and the focus gate above would unmount the overlay before the click lands. */}
             <div
               className={cn(
                 "max-w-full overflow-hidden rounded-xl text-popover-foreground ring-1 ring-border/50 transition-[width] duration-200 ease-out",
                 POPOVER_SURFACE_CLASS,
                 optionsOpen ? "w-72" : "w-24",
               )}
+              onMouseDown={(event) => event.preventDefault()}
               ref={optionsSurfaceRef}
               style={POPOVER_SHADOW_STYLE}
             >
@@ -202,9 +204,23 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   transition={{ duration: 0.16, ease: "easeOut" }}
                 >
                   <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2">
+                    {/* A label moves focus to its control from the click
+                        default action, not from mousedown, so the surface's
+                        mousedown guard alone can't keep the editor focused
+                        here. Cancel the forwarding and drive the switch
+                        directly; the association still names the control for
+                        assistive tech, which reaches the switch by keyboard
+                        without going through this label. */}
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: pointer-only affordance; the switch it labels is the keyboard-accessible path. */}
                     <label
                       className="flex min-w-0 flex-col"
                       htmlFor={keepPinnedSwitchId}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onKeepMentionedAgentsPinnedChange?.(
+                          !keepMentionedAgentsPinned,
+                        );
+                      }}
                     >
                       <span className="text-sm font-medium">
                         Automatically mention agents
@@ -247,6 +263,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             </div>
           </div>
         ) : null}
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, same as the options surface — here it covers presses on the scrollbar and the list's padding ring. */}
         <div
           className={cn(
             "max-h-48 w-full overflow-y-auto rounded-xl p-1",
@@ -257,6 +274,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             POPOVER_SURFACE_CLASS,
           )}
           data-testid="mention-autocomplete"
+          onMouseDown={(event) => event.preventDefault()}
           onScroll={handleScroll}
           ref={listRef}
           style={POPOVER_SHADOW_STYLE}
