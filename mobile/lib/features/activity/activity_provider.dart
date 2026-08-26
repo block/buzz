@@ -5,9 +5,22 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
+import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';
+
+typedef DmResurfaceAction = Future<String> Function(List<String> pubkeys);
+
+final dmResurfaceActionProvider = Provider<DmResurfaceAction>(
+  (ref) => (pubkeys) async {
+    final channel = await ref
+        .read(channelActionsProvider)
+        .openDm(pubkeys: pubkeys);
+    return channel.id;
+  },
+);
 
 /// Builds the Activity inbox feed over the relay websocket.
 ///
@@ -43,6 +56,9 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   int? _refreshGeneration;
   bool _refreshQueued = false;
   int _subscriptionGeneration = 0;
+  final Set<String> _handledDmResurfaceEventIds = {};
+  final Set<String> _pendingDmResurfaceChannelIds = {};
+  String? _dmResurfaceScope;
 
   @override
   Future<HomeFeedResponse> build() async {
@@ -54,6 +70,14 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     ref.watch(channelsProvider.select(_dmChannelKey));
 
     final generation = ++_subscriptionGeneration;
+    final currentPubkey = ref.read(myPubkeyProvider)?.toLowerCase();
+    final currentScope =
+        '${ref.read(relayConfigProvider).baseUrl}\u0000$currentPubkey';
+    if (_dmResurfaceScope != currentScope) {
+      _dmResurfaceScope = currentScope;
+      _handledDmResurfaceEventIds.clear();
+      _pendingDmResurfaceChannelIds.clear();
+    }
     _clearLiveSubscriptions();
     ref.onDispose(() {
       _subscriptionGeneration += 1;
@@ -84,7 +108,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           since: since,
           limit: 100,
         ),
-        (_) => _scheduleLiveRefresh(generation),
+        (event) => _handleAddressedLiveEvent(event, generation),
       );
       if (generation != _subscriptionGeneration) {
         unsubscribeAddressed();
@@ -117,6 +141,82 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       if (generation == _subscriptionGeneration) {
         debugPrint('[ActivityNotifier] live subscription failed: $error');
       }
+    }
+  }
+
+  void _handleAddressedLiveEvent(NostrEvent event, int generation) {
+    _scheduleLiveRefresh(generation);
+    final myPk = ref.read(myPubkeyProvider);
+    if (myPk == null || !isIncomingDmMessageEvent(event, myPk)) {
+      return;
+    }
+    if (!ref.read(channelsProvider.notifier).hasLoaded) {
+      unawaited(
+        _resurfaceAfterChannelDiscovery(event, myPk, _dmResurfaceScope),
+      );
+      return;
+    }
+    unawaited(_resurfaceHiddenDm(event, myPk, generation));
+  }
+
+  Future<void> _resurfaceAfterChannelDiscovery(
+    NostrEvent event,
+    String myPk,
+    String? expectedScope,
+  ) async {
+    try {
+      await ref.read(channelsProvider.future);
+    } catch (error) {
+      if (expectedScope == _dmResurfaceScope) {
+        debugPrint(
+          '[ActivityNotifier] channel discovery failed before DM resurface: $error',
+        );
+      }
+      return;
+    }
+    if (expectedScope != _dmResurfaceScope) return;
+    await _resurfaceHiddenDm(event, myPk, _subscriptionGeneration);
+  }
+
+  Future<void> _resurfaceHiddenDm(
+    NostrEvent event,
+    String myPk,
+    int generation,
+  ) async {
+    final channelId = event.channelId;
+    if (channelId == null || generation != _subscriptionGeneration) return;
+    final channelsNotifier = ref.read(channelsProvider.notifier);
+    if (!channelsNotifier.hasLoaded ||
+        !channelsNotifier.hiddenDmIds.contains(channelId) ||
+        !_handledDmResurfaceEventIds.add(event.id)) {
+      return;
+    }
+    if (!_pendingDmResurfaceChannelIds.add(channelId)) return;
+
+    try {
+      final members = await ref.read(channelMembersProvider(channelId).future);
+      if (generation != _subscriptionGeneration) return;
+      final peers = dmPeerPubkeysFromMembers(
+        members.map((member) => member.pubkey),
+        myPk,
+      );
+      if (peers.isEmpty) return;
+      final openedChannelId = await ref.read(dmResurfaceActionProvider)(
+        peers.toList(),
+      );
+      if (generation != _subscriptionGeneration) return;
+      if (openedChannelId != channelId) {
+        throw StateError('Relay reopened a different DM conversation.');
+      }
+    } catch (error) {
+      _handledDmResurfaceEventIds.remove(event.id);
+      if (generation == _subscriptionGeneration) {
+        debugPrint(
+          '[ActivityNotifier] failed to resurface hidden DM $channelId: $error',
+        );
+      }
+    } finally {
+      _pendingDmResurfaceChannelIds.remove(channelId);
     }
   }
 

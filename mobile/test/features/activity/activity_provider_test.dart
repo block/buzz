@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -299,6 +300,211 @@ void main() {
   );
 
   test(
+    'live activity resurfaces a hidden DM through the existing open action',
+    () async {
+      const self =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      const bob =
+          '3333333333333333333333333333333333333333333333333333333333333333';
+      final session = _RecordingSessionNotifier();
+      final reopened = <List<String>>[];
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(
+              const <Channel>[],
+              hiddenDmIds: const {'hidden-dm'},
+            ),
+          ),
+          channelMembersProvider('hidden-dm').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: bob,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopened.add(pubkeys);
+            return 'hidden-dm';
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      session.emit(
+        const NostrEvent(
+          id: 'hidden-dm-message',
+          pubkey: alice,
+          createdAt: 1_700_000_000,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['p', self],
+            ['h', 'hidden-dm'],
+          ],
+          content: 'Hello again',
+          sig: '',
+        ),
+      );
+
+      await _waitFor(() => reopened.isNotEmpty);
+      expect(reopened, [
+        [alice, bob],
+      ]);
+    },
+  );
+
+  test(
+    'queues a hidden DM message until channel discovery completes',
+    () async {
+      const self =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final session = _RecordingSessionNotifier();
+      late _DeferredChannelsNotifier channels;
+      final reopened = <List<String>>[];
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => channels = _DeferredChannelsNotifier(
+              hiddenDmIds: const {'hidden-dm'},
+            ),
+          ),
+          channelMembersProvider('hidden-dm').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopened.add(pubkeys);
+            return 'hidden-dm';
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(channelsProvider);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      session.emit(
+        const NostrEvent(
+          id: 'hidden-dm-during-discovery',
+          pubkey: alice,
+          createdAt: 1_700_000_000,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['p', self],
+            ['h', 'hidden-dm'],
+          ],
+          content: 'Hello during startup',
+          sig: '',
+        ),
+      );
+      expect(reopened, isEmpty);
+
+      channels.complete(const <Channel>[]);
+      await container.read(channelsProvider.future);
+      await _waitFor(() => reopened.isNotEmpty);
+      expect(reopened, [
+        [alice],
+      ]);
+    },
+  );
+
+  test('a suspended membership read cannot mutate a rebuilt scope', () async {
+    const self =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+    const alice =
+        '2222222222222222222222222222222222222222222222222222222222222222';
+    final session = _RecordingSessionNotifier();
+    final membersRequested = Completer<void>();
+    final membersGate = Completer<List<ChannelMember>>();
+    var reopenCount = 0;
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue(self),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(
+            const <Channel>[],
+            hiddenDmIds: const {'hidden-dm'},
+          ),
+        ),
+        channelMembersProvider('hidden-dm').overrideWith((ref) {
+          if (!membersRequested.isCompleted) membersRequested.complete();
+          return membersGate.future;
+        }),
+        dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+          reopenCount += 1;
+          return 'hidden-dm';
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    session.emit(
+      const NostrEvent(
+        id: 'hidden-dm-stale-message',
+        pubkey: alice,
+        createdAt: 1_700_000_000,
+        kind: EventKind.streamMessageV2,
+        tags: [
+          ['p', self],
+          ['h', 'hidden-dm'],
+        ],
+        content: 'Hello again',
+        sig: '',
+      ),
+    );
+    await membersRequested.future;
+    container.invalidate(activityProvider);
+    await container.read(activityProvider.future);
+    membersGate.complete([
+      ChannelMember(pubkey: self, role: 'member', joinedAt: DateTime(2026)),
+      ChannelMember(pubkey: alice, role: 'member', joinedAt: DateTime(2026)),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(reopenCount, 0);
+  });
+
+  test(
     'serializes live refreshes and catches up events queued mid-fetch',
     () async {
       final session = _RecordingSessionNotifier();
@@ -409,9 +615,40 @@ void main() {
 
 class _FixedChannelsNotifier extends ChannelsNotifier {
   final List<Channel> channels;
+  final Set<String> _hiddenDmIds;
 
-  _FixedChannelsNotifier(this.channels);
+  _FixedChannelsNotifier(this.channels, {Set<String> hiddenDmIds = const {}})
+    : _hiddenDmIds = hiddenDmIds;
+
+  @override
+  bool get hasLoaded => true;
+
+  @override
+  Set<String> get hiddenDmIds => _hiddenDmIds;
 
   @override
   Future<List<Channel>> build() async => channels;
+}
+
+class _DeferredChannelsNotifier extends ChannelsNotifier {
+  _DeferredChannelsNotifier({required Set<String> hiddenDmIds})
+    : _hiddenDmIds = hiddenDmIds;
+
+  final Set<String> _hiddenDmIds;
+  final _gate = Completer<List<Channel>>();
+  bool _hasLoaded = false;
+
+  @override
+  bool get hasLoaded => _hasLoaded;
+
+  @override
+  Set<String> get hiddenDmIds => _hiddenDmIds;
+
+  @override
+  Future<List<Channel>> build() => _gate.future;
+
+  void complete(List<Channel> channels) {
+    _hasLoaded = true;
+    _gate.complete(channels);
+  }
 }

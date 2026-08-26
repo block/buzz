@@ -53,6 +53,7 @@ import {
   CHANNEL_MEMBERS_STALE_TIME_MS,
   channelMembersQueryKey,
 } from "@/features/channels/rosterFreshness";
+import { dmVisibilityQueryKey } from "@/features/channels/useHiddenDmIds";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -537,6 +538,14 @@ export function useOpenDmMutation() {
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
         upsertCachedChannel(current, openedChannel),
       );
+      queryClient.setQueriesData<Set<string>>(
+        { queryKey: dmVisibilityQueryKey },
+        (current) => {
+          const next = new Set(current);
+          next.delete(openedChannel.id);
+          return next;
+        },
+      );
     },
     onSettled: () => {
       // The relay-returned DM is already in the cache. Mark the list stale so
@@ -546,6 +555,7 @@ export function useOpenDmMutation() {
         queryKey: channelsQueryKey,
         refetchType: "none",
       });
+      void queryClient.invalidateQueries({ queryKey: dmVisibilityQueryKey });
     },
   });
 }
@@ -591,8 +601,17 @@ export function useHideDmMutation() {
         queryClient.setQueryData(channelsQueryKey, context.previous);
       }
     },
+    onSuccess: (_data, channelId) => {
+      queryClient.setQueriesData<Set<string>>(
+        { queryKey: dmVisibilityQueryKey },
+        (current) => new Set(current).add(channelId),
+      );
+    },
     onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: dmVisibilityQueryKey }),
+      ]);
     },
   });
 }
