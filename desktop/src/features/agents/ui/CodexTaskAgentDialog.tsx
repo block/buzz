@@ -123,7 +123,10 @@ export function CodexTaskAgentDialog({
   }, [open]);
 
   React.useEffect(() => {
-    if (!open || filteredTasks.length === 0) return;
+    // Selecting a remote task intentionally clears the local task id. Do not
+    // interpret that empty id as "nothing selected" and immediately restore
+    // the first local task on the next render.
+    if (!open || remoteTaskId || filteredTasks.length === 0) return;
 
     const query = search.trim().toLocaleLowerCase();
     const exactMatch = query
@@ -137,7 +140,7 @@ export function CodexTaskAgentDialog({
       setTaskId(nextTask.id);
       setName(taskLabel(nextTask));
     }
-  }, [filteredTasks, open, search, taskId, tasks]);
+  }, [filteredTasks, open, remoteTaskId, search, taskId, tasks]);
 
   function reset() {
     setSearch("");
