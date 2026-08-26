@@ -17,6 +17,8 @@ type FocusThreadDrawerProps = {
   label?: string;
   hasActiveEdit?: boolean;
   onClose: () => void;
+  /** Resolve an explicit focus target after this drawer has been dismissed. */
+  restoreFocusTarget?: () => HTMLElement | null;
 };
 
 /**
@@ -148,6 +150,7 @@ export function FocusThreadDrawer({
   label = "Thread",
   hasActiveEdit = false,
   onClose,
+  restoreFocusTarget,
 }: FocusThreadDrawerProps) {
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
@@ -188,6 +191,11 @@ export function FocusThreadDrawer({
     return () => {
       const previousFocus = previousFocusRef.current;
       requestAnimationFrame(() => {
+        const explicitTarget = restoreFocusTarget?.();
+        if (explicitTarget) {
+          explicitTarget.focus({ preventScroll: true });
+          return;
+        }
         // A real dismissal keeps focus mode selected; a presentation switch
         // has already selected split mode and owns focus inside the new panel.
         if (getThreadViewMode() === "focus") {
@@ -195,7 +203,7 @@ export function FocusThreadDrawer({
         }
       });
     };
-  }, []);
+  }, [restoreFocusTarget]);
 
   return (
     <div

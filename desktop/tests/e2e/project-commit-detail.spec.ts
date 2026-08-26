@@ -855,10 +855,35 @@ test("project workspace sheet stays independent from an open thread", async ({
   await expect(workspaceDrawer.getByTestId("message-thread-panel")).toHaveCount(
     0,
   );
+  const coveredThreadSurface = page.getByTestId("thread-surface");
+  await expect(coveredThreadSurface).toHaveAttribute("inert", "");
+  await expect(coveredThreadSurface).toHaveAttribute("aria-hidden", "true");
+  const coveredSnapshot = await page.locator("body").ariaSnapshot();
+  expect(coveredSnapshot).not.toContain(threadRootContent);
+  expect(coveredSnapshot).toContain("Tasks");
+  expect(coveredSnapshot).toContain("Close panel");
 
-  await workspaceDrawer.getByTestId("auxiliary-panel-close").click();
+  const workspaceClose = workspaceDrawer.getByTestId("auxiliary-panel-close");
+  await workspaceClose.focus();
+  await expect(workspaceClose).toBeFocused();
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press("Tab");
+    expect(
+      await page.evaluate(
+        () =>
+          document.activeElement?.closest('[data-testid="thread-surface"]') !==
+          null,
+      ),
+    ).toBe(false);
+  }
+
+  await workspaceClose.click();
   await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  const threadClose = coveredThreadSurface.getByTestId("auxiliary-panel-close");
+  await expect(threadClose).toBeFocused();
+  await expect(coveredThreadSurface).not.toHaveAttribute("inert", "");
+  await expect(coveredThreadSurface).not.toHaveAttribute("aria-hidden", "true");
 
   await page.setViewportSize({ height: 1080, width: 1920 });
   const splitThreadPane = page
@@ -892,6 +917,10 @@ test("project workspace sheet stays independent from an open thread", async ({
     },
   );
   expect(workspaceCoversThreadDivider).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
+  await expect(splitThreadPane).toBeVisible();
+  await expect(threadClose).toBeFocused();
 });
 
 test("commit detail opens from the commits feed with a diff", async ({

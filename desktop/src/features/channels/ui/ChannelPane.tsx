@@ -30,6 +30,10 @@ import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThre
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { IdleAuxiliaryPanel } from "@/features/channels/ui/IdleAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
+import {
+  ThreadPanelSurface,
+  useThreadPanelSurface,
+} from "@/features/channels/ui/ThreadPanelSurface";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
 import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
@@ -182,6 +186,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
+  const { ref: threadSurfaceRef, restoreFocusTarget } = useThreadPanelSurface();
   const { goChannel } = useAppNavigation();
   const prepareDmSendChannel = usePrepareDmSendChannel(
     activeChannel,
@@ -513,20 +518,19 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       <React.Fragment key={options.key ?? testId}>{panel}</React.Fragment>
     );
-  const wrapThreadPanel = (panel: React.ReactNode) =>
-    useFocusThreadDrawer ? (
-      <FocusThreadDrawer
-        channelName={activeChannel?.name ?? "channel"}
-        escapeEnabled={!showIdleAuxiliaryOverThread}
-        hasActiveEdit={threadEditTarget !== null}
-        key={THREAD_SURFACE_KEY}
-        onClose={onCloseThread}
-      >
-        {panel}
-      </FocusThreadDrawer>
-    ) : (
-      wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
-    );
+  const wrapThreadPanel = (panel: React.ReactNode) => (
+    <ThreadPanelSurface
+      channelName={activeChannel?.name ?? "channel"}
+      covered={showIdleAuxiliaryOverThread}
+      hasActiveEdit={threadEditTarget !== null}
+      isFocusDrawer={useFocusThreadDrawer}
+      key={THREAD_SURFACE_KEY}
+      onClose={onCloseThread}
+      ref={threadSurfaceRef}
+    >
+      {useFocusThreadDrawer ? panel : wrapAux(panel, "message-thread-panel")}
+    </ThreadPanelSurface>
+  );
   const wrapIdlePanel = (panel: React.ReactNode) =>
     useFocusIdleDrawer && onCloseIdleAuxiliaryPanel ? (
       <FocusThreadDrawer
@@ -534,6 +538,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         key="idle-auxiliary-surface"
         label={idleAuxiliaryTitle || "Panel"}
         onClose={onCloseIdleAuxiliaryPanel}
+        restoreFocusTarget={restoreFocusTarget}
       >
         {panel}
       </FocusThreadDrawer>
