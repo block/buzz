@@ -1411,7 +1411,16 @@ declare global {
     }) => unknown;
     __BUZZ_E2E_SEED_MOCK_REMINDERS__?: (reminders: RelayEvent[]) => void;
     __BUZZ_E2E_QUERY_CLIENT__?: {
-      invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
+      invalidateQueries: (filters: {
+        queryKey: readonly unknown[];
+        exact?: boolean;
+      }) => unknown;
+      getQueryState: (queryKey: readonly unknown[]) =>
+        | {
+            fetchStatus: "fetching" | "paused" | "idle";
+            status: "pending" | "error" | "success";
+          }
+        | undefined;
     };
     __BUZZ_E2E_MD_PARSE_COUNT__?: () => number;
     /**

@@ -18,6 +18,7 @@ import {
   getAgentIdentityPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentDirectoryReady,
   isAgentMentionChannelType,
   rememberSelectedAgentPubkeys,
   uniqueAutocompleteLabels,
@@ -99,14 +100,8 @@ export function useMentions(
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
-  const managedAgentDirectoryReady =
-    managedAgentsQuery.data !== undefined &&
-    managedAgentsQuery.error === null &&
-    !managedAgentsQuery.isFetching;
-  const relayAgentDirectoryReady =
-    relayAgentsQuery.data !== undefined &&
-    relayAgentsQuery.error === null &&
-    !relayAgentsQuery.isFetching;
+  const managedAgentDirectoryReady = isAgentDirectoryReady(managedAgentsQuery);
+  const relayAgentDirectoryReady = isAgentDirectoryReady(relayAgentsQuery);
   const agentDirectoriesReady =
     managedAgentDirectoryReady && relayAgentDirectoryReady;
   const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
@@ -228,12 +223,21 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
-  // Identity-cached (shared with the timeline's roster derivations) — the
-  // Set is built once per distinct roster instead of per consumer.
-  const memberPubkeys = React.useMemo(
-    () => (members ? channelMemberPubkeySet(members) : new Set<string>()),
-    [members],
-  );
+  // Merge both signed membership projections: the dedicated roster and the
+  // active channel summary. The latter keeps autocomplete current when the
+  // roster cache has not observed a membership change yet.
+  const memberPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(
+      members ? channelMemberPubkeySet(members) : undefined,
+    );
+    const activeChannel = (channelsQuery.data ?? []).find(
+      (channel) => channel.id === channelId,
+    );
+    for (const pubkey of activeChannel?.memberPubkeys ?? []) {
+      pubkeys.add(normalizePubkey(pubkey));
+    }
+    return pubkeys;
+  }, [channelId, channelsQuery.data, members]);
   const agentIdentityPubkeys = React.useMemo(
     () =>
       getAgentIdentityPubkeys({
@@ -260,6 +264,7 @@ export function useMentions(
         managedAgents: managedAgentsQuery.data,
         memberPubkeys,
         members,
+        mentionChannelId,
         mentionableAgentPubkeys,
         personaNameByPubkey,
         profiles,
@@ -283,6 +288,7 @@ export function useMentions(
       managedAgentsQuery.data,
       memberPubkeys,
       members,
+      mentionChannelId,
       mentionableAgentPubkeys,
       personaNameByPubkey,
       profiles,
