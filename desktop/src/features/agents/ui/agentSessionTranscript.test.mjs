@@ -720,6 +720,42 @@ test("buildTranscript separates repeated lifecycle text", () => {
   assert.equal(item.text, "recovered: first\nrecovered: second");
 });
 
+test("buildTranscript surfaces structured turn error detail to the owner", () => {
+  const [dataOnlyError] = buildTranscript([
+    {
+      ...baseEvent,
+      kind: "turn_error",
+      payload: {
+        outcome: "error",
+        error: "Agent reported error (code -32000): Unknown agent error",
+        code: -32000,
+        data: '{"code":-32000,"data":"quota exceeded"}',
+      },
+    },
+  ]);
+  assert.equal(
+    dataOnlyError.text,
+    'error: Agent reported error (code -32000): Unknown agent error\n{"code":-32000,"data":"quota exceeded"}',
+  );
+
+  const [internalError] = buildTranscript([
+    {
+      ...baseEvent,
+      kind: "turn_error",
+      payload: {
+        outcome: "error",
+        error: "Agent reported error (code -32603): Internal error",
+        code: -32603,
+        data: '{"details":"unknown option \'--tools\'"}',
+      },
+    },
+  ]);
+  assert.equal(
+    internalError.text,
+    'error: Internal error\n{"details":"unknown option \'--tools\'"}',
+  );
+});
+
 // --- permission outcome (Fix #3) ---
 
 function makePermissionRequest(seq, requestId, turnId = "turn-1") {
