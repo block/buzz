@@ -13,6 +13,9 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { useProjectsQuery } from "@/features/projects/hooks";
+import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeChannel";
+import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
@@ -111,6 +114,7 @@ export function ChannelRouteScreen({
   const isHuddleTranscript = huddleWindowChannelId() !== null;
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
+  const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const channels = channelsQuery.data ?? [];
@@ -129,6 +133,10 @@ export function ChannelRouteScreen({
     memberChannel ??
     openDirectoryQuery.data?.find((channel) => channel.id === channelId) ??
     null;
+  const projectHome = findProjectHomeByChannelId(
+    channelId,
+    projectsQuery.data ?? [],
+  );
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
@@ -261,6 +269,18 @@ export function ChannelRouteScreen({
       <ViewLoadingFallback
         includeHeader
         kind={selectedPostId ? "forum" : "channel"}
+      />
+    );
+  }
+
+  if (projectHome && !isHuddleTranscript) {
+    return (
+      <ProjectChannelHome
+        autoSendDraftKey={autoSendDraftKey}
+        project={projectHome}
+        projects={projectsQuery.data ?? [projectHome]}
+        targetMessageEvents={targetMessageEvents}
+        targetMessageId={targetMessageId}
       />
     );
   }

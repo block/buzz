@@ -1247,6 +1247,8 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Omits kind 30621 seeds while retaining standalone kind 30617 repositories. */
+    __BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__?: boolean;
     /** Project-scoped events accepted by the mock relay. */
     __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
       content: string;
@@ -1521,6 +1523,7 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
 const STARTER_GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const STARTER_PROJECT_HOME_CHANNEL_ID = "cf63feec-21bb-5bf0-a2f8-0e4c3de8ec73";
 const STARTER_WELCOME_CHANNEL_ID = "5f0b1b3c-2a37-5366-9b8c-31a4b21d8e77";
 const STARTER_GENERAL_CHANNEL_NAME = "general";
 const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
@@ -2677,6 +2680,28 @@ const mockChannels: MockChannel[] = [
       createMockMember(BOB_PUBKEY, "member", 960),
       createMockMember(PROFILE_ONLY_AGENT_PUBKEY, "member", 840),
     ],
+  }),
+  createMockChannel({
+    id: STARTER_PROJECT_HOME_CHANNEL_ID,
+    name: "buzz",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Project home for the Buzz community platform.",
+    topic: null,
+    purpose: null,
+    last_message_at: null,
+    archived_at: null,
+    created_by: MOCK_IDENTITY_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 1440,
+    updated_minutes_ago: 1440,
+    members: [createMockMember(MOCK_IDENTITY_PUBKEY, "owner", 1440)],
   }),
   createMockChannel({
     id: STARTER_WELCOME_CHANNEL_ID,
@@ -5890,7 +5915,7 @@ function buildMockProjectEvents(): RelayEvent[] {
           [
             "buzz-channel",
             getConfig()?.mock?.projectAccessChannelId ??
-              "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+              STARTER_PROJECT_HOME_CHANNEL_ID,
           ],
           ["clone", seed.cloneUrl],
           ...(seed.webUrl ? [["web", seed.webUrl]] : []),
@@ -5968,24 +5993,32 @@ function buildMockProjectEvents(): RelayEvent[] {
     }
   }
 
-  const projectOwner =
-    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
-  events.push(
-    createMockEvent(
-      KIND_PROJECT_ANNOUNCEMENT,
-      "",
-      [
-        ["d", "buzz"],
-        ["name", "buzz"],
-        ["description", "The complete Buzz community platform."],
-        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
-        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
-      ],
-      projectOwner,
-      now,
-      "project-buzz".padEnd(64, "0"),
-    ),
-  );
+  if (!window.__BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__) {
+    const projectOwner =
+      window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
+    events.push(
+      createMockEvent(
+        KIND_PROJECT_ANNOUNCEMENT,
+        "",
+        [
+          ["d", "buzz"],
+          ["name", "buzz"],
+          ["description", "The complete Buzz community platform."],
+          ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
+          ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+          [
+            "buzz-channel",
+            getConfig()?.mock?.projectAccessChannelId ??
+              STARTER_PROJECT_HOME_CHANNEL_ID,
+          ],
+          ["buzz-related-channel", "9dae0116-799b-5071-a0a8-fdd30a91a35d"],
+        ],
+        projectOwner,
+        now,
+        "project-buzz".padEnd(64, "0"),
+      ),
+    );
+  }
 
   return events;
 }
@@ -7398,6 +7431,8 @@ async function handleAddChannelMembers(
     channelId: string;
     pubkeys: string[];
     role?: RawChannelMember["role"];
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawAddChannelMembersResponse> {
@@ -7407,6 +7442,8 @@ async function handleAddChannelMembers(
       window.setTimeout(resolve, addChannelMembersDelayMs),
     );
   }
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
   const configuredErrors = config?.mock?.addChannelMembersErrors;
   if (configuredErrors && configuredErrors.length > 0) {
     const index = Math.min(
