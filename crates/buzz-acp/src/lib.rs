@@ -2190,8 +2190,10 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
+    let (mcp_servers, secret_file_guard) = build_mcp_servers(&config);
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers,
+        secret_file_guard,
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -5030,17 +5032,44 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
-/// Write the signing key where only this user can read it, and return
-/// the path.
+/// Removes the on-disk signing-key file (see `write_secret_file`) once the
+/// run that wrote it ends, clean shutdown or panic alike — the file only
+/// needs to survive as long as this process does.
 ///
-/// Keyed by process id so two agents never share a file, and truncated on every
-/// write so a restarted agent cannot read a previous identity. Permissions are
-/// set as the file is created — creating it world-readable and tightening
-/// afterwards leaves a window, however short.
+/// Best-effort: failing to remove it during an already-messy shutdown is
+/// not worth panicking over. A leftover is not a security regression from
+/// today's baseline either — `write_secret_file`'s exclusive-creation check
+/// already treats anything it did not just create as untrusted and falls
+/// back to the inline value rather than reusing or deleting it.
+struct SecretFileGuard(Option<std::path::PathBuf>);
+
+impl Drop for SecretFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Write the signing key where only this user can read it, and return the
+/// path plus a guard that deletes the file when the caller is done with it.
 ///
-/// Returns `None` on any failure; the caller falls back to the inline value
-/// rather than leaving the agent without a key.
-fn write_secret_file(secret: &str) -> Option<String> {
+/// Keyed by process id so two agents never share a file. The file is
+/// created exclusively (`OpenOptions::create_new` — `O_CREAT | O_EXCL` on
+/// Unix, `CREATE_NEW` on Windows) with a symlink guard on the open itself
+/// (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`): anything already at the
+/// path — a stale leftover from a crashed process that reused this pid, or
+/// a symlink an attacker planted in a world-writable fallback directory —
+/// makes the call fail rather than write through or over it. Because the
+/// file is only ever opened at the moment it is created, the 0600 mode set
+/// on that same call always applies; there is no existing-file case where
+/// it would silently not.
+///
+/// A refusal here is not a hard failure: the caller falls back to the
+/// inline value exactly as it would for any other error from this
+/// function. A key in the process table is bad; an agent that will not
+/// start is worse.
+fn write_secret_file(secret: &str) -> Option<(String, SecretFileGuard)> {
     use std::io::Write;
 
     // No new dependency for this: the fork keeps `crates/` as close to upstream
@@ -5056,23 +5085,105 @@ fn write_secret_file(secret: &str) -> Option<String> {
     let path = dir.join(format!("{}.nsec", std::process::id()));
 
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
+        use nix::fcntl::OFlag;
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        options.custom_flags(OFlag::O_NOFOLLOW.bits());
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open a symlink/junction itself
+        // instead of following it — the Windows counterpart to O_NOFOLLOW.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
     let mut file = options.open(&path).ok()?;
     file.write_all(secret.as_bytes()).ok()?;
     file.flush().ok()?;
-    Some(path.to_string_lossy().into_owned())
+    Some((
+        path.to_string_lossy().into_owned(),
+        SecretFileGuard(Some(path)),
+    ))
 }
 
-fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+fn build_mcp_servers(config: &Config) -> (Vec<McpServer>, Option<SecretFileGuard>) {
     if config.mcp_command.is_empty() {
-        return vec![];
+        return (vec![], None);
     }
-    vec![McpServer {
+
+    let mut env = vec![EnvVar {
+        name: "BUZZ_RELAY_URL".into(),
+        value: config.relay_url.clone(),
+    }];
+
+    // The signing key travels as a file path, not a value.
+    //
+    // This list is sent over ACP and the adapter renders it into
+    // `claude --mcp-config '{…"env":{…}}'` — an argv, which every process
+    // running as this user can read. Measured live: `ps aux | grep nsec1`
+    // returned six lines, one per agent, each a complete identity. Nobody
+    // was looking for it; it turned up while checking which binary ran.
+    //
+    // An nsec is the whole identity — whoever reads it can post as that
+    // agent, open work records, sign events. So the value goes into a 0600
+    // file and only the path is advertised; the aggregator reads the file
+    // and hands the key to its children through *their* environment, which
+    // argv never shows.
+    //
+    // Fail-safe on purpose: if the file cannot be written, the inline value
+    // is used exactly as before. A key in the process table is bad; an agent
+    // that will not start is worse.
+    let secret = config
+        .keys
+        .secret_key()
+        .to_bech32()
+        .expect("secret key bech32 encoding should never fail");
+    let secret_file_guard = match write_secret_file(&secret) {
+        Some((path, guard)) => {
+            env.push(EnvVar {
+                name: "BUZZ_PRIVATE_KEY_FILE".into(),
+                value: path,
+            });
+            Some(guard)
+        }
+        None => {
+            env.push(EnvVar {
+                name: "BUZZ_PRIVATE_KEY".into(),
+                value: secret,
+            });
+            None
+        }
+    };
+
+    // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+    // so the MCP server can attach it to every signed event.
+    if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+        if !auth_tag.is_empty() {
+            env.push(EnvVar {
+                name: "BUZZ_AUTH_TAG".into(),
+                value: auth_tag,
+            });
+        }
+    }
+    // Forward the agent's display name so dev-mcp can use it as the git
+    // author name instead of the raw npub. Read from the process env
+    // rather than Config: this is a pass-through of a contract owned
+    // upstream, and absent simply means dev-mcp falls back to the npub.
+    if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+        if !display_name.is_empty() {
+            env.push(EnvVar {
+                name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                value: display_name,
+            });
+        }
+    }
+
+    let server = McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -5080,70 +5191,10 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             .to_string(),
         command: config.mcp_command.clone(),
         args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-            ];
-            // The signing key travels as a file path, not a value.
-            //
-            // This list is sent over ACP and the adapter renders it into
-            // `claude --mcp-config '{…"env":{…}}'` — an argv, which every process
-            // running as this user can read. Measured live: `ps aux | grep nsec1`
-            // returned six lines, one per agent, each a complete identity. Nobody
-            // was looking for it; it turned up while checking which binary ran.
-            //
-            // An nsec is the whole identity — whoever reads it can post as that
-            // agent, open work records, sign events. So the value goes into a 0600
-            // file and only the path is advertised; the aggregator reads the file
-            // and hands the key to its children through *their* environment, which
-            // argv never shows.
-            //
-            // Fail-safe on purpose: if the file cannot be written, the inline value
-            // is used exactly as before. A key in the process table is bad; an agent
-            // that will not start is worse.
-            let secret = config
-                .keys
-                .secret_key()
-                .to_bech32()
-                .expect("secret key bech32 encoding should never fail");
-            match write_secret_file(&secret) {
-                Some(path) => env.push(EnvVar {
-                    name: "BUZZ_PRIVATE_KEY_FILE".into(),
-                    value: path,
-                }),
-                None => env.push(EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    value: secret,
-                }),
-            }
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
-            }
-            env
-        },
-    }]
+        env,
+    };
+
+    (vec![server], secret_file_guard)
 }
 
 #[cfg(test)]
@@ -5576,37 +5627,99 @@ mod author_gate_tests {
     // The signing key must not be advertised by value — the adapter
     // renders the advertised env into an argv.
     mod secret_file_tests {
+        use parking_lot::Mutex;
+
+        /// `write_secret_file`'s path is `$HOME` plus this process's pid,
+        /// and env vars are process-global — two tests overriding `HOME`
+        /// concurrently would corrupt each other's fixture regardless of
+        /// which directory each one intends. Serializes just the tests in
+        /// this module; every other test in the binary (e.g.
+        /// `build_mcp_servers_tests`) never touches `HOME` and so never
+        /// collides with the isolated directories these tests use.
+        static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+        /// Point `HOME` at a fresh, empty temp directory for the duration
+        /// of `f`, then restore whatever `HOME` was before and remove the
+        /// directory.
+        fn with_isolated_home<T>(f: impl FnOnce() -> T) -> T {
+            let _guard = HOME_LOCK.lock();
+            let dir = std::env::temp_dir().join(format!(
+                "buzz-acp-secret-file-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&dir).expect("create isolated HOME");
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", &dir);
+
+            let result = f();
+
+            match previous {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            result
+        }
+
         #[test]
         fn the_key_file_is_written_readable_only_by_its_owner() {
-            let secret = "nsec1testtesttesttesttesttesttesttesttesttesttesttest";
-            let path = super::super::write_secret_file(secret)
-                .expect("writing under HOME should succeed in a test environment");
+            with_isolated_home(|| {
+                let secret = "nsec1testtesttesttesttesttesttesttesttesttesttesttest";
+                let (path, _guard) = super::super::write_secret_file(secret)
+                    .expect("writing under an isolated HOME should succeed");
 
-            assert_eq!(
-                std::fs::read_to_string(&path).expect("readable by us"),
-                secret,
-                "the aggregator has to be able to read it back"
-            );
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
                 assert_eq!(
-                    mode & 0o077,
-                    0,
-                    "group and other must have no access — mode was {:o}",
-                    mode
+                    std::fs::read_to_string(&path).expect("readable by us"),
+                    secret,
+                    "the aggregator has to be able to read it back"
                 );
-            }
 
-            // Truncation matters: a restarted agent must not be able to read a
-            // previous identity out of a longer file left behind.
-            let shorter = "nsec1short";
-            let again = super::super::write_secret_file(shorter).expect("second write");
-            assert_eq!(std::fs::read_to_string(&again).expect("readable"), shorter);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+                    assert_eq!(
+                        mode & 0o077,
+                        0,
+                        "group and other must have no access — mode was {:o}",
+                        mode
+                    );
+                }
+            });
+        }
 
-            let _ = std::fs::remove_file(&path);
+        #[test]
+        fn creation_is_exclusive_a_pre_existing_file_is_never_opened() {
+            with_isolated_home(|| {
+                let secret = "nsec1testtesttesttesttesttesttesttesttesttesttesttest";
+                let (path, guard) = super::super::write_secret_file(secret)
+                    .expect("first write creates the file");
+
+                // Same pid, same HOME -> the second call resolves to the
+                // exact same path while the first file is still on disk
+                // (guard not yet dropped). `create_new` must refuse it
+                // outright rather than truncate — that refusal is what
+                // makes a pre-planted symlink, or a stale leftover from a
+                // crashed process, harmless instead of a write-through
+                // target.
+                let attacker_secret =
+                    "nsec1attackerattackerattackerattackerattackerattacker";
+                assert!(
+                    super::super::write_secret_file(attacker_secret).is_none(),
+                    "a pre-existing file at the key path must not be opened or overwritten"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&path).expect("original still readable"),
+                    secret,
+                    "the refused second write must not have touched the original"
+                );
+
+                drop(guard);
+                assert!(
+                    !std::path::Path::new(&path).exists(),
+                    "dropping the guard must remove the file it created"
+                );
+            });
         }
     }
 
@@ -6900,7 +7013,7 @@ mod build_mcp_servers_tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
         assert_eq!(server.name, "test-mcp-server");
@@ -6927,7 +7040,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
@@ -6944,7 +7057,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
@@ -6957,7 +7070,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         let entry = servers[0]
@@ -6976,7 +7089,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
 
         // Absent, not empty-valued: dev-mcp distinguishes the two and only
         // falls back to the npub when the key is missing or blank.
@@ -6994,7 +7107,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         assert!(
@@ -7010,7 +7123,7 @@ mod build_mcp_servers_tests {
     fn empty_mcp_command_returns_no_servers() {
         let mut config = test_config();
         config.mcp_command = "".into();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         assert!(
             servers.is_empty(),
             "empty mcp_command should produce no MCP servers"
@@ -7021,7 +7134,7 @@ mod build_mcp_servers_tests {
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "my-mcp-server");
     }
@@ -7042,7 +7155,7 @@ mod build_mcp_servers_tests {
 
         // Confirm a non-empty command with no stem (e.g. just a dot) also falls back.
         config.mcp_command = ".".into();
-        let servers = build_mcp_servers(&config);
+        let (servers, _guard) = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(
             servers[0].name, "mcp",
