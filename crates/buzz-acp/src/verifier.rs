@@ -3,8 +3,8 @@
 //! The relay returns the exact signed workflow definition, the visible message,
 //! and a narrowly scoped relay-signed receipt. This module verifies those
 //! public artifacts without receiving private trigger context, webhook fields,
-//! prior-step outputs, execution traces, or secrets. It performs no I/O and has
-//! no production caller until the capability-gated runtime wires it in.
+//! prior-step outputs, execution traces, or secrets. It performs no I/O; the
+//! capability-gated runtime supplies the authenticated API response directly.
 
 use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_DEF};
 use buzz_core::tenant::CommunityId;

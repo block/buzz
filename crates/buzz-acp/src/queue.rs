@@ -658,16 +658,19 @@ impl EventQueue {
     /// Returns the event IDs of dropped events so the caller can clean up
     /// any reactions (👀) that were added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
-            .queues
-            .remove(&channel_id)
-            .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
-            .unwrap_or_default();
+        let mut ids = Vec::new();
+        if let Some(events) = self.queues.remove(&channel_id) {
+            ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+        }
+        if let Some(events) = self.cancelled_batches.remove(&channel_id) {
+            ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+        }
+        if let Some(events) = self.withheld_native_steer.remove(&channel_id) {
+            ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+        }
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
-        self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -767,6 +770,31 @@ impl EventQueue {
                 "release_native_steer overflow — dropped newest event to enforce cap"
             );
         }
+    }
+
+    /// Whether an event remains under local queue ownership, including a
+    /// cancel-merge batch or a pending native steer.
+    pub fn contains_event(&self, channel_id: Uuid, event_id: &str) -> bool {
+        self.queues.get(&channel_id).is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event.event.id.to_hex() == event_id)
+        }) || self
+            .cancelled_batches
+            .get(&channel_id)
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event.event.id.to_hex() == event_id)
+            })
+            || self
+                .withheld_native_steer
+                .get(&channel_id)
+                .is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|event| event.event.id.to_hex() == event_id)
+                })
     }
 
     /// Drop a specific event by id from both the side table and the main
@@ -4046,6 +4074,29 @@ mod tests {
         let drained = q.drain_channel(ch);
         assert_eq!(drained.len(), 1);
         assert_eq!(pending_count(&q), 0);
+    }
+
+    #[test]
+    fn test_drain_channel_reports_cancelled_and_withheld_events() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let cancelled = make_queued(ch, "cancelled");
+        let withheld = make_queued(ch, "withheld");
+        let cancelled_id = cancelled.event.id.to_hex();
+        let withheld_id = withheld.event.id.to_hex();
+
+        q.push(cancelled);
+        let batch = q.flush_next().expect("cancelled batch");
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+        q.push(withheld);
+        assert!(q.mark_native_steer_pending(ch, &withheld_id));
+
+        let drained = q.drain_channel(ch);
+        assert!(drained.contains(&cancelled_id));
+        assert!(drained.contains(&withheld_id));
+        assert!(!q.contains_event(ch, &cancelled_id));
+        assert!(!q.contains_event(ch, &withheld_id));
     }
 
     #[test]

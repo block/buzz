@@ -828,7 +828,7 @@ impl AgentPool {
         &mut self,
         channel_id: Uuid,
         request: SteerRequest,
-    ) -> Result<(), SteerError> {
+    ) -> Result<String, SteerError> {
         let meta = self
             .task_map
             .values_mut()
@@ -839,7 +839,8 @@ impl AgentPool {
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .map_err(|e| SteerError::Transport(e.to_string()))?;
+        Ok(meta.turn_id.clone())
     }
 
     /// Durably associate a successful steer with the exact ACP session that

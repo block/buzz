@@ -28,7 +28,7 @@ use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_REMINDER, KIND_WORKFLOW_AGENT_WAKE, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -71,6 +71,13 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const WORKFLOW_DELIVERY_LEASE_SECONDS: i64 = 300;
+const WORKFLOW_LEASE_RENEW_INTERVAL_SECS: u64 = 30;
+const WORKFLOW_LEASE_FAIL_CLOSED_MARGIN_SECS: i64 = 60;
+
+fn workflow_lease_seconds(_config: &Config) -> i64 {
+    WORKFLOW_DELIVERY_LEASE_SECONDS
+}
 
 /// Resolve the process working directory for ACP session metadata and prompts.
 ///
@@ -254,6 +261,894 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// Cause carried by a relay-signed workflow doorbell.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum WorkflowCauseClaim {
+    Event(nostr::EventId),
+    Schedule(String),
+    Command(nostr::EventId),
+    Webhook,
+}
+
+/// Structurally valid relay delivery envelope. This grants no authority by itself.
+#[derive(Clone, Debug)]
+struct WorkflowDoorbellClaim {
+    owner: String,
+    definition_id: nostr::EventId,
+    step_id: String,
+    cause: WorkflowCauseClaim,
+}
+
+#[derive(Clone, Debug)]
+struct TrustedWorkflowDoorbell {
+    owner: String,
+    rendered_content: String,
+    dedup_key: Option<String>,
+    webhook_definition: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum WorkflowDeliveryCauseWire {
+    Event { event_id: String },
+    Schedule { scheduled_for_unix_seconds: i64 },
+    Webhook { invocation_id: Uuid },
+}
+
+impl WorkflowDeliveryCauseWire {
+    fn to_protocol(&self) -> Option<buzz_core::workflow_delivery::WorkflowDeliveryCause> {
+        match self {
+            Self::Event { event_id } => {
+                Some(buzz_core::workflow_delivery::WorkflowDeliveryCause::Event(
+                    nostr::EventId::from_hex(event_id).ok()?,
+                ))
+            }
+            Self::Schedule {
+                scheduled_for_unix_seconds,
+            } => Some(
+                buzz_core::workflow_delivery::WorkflowDeliveryCause::Schedule {
+                    scheduled_for_unix_seconds: *scheduled_for_unix_seconds,
+                },
+            ),
+            Self::Webhook { invocation_id } => Some(
+                buzz_core::workflow_delivery::WorkflowDeliveryCause::Webhook {
+                    invocation_id: *invocation_id,
+                },
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct WorkflowDeliveryBindingWire {
+    community_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    step_id: String,
+    target_pubkey: String,
+    definition_event_id: String,
+    message_event_id: String,
+    cause: WorkflowDeliveryCauseWire,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ClaimedWorkflowDeliveryWire {
+    #[serde(flatten)]
+    binding: WorkflowDeliveryBindingWire,
+    id: Uuid,
+    lease_generation: i64,
+    lease_until: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ClaimedWorkflowDeliveryResponse {
+    delivery: ClaimedWorkflowDeliveryWire,
+    definition_event: nostr::Event,
+    message_event: nostr::Event,
+    receipt_event: nostr::Event,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimedWorkflowDelivery {
+    id: Uuid,
+    binding: WorkflowDeliveryBindingWire,
+    channel_id: Uuid,
+    lease_generation: i64,
+    lease_until: chrono::DateTime<chrono::Utc>,
+    definition_event: nostr::Event,
+    message_event: nostr::Event,
+    receipt_event: nostr::Event,
+}
+
+impl ClaimedWorkflowDelivery {
+    fn verifier_snapshot(&self) -> Option<verifier::DeliverySnapshot> {
+        Some(verifier::DeliverySnapshot {
+            id: self.id,
+            community_id: buzz_core::tenant::CommunityId::from_uuid(self.binding.community_id),
+            workflow_id: self.binding.workflow_id,
+            run_id: self.binding.run_id,
+            step_id: self.binding.step_id.clone(),
+            definition_event_id: self.binding.definition_event_id.clone(),
+            message_event_id: self.binding.message_event_id.clone(),
+            target_pubkey: self.binding.target_pubkey.clone(),
+            cause: self.binding.cause.to_protocol()?,
+        })
+    }
+}
+
+async fn claim_workflow_delivery(
+    rest_client: &relay::RestClient,
+    delivery_id: Option<Uuid>,
+    expected: Option<&WorkflowDeliveryBindingWire>,
+    lease_seconds: i64,
+) -> Option<ClaimedWorkflowDelivery> {
+    // Identifier-only wakes are hints, not authority. A specific claim is made
+    // only when its complete immutable binding is already known; otherwise the
+    // caller uses the ordinary oldest-pending poll and compares the result.
+    if delivery_id.is_some() != expected.is_some() {
+        return None;
+    }
+    let response = rest_client
+        .post_json(
+            "/workflows/agent-deliveries/claim",
+            &serde_json::json!({
+                "delivery_id": delivery_id,
+                "expected": expected,
+                "lease_seconds": lease_seconds,
+            }),
+        )
+        .await
+        .ok()?;
+    let response: ClaimedWorkflowDeliveryResponse = serde_json::from_value(response).ok()?;
+    let channel_id = single_uuid_tag(&response.message_event, "h")?;
+    let delivery = ClaimedWorkflowDelivery {
+        id: response.delivery.id,
+        binding: response.delivery.binding,
+        channel_id,
+        lease_generation: response.delivery.lease_generation,
+        lease_until: response.delivery.lease_until,
+        definition_event: response.definition_event,
+        message_event: response.message_event,
+        receipt_event: response.receipt_event,
+    };
+    tracing::debug!(
+        delivery = %delivery.id,
+        lease_generation = delivery.lease_generation,
+        "claimed workflow delivery"
+    );
+    Some(delivery)
+}
+
+async fn renew_workflow_delivery(
+    rest_client: &relay::RestClient,
+    delivery: &ClaimedWorkflowDelivery,
+    lease_seconds: i64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let path = format!("/workflows/agent-deliveries/{}/renew", delivery.id);
+    let response = rest_client
+        .post_json(
+            &path,
+            &serde_json::json!({
+                "lease_generation": delivery.lease_generation,
+                "binding": delivery.binding,
+                "lease_seconds": lease_seconds,
+            }),
+        )
+        .await
+        .ok()?;
+    serde_json::from_value(response.get("lease_until")?.clone()).ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn renew_owned_workflow_deliveries(
+    rest_client: &relay::RestClient,
+    lease_seconds: i64,
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    workflow_deliveries_by_event: &mut HashMap<String, ClaimedWorkflowDelivery>,
+    workflow_deliveries_by_turn: &mut HashMap<String, Vec<ClaimedWorkflowDelivery>>,
+    workflow_native_steer_turn_by_event: &mut HashMap<String, String>,
+    completed_workflow_turns: &mut HashMap<String, bool>,
+    pending_workflow_finalizations: &mut HashMap<Uuid, PendingWorkflowFinalization>,
+) {
+    #[derive(Clone)]
+    enum Owner {
+        Event(String),
+        Turn(String),
+        Finalizing(Uuid),
+    }
+
+    let mut owned = workflow_deliveries_by_event
+        .iter()
+        .map(|(event_id, delivery)| (Owner::Event(event_id.clone()), delivery.clone()))
+        .collect::<Vec<_>>();
+    owned.extend(
+        workflow_deliveries_by_turn
+            .iter()
+            .flat_map(|(turn_id, deliveries)| {
+                deliveries
+                    .iter()
+                    .cloned()
+                    .map(|delivery| (Owner::Turn(turn_id.clone()), delivery))
+                    .collect::<Vec<_>>()
+            }),
+    );
+    owned.extend(
+        pending_workflow_finalizations
+            .iter()
+            .map(|(delivery_id, finalization)| {
+                (
+                    Owner::Finalizing(*delivery_id),
+                    finalization.delivery.clone(),
+                )
+            }),
+    );
+
+    // All claims renew concurrently under one aggregate deadline. The main
+    // loop never spends one REST retry budget per claim while later leases
+    // silently expire behind it.
+    let renewals = owned.iter().map(|(_, delivery)| {
+        let delivery = delivery.clone();
+        async move {
+            let renewed = tokio::time::timeout(
+                Duration::from_secs(WORKFLOW_LEASE_FAIL_CLOSED_MARGIN_SECS as u64 / 2),
+                renew_workflow_delivery(rest_client, &delivery, lease_seconds),
+            )
+            .await
+            .ok()
+            .flatten();
+            (delivery, renewed)
+        }
+    });
+    let results = futures_util::future::join_all(renewals).await;
+
+    for ((owner, _), (delivery, renewed)) in owned.into_iter().zip(results) {
+        if let Some(lease_until) = renewed {
+            match &owner {
+                Owner::Event(event_id) => {
+                    if let Some(current) = workflow_deliveries_by_event.get_mut(event_id) {
+                        current.lease_until = lease_until;
+                    }
+                }
+                Owner::Turn(turn_id) => {
+                    if let Some(current) =
+                        workflow_deliveries_by_turn
+                            .get_mut(turn_id)
+                            .and_then(|deliveries| {
+                                deliveries.iter_mut().find(|item| item.id == delivery.id)
+                            })
+                    {
+                        current.lease_until = lease_until;
+                    }
+                }
+                Owner::Finalizing(delivery_id) => {
+                    if let Some(current) = pending_workflow_finalizations.get_mut(delivery_id) {
+                        current.delivery.lease_until = lease_until;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let seconds_left = (delivery.lease_until - chrono::Utc::now()).num_seconds();
+        tracing::warn!(delivery = %delivery.id, seconds_left, "workflow delivery lease renewal failed");
+        if seconds_left > WORKFLOW_LEASE_FAIL_CLOSED_MARGIN_SECS {
+            continue;
+        }
+
+        tracing::error!(delivery = %delivery.id, channel = %delivery.channel_id,
+            "workflow delivery lease cannot be maintained — stopping local ownership");
+        signal_in_flight_task(pool, delivery.channel_id, ControlSignal::Cancel);
+        queue.remove_event(delivery.channel_id, &delivery.binding.message_event_id);
+        match owner {
+            Owner::Event(event_id) => {
+                workflow_deliveries_by_event.remove(&event_id);
+                if let Some(turn_id) = workflow_native_steer_turn_by_event.remove(&event_id) {
+                    clear_completed_workflow_turn_if_resolved(
+                        &turn_id,
+                        workflow_native_steer_turn_by_event,
+                        completed_workflow_turns,
+                    );
+                }
+            }
+            Owner::Turn(turn_id) => {
+                if let Some(deliveries) = workflow_deliveries_by_turn.get_mut(&turn_id) {
+                    deliveries.retain(|item| item.id != delivery.id);
+                    if deliveries.is_empty() {
+                        workflow_deliveries_by_turn.remove(&turn_id);
+                    }
+                }
+            }
+            Owner::Finalizing(delivery_id) => {
+                // Never replace an uncertain terminal disposition with a
+                // different failure. An exact finish replay may already have
+                // committed while its response was lost; preserve that intent
+                // for reconciliation until the bounded owner window closes.
+                tracing::error!(
+                    delivery = %delivery_id,
+                    "workflow finalization lease cannot be renewed"
+                );
+                continue;
+            }
+        }
+        finish_workflow_delivery(
+            rest_client,
+            pending_workflow_finalizations,
+            &delivery,
+            false,
+            false,
+            Some("lease_renewal_failed"),
+            Some("managed agent stopped because exclusive delivery ownership could not be renewed"),
+        )
+        .await;
+    }
+}
+
+async fn verified_workflow_delivery_message(
+    delivery: &ClaimedWorkflowDelivery,
+    agent_pubkey: &str,
+    relay_self: Option<&str>,
+) -> Option<(nostr::Event, String)> {
+    let snapshot = delivery.verifier_snapshot()?;
+    let authority = verifier::FetchedAuthority {
+        definition: Some(&delivery.definition_event),
+        message: Some(&delivery.message_event),
+        receipt: Some(&delivery.receipt_event),
+    };
+    verifier::verify_workflow_delivery(&snapshot, &authority, agent_pubkey, relay_self).ok()
+}
+
+fn retain_workflow_deliveries_for_local_retry(
+    queue: &EventQueue,
+    channel_id: Option<Uuid>,
+    allow_local_retry: bool,
+    deliveries: Vec<ClaimedWorkflowDelivery>,
+    workflow_deliveries_by_event: &mut HashMap<String, ClaimedWorkflowDelivery>,
+) -> Vec<ClaimedWorkflowDelivery> {
+    let mut terminal = Vec::new();
+    for delivery in deliveries {
+        if allow_local_retry
+            && channel_id.is_some_and(|channel_id| {
+                queue.contains_event(channel_id, &delivery.binding.message_event_id)
+            })
+        {
+            workflow_deliveries_by_event
+                .insert(delivery.binding.message_event_id.clone(), delivery);
+        } else {
+            terminal.push(delivery);
+        }
+    }
+    terminal
+}
+
+async fn try_finish_workflow_delivery(
+    rest_client: &relay::RestClient,
+    delivery: &ClaimedWorkflowDelivery,
+    delivered: bool,
+    retryable: bool,
+    failure_code: Option<&str>,
+    failure_message: Option<&str>,
+) -> bool {
+    let _ = (retryable, failure_code, failure_message);
+    let path = format!("/workflows/agent-deliveries/{}/finish", delivery.id);
+    let result = rest_client
+        .post_json(
+            &path,
+            &serde_json::json!({
+                "lease_generation": delivery.lease_generation,
+                "binding": delivery.binding,
+                "disposition": if delivered { "finished" } else { "failed" },
+            }),
+        )
+        .await;
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(delivery = %delivery.id, %error, "workflow delivery finish failed");
+            false
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PendingWorkflowFinalization {
+    delivery: ClaimedWorkflowDelivery,
+    delivered: bool,
+    retryable: bool,
+    failure_code: Option<String>,
+    failure_message: Option<String>,
+}
+
+async fn finish_workflow_delivery(
+    rest_client: &relay::RestClient,
+    pending: &mut HashMap<Uuid, PendingWorkflowFinalization>,
+    delivery: &ClaimedWorkflowDelivery,
+    delivered: bool,
+    retryable: bool,
+    failure_code: Option<&str>,
+    failure_message: Option<&str>,
+) {
+    let finalization = PendingWorkflowFinalization {
+        delivery: delivery.clone(),
+        delivered,
+        retryable,
+        failure_code: failure_code.map(str::to_owned),
+        failure_message: failure_message.map(str::to_owned),
+    };
+    pending.insert(delivery.id, finalization);
+    // Delivery work and its terminal intent are recorded synchronously, but
+    // network I/O is deferred to the concurrent reconciliation stage. This
+    // keeps result, panic, channel-removal, and shutdown loops from spending a
+    // serial REST retry budget while claims later in the ledger go unrenewed.
+    let _ = rest_client;
+}
+
+async fn reconcile_workflow_finalizations(
+    rest_client: &relay::RestClient,
+    pending: &mut HashMap<Uuid, PendingWorkflowFinalization>,
+) {
+    let now = chrono::Utc::now();
+    let attempts = pending.values().filter_map(|finalization| {
+        let safe_seconds = (finalization.delivery.lease_until - now).num_seconds()
+            - WORKFLOW_LEASE_FAIL_CLOSED_MARGIN_SECS;
+        if safe_seconds <= 0 {
+            tracing::error!(
+                delivery = %finalization.delivery.id,
+                "workflow finalization has no safe I/O window"
+            );
+            return None;
+        }
+        let finalization = finalization.clone();
+        Some(async move {
+            let delivery_id = finalization.delivery.id;
+            let finished = tokio::time::timeout(
+                Duration::from_secs(safe_seconds.min(30) as u64),
+                try_finish_workflow_delivery(
+                    rest_client,
+                    &finalization.delivery,
+                    finalization.delivered,
+                    finalization.retryable,
+                    finalization.failure_code.as_deref(),
+                    finalization.failure_message.as_deref(),
+                ),
+            )
+            .await
+            .unwrap_or(false);
+            (delivery_id, finished)
+        })
+    });
+    for (delivery_id, finished) in futures_util::future::join_all(attempts).await {
+        if finished {
+            pending.remove(&delivery_id);
+        }
+    }
+}
+
+async fn transfer_native_steer_workflow_delivery(
+    rest_client: &relay::RestClient,
+    event_id: &str,
+    turn_id: &str,
+    workflow_deliveries_by_event: &mut HashMap<String, ClaimedWorkflowDelivery>,
+    workflow_deliveries_by_turn: &mut HashMap<String, Vec<ClaimedWorkflowDelivery>>,
+    completed_workflow_turns: &mut HashMap<String, bool>,
+    pending_workflow_finalizations: &mut HashMap<Uuid, PendingWorkflowFinalization>,
+) {
+    let Some(delivery) = workflow_deliveries_by_event.remove(event_id) else {
+        return;
+    };
+    if let Some(delivered) = completed_workflow_turns.get(turn_id).copied() {
+        finish_workflow_delivery(
+            rest_client,
+            pending_workflow_finalizations,
+            &delivery,
+            delivered,
+            false,
+            (!delivered).then_some("prompt_failed"),
+            (!delivered).then_some("managed agent turn terminated without a local retry"),
+        )
+        .await;
+    } else {
+        workflow_deliveries_by_turn
+            .entry(turn_id.to_owned())
+            .or_default()
+            .push(delivery);
+    }
+}
+
+fn clear_completed_workflow_turn_if_resolved(
+    turn_id: &str,
+    workflow_native_steer_turn_by_event: &HashMap<String, String>,
+    completed_workflow_turns: &mut HashMap<String, bool>,
+) {
+    if !workflow_native_steer_turn_by_event
+        .values()
+        .any(|pending_turn| pending_turn == turn_id)
+    {
+        completed_workflow_turns.remove(turn_id);
+    }
+}
+
+fn single_uuid_tag(event: &nostr::Event, name: &str) -> Option<Uuid> {
+    let tags = exact_tags(event, name);
+    (tags.len() == 1 && tags[0].as_slice().len() == 2)
+        .then(|| tags[0].as_slice()[1].parse().ok())
+        .flatten()
+}
+
+fn exact_tags<'a>(event: &'a nostr::Event, name: &str) -> Vec<&'a nostr::Tag> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
+        .collect()
+}
+
+fn workflow_delivery_gate(
+    author: &str,
+    durable_workflow_owner: Option<&str>,
+    doorbell_shape: bool,
+    legacy_workflow: Option<TrustedWorkflowDoorbell>,
+) -> Option<(String, Option<TrustedWorkflowDoorbell>)> {
+    if durable_workflow_owner.is_none() && doorbell_shape && legacy_workflow.is_none() {
+        return None;
+    }
+    let principal = durable_workflow_owner
+        .map(str::to_owned)
+        .or_else(|| {
+            legacy_workflow
+                .as_ref()
+                .map(|workflow| workflow.owner.clone())
+        })
+        .unwrap_or_else(|| author.to_owned());
+    Some((principal, legacy_workflow))
+}
+
+fn is_workflow_delivery_candidate(event: &nostr::Event, relay_self: Option<&str>) -> bool {
+    relay_self.is_some_and(|relay| {
+        event.kind.as_u16() as u32 == buzz_core::kind::KIND_STREAM_MESSAGE
+            && event.pubkey.to_hex().eq_ignore_ascii_case(relay)
+            && !exact_tags(event, "buzz:workflow").is_empty()
+    })
+}
+
+/// Validate the distinguished relay delivery shape, without granting authority.
+fn workflow_doorbell_claim(
+    event: &nostr::Event,
+    relay_self: Option<&str>,
+) -> Option<WorkflowDoorbellClaim> {
+    let relay_self = relay_self?;
+    if event.kind.as_u16() as u32 != buzz_core::kind::KIND_STREAM_MESSAGE
+        || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
+        || event.verify().is_err()
+    {
+        return None;
+    }
+
+    let markers = exact_tags(event, "buzz:workflow");
+    if markers.len() != 1 || markers[0].as_slice() != ["buzz:workflow", "doorbell-v1"] {
+        return None;
+    }
+    let owners = exact_tags(event, "workflow-owner");
+    if owners.len() != 1 || owners[0].as_slice().len() != 2 {
+        return None;
+    }
+    let owner = owners[0].as_slice()[1].to_ascii_lowercase();
+    nostr::PublicKey::from_hex(&owner).ok()?;
+
+    let definitions = exact_tags(event, "workflow-definition");
+    if definitions.len() != 1 || definitions[0].as_slice().len() != 3 {
+        return None;
+    }
+    let definition_id = nostr::EventId::from_hex(&definitions[0].as_slice()[1]).ok()?;
+    let step_id = definitions[0].as_slice()[2].clone();
+    if step_id.is_empty() {
+        return None;
+    }
+
+    let causes = exact_tags(event, "workflow-cause");
+    if causes.len() != 1 || causes[0].as_slice().len() != 3 {
+        return None;
+    }
+    let cause = match causes[0].as_slice()[1].as_str() {
+        "event" if event.content.is_empty() => {
+            WorkflowCauseClaim::Event(nostr::EventId::from_hex(&causes[0].as_slice()[2]).ok()?)
+        }
+        "command" if event.content.is_empty() => {
+            WorkflowCauseClaim::Command(nostr::EventId::from_hex(&causes[0].as_slice()[2]).ok()?)
+        }
+        "schedule" if event.content.is_empty() && !causes[0].as_slice()[2].is_empty() => {
+            WorkflowCauseClaim::Schedule(causes[0].as_slice()[2].clone())
+        }
+        "webhook" if causes[0].as_slice()[2].is_empty() => WorkflowCauseClaim::Webhook,
+        _ => return None,
+    };
+
+    Some(WorkflowDoorbellClaim {
+        owner,
+        definition_id,
+        step_id,
+        cause,
+    })
+}
+
+async fn query_exact_event(
+    id: nostr::EventId,
+    rest_client: &relay::RestClient,
+) -> Option<nostr::Event> {
+    let response = tokio::time::timeout(
+        Duration::from_millis(2000),
+        rest_client.query(&[nostr::Filter::new().id(id)]),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let events = response.as_array()?;
+    if events.len() != 1 {
+        return None;
+    }
+    let event = serde_json::from_value::<nostr::Event>(events[0].clone()).ok()?;
+    (event.id == id && event.verify().is_ok()).then_some(event)
+}
+
+fn event_channel_matches(event: &nostr::Event, channel_id: Uuid) -> bool {
+    let channels = exact_tags(event, "h");
+    channels.len() == 1
+        && channels[0].as_slice().len() == 2
+        && channels[0].as_slice()[1].parse::<Uuid>().ok() == Some(channel_id)
+}
+
+fn definition_channel_matches(definition: &nostr::Event, channel_id: Uuid) -> bool {
+    event_channel_matches(definition, channel_id)
+}
+
+fn workflow_uuid(definition: &nostr::Event) -> Option<Uuid> {
+    let tags = exact_tags(definition, "d");
+    (tags.len() == 1 && tags[0].as_slice().len() == 2)
+        .then(|| tags[0].as_slice()[1].parse().ok())
+        .flatten()
+}
+
+fn template_references_prior_outputs(template: &str) -> bool {
+    let mut remaining = template;
+    while let Some(start) = remaining.find("{{") {
+        let after_open = &remaining[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            return after_open.trim_start().starts_with("steps.");
+        };
+        let path = after_open[..end]
+            .split('|')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if path.starts_with("steps.") {
+            return true;
+        }
+        remaining = &after_open[end + 2..];
+    }
+    false
+}
+
+fn step_condition_depends_on_prior_outputs(condition: &str) -> bool {
+    condition
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token.starts_with("steps_") || token == "steps")
+}
+
+fn command_targets_workflow(command: &nostr::Event, workflow_id: Uuid) -> bool {
+    let references: Vec<_> = exact_tags(command, "d")
+        .into_iter()
+        .chain(exact_tags(command, "e"))
+        .collect();
+    references.len() == 1
+        && references[0].as_slice().len() == 2
+        && references[0].as_slice()[1] == workflow_id.to_string()
+}
+
+/// Maximum serialized webhook cargo admitted into a doorbell prompt.
+const MAX_WORKFLOW_WEBHOOK_CARGO_BYTES: usize = 61_440;
+
+/// Refetch owner authority and cause, then render the signed template locally.
+async fn trusted_workflow_doorbell(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    relay_self: Option<&str>,
+    rest_client: &relay::RestClient,
+) -> Option<TrustedWorkflowDoorbell> {
+    use buzz_workflow::executor::{resolve_template, TriggerContext};
+    use buzz_workflow::schema::ActionDef;
+
+    let claim = workflow_doorbell_claim(event, relay_self)?;
+    let definition = query_exact_event(claim.definition_id, rest_client).await?;
+    if definition.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_DEF
+        || !definition
+            .pubkey
+            .to_hex()
+            .eq_ignore_ascii_case(&claim.owner)
+        || !definition_channel_matches(&definition, channel_id)
+    {
+        return None;
+    }
+    let workflow_id = workflow_uuid(&definition)?;
+    let (workflow, _) = buzz_workflow::WorkflowEngine::parse_yaml(&definition.content).ok()?;
+    let step = workflow
+        .steps
+        .iter()
+        .find(|step| step.id == claim.step_id)?;
+    let ActionDef::SendMessage { text, channel, .. } = &step.action else {
+        return None;
+    };
+    if channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| value.parse::<Uuid>().ok() != Some(channel_id))
+    {
+        return None;
+    }
+
+    let (trigger_ctx, dedup_key, webhook_definition) = match &claim.cause {
+        WorkflowCauseClaim::Event(id) => {
+            let source = query_exact_event(*id, rest_client).await?;
+            if !event_channel_matches(&source, channel_id) {
+                return None;
+            }
+            let stored = buzz_core::StoredEvent::new(source, Some(channel_id));
+            let ctx = buzz_workflow::build_trigger_context(&stored);
+            if !buzz_workflow::trigger_matches_signed_event(
+                &workflow,
+                &ctx,
+                stored.event.kind.as_u16() as u32,
+            )
+            .await
+            {
+                return None;
+            }
+            (
+                ctx,
+                Some(format!("{}:event:{id}", claim.definition_id)),
+                None,
+            )
+        }
+        WorkflowCauseClaim::Command(id) => {
+            let command = query_exact_event(*id, rest_client).await?;
+            let command_author = command.pubkey.to_hex();
+            let command_controls_workflow = command_author.eq_ignore_ascii_case(&claim.owner)
+                || check_sibling_via_profile(&claim.owner, &command_author, rest_client).await;
+            if command.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_TRIGGER
+                || !command_controls_workflow
+                || !command_targets_workflow(&command, workflow_id)
+            {
+                return None;
+            }
+            (
+                TriggerContext {
+                    author: command_author,
+                    channel_id: channel_id.to_string(),
+                    ..Default::default()
+                },
+                Some(format!("{}:command:{id}", claim.definition_id)),
+                None,
+            )
+        }
+        WorkflowCauseClaim::Schedule(slot) => {
+            let slot_time = chrono::DateTime::parse_from_rfc3339(slot)
+                .ok()?
+                .with_timezone(&chrono::Utc);
+            if !buzz_workflow::schedule_cause_matches(&workflow, slot_time) {
+                return None;
+            }
+            let timestamp = slot_time.timestamp().to_string();
+            (
+                TriggerContext {
+                    channel_id: channel_id.to_string(),
+                    timestamp,
+                    ..Default::default()
+                },
+                Some(format!("{}:schedule:{slot}", claim.definition_id)),
+                None,
+            )
+        }
+        WorkflowCauseClaim::Webhook => {
+            if !matches!(workflow.trigger, buzz_workflow::schema::TriggerDef::Webhook)
+                || event.content.len() > MAX_WORKFLOW_WEBHOOK_CARGO_BYTES
+            {
+                return None;
+            }
+            let fields: HashMap<String, String> =
+                serde_json::from_str::<serde_json::Value>(&event.content)
+                    .ok()?
+                    .as_object()?
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            value
+                                .as_str()
+                                .map(ToOwned::to_owned)
+                                .unwrap_or_else(|| value.to_string()),
+                        )
+                    })
+                    .collect();
+            (
+                TriggerContext {
+                    channel_id: channel_id.to_string(),
+                    webhook_fields: fields,
+                    ..Default::default()
+                },
+                None,
+                Some(claim.definition_id.to_hex()),
+            )
+        }
+    };
+    if let Some(condition) = &step.if_expr {
+        if step_condition_depends_on_prior_outputs(condition)
+            || !buzz_workflow::executor::evaluate_condition(
+                condition,
+                &trigger_ctx,
+                &HashMap::new(),
+            )
+            .await
+            .ok()?
+        {
+            return None;
+        }
+    }
+    // Doorbells carry signed trigger provenance, not mutable outputs from prior
+    // workflow actions. Never turn an unverifiable step output into literal
+    // owner-authorized prompt text.
+    if template_references_prior_outputs(text) {
+        return None;
+    }
+    let rendered = resolve_template(text, &trigger_ctx, &HashMap::new()).ok()?;
+    let rendered_content = if matches!(claim.cause, WorkflowCauseClaim::Webhook) {
+        format!("[Untrusted external webhook data rendered into owner-declared trigger slots]\n{rendered}")
+    } else {
+        rendered
+    };
+    Some(TrustedWorkflowDoorbell {
+        owner: claim.owner,
+        rendered_content,
+        dedup_key,
+        webhook_definition,
+    })
+}
+
+fn with_doorbell_content(event: &nostr::Event, content: String) -> Option<nostr::Event> {
+    let mut value = serde_json::to_value(event).ok()?;
+    value["content"] = serde_json::Value::String(content);
+    serde_json::from_value(value).ok()
+}
+
+fn admit_workflow_cause(
+    key: &str,
+    current: &mut HashSet<String>,
+    previous: &mut HashSet<String>,
+) -> bool {
+    if current.contains(key) || previous.contains(key) {
+        return false;
+    }
+    current.insert(key.to_owned());
+    if current.len() >= 1000 {
+        *previous = std::mem::take(current);
+    }
+    true
+}
+
+fn admit_workflow_webhook(
+    definition: &str,
+    limits: &mut HashMap<String, (f64, std::time::Instant)>,
+    now: std::time::Instant,
+) -> bool {
+    let bucket = limits.entry(definition.to_owned()).or_insert((5.0, now));
+    bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64() / 12.0).min(5.0);
+    bucket.1 = now;
+    if bucket.0 < 1.0 {
+        return false;
+    }
+    bucket.0 -= 1.0;
+    true
+}
+
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -1573,6 +2468,8 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    /// Exact prompt turn that accepted the steer request.
+    turn_id: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -2013,6 +2910,8 @@ async fn tokio_main() -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
+    let relay_self = relay.relay_self().map(str::to_owned);
+
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
     // Best-effort: a failure here is non-fatal (we just lose the startup window
@@ -2256,6 +3155,11 @@ async fn tokio_main() -> Result<()> {
     } else {
         None
     };
+    // Poll durable workflow handoffs independently of ephemeral wakes. The
+    // immediate first tick covers startup; subsequent ticks cover missed wakes
+    // and reconnects.
+    let mut workflow_delivery_poll = tokio::time::interval(Duration::from_secs(15));
+    workflow_delivery_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut typing_refresh = if config.typing_enabled {
         let interval = Duration::from_secs(3);
@@ -2310,6 +3214,7 @@ async fn tokio_main() -> Result<()> {
     // spawn_and_init never blocks the main loop.
     let maintenance_interval = Duration::from_secs(30);
     let mut last_maintenance = std::time::Instant::now();
+    let mut last_workflow_lease_renewal = std::time::Instant::now();
 
     // Channel for background respawn tasks to return completed agents.
     // Bounded to agent count — at most one respawn per slot in flight.
@@ -2364,6 +3269,28 @@ async fn tokio_main() -> Result<()> {
     // Rotates at 1000 entries instead of clearing the entire set at 2000.
     let mut seen_membership_current: HashSet<String> = HashSet::new();
     let mut seen_membership_previous: HashSet<String> = HashSet::new();
+    // Semantic workflow-cause dedup. Two generations keep memory bounded while
+    // ensuring reconnect replays cannot open multiple turns for the same cause.
+    let mut seen_workflow_current: HashSet<String> = HashSet::new();
+    let mut seen_workflow_previous: HashSet<String> = HashSet::new();
+    // Per-definition webhook token buckets: five immediate, then five/minute.
+    let mut webhook_limits: HashMap<String, (f64, std::time::Instant)> = HashMap::new();
+    // Durable workflow leases are indexed by the turn they enter. The ephemeral
+    // wake is only discovery; completion is fenced by the claim token after the
+    // actual prompt outcome returns.
+    let mut workflow_deliveries_by_event: HashMap<String, ClaimedWorkflowDelivery> = HashMap::new();
+    let mut workflow_deliveries_by_turn: HashMap<String, Vec<ClaimedWorkflowDelivery>> =
+        HashMap::new();
+    // Terminal dispositions remain owned until the relay authoritatively
+    // acknowledges the fenced finish. This prevents a lost HTTP response from
+    // turning successful work into a future redelivery.
+    let mut pending_workflow_finalizations: HashMap<Uuid, PendingWorkflowFinalization> =
+        HashMap::new();
+    // Native steers retain durable delivery ownership on the queued event until
+    // the agent acknowledges success. Results that race ahead of that ack are
+    // retained so success can finish against the exact fenced turn outcome.
+    let mut workflow_native_steer_turn_by_event: HashMap<String, String> = HashMap::new();
+    let mut completed_workflow_turns: HashMap<String, bool> = HashMap::new();
 
     // Channels the agent has been removed from. When a checked-out agent is
     // returned to the pool, its sessions for these channels are stripped, and
@@ -2444,6 +3371,26 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        if last_workflow_lease_renewal.elapsed()
+            >= Duration::from_secs(WORKFLOW_LEASE_RENEW_INTERVAL_SECS)
+        {
+            last_workflow_lease_renewal = std::time::Instant::now();
+            renew_owned_workflow_deliveries(
+                &ctx.rest_client,
+                workflow_lease_seconds(&config),
+                &mut pool,
+                &mut queue,
+                &mut workflow_deliveries_by_event,
+                &mut workflow_deliveries_by_turn,
+                &mut workflow_native_steer_turn_by_event,
+                &mut completed_workflow_turns,
+                &mut pending_workflow_finalizations,
+            )
+            .await;
+            reconcile_workflow_finalizations(&ctx.rest_client, &mut pending_workflow_finalizations)
+                .await;
+        }
+
         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
@@ -2478,9 +3425,14 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    &mut workflow_deliveries_by_event,
+                    &mut workflow_deliveries_by_turn,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2530,9 +3482,14 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-            {
+            for (channel_id, thread_tags) in dispatch_pending(
+                &mut pool,
+                &mut queue,
+                &ctx,
+                &mut last_activity,
+                &mut workflow_deliveries_by_event,
+                &mut workflow_deliveries_by_turn,
+            ) {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -2630,11 +3587,108 @@ async fn tokio_main() -> Result<()> {
                     None
                 }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
+                _ = workflow_delivery_poll.tick() => {
+                    let _ = result_rx;
+                    if let Some(delivery) = claim_workflow_delivery(
+                        &ctx.rest_client,
+                        None,
+                        None,
+                        workflow_lease_seconds(&config),
+                    ).await {
+                        match verified_workflow_delivery_message(
+                            &delivery,
+                            &pubkey_hex,
+                            relay_self.as_deref(),
+                        ).await {
+                            Some((message, owner)) => {
+                                let channel_id = delivery.channel_id;
+                                let is_dm = is_dm_channel(channel_id, &ctx.channel_info).await;
+                                let allowed = author_allowed(
+                                    &config.respond_to,
+                                    &config.respond_to_allowlist,
+                                    &owner,
+                                    is_dm,
+                                    &owner_cache,
+                                    &ctx.rest_client,
+                                ).await;
+                                let matched = if allowed {
+                                    filter::match_event(&message, channel_id, &rules, &pubkey_hex).await
+                                } else {
+                                    None
+                                };
+                                if let Some(matched) = matched {
+                                    let event_id = message.id.to_hex();
+                                    if queue.push(QueuedEvent {
+                                        channel_id,
+                                        event: message,
+                                        received_at: std::time::Instant::now(),
+                                        prompt_tag: matched.prompt_tag,
+                                    }) {
+                                        workflow_deliveries_by_event.insert(event_id, delivery);
+                                    }
+                                    if pool_ready {
+                                        for (channel_id, thread_tags) in dispatch_pending(
+                                            &mut pool,
+                                            &mut queue,
+                                            &ctx,
+                                            &mut last_activity,
+                                            &mut workflow_deliveries_by_event,
+                                            &mut workflow_deliveries_by_turn,
+                                        ) {
+                                            typing_channels.insert(channel_id, thread_tags);
+                                        }
+                                    }
+                                } else {
+                                    finish_workflow_delivery(
+                                        &ctx.rest_client,
+                                        &mut pending_workflow_finalizations,
+                                        &delivery,
+                                        false,
+                                        false,
+                                        Some("delivery_not_admitted"),
+                                        Some("verified workflow message did not pass ACP admission"),
+                                    ).await;
+                                }
+                            }
+                            None => {
+                                finish_workflow_delivery(
+                                    &ctx.rest_client,
+                                    &mut pending_workflow_finalizations,
+                                    &delivery,
+                                    false,
+                                    false,
+                                    Some("delivery_verification_failed"),
+                                    Some("definition, execution state, or visible message did not verify"),
+                                ).await;
+                            }
+                        }
+                    }
+                    None
+                }
                 buzz_event = relay.next_event() => {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
-                        Some(buzz_event) => {
+                        Some(mut buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
+                            let durable_workflow_owner: Option<String> = None;
+                            let claimed_workflow_delivery: Option<ClaimedWorkflowDelivery> = None;
+
+                            if kind_u32 == KIND_WORKFLOW_AGENT_WAKE {
+                                // The wake is an identifier-only latency hint. It cannot
+                                // supply D's complete immutable expected binding, so it
+                                // never authorizes a targeted claim. The short durable
+                                // poll below remains the sole claim path.
+                                if verifier::trusted_live_workflow_wake_delivery_id(
+                                    &buzz_event.event,
+                                    &pubkey_hex,
+                                    relay_self.as_deref(),
+                                )
+                                .is_none()
+                                {
+                                    tracing::warn!("invalid workflow delivery wake — dropping");
+                                }
+                                continue;
+                            }
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
@@ -2716,6 +3770,23 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
+                                    for event_id in &drained_ids {
+                                        workflow_native_steer_turn_by_event.remove(event_id);
+                                        if let Some(delivery) =
+                                            workflow_deliveries_by_event.remove(event_id)
+                                        {
+                                            finish_workflow_delivery(
+                                                &ctx.rest_client,
+                                                &mut pending_workflow_finalizations,
+                                                &delivery,
+                                                false,
+                                                false,
+                                                Some("channel_membership_removed"),
+                                                Some("managed agent lost channel membership"),
+                                            )
+                                            .await;
+                                        }
+                                    }
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2873,28 +3944,70 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
+                                let doorbell_shape = is_workflow_delivery_candidate(
+                                    &buzz_event.event,
+                                    relay_self.as_deref(),
+                                );
+                                // A durable wake has already been claimed and its
+                                // message-v1 envelope verified against immutable DB
+                                // bindings. Only unclaimed legacy doorbell-v1 events
+                                // pass through the legacy authority reconstruction.
+                                let workflow = if durable_workflow_owner.is_some() {
+                                    None
+                                } else {
+                                    trusted_workflow_doorbell(
+                                        &buzz_event.event,
+                                        buzz_event.channel_id,
+                                        relay_self.as_deref(),
+                                        &ctx.rest_client,
+                                    ).await
+                                };
+                                let Some((principal, workflow)) = workflow_delivery_gate(
+                                    &author,
+                                    durable_workflow_owner.as_deref(),
+                                    doorbell_shape,
+                                    workflow,
+                                ) else {
+                                    tracing::warn!(channel_id = %buzz_event.channel_id, "invalid workflow doorbell — dropping fail closed");
+                                    continue;
+                                };
+                                if let Some(workflow) = &workflow {
+                                    if let Some(key) = &workflow.dedup_key {
+                                        if !admit_workflow_cause(
+                                            key,
+                                            &mut seen_workflow_current,
+                                            &mut seen_workflow_previous,
+                                        ) {
+                                            tracing::debug!(channel_id = %buzz_event.channel_id, "duplicate workflow cause — dropping");
+                                            continue;
+                                        }
+                                    }
+                                    if let Some(definition) = &workflow.webhook_definition {
+                                        if !admit_workflow_webhook(
+                                            definition,
+                                            &mut webhook_limits,
+                                            std::time::Instant::now(),
+                                        ) {
+                                            tracing::warn!(channel_id = %buzz_event.channel_id, "workflow webhook rate limit exceeded — dropping");
+                                            continue;
+                                        }
+                                    }
+                                    let Some(rendered) = with_doorbell_content(&buzz_event.event, workflow.rendered_content.clone()) else {
+                                        continue;
+                                    };
+                                    buzz_event.event = rendered;
+                                }
+                                let is_dm = is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
-                                    &author,
+                                    &principal,
                                     is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
-                                )
-                                .await;
+                                ).await;
                                 if !allowed {
-                                    tracing::debug!(
-                                        channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
-                                        mode = %config.respond_to,
-                                        is_dm,
-                                        "inbound author gate — dropping event"
-                                    );
+                                    tracing::debug!(channel_id = %buzz_event.channel_id, author = %author, principal = %principal, workflow_delegated = workflow.is_some(), mode = %config.respond_to, is_dm, "inbound author gate — dropping event");
                                     continue;
                                 }
                             }
@@ -2935,6 +4048,9 @@ async fn tokio_main() -> Result<()> {
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
+                                if let Some(delivery) = claimed_workflow_delivery {
+                                    workflow_deliveries_by_event.insert(event_id_hex.clone(), delivery);
+                                }
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -2967,16 +4083,25 @@ async fn tokio_main() -> Result<()> {
                                     // to the universal cancel+merge `Steer`
                                     // signal so the event still reaches the
                                     // agent.
-                                    let native_attempted = matches!(signal, ControlSignal::Steer)
-                                        && try_native_steer(
-                                            &mut pool,
-                                            &mut queue,
-                                            buzz_event.channel_id,
-                                            event_for_steer,
-                                            prompt_tag_for_steer,
-                                            &steer_ack_tx,
-                                        );
-                                    if !native_attempted {
+                                    let native_turn = matches!(signal, ControlSignal::Steer)
+                                        .then(|| {
+                                            try_native_steer(
+                                                &mut pool,
+                                                &mut queue,
+                                                buzz_event.channel_id,
+                                                event_for_steer,
+                                                prompt_tag_for_steer,
+                                                &steer_ack_tx,
+                                            )
+                                        })
+                                        .flatten();
+                                    if let Some(turn_id) = native_turn.as_ref() {
+                                        if workflow_deliveries_by_event.contains_key(&event_id_hex) {
+                                            workflow_native_steer_turn_by_event
+                                                .insert(event_id_hex.clone(), turn_id.clone());
+                                        }
+                                    }
+                                    if native_turn.is_none() {
                                         signal_in_flight_task(
                                             &mut pool,
                                             buzz_event.channel_id,
@@ -2987,7 +4112,14 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(
+                        &mut pool,
+                        &mut queue,
+                        &ctx,
+                        &mut last_activity,
+                        &mut workflow_deliveries_by_event,
+                        &mut workflow_deliveries_by_turn,
+                    )
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -3087,7 +4219,14 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(
+                        &mut pool,
+                        &mut queue,
+                        &ctx,
+                        &mut last_activity,
+                        &mut workflow_deliveries_by_event,
+                        &mut workflow_deliveries_by_turn,
+                    )
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3150,6 +4289,19 @@ async fn tokio_main() -> Result<()> {
 
         match pool_event {
             Some(PoolEvent::Result(result)) => {
+                let turn_id = result.turn_id.clone();
+                let workflow_deliveries = workflow_deliveries_by_turn.remove(&turn_id);
+                let workflow_delivered = matches!(result.outcome, PromptOutcome::Ok(_));
+                let workflow_channel = match &result.source {
+                    PromptSource::Channel(channel_id) => Some(*channel_id),
+                    PromptSource::Heartbeat => None,
+                };
+                if workflow_native_steer_turn_by_event
+                    .values()
+                    .any(|pending_turn| pending_turn == &turn_id)
+                {
+                    completed_workflow_turns.insert(turn_id.clone(), workflow_delivered);
+                }
                 // Stop typing indicator for the completed channel.
                 if let PromptSource::Channel(ch) = &result.source {
                     typing_channels.remove(ch);
@@ -3170,7 +4322,29 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                if drain_ready_join_results(
+                if let Some(deliveries) = workflow_deliveries {
+                    let terminal = retain_workflow_deliveries_for_local_retry(
+                        &queue,
+                        workflow_channel,
+                        !workflow_delivered,
+                        deliveries,
+                        &mut workflow_deliveries_by_event,
+                    );
+                    for delivery in terminal {
+                        finish_workflow_delivery(
+                            &ctx.rest_client,
+                            &mut pending_workflow_finalizations,
+                            &delivery,
+                            workflow_delivered,
+                            false,
+                            (!workflow_delivered).then_some("prompt_failed"),
+                            (!workflow_delivered)
+                                .then_some("managed agent turn terminated without a local retry"),
+                        )
+                        .await;
+                    }
+                }
+                let (join_action, panic_recoveries) = drain_ready_join_results(
                     &mut pool,
                     &mut queue,
                     &config,
@@ -3181,19 +4355,48 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
-                ) == LoopAction::Exit
-                {
+                );
+                for recovery in panic_recoveries {
+                    if let Some(deliveries) = workflow_deliveries_by_turn.remove(&recovery.turn_id)
+                    {
+                        let terminal = retain_workflow_deliveries_for_local_retry(
+                            &queue,
+                            recovery.channel_id,
+                            true,
+                            deliveries,
+                            &mut workflow_deliveries_by_event,
+                        );
+                        for delivery in terminal {
+                            finish_workflow_delivery(
+                                &ctx.rest_client,
+                                &mut pending_workflow_finalizations,
+                                &delivery,
+                                false,
+                                false,
+                                Some("prompt_panicked"),
+                                Some("managed agent panicked without a local retry"),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                if join_action == LoopAction::Exit {
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    &mut workflow_deliveries_by_event,
+                    &mut workflow_deliveries_by_turn,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
             Some(PoolEvent::Panic(join_error)) => {
                 tracing::error!("agent task panicked: {join_error}");
-                recover_panicked_agent(
+                let panic_recovery = recover_panicked_agent(
                     &mut pool,
                     &mut queue,
                     &config,
@@ -3206,19 +4409,49 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                 );
+                if let Some(recovery) = panic_recovery {
+                    if let Some(deliveries) = workflow_deliveries_by_turn.remove(&recovery.turn_id)
+                    {
+                        let terminal = retain_workflow_deliveries_for_local_retry(
+                            &queue,
+                            recovery.channel_id,
+                            true,
+                            deliveries,
+                            &mut workflow_deliveries_by_event,
+                        );
+                        for delivery in terminal {
+                            finish_workflow_delivery(
+                                &ctx.rest_client,
+                                &mut pending_workflow_finalizations,
+                                &delivery,
+                                false,
+                                false,
+                                Some("prompt_panicked"),
+                                Some("managed agent panicked without a local retry"),
+                            )
+                            .await;
+                        }
+                    }
+                }
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    &mut workflow_deliveries_by_event,
+                    &mut workflow_deliveries_by_turn,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                turn_id,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -3321,6 +4554,9 @@ async fn tokio_main() -> Result<()> {
                     Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
                     Err(_recv_err) => (true, false, false),
                 };
+                // Every terminal ack resolves this event from the accepting turn.
+                // Retain the result until all events for that turn resolve.
+                workflow_native_steer_turn_by_event.remove(&event_id);
                 tracing::info!(
                     channel = %channel_id,
                     event_id = %event_id,
@@ -3332,6 +4568,16 @@ async fn tokio_main() -> Result<()> {
                 );
                 if let Ok(pool::SteerAck::Success { session_id }) = &ack {
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
+                    transfer_native_steer_workflow_delivery(
+                        &ctx.rest_client,
+                        &event_id,
+                        &turn_id,
+                        &mut workflow_deliveries_by_event,
+                        &mut workflow_deliveries_by_turn,
+                        &mut completed_workflow_turns,
+                        &mut pending_workflow_finalizations,
+                    )
+                    .await;
                     if !pool.record_successful_steer(
                         channel_id,
                         event_id.clone(),
@@ -3350,6 +4596,11 @@ async fn tokio_main() -> Result<()> {
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
                 }
+                clear_completed_workflow_turn_if_resolved(
+                    &turn_id,
+                    &workflow_native_steer_turn_by_event,
+                    &mut completed_workflow_turns,
+                );
                 if signal_fallback {
                     // Universal cancel+merge fallback. Note: the
                     // queued event has already been released to the
@@ -3365,9 +4616,14 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    &mut workflow_deliveries_by_event,
+                    &mut workflow_deliveries_by_turn,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3393,9 +4649,14 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (channel_id, thread_tags) in dispatch_pending(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &mut last_activity,
+                            &mut workflow_deliveries_by_event,
+                            &mut workflow_deliveries_by_turn,
+                        ) {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     }
@@ -3463,6 +4724,20 @@ async fn tokio_main() -> Result<()> {
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
                         let idx = pr.agent.index;
+                        let delivered = matches!(pr.outcome, PromptOutcome::Ok(_));
+                        if let Some(deliveries) = workflow_deliveries_by_turn.remove(&pr.turn_id) {
+                            for delivery in deliveries {
+                                finish_workflow_delivery(
+                                    &ctx.rest_client,
+                                    &mut pending_workflow_finalizations,
+                                    &delivery,
+                                    delivered,
+                                    false,
+                                    (!delivered).then_some("runtime_shutdown"),
+                                    (!delivered).then_some("managed agent stopped during the turn"),
+                                ).await;
+                            }
+                        }
                         pr.agent.acp.shutdown().await;
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
                     }
@@ -3480,8 +4755,85 @@ async fn tokio_main() -> Result<()> {
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
         let idx = pr.agent.index;
+        let delivered = matches!(pr.outcome, PromptOutcome::Ok(_));
+        if let Some(deliveries) = workflow_deliveries_by_turn.remove(&pr.turn_id) {
+            for delivery in deliveries {
+                finish_workflow_delivery(
+                    &ctx.rest_client,
+                    &mut pending_workflow_finalizations,
+                    &delivery,
+                    delivered,
+                    false,
+                    (!delivered).then_some("runtime_shutdown"),
+                    (!delivered).then_some("managed agent stopped during the turn"),
+                )
+                .await;
+            }
+        }
         pr.agent.acp.shutdown().await;
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
+    }
+
+    // Anything still owned after the bounded drain is uncertain or never
+    // started. Fence it terminally while this runtime still owns the lease;
+    // never let shutdown silently drop a claim ledger for later redelivery.
+    for (_, delivery) in workflow_deliveries_by_event.drain() {
+        finish_workflow_delivery(
+            &ctx.rest_client,
+            &mut pending_workflow_finalizations,
+            &delivery,
+            false,
+            false,
+            Some("runtime_shutdown"),
+            Some("managed agent stopped before delivery"),
+        )
+        .await;
+    }
+    for delivery in workflow_deliveries_by_turn
+        .drain()
+        .flat_map(|(_, deliveries)| deliveries)
+    {
+        finish_workflow_delivery(
+            &ctx.rest_client,
+            &mut pending_workflow_finalizations,
+            &delivery,
+            false,
+            false,
+            Some("runtime_shutdown"),
+            Some("managed agent turn did not finish before shutdown"),
+        )
+        .await;
+    }
+    // Renew before every admitted, concurrent finish round so stalled I/O cannot
+    // starve another claim's lease. The 30-second deadline below stops new rounds;
+    // an already-admitted renewal/finalization round may finish after it. If
+    // shutdown still ends with unresolved
+    // intent, claim expiry is terminal in the database and cannot be reclaimed.
+    let finalization_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !pending_workflow_finalizations.is_empty()
+        && tokio::time::Instant::now() < finalization_deadline
+    {
+        renew_owned_workflow_deliveries(
+            &ctx.rest_client,
+            workflow_lease_seconds(&config),
+            &mut pool,
+            &mut queue,
+            &mut workflow_deliveries_by_event,
+            &mut workflow_deliveries_by_turn,
+            &mut workflow_native_steer_turn_by_event,
+            &mut completed_workflow_turns,
+            &mut pending_workflow_finalizations,
+        )
+        .await;
+        reconcile_workflow_finalizations(&ctx.rest_client, &mut pending_workflow_finalizations)
+            .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !pending_workflow_finalizations.is_empty() {
+        tracing::error!(
+            deliveries = pending_workflow_finalizations.len(),
+            "shutdown ended with unresolved workflow finalizations; claim expiry will terminalize them without redelivery"
+        );
     }
     // Explicitly shut down idle agents still sitting in their slots.
     for slot in pool.agents_mut().iter_mut() {
@@ -3645,7 +4997,7 @@ fn try_native_steer(
     event: nostr::Event,
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
-) -> bool {
+) -> Option<String> {
     // Build the steer body: framing strings come from
     // `queue::native_steer_framing()` (Eva's drift-proof requirement —
     // native and cancel+merge fallback share these so the agent gets the
@@ -3682,7 +5034,7 @@ fn try_native_steer(
     };
 
     match pool.send_steer(channel_id, request) {
-        Ok(()) => {
+        Ok(turn_id) => {
             // Withhold the queued event synchronously BEFORE spawning
             // the watcher: this closes the race where `mark_complete`
             // clears `in_flight_channels` and a stray `flush_next` could
@@ -3706,15 +5058,17 @@ fn try_native_steer(
             }
             let ack_tx_clone = steer_ack_tx.clone();
             let event_id_for_watcher = event_id_hex.clone();
+            let ack_turn_id = turn_id.clone();
             tokio::spawn(async move {
                 let ack = ack_rx.await;
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    turn_id: ack_turn_id,
                     ack,
                 });
             });
-            true
+            Some(turn_id)
         }
         Err(e) => {
             tracing::info!(
@@ -3722,7 +5076,7 @@ fn try_native_steer(
                 error = ?e,
                 "non-cancelling steer not accepted — falling back to cancel+merge"
             );
-            false
+            None
         }
     }
 }
@@ -3735,6 +5089,8 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
+    workflow_deliveries_by_event: &mut HashMap<String, ClaimedWorkflowDelivery>,
+    workflow_deliveries_by_turn: &mut HashMap<String, Vec<ClaimedWorkflowDelivery>>,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -3788,6 +5144,15 @@ fn dispatch_pending(
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
+        let task_workflow_deliveries = batch
+            .events
+            .iter()
+            .chain(batch.cancelled_events.iter())
+            .filter_map(|event| workflow_deliveries_by_event.remove(&event.event.id.to_hex()))
+            .collect::<Vec<_>>();
+        if !task_workflow_deliveries.is_empty() {
+            workflow_deliveries_by_turn.insert(turn_id.clone(), task_workflow_deliveries);
+        }
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -4278,6 +5643,12 @@ fn handle_prompt_result(
     LoopAction::Continue
 }
 
+#[derive(Debug)]
+struct PanicRecovery {
+    turn_id: String,
+    channel_id: Option<Uuid>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn recover_panicked_agent(
     pool: &mut AgentPool,
@@ -4291,11 +5662,15 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
-) {
+) -> Option<PanicRecovery> {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
         tracing::error!("panic for unknown task {task_id:?} — bug");
-        return;
+        return None;
+    };
+    let recovery = PanicRecovery {
+        turn_id: meta.turn_id.clone(),
+        channel_id: meta.channel_id,
     };
     let i = meta.agent_index;
 
@@ -4345,7 +5720,7 @@ fn recover_panicked_agent(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = i, "circuit open after panic — not respawning");
-            return;
+            return Some(recovery);
         }
         CrashVerdict::HalfOpenProbe => {
             tracing::info!(agent = i, "circuit half-open — probe respawn after panic");
@@ -4375,6 +5750,7 @@ fn recover_panicked_agent(
         let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
         guard.send(result);
     });
+    Some(recovery)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4389,11 +5765,12 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
-) -> LoopAction {
+) -> (LoopAction, Vec<PanicRecovery>) {
+    let mut recoveries = Vec::new();
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
             tracing::error!("agent task panicked: {join_error}");
-            recover_panicked_agent(
+            if let Some(recovery) = recover_panicked_agent(
                 pool,
                 queue,
                 config,
@@ -4405,13 +5782,15 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
-            );
+            ) {
+                recoveries.push(recovery);
+            }
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
-                return LoopAction::Exit;
+                return (LoopAction::Exit, recoveries);
             }
         }
     }
-    LoopAction::Continue
+    (LoopAction::Continue, recoveries)
 }
 
 fn dispatch_heartbeat(
@@ -5125,6 +6504,629 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             env
         },
     }]
+}
+
+#[cfg(test)]
+mod workflow_authority_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn lifecycle_delivery(message_event_id: String, channel_id: Uuid) -> ClaimedWorkflowDelivery {
+        let keys = Keys::generate();
+        let definition_event = EventBuilder::new(Kind::Custom(1), "definition")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let message_event = EventBuilder::new(Kind::Custom(1), "message")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ClaimedWorkflowDelivery {
+            id: Uuid::new_v4(),
+            binding: WorkflowDeliveryBindingWire {
+                community_id: Uuid::new_v4(),
+                workflow_id: Uuid::new_v4(),
+                run_id: Uuid::new_v4(),
+                step_id: "step".into(),
+                target_pubkey: keys.public_key().to_hex(),
+                definition_event_id: definition_event.id.to_hex(),
+                message_event_id,
+                cause: WorkflowDeliveryCauseWire::Webhook {
+                    invocation_id: Uuid::new_v4(),
+                },
+            },
+            channel_id,
+            lease_generation: 1,
+            lease_until: chrono::Utc::now() + chrono::Duration::hours(1),
+            receipt_event: message_event.clone(),
+            definition_event,
+            message_event,
+        }
+    }
+
+    fn definition(owner: &Keys, channel: Uuid, trigger: &str, text: &str) -> nostr::Event {
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
+            format!("name: signed\ntrigger:\n  on: {trigger}\nsteps:\n  - id: wake\n    action: send_message\n    text: '{text}'\n"),
+        )
+        .tags([
+            Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+        ])
+        .sign_with_keys(owner)
+        .unwrap()
+    }
+
+    fn doorbell(
+        relay: &Keys,
+        owner: &Keys,
+        definition: &nostr::Event,
+        channel: Uuid,
+        cause: [&str; 3],
+        content: &str,
+    ) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([
+                Tag::parse(["buzz:workflow", "doorbell-v1"]).unwrap(),
+                Tag::parse(["workflow-owner", &owner.public_key().to_hex()]).unwrap(),
+                Tag::parse(["workflow-definition", &definition.id.to_hex(), "wake"]).unwrap(),
+                Tag::parse(cause).unwrap(),
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(relay)
+            .unwrap()
+    }
+
+    #[test]
+    fn workflow_lease_matches_authenticated_api_maximum() {
+        assert_eq!(WORKFLOW_DELIVERY_LEASE_SECONDS, 300);
+    }
+
+    #[tokio::test]
+    async fn stalled_finalizations_share_one_safe_concurrent_budget() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                sockets.push(socket);
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            sockets.len()
+        });
+        let client = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let mut pending = HashMap::new();
+        for marker in ["aa", "bb"] {
+            let mut delivery = lifecycle_delivery(marker.repeat(32), Uuid::new_v4());
+            delivery.lease_until = chrono::Utc::now()
+                + chrono::Duration::seconds(WORKFLOW_LEASE_FAIL_CLOSED_MARGIN_SECS + 5);
+            finish_workflow_delivery(&client, &mut pending, &delivery, true, false, None, None)
+                .await;
+        }
+        let started = tokio::time::Instant::now();
+        reconcile_workflow_finalizations(&client, &mut pending).await;
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert_eq!(
+            pending.len(),
+            2,
+            "stalled finishes retain exact terminal intent"
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            2,
+            "both finalizations start concurrently"
+        );
+    }
+
+    #[test]
+    fn distinguished_shape_accepts_exact_pointer_and_webhook_cargo() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(&owner, channel, "webhook", "hello {{trigger.name}}");
+        let event = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "webhook", ""],
+            r#"{"name":"external"}"#,
+        );
+        let claim = workflow_doorbell_claim(&event, Some(&relay.public_key().to_hex())).unwrap();
+        assert_eq!(claim.definition_id, def.id);
+        assert_eq!(claim.step_id, "wake");
+        assert_eq!(claim.cause, WorkflowCauseClaim::Webhook);
+    }
+
+    #[test]
+    fn prior_output_detection_covers_spaced_templates_and_condition_tokens() {
+        assert!(template_references_prior_outputs(
+            "{{ steps.check.output.status }}"
+        ));
+        assert!(template_references_prior_outputs(
+            "prefix {{steps.check.output.status"
+        ));
+        assert!(!template_references_prior_outputs(
+            "literal steps.check.output.status"
+        ));
+        assert!(step_condition_depends_on_prior_outputs(
+            "steps_check_output_status == 200"
+        ));
+        assert!(step_condition_depends_on_prior_outputs(
+            "steps == 'untrusted'"
+        ));
+        assert!(!step_condition_depends_on_prior_outputs(
+            "trigger_text == 'ordinary'"
+        ));
+    }
+
+    #[test]
+    fn workflow_candidates_fail_closed_before_ordinary_author_handling() {
+        let relay = Keys::generate();
+        let channel = Uuid::new_v4();
+        let malformed = EventBuilder::new(Kind::Custom(9), "relay prose")
+            .tags([
+                Tag::parse(["buzz:workflow", "unknown-version"]).unwrap(),
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(is_workflow_delivery_candidate(
+            &malformed,
+            Some(&relay.public_key().to_hex())
+        ));
+        assert!(workflow_doorbell_claim(&malformed, Some(&relay.public_key().to_hex())).is_none());
+
+        let ordinary = EventBuilder::new(Kind::Custom(9), "ordinary relay message")
+            .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(!is_workflow_delivery_candidate(
+            &ordinary,
+            Some(&relay.public_key().to_hex())
+        ));
+    }
+
+    #[test]
+    fn relay_prose_and_malformed_or_duplicate_tags_fail_closed() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(&owner, channel, "message_posted", "wake");
+        let source = Keys::generate();
+        let trigger = EventBuilder::new(Kind::Custom(9), "source")
+            .sign_with_keys(&source)
+            .unwrap();
+        let prose = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "event", &trigger.id.to_hex()],
+            "relay-controlled prose",
+        );
+        assert!(workflow_doorbell_claim(&prose, Some(&relay.public_key().to_hex())).is_none());
+
+        let mut duplicate = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "event", &trigger.id.to_hex()],
+            "",
+        );
+        duplicate
+            .tags
+            .push(Tag::parse(["workflow-cause", "schedule", "2026-08-14T00:00:00Z"]).unwrap());
+        assert!(workflow_doorbell_claim(&duplicate, Some(&relay.public_key().to_hex())).is_none());
+    }
+
+    async fn rest_client_serving(
+        responses: Vec<serde_json::Value>,
+    ) -> (relay::RestClient, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for response_body in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                let body = response_body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (
+            relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: Keys::generate(),
+                auth_tag_json: None,
+            },
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn owner_signed_event_cause_is_refetched_and_rendered_locally() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let author = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(
+            &owner,
+            channel,
+            "message_posted",
+            "Hello {{trigger.author}}: {{trigger.text}}",
+        );
+        let source = EventBuilder::new(Kind::Custom(9), "signed source")
+            .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .sign_with_keys(&author)
+            .unwrap();
+        let pointer = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "event", &source.id.to_hex()],
+            "",
+        );
+        let (client, server) =
+            rest_client_serving(vec![serde_json::json!([def]), serde_json::json!([source])]).await;
+
+        let trusted = trusted_workflow_doorbell(
+            &pointer,
+            channel,
+            Some(&relay.public_key().to_hex()),
+            &client,
+        )
+        .await
+        .expect("trusted doorbell");
+        assert_eq!(
+            trusted.rendered_content,
+            format!("Hello {}: signed source", author.public_key().to_hex())
+        );
+        assert_eq!(trusted.owner, owner.public_key().to_hex());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn human_owner_signed_command_authorizes_agent_owned_workflow() {
+        let relay = Keys::generate();
+        let human = Keys::generate();
+        let agent = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(&agent, channel, "webhook", "manual by {{trigger.author}}");
+        let workflow_id = workflow_uuid(&def).unwrap();
+        let command = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_TRIGGER as u16),
+            "",
+        )
+        .tags([Tag::parse(["d", &workflow_id.to_string()]).unwrap()])
+        .sign_with_keys(&human)
+        .unwrap();
+        let auth_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&human, &agent.public_key(), "").expect("auth tag");
+        let auth_parts: Vec<String> = serde_json::from_str(&auth_json).unwrap();
+        let profile = EventBuilder::new(Kind::Metadata, "{}")
+            .tags([Tag::parse(auth_parts).unwrap()])
+            .sign_with_keys(&agent)
+            .unwrap();
+        let pointer = doorbell(
+            &relay,
+            &agent,
+            &def,
+            channel,
+            ["workflow-cause", "command", &command.id.to_hex()],
+            "",
+        );
+        let (client, server) = rest_client_serving(vec![
+            serde_json::json!([def]),
+            serde_json::json!([command]),
+            serde_json::json!([profile]),
+        ])
+        .await;
+
+        let trusted = trusted_workflow_doorbell(
+            &pointer,
+            channel,
+            Some(&relay.public_key().to_hex()),
+            &client,
+        )
+        .await
+        .expect("human owner command should retain agent workflow authority");
+        assert_eq!(
+            trusted.rendered_content,
+            format!("manual by {}", human.public_key().to_hex())
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn verified_durable_message_reaches_dispatch_without_legacy_doorbell_authority() {
+        let admitted = workflow_delivery_gate("relay", Some("durable-owner"), true, None)
+            .expect("verified durable message is admitted");
+        assert_eq!(admitted.0, "durable-owner");
+        assert!(admitted.1.is_none());
+        assert!(
+            workflow_delivery_gate("relay", None, true, None).is_none(),
+            "an unverified workflow-shaped message still fails closed"
+        );
+        let ordinary = workflow_delivery_gate("human", None, false, None)
+            .expect("ordinary messages retain their author principal");
+        assert_eq!(ordinary.0, "human");
+    }
+
+    #[tokio::test]
+    async fn claimed_native_steer_finishes_once_with_exact_completed_turn() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 16384];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = "{}";
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+        let client = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let channel = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "durable steer")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let event_id = event.id.to_hex();
+        let delivery_id = Uuid::new_v4();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id: channel,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "workflow".into()
+        }));
+        assert!(queue.mark_native_steer_pending(channel, &event_id));
+        let mut delivery = lifecycle_delivery(event_id.clone(), channel);
+        delivery.id = delivery_id;
+        let mut by_event = HashMap::from([(event_id.clone(), delivery)]);
+        let mut by_turn = HashMap::new();
+        let mut completed = HashMap::from([("busy-turn".into(), true)]);
+        let mut finalizing = HashMap::new();
+        let mut pending_turn_by_event = HashMap::from([(event_id.clone(), "busy-turn".to_owned())]);
+        transfer_native_steer_workflow_delivery(
+            &client,
+            &event_id,
+            "busy-turn",
+            &mut by_event,
+            &mut by_turn,
+            &mut completed,
+            &mut finalizing,
+        )
+        .await;
+        assert!(by_event.is_empty() && by_turn.is_empty());
+        assert_eq!(completed.get("busy-turn"), Some(&true));
+        pending_turn_by_event.remove(&event_id);
+        clear_completed_workflow_turn_if_resolved(
+            "busy-turn",
+            &pending_turn_by_event,
+            &mut completed,
+        );
+        queue.remove_event(channel, &event_id);
+        assert!(completed.is_empty());
+        assert_eq!(queue.queued_event_count(&channel), 0);
+        reconcile_workflow_finalizations(&client, &mut finalizing).await;
+        let request = server.await.unwrap();
+        assert!(request.contains(&format!("/workflows/agent-deliveries/{delivery_id}/finish")));
+        assert!(request.contains("\"disposition\":\"finished\""));
+        // Idempotent ack replay cannot finish the removed fenced claim twice.
+        transfer_native_steer_workflow_delivery(
+            &client,
+            &event_id,
+            "busy-turn",
+            &mut by_event,
+            &mut by_turn,
+            &mut completed,
+            &mut finalizing,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn two_successful_native_steers_finish_against_one_prior_turn_result() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 16384];
+                let read = socket.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let body = "{}";
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let client = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let turn_id = "shared-completed-turn";
+        let event_ids = ["aa".repeat(32), "bb".repeat(32)];
+        let delivery_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let mut by_event = HashMap::new();
+        for (event_id, delivery_id) in event_ids.iter().zip(delivery_ids) {
+            by_event.insert(event_id.clone(), {
+                let mut delivery = lifecycle_delivery(event_id.clone(), Uuid::new_v4());
+                delivery.id = delivery_id;
+                delivery
+            });
+        }
+        let mut pending = HashMap::from([
+            (event_ids[0].clone(), turn_id.into()),
+            (event_ids[1].clone(), turn_id.into()),
+        ]);
+        let mut by_turn = HashMap::new();
+        let mut completed = HashMap::from([(turn_id.into(), true)]);
+        let mut finalizing = HashMap::new();
+        for event_id in &event_ids {
+            pending.remove(event_id);
+            transfer_native_steer_workflow_delivery(
+                &client,
+                event_id,
+                turn_id,
+                &mut by_event,
+                &mut by_turn,
+                &mut completed,
+                &mut finalizing,
+            )
+            .await;
+            clear_completed_workflow_turn_if_resolved(turn_id, &pending, &mut completed);
+        }
+        assert!(by_event.is_empty() && by_turn.is_empty() && completed.is_empty());
+        reconcile_workflow_finalizations(&client, &mut finalizing).await;
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for delivery_id in delivery_ids {
+            assert!(requests.iter().any(|request| request
+                .contains(&format!("/workflows/agent-deliveries/{delivery_id}/finish"))));
+        }
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("\"disposition\":\"finished\"")));
+    }
+
+    #[test]
+    fn mixed_native_steer_resolution_clears_outcome_only_after_final_ack() {
+        let turn_id = "mixed-turn";
+        let mut pending = HashMap::from([
+            ("success".to_string(), turn_id.into()),
+            ("failed".to_string(), turn_id.into()),
+        ]);
+        let mut completed = HashMap::from([(turn_id.into(), true)]);
+        pending.remove("failed");
+        clear_completed_workflow_turn_if_resolved(turn_id, &pending, &mut completed);
+        assert_eq!(completed.get(turn_id), Some(&true));
+        pending.remove("success");
+        clear_completed_workflow_turn_if_resolved(turn_id, &pending, &mut completed);
+        assert!(!completed.contains_key(turn_id));
+    }
+
+    #[test]
+    fn rejected_native_steer_retains_claim_on_released_queue_event() {
+        let channel = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "durable fallback")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id: channel,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "workflow".into()
+        }));
+        assert!(queue.mark_native_steer_pending(channel, &event_id));
+        let claim = lifecycle_delivery(event_id.clone(), channel);
+        let mut by_event = HashMap::from([(event_id.clone(), claim)]);
+        queue.release_native_steer(channel, &event_id);
+        let batch = queue
+            .flush_next()
+            .expect("released fallback dispatches normally");
+        let turn_claims = batch
+            .events
+            .iter()
+            .filter_map(|event| by_event.remove(&event.event.id.to_hex()))
+            .collect::<Vec<_>>();
+        assert_eq!(turn_claims.len(), 1);
+        assert!(by_event.is_empty());
+    }
+
+    #[test]
+    fn durable_runtime_uses_public_authority_artifacts_only() {
+        let source = include_str!("verifier.rs");
+        assert!(source.contains("WorkflowDeliveryReceipt::verify"));
+        assert!(!source.contains("pub trigger_context:"));
+        assert!(!source.contains("pub execution_trace:"));
+    }
+
+    #[test]
+    fn semantic_cause_dedup_survives_generation_rotation() {
+        let mut current = HashSet::new();
+        let mut previous = HashSet::new();
+        assert!(admit_workflow_cause(
+            "definition:event:cause",
+            &mut current,
+            &mut previous,
+        ));
+        for index in 0..999 {
+            assert!(admit_workflow_cause(
+                &format!("other:{index}"),
+                &mut current,
+                &mut previous,
+            ));
+        }
+        assert!(current.is_empty(), "the full generation should rotate");
+        assert!(!admit_workflow_cause(
+            "definition:event:cause",
+            &mut current,
+            &mut previous,
+        ));
+    }
+
+    #[test]
+    fn webhook_rate_limit_bursts_five_then_refills() {
+        let mut limits = HashMap::new();
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            assert!(admit_workflow_webhook("definition", &mut limits, start));
+        }
+        assert!(!admit_workflow_webhook("definition", &mut limits, start));
+        assert!(admit_workflow_webhook(
+            "definition",
+            &mut limits,
+            start + Duration::from_secs(12),
+        ));
+        assert!(
+            admit_workflow_webhook("other-definition", &mut limits, start),
+            "limits are isolated per workflow revision"
+        );
+    }
+
+    #[test]
+    fn p_tags_never_supply_workflow_authority() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = EventBuilder::new(Kind::Custom(9), "")
+            .tags([
+                Tag::parse(["buzz:workflow", "doorbell-v1"]).unwrap(),
+                Tag::parse(["p", &owner]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(workflow_doorbell_claim(&event, Some(&relay.public_key().to_hex())).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -8588,6 +10590,208 @@ mod error_outcome_emission_tests {
             1,
             "non-auth application error must preserve the event for retry"
         );
+    }
+
+    fn claimed_delivery(event: &nostr::Event, channel_id: Uuid) -> ClaimedWorkflowDelivery {
+        let keys = Keys::generate();
+        let definition_event = EventBuilder::new(Kind::Custom(1), "definition")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let receipt_event = EventBuilder::new(Kind::Custom(1), "receipt")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ClaimedWorkflowDelivery {
+            id: Uuid::new_v4(),
+            binding: WorkflowDeliveryBindingWire {
+                community_id: Uuid::new_v4(),
+                workflow_id: Uuid::new_v4(),
+                run_id: Uuid::new_v4(),
+                step_id: "deliver".into(),
+                target_pubkey: keys.public_key().to_hex(),
+                definition_event_id: definition_event.id.to_hex(),
+                message_event_id: event.id.to_hex(),
+                cause: WorkflowDeliveryCauseWire::Webhook {
+                    invocation_id: Uuid::new_v4(),
+                },
+            },
+            channel_id,
+            lease_generation: 1,
+            lease_until: chrono::Utc::now() + chrono::Duration::hours(1),
+            definition_event,
+            message_event: event.clone(),
+            receipt_event,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_requeued_turn_retains_same_durable_claim_locally() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "durable retry")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: event.clone(),
+                prompt_tag: "workflow".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let delivery = claimed_delivery(&event, channel_id);
+        let original_generation = delivery.lease_generation;
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "durable-failure-turn".into(),
+                recoverable_batch: Some(batch.clone()),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut heartbeat_in_flight = false;
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &test_config(),
+            PromptResult {
+                agent,
+                source: PromptSource::Channel(channel_id),
+                turn_id: "durable-failure-turn".into(),
+                outcome: PromptOutcome::Error(AcpError::AgentError {
+                    code: -32000,
+                    message: "retryable".into(),
+                }),
+                batch: Some(batch),
+            },
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let mut by_event = HashMap::new();
+        let terminal = retain_workflow_deliveries_for_local_retry(
+            &queue,
+            Some(channel_id),
+            true,
+            vec![delivery],
+            &mut by_event,
+        );
+        assert!(
+            terminal.is_empty(),
+            "local retry must not terminalize the DB claim"
+        );
+        assert_eq!(
+            by_event[&event.id.to_hex()].lease_generation,
+            original_generation
+        );
+        assert!(queue.contains_event(channel_id, &event.id.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn panic_recovery_returns_same_durable_claim_to_exact_queued_event() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "durable panic retry")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: event.clone(),
+                prompt_tag: "workflow".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let delivery = claimed_delivery(&event, channel_id);
+        let original_generation = delivery.lease_generation;
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "durable-panic-turn".into(),
+                recoverable_batch: Some(batch),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        started_rx.await.unwrap();
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut heartbeat_in_flight = false;
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let recovery = recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &test_config(),
+            join_error,
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+        )
+        .expect("panic metadata survives recovery");
+
+        let mut by_event = HashMap::new();
+        let terminal = retain_workflow_deliveries_for_local_retry(
+            &queue,
+            recovery.channel_id,
+            true,
+            vec![delivery],
+            &mut by_event,
+        );
+        assert_eq!(recovery.turn_id, "durable-panic-turn");
+        assert!(
+            terminal.is_empty(),
+            "requeued panic must not terminalize the DB claim"
+        );
+        assert_eq!(
+            by_event[&event.id.to_hex()].lease_generation,
+            original_generation
+        );
+        assert!(queue.contains_event(channel_id, &event.id.to_hex()));
     }
 }
 

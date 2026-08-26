@@ -1120,6 +1120,42 @@ fn owner_authority_allows(role: Option<&str>, needs_elevated: bool) -> bool {
     }
 }
 
+/// Validate a relay-provided schedule cause against the signed definition.
+///
+/// Freshness/skew is a separate policy; this checks only that the slot is an
+/// exact cron occurrence or interval boundary.
+pub fn schedule_cause_matches(def: &WorkflowDef, slot: DateTime<Utc>) -> bool {
+    match &def.trigger {
+        schema::TriggerDef::Schedule {
+            cron: Some(expr),
+            interval: None,
+        } => {
+            let Ok(schedule) = schema::normalize_cron(expr).parse::<cron::Schedule>() else {
+                return false;
+            };
+            let previous = slot - chrono::Duration::seconds(1);
+            schedule.after(&previous).next() == Some(slot)
+        }
+        schema::TriggerDef::Schedule {
+            cron: None,
+            interval: Some(duration),
+        } => executor::parse_duration_secs(duration)
+            .ok()
+            .is_some_and(|seconds| seconds > 0 && slot.timestamp().rem_euclid(seconds as i64) == 0),
+        _ => false,
+    }
+}
+
+/// Validate that a signed source event semantically satisfies a workflow trigger.
+pub async fn trigger_matches_signed_event(
+    def: &WorkflowDef,
+    trigger_ctx: &executor::TriggerContext,
+    kind_u32: u32,
+) -> bool {
+    trigger_matches_event(&def.trigger, kind_u32)
+        && should_fire_workflow(def, trigger_ctx, Uuid::nil()).await
+}
+
 /// Returns `true` if the trigger type matches the given event kind.
 fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
     use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
