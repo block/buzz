@@ -6,6 +6,10 @@ on: # zizmor: ignore[dangerous-triggers] untrusted PR code is inspected only in 
     types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
+  push:
+    branches: [main]
+  repository_dispatch:
+    types: [codex-security-review-reconcile]
 
 jobs:
   prepare-review:
@@ -14,7 +18,7 @@ jobs:
     # gate and must not be configured as required status checks.
     # MEMBER and OWNER are GitHub's associations for members of the `block`
     # organization. Outside contributors require this exact command from one
-    # of those members: @buzz-security-review
+    # of those members: @buzz-security-review <full-head-sha>
     if: >-
       github.repository == 'block/buzz' && (
         (
@@ -24,13 +28,14 @@ jobs:
         ) || (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
-          github.event.comment.body == '@buzz-security-review' &&
+          startsWith(github.event.comment.body, '@buzz-security-review ') &&
           contains(fromJSON('["MEMBER", "OWNER"]'), github.event.comment.author_association)
         )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
@@ -40,51 +45,146 @@ jobs:
       head_repo: ${{ steps.pr.outputs.head_repo }}
       commit_range: ${{ steps.pr.outputs.commit_range }}
     steps:
+      - name: Checkout trusted workflow support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Resolve current pull request
         id: pr
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const prNumber = context.eventName === 'pull_request_target'
-              ? context.payload.pull_request.number
-              : context.issue.number;
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
+            const review = require('./.github/scripts/codex-security-review.js');
+            await review.prepare({ github, context, core });
 
-            if (pullRequest.state !== 'open') {
-              core.setFailed(`Pull request #${prNumber} is not open.`);
-              return;
-            }
-            if (pullRequest.base.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
-              core.setFailed(`Pull request #${prNumber} targets an unexpected repository.`);
-              return;
-            }
-            if (pullRequest.base.ref !== 'main') {
-              core.setFailed(`Pull request #${prNumber} does not target main.`);
-              return;
-            }
-            if (!pullRequest.head.repo?.full_name) {
-              core.setFailed(`Pull request #${prNumber} has no available head repository.`);
-              return;
-            }
+  prepare-base-reconciliation:
+    name: Find Reviews From the Previous Base
+    if: >-
+      github.repository == 'block/buzz' && (
+        github.event_name == 'push' ||
+        github.event_name == 'repository_dispatch'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: codex-security-review-base-reconciliation-${{ github.event.client_payload.main_sha || github.sha }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      pr_numbers: ${{ steps.prs.outputs.pr_numbers }}
+      main_sha: ${{ steps.prs.outputs.main_sha }}
+      should_continue: ${{ steps.prs.outputs.should_continue }}
+      next_after: ${{ steps.prs.outputs.next_after }}
+      next_pass: ${{ steps.prs.outputs.next_pass }}
+    steps:
+      - name: Checkout trusted workflow support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-            const commitRange = `${pullRequest.base.sha}...${pullRequest.head.sha}`;
-            core.setOutput('pr_number', String(prNumber));
-            core.setOutput('trigger_actor', context.actor);
-            core.setOutput('base_sha', pullRequest.base.sha);
-            core.setOutput('head_sha', pullRequest.head.sha);
-            core.setOutput('head_repo', pullRequest.head.repo.full_name);
-            core.setOutput('commit_range', commitRange);
+      - name: Find labeled reviews
+        id: prs
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const review = require('./.github/scripts/codex-security-review.js');
+            await review.prepareBaseReconciliation({ github, context, core });
 
-  invalidate-external-review:
-    name: Mark External Review Stale
+  reconcile-base-reviews:
+    name: Reconcile Review for PR ${{ matrix.pr_number }}
+    needs: prepare-base-reconciliation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        pr_number: ${{ fromJSON(needs.prepare-base-reconciliation.outputs.pr_numbers) }}
+    concurrency:
+      group: codex-security-review-post-${{ matrix.pr_number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Checkout trusted workflow support
+        if: matrix.pr_number != 0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Mark review of the previous base stale
+        if: matrix.pr_number != 0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW_PR_NUMBER: ${{ matrix.pr_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const review = require('./.github/scripts/codex-security-review.js');
+            await review.withGithubRetry(
+              () => review.invalidate({
+                github,
+                context,
+                core,
+                prNumber: Number(process.env.REVIEW_PR_NUMBER),
+                existingOnly: true,
+              }),
+              { core },
+            );
+
+  continue-base-reconciliation:
+    name: Continue Base Reconciliation
+    needs: [prepare-base-reconciliation, reconcile-base-reviews]
+    if: >-
+      always() &&
+      needs.prepare-base-reconciliation.result == 'success' &&
+      needs.prepare-base-reconciliation.outputs.should_continue == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted workflow support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Dispatch the next reconciliation batch
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const review = require('./.github/scripts/codex-security-review.js');
+            await new Promise((resolve) => setTimeout(resolve, 60000));
+            await review.withGithubRetry(
+              () => github.rest.repos.createDispatchEvent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                event_type: 'codex-security-review-reconcile',
+                client_payload: {
+                  after_pr: '${{ needs.prepare-base-reconciliation.outputs.next_after }}',
+                  main_sha: '${{ needs.prepare-base-reconciliation.outputs.main_sha }}',
+                  pass: '${{ needs.prepare-base-reconciliation.outputs.next_pass }}',
+                },
+              }),
+              { core },
+            );
+
+  invalidate-previous-review:
+    name: Mark Previous Review Stale
     if: >-
       github.repository == 'block/buzz' &&
-      github.event_name == 'pull_request_target' &&
-      !contains(fromJSON('["MEMBER", "OWNER"]'), github.event.pull_request.author_association)
+      github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
@@ -101,13 +201,13 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Mark current external head as awaiting review
+      - name: Mark previous range as awaiting review
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ github.token }}
           script: |
             const review = require('./.github/scripts/codex-security-review.js');
-            await review.invalidate({ github, context, core });
+            await review.invalidatePullRequestUpdate({ github, context, core });
 
   security-review:
     name: Run Codex Security Review
