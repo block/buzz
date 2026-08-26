@@ -12,7 +12,10 @@ mod huddle;
 mod identity_storage;
 mod initial_window;
 mod key_backup;
+mod link_preview_tags;
 mod linux_media;
+#[cfg(target_os = "macos")]
+mod macos_notifications;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -23,9 +26,13 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod native_relay_client;
 mod native_websocket;
+mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
+mod observed_unread;
+mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
@@ -39,27 +46,32 @@ mod terminal_runtime;
 mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
+mod unread_catch_up;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
+#[doc(hidden)]
+pub use commands::print_agent_access_owner_only_probe_if_requested;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
+    acknowledge_pending_community_deep_link, acknowledge_pending_entity_deep_link,
+    acknowledge_pending_navigation_deep_link, clear_pending_navigation_deep_links,
+    handle_deep_link_url, take_pending_community_deep_link, take_pending_entity_deep_link,
+    take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
+    PendingNavigationDeepLinks,
 };
-use huddle::audio_output::{
-    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
-};
-use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
-    add_agent_to_huddle, check_pipeline_hotstart, close_huddle_companion, confirm_huddle_active,
-    download_voice_models, end_huddle, get_huddle_agent_pubkeys, get_huddle_state,
-    get_model_status, get_voice_input_mode, interrupt_huddle_speech, join_huddle, leave_huddle,
-    open_huddle_window, push_audio_pcm, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
-    set_huddle_transcription_enabled, set_tts_enabled, set_voice_input_mode, speak_agent_message,
-    start_huddle, start_stt_pipeline, HuddlePhase,
+    add_agent_to_huddle,
+    audio_output::{get_audio_output_device, list_audio_output_devices, set_audio_output_device},
+    check_pipeline_hotstart, close_huddle_companion, confirm_huddle_active, download_voice_models,
+    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
+    interrupt_huddle_speech, join_huddle, leave_huddle, open_huddle_window, push_audio_pcm,
+    reconnect::reconnect_huddle_audio,
+    remove_agent_from_huddle, set_huddle_manual_mic_unmuted, set_huddle_transcription_enabled,
+    set_tts_enabled, set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
+    HuddlePhase,
 };
 use initial_window::*;
 use managed_agents::{
@@ -80,7 +92,6 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
@@ -139,7 +150,6 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
-
                     // Linux/WebKitGTK needs media-stream settings and a
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
@@ -192,96 +202,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
 
-    // The global-shortcut plugin is omitted from test builds: linking it into
-    // the lib-test binary makes it fail to load on Windows
-    // (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
-    #[cfg(not(test))]
-    let builder = builder.plugin({
-        use tauri_plugin_global_shortcut::ShortcutState;
-
-        // Generation counter for the release delay task. Incremented on
-        // every press — a delayed release only fires if the generation
-        // hasn't changed (i.e. no new press happened during the delay).
-        // This prevents press→release→press within 200 ms from having
-        // the first release clobber the second press.
-        let ptt_press_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(move |app, _shortcut, event| {
-                let state = match app.try_state::<AppState>() {
-                    Some(s) => s,
-                    None => return,
-                };
-
-                // Only act if a huddle is active and mode is PTT.
-                let (is_ptt_mode, is_active) = match state.huddle_state.lock() {
-                    Ok(hs) => (
-                        hs.voice_input_mode == huddle::VoiceInputMode::PushToTalk,
-                        matches!(
-                            hs.phase,
-                            huddle::HuddlePhase::Connected | huddle::HuddlePhase::Active
-                        ),
-                    ),
-                    Err(_) => return,
-                };
-
-                if !is_ptt_mode || !is_active {
-                    return;
-                }
-
-                match event.state {
-                    ShortcutState::Pressed => {
-                        // Bump generation — invalidates any pending release delay.
-                        ptt_press_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-
-                        if let Ok(hs) = state.huddle_state.lock() {
-                            hs.ptt_active
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            // Only cancel TTS if it's actually playing — avoids
-                            // a stale cancel flag that drops the next queued message.
-                            if hs.tts_active.load(std::sync::atomic::Ordering::Acquire) {
-                                hs.tts_cancel
-                                    .store(true, std::sync::atomic::Ordering::Release);
-                            }
-                        }
-                        // Emit ptt-state=true to the frontend.
-                        // The React side plays the press audio cue on this event
-                        // (Web Audio API via HuddleContext). Rust-side rodio audio
-                        // was considered but rejected: the rodio OutputStream must
-                        // outlive the handler and sharing it across the shortcut
-                        // closure adds lifecycle complexity for marginal gain.
-                        // The React implementation is sufficient and simpler.
-                        let _ = app.emit("ptt-state", true);
-                    }
-                    ShortcutState::Released => {
-                        // Capture generation at release time.
-                        let gen_at_release =
-                            ptt_press_gen.load(std::sync::atomic::Ordering::Acquire);
-                        let gen_arc = Arc::clone(&ptt_press_gen);
-                        let app_handle = app.clone();
-                        // 200 ms release delay — captures the tail of the utterance.
-                        // Only applies if no new press happened during the delay.
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            // Check generation — if it changed, a new press arrived.
-                            if gen_arc.load(std::sync::atomic::Ordering::Acquire) != gen_at_release
-                            {
-                                return; // Superseded by a new press.
-                            }
-                            if let Some(state) = app_handle.try_state::<AppState>() {
-                                if let Ok(hs) = state.huddle_state.lock() {
-                                    hs.ptt_active
-                                        .store(false, std::sync::atomic::Ordering::Release);
-                                }
-                            }
-                            // Emit ptt-state=false — React plays the release audio cue.
-                            let _ = app_handle.emit("ptt-state", false);
-                        });
-                    }
-                }
-            })
-            .build()
-    });
+    // The push-to-talk global-shortcut plugin lives in `ptt_shortcut`, next to
+    // the registration lifecycle it drives. Installing it is a no-op in test
+    // builds; see that module for why.
+    let builder = ptt_shortcut::install(builder);
 
     // Register the updater only in configured release builds; omit it locally.
     #[cfg(buzz_updater_enabled)]
@@ -290,7 +214,6 @@ pub fn run() {
     } else {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     };
-
     let app = app_menu::install(builder)
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -302,14 +225,22 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(PendingNavigationDeepLinks::default())
+        .manage(PendingEntityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
+        .manage(archive::sync::ArchiveSyncState::default())
+        .manage(native_relay_client::NativeRelayClient::default())
+        .manage(observed_unread::ObservedUnreadStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
-            tray_menu::init(&app_handle)?;
+            {
+                tray_menu::init(&app_handle)?;
+                macos_notifications::init(&app_handle)?;
+            }
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -510,15 +441,7 @@ pub fn run() {
             // and on cold start. The single-instance plugin handles forwarding
             // from duplicate launches on Windows/Linux.
             #[cfg(desktop)]
-            {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                let dl_handle = app.handle().clone();
-                app.deep_link().on_open_url(move |event| {
-                    for url in event.urls() {
-                        handle_deep_link_url(&dl_handle, url.as_str());
-                    }
-                });
-            }
+            deep_link::install_deep_link_handlers(app);
 
             // Defer launch-time agent restoration until `apply_workspace` has
             // installed the active workspace relay and identity. Starting here
@@ -611,6 +534,11 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            take_pending_navigation_deep_link,
+            acknowledge_pending_navigation_deep_link,
+            clear_pending_navigation_deep_links,
+            take_pending_entity_deep_link,
+            acknowledge_pending_entity_deep_link,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,
@@ -651,8 +579,11 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
+            publish_project_owner_announcement,
             sign_project_pull_request_status,
             sign_project_pull_request_review_request,
+            sign_project_issue_assignment,
+            sign_project_issue_unassignment,
             publish_project_pull_request_merged_status,
             merge_project_pull_request,
             open_project_terminal,
@@ -667,7 +598,7 @@ pub fn run() {
             get_relay_ws_url,
             get_relay_http_url,
             get_media_proxy_port,
-            fetch_link_preview_title,
+            fetch_link_preview_metadata,
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,
@@ -720,12 +651,19 @@ pub fn run() {
             remove_reaction,
             get_event,
             show_native_notification,
+            #[cfg(target_os = "macos")]
+            macos_notifications::take_pending_activations,
+            #[cfg(target_os = "macos")]
+            macos_notifications::notification_permission_state,
+            #[cfg(target_os = "macos")]
+            macos_notifications::request_notification_access,
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
             upload_media_bytes,
             upload_media_bytes_raw,
             cancel_media_upload,
+            release_media_upload,
             download_image,
             save_png_data_url,
             download_file,
@@ -746,6 +684,7 @@ pub fn run() {
             get_relay_self,
             resolve_oa_owner,
             list_relay_agents,
+            revalidate_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
@@ -763,11 +702,13 @@ pub fn run() {
             get_managed_agent_log,
             get_agent_models,
             discover_agent_models,
+            agent_access_owner_only,
             get_agent_config_surface,
             get_runtime_file_config,
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
+            persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
             mesh_start_node,
@@ -779,6 +720,10 @@ pub fn run() {
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
+            persona_catalog::fetch_persona_catalog,
+            unread_catch_up::unread_catch_up,
+            observed_unread::observed_unread_open_scope,
+            observed_unread::observed_unread_ingest,
             list_personas,
             create_persona,
             update_persona,
@@ -868,6 +813,7 @@ pub fn run() {
             set_audio_output_device,
             get_audio_output_device,
             start_pairing,
+            start_identity_recovery_pairing,
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
@@ -891,6 +837,10 @@ pub fn run() {
             archive::read_archived_observer_events_for_channel,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
+            archive::get_agent_usage_series,
+            archive::sync::announce_archive_sync_epoch,
+            archive::sync::start_archive_sync,
+            archive::sync::stop_archive_sync,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

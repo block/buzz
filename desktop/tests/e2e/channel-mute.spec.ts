@@ -80,12 +80,10 @@ test.describe("channel muting", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
     const engRow = page.getByTestId("channel-engineering");
+    const engLabel = engRow.locator("[data-sidebar-row-label]");
     await expect(engRow).toBeVisible();
     await expect(engRow).toHaveCSS("opacity", "1");
-    await expect(engRow.locator("[data-sidebar-row-label]")).toHaveCSS(
-      "opacity",
-      "0.5",
-    );
+    await expect(engLabel).toHaveCSS("opacity", "0.5");
     await expect(engRow.locator("svg.lucide-hash")).toHaveCSS("opacity", "0.5");
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
   });
@@ -98,12 +96,19 @@ test.describe("channel muting", () => {
     await installMockBridge(page);
 
     await page.goto("/");
+    await expect(page.locator("html")).toHaveClass(/dark/);
     await page.getByTestId("channel-random").click();
 
-    const mutedLabel = page
-      .getByTestId("channel-engineering")
-      .locator("[data-sidebar-row-label]");
-    await expect(mutedLabel).toHaveCSS("opacity", "0.45");
+    const engRow = page.getByTestId("channel-engineering");
+    await expect(engRow).toHaveCSS("opacity", "1");
+    await expect(engRow.locator("[data-sidebar-row-label]")).toHaveCSS(
+      "opacity",
+      "0.45",
+    );
+    await expect(engRow.locator("svg.lucide-hash")).toHaveCSS(
+      "opacity",
+      "0.45",
+    );
   });
 
   test("03 — muted channel with a top-level @mention is emphasized", async ({

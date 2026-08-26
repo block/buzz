@@ -1,11 +1,14 @@
 part of '../activity_page.dart';
 
 class _LoadingSkeleton extends StatelessWidget {
-  const _LoadingSkeleton();
+  final ScrollController scrollController;
+
+  const _LoadingSkeleton({required this.scrollController});
 
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
+      controller: scrollController,
       padding: _activityScrollPadding(
         context,
         horizontal: Grid.gutter,

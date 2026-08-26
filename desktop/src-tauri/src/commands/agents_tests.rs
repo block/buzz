@@ -34,6 +34,7 @@ fn bare_agent_record(
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -58,6 +59,7 @@ fn bare_agent_record(
         source_team_persona_slug: None,
         catalog_source: None,
         relay_mesh: None,
+        effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -98,8 +100,12 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
 
     let owner = nostr::Keys::generate();
     let agent = nostr::Keys::generate();
-    let event = build_agent_archive_request(&owner, &agent.public_key().to_hex())
-        .expect("build archive request");
+    let event = build_agent_archive_request(
+        &owner,
+        &agent.public_key().to_hex(),
+        Some("persona-reviewer"),
+    )
+    .expect("build archive request");
     let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
     let tags = json["tags"].as_array().unwrap();
 
@@ -107,6 +113,7 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
     assert_eq!(event.pubkey, owner.public_key());
     assert!(event.verify_id());
     assert!(event.verify_signature());
+    assert_eq!(event.content, r#"{"persona_id":"persona-reviewer"}"#);
     assert!(tags.iter().any(|tag| {
         tag.as_array().is_some_and(|parts| {
             parts.first().and_then(serde_json::Value::as_str) == Some("p")
@@ -316,6 +323,31 @@ fn profile_needs_sync_when_missing() {
     assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
 }
 
+// ── resolve_reconcile_relay: deferred-task relay pinning ────────────────────
+
+#[test]
+fn pinned_reconcile_relay_wins_over_a_post_switch_workspace() {
+    // Round-8 P1: the fire-and-forget reconciliation spawned by a scoped
+    // start may execute after an A→B community switch. The pinned relay —
+    // captured while A was the validated workspace — must win over the
+    // workspace read at execution time, so the kind:0 query/publish can
+    // never land on B under A's authorization.
+    let relay = resolve_reconcile_relay(
+        Some("wss://tenant-a.example"),
+        "",                       // never-pinned record
+        "wss://tenant-b.example", // the switch landed before execution
+    );
+    assert_eq!(relay, "wss://tenant-a.example");
+}
+
+#[test]
+fn unpinned_reconcile_relay_resolves_the_execution_time_workspace() {
+    // No tenant boundary: legacy behavior — follow the live workspace via
+    // effective_agent_relay_url (which ignores the record pin by design).
+    let relay = resolve_reconcile_relay(None, "wss://stale-pin.example", "wss://tenant-b.example");
+    assert_eq!(relay, "wss://tenant-b.example");
+}
+
 #[test]
 fn profile_needs_sync_when_missing_even_without_expected_avatar() {
     assert!(profile_needs_sync(None, "Duncan", None));
@@ -411,6 +443,27 @@ fn legacy_avatar_empty_when_nothing_resolves() {
 
 // ── Provider deploy payload completeness ─────────────────────────────────────
 
+fn deploy_payload_for_policy(
+    record: &ManagedAgentRecord,
+    owner_only_access: bool,
+) -> serde_json::Value {
+    deploy_payload_json(
+        record,
+        "wss://relay.example".to_string(),
+        DeployProjections {
+            effective_model: Some("gpt-x".to_string()),
+            effective_provider: Some("openai".to_string()),
+            effective_prompt: None,
+            effective_parallelism: record.parallelism,
+            owner_only_access,
+        },
+        std::collections::BTreeMap::new(),
+        // Access projection is the subject here; the launch block is exercised
+        // by the shared provider fixture test below.
+        serde_json::Value::Null,
+    )
+}
+
 /// The shared provider fixture is the contract arbiter: it must be the exact
 /// richest deploy request produced by the real desktop serializers.
 #[test]
@@ -465,9 +518,17 @@ fn deploy_payload_matches_the_shared_full_launch_fixture() {
     let agent = deploy_payload_json(
         &record,
         "wss://relay.example".into(),
-        Some("gpt-5".into()),
-        Some("openai".into()),
-        None,
+        DeployProjections {
+            effective_model: Some("gpt-5".into()),
+            effective_provider: Some("openai".into()),
+            effective_prompt: None,
+            effective_parallelism: crate::managed_agents::effective_parallelism(
+                &descriptor.command,
+                record.parallelism,
+            ),
+            // Fixture asserts the record's own access fields survive.
+            owner_only_access: false,
+        },
         std::collections::BTreeMap::from([("USER_KEY".into(), "user-value".into())]),
         launch,
     );
@@ -500,4 +561,135 @@ fn tauri_platform_configs_bundle_kubernetes_only_on_supported_hosts() {
             "unexpected Kubernetes externalBin for {target}; merged {paths:?}"
         );
     }
+}
+
+#[test]
+fn current_build_deploy_payload_forwards_compiled_policy() {
+    use crate::managed_agents::{BackendKind, RespondTo};
+
+    let expected_owner_only = match std::env::var("BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY") {
+        Ok(value) => value
+            .parse::<bool>()
+            .expect("BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY must be true or false"),
+        Err(std::env::VarError::NotPresent)
+            if !crate::managed_agents::owner_only_access_build() =>
+        {
+            false
+        }
+        Err(std::env::VarError::NotPresent) => {
+            panic!(
+                "BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY must be set for owner-only-access-build tests"
+            )
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY must be valid UTF-8")
+        }
+    };
+    let mut record = bare_agent_record(None, None, None);
+    record.backend = BackendKind::Provider {
+        id: "provider".to_string(),
+        config: serde_json::json!({}),
+    };
+    record.respond_to = RespondTo::Anyone;
+    record.respond_to_allowlist = vec!["a".repeat(64)];
+
+    let payload = deploy_payload_json(
+        &record,
+        "wss://relay.example".to_string(),
+        DeployProjections {
+            effective_model: None,
+            effective_provider: None,
+            effective_prompt: None,
+            effective_parallelism: record.parallelism,
+            owner_only_access: crate::managed_agents::owner_only_access_build(),
+        },
+        std::collections::BTreeMap::new(),
+        // The compiled access policy is the subject here; the launch block is
+        // exercised by the shared provider fixture test above.
+        serde_json::Value::Null,
+    );
+    let expected_mode = if expected_owner_only {
+        "owner-only"
+    } else {
+        "anyone"
+    };
+
+    assert_eq!(
+        payload["respond_to"], expected_mode,
+        "current-build deploy payload did not forward the compiled policy",
+    );
+    let expected_allowlist = if expected_owner_only {
+        serde_json::json!([])
+    } else {
+        serde_json::json!(["a".repeat(64)])
+    };
+    assert_eq!(
+        payload["respond_to_allowlist"], expected_allowlist,
+        "current-build deploy payload did not apply the compiled policy to the stale allowlist",
+    );
+}
+
+#[test]
+fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_builds() {
+    use crate::managed_agents::BackendKind;
+
+    let mut record = bare_agent_record(None, None, None);
+    record.backend = BackendKind::Provider {
+        id: "provider".to_string(),
+        config: serde_json::json!({}),
+    };
+    record.backend_agent_id = Some("existing-provider-agent".to_string());
+    record.respond_to = crate::managed_agents::RespondTo::Anyone;
+    record.respond_to_allowlist = vec!["a".repeat(64)];
+
+    assert!(provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
+    let payload = deploy_payload_for_policy(&record, true);
+    assert_eq!(payload["respond_to"], "owner-only");
+    assert_eq!(payload["respond_to_allowlist"], serde_json::json!([]));
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, false
+    ));
+
+    record.provider_policy_pending = true;
+    assert!(provider_access::needs_reconciliation_with_policy(
+        &record, false
+    ));
+
+    record.backend_agent_id = None;
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
+
+    record.backend = BackendKind::Local;
+    record.backend_agent_id = Some("stale-provider-id".to_string());
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
+}
+
+#[test]
+fn owner_only_access_deploy_payload_clamps_stale_access() {
+    use crate::managed_agents::{BackendKind, RespondTo};
+
+    let mut record = bare_agent_record(None, None, None);
+    record.backend = BackendKind::Provider {
+        id: "provider".to_string(),
+        config: serde_json::json!({}),
+    };
+    record.respond_to = RespondTo::Anyone;
+    record.respond_to_allowlist = vec!["a".repeat(64)];
+
+    let payload = deploy_payload_for_policy(&record, true);
+
+    assert_eq!(
+        payload["respond_to"], "owner-only",
+        "owner-only-access deploy payload widened stale access"
+    );
+    assert_eq!(
+        payload["respond_to_allowlist"],
+        serde_json::json!([]),
+        "owner-only-access deploy payload retained a stale allowlist"
+    );
 }

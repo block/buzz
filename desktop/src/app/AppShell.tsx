@@ -8,6 +8,10 @@ import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
+import {
+  type TerminalContextOverride,
+  TerminalContextOverrideProvider,
+} from "@/app/TerminalContextOverrideContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
@@ -15,6 +19,7 @@ import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useAppShellKeyboardShortcuts } from "@/app/useAppShellKeyboardShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useChannelActivityProjection } from "@/app/useChannelActivityProjection";
@@ -56,7 +61,8 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
-import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
+import { useArchiveSync } from "@/features/local-archive/useArchiveSync";
+import { useArchiveAgentMetricsBridge } from "@/features/local-archive/useArchiveAgentMetricsBridge";
 import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
@@ -89,8 +95,7 @@ import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBou
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
-import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
-import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
+import { useAppDeepLinks } from "@/shared/useAppDeepLinks";
 import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -127,6 +132,8 @@ export function AppShell() {
     null,
   );
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
+  const [scopeSearchFocusRequest, setScopeSearchFocusRequest] =
+    React.useState(0);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
@@ -173,9 +180,11 @@ export function AppShell() {
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   usePersonaSync(
     identityQuery.data?.pubkey,
@@ -201,6 +210,9 @@ export function AppShell() {
   // useArchiveSync must wait for reconciliation, or listeners could open
   // before kind 24200 is guaranteed present in the subscription.
   useArchiveSync(observerReconciled);
+  // The archive batch now persists in Rust, so the agent-metrics invalidation
+  // signal arrives as a Tauri event rather than an in-process call.
+  useArchiveAgentMetricsBridge();
   // Kind 44200 is relay-persisted (durable) and stays deferred: missed
   // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
@@ -308,6 +320,8 @@ export function AppShell() {
     selectedView,
     sidebarChannels,
   ]);
+  const [terminalContextOverride, setTerminalContextOverride] =
+    React.useState<TerminalContextOverride | null>(null);
   const { activeChannel, terminalContext } = useTerminalContext({
     channelId: selectedChannelId,
     channels,
@@ -315,6 +329,14 @@ export function AppShell() {
     pubkey: identityQuery.data?.pubkey,
     relayUrl: communitiesHook.activeCommunity?.relayUrl,
   });
+  const effectiveTerminalContext = terminalContextOverride
+    ? {
+        ...terminalContext,
+        channelId: terminalContextOverride.channelId,
+        channelName: terminalContextOverride.channelName,
+        threadId: null,
+      }
+    : terminalContext;
   const managedChannel = React.useMemo(() => {
     const targetChannelId = managedChannelId ?? selectedChannelId;
     return targetChannelId
@@ -492,6 +514,10 @@ export function AppShell() {
     setSearchFocusRequest((request) => request + 1);
     void refetchChannels();
   }, [refetchChannels]);
+  const handleOpenChannelSearch = React.useCallback(() => {
+    setScopeSearchFocusRequest((request) => request + 1);
+    void refetchChannels();
+  }, [refetchChannels]);
 
   const handleBrowseChannelJoin = React.useCallback(
     async (channelId: string) => {
@@ -629,79 +655,27 @@ export function AppShell() {
   useAppShellLifecycleEffects({
     desktopBadgeEnabled: !isHuddleRoom,
     homeBadgeCountExcludingHighPriority,
-    unreadChannelIds,
+    topLevelUnreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
-  useMessageDeepLinks(!isHuddleRoom);
+  // Dispatch `buzz://` deep links only from the main window; the companion is dedicated to its active Huddle route.
+  useAppDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
   );
-  React.useLayoutEffect(() => {
-    if (settingsOpen || isHuddleRoom) {
-      return;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
-        return;
-      }
-
-      // A focused surface may claim the shortcut first — e.g. the composer
-      // consumes ⌘K to open the link editor when text is selected. Its
-      // element-level handler runs before this window-level bubble listener
-      // and calls `preventDefault()`; respect that instead of also opening
-      // the global dialog.
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const key = event.key.toLowerCase();
-      if (key === "k" && !event.shiftKey) {
-        event.preventDefault();
-        handleOpenSearch();
-        return;
-      }
-
-      if (key === "k" && event.shiftKey) {
-        event.preventDefault();
-        void goNewMessage();
-        return;
-      }
-
-      if (key === "n" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenCreateChannel();
-        return;
-      }
-
-      if (key === "o" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenBrowseChannels();
-        return;
-      }
-
-      if (key === "a" && event.shiftKey) {
-        event.preventDefault();
-        void goHome();
-        return;
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [
-    handleOpenBrowseChannels,
-    handleOpenCreateChannel,
-    handleOpenSearch,
-    goNewMessage,
-    goHome,
-    isHuddleRoom,
-    settingsOpen,
-  ]);
+  useAppShellKeyboardShortcuts({
+    activeChannelId: selectedView === "channel" ? selectedChannelId : null,
+    canSearchCurrentChannel:
+      selectedView === "channel" && Boolean(activeChannel),
+    disabled: settingsOpen || isHuddleRoom,
+    onBrowseChannels: handleOpenBrowseChannels,
+    onCreateChannel: handleOpenCreateChannel,
+    onGoHome: goHome,
+    onNewMessage: goNewMessage,
+    onSearchCurrentChannel: handleOpenChannelSearch,
+    onSearchEverything: handleOpenSearch,
+  });
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
@@ -779,7 +753,6 @@ export function AppShell() {
               <CommunityRail
                 activeCommunityId={communitiesHook.activeCommunity?.id ?? null}
                 onAddCommunity={addCommunityDialog.openDialog}
-                onRemoveCommunity={(id) => void handleRemoveCommunity(id)}
                 onReorderCommunities={communitiesHook.reorderCommunities}
                 onSwitchCommunity={handleSwitchCommunity}
                 onUpdateCommunity={communitiesHook.updateCommunity}
@@ -787,7 +760,7 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
-              className="relative z-10 min-h-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
@@ -872,9 +845,7 @@ export function AppShell() {
                         onOpenAddCommunity={addCommunityDialog.openDialog}
                         onSendFeedback={() => setIsSendFeedbackOpen(true)}
                         onUpdateCommunity={communitiesHook.updateCommunity}
-                        onRemoveCommunity={(id) =>
-                          void handleRemoveCommunity(id)
-                        }
+                        onRemoveCommunity={handleRemoveCommunity}
                         onSwitchCommunity={handleSwitchCommunity}
                         onCreateAgent={() => requestOpenCreateAgent()}
                         selfPresenceStatus={presenceSession.currentStatus}
@@ -898,7 +869,10 @@ export function AppShell() {
                         onSelectChannel={handleSidebarChannelSelect}
                         onOpenSearchResult={handleOpenSearchResult}
                         searchChannels={channels}
-                        searchFocusRequest={searchFocusRequest}
+                        searchFocusRequests={[
+                          searchFocusRequest,
+                          scopeSearchFocusRequest,
+                        ]}
                         onSelectHome={() => void goHome()}
                         onSelectProjects={() => void goProjects()}
                         onSelectPulse={() => void goPulse()}
@@ -937,14 +911,21 @@ export function AppShell() {
                         onUnstarChannel={unstarChannel}
                       />
                     ) : null}
-                    <AppShellChannelSurface
-                      isHuddleRoom={isHuddleRoom}
-                      isHuddleRoomStarting={isHuddleRoomStarting}
-                      mainInsetRef={mainInsetRef}
-                      terminal={<TerminalBootstrap {...terminalContext} />}
+                    <TerminalContextOverrideProvider
+                      onChange={setTerminalContextOverride}
                     >
-                      <Outlet />
-                    </AppShellChannelSurface>
+                      <AppShellChannelSurface
+                        hasCommunityRail={hasCommunityRail}
+                        isHuddleRoom={isHuddleRoom}
+                        isHuddleRoomStarting={isHuddleRoomStarting}
+                        mainInsetRef={mainInsetRef}
+                        terminal={
+                          <TerminalBootstrap {...effectiveTerminalContext} />
+                        }
+                      >
+                        <Outlet />
+                      </AppShellChannelSurface>
+                    </TerminalContextOverrideProvider>
                     {!isHuddleRoom ? (
                       <RelayConnectionOverlay
                         card={relayConnectionCard}
@@ -984,6 +965,7 @@ export function AppShell() {
                   onSelectChannel={(channelId) => {
                     void goChannel(channelId);
                   }}
+                  relayUrl={communitiesHook.activeCommunity?.relayUrl}
                 />
                 <SendFeedbackController
                   onOpenChange={setIsSendFeedbackOpen}

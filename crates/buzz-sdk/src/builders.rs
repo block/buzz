@@ -120,6 +120,11 @@ fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Maximum length of a custom emoji shortcode.
+pub const MAX_CUSTOM_EMOJI_SHORTCODE_LEN: usize = 64;
+/// Maximum reaction payload length for a colon-wrapped custom emoji shortcode.
+pub const MAX_CUSTOM_EMOJI_REACTION_LEN: usize = MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 2;
+
 /// Validate and normalize a NIP-30 custom emoji shortcode.
 ///
 /// Shortcodes are case-insensitive in Buzz's relay-global set; lowercase
@@ -131,9 +136,9 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
             "emoji shortcode must not be empty".into(),
         ));
     }
-    if trimmed.len() > 64 {
+    if trimmed.len() > MAX_CUSTOM_EMOJI_SHORTCODE_LEN {
         return Err(SdkError::InvalidInput(format!(
-            "emoji shortcode exceeds 64 bytes (got {})",
+            "emoji shortcode exceeds {MAX_CUSTOM_EMOJI_SHORTCODE_LEN} bytes (got {})",
             trimmed.len()
         )));
     }
@@ -234,7 +239,9 @@ pub fn build_message(
         tags.push(tag(&["broadcast", "1"])?);
     }
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -285,7 +292,9 @@ pub fn build_forum_post(
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45001), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a forum comment reply (kind 45003).
@@ -301,7 +310,9 @@ pub fn build_forum_comment(
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45003), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a diff/patch message (kind 40008).
@@ -1110,6 +1121,131 @@ pub fn build_git_issue(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
 }
 
+/// Build an issue assignment note (kind:1) — a labeled comment whose `p`
+/// tags are the assignees, mirroring the Desktop app's assignment events.
+///
+/// Tag layout: `["e", <issue>, "", "root"]`, `["a", <repo>]`, one `["p", ..]`
+/// per assignee, and `["t", "assignment"]`.
+///
+/// Clients only trust assignments signed by the issue author or the repo
+/// owner (who may assign anyone), or a self-assignment whose sole assignee
+/// is the signer. Assignments from other signers are ignored on read.
+pub fn build_git_issue_assignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue assignment note with an optional causal assignment-operation
+/// event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_assignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Assign,
+        prior,
+    )
+}
+
+/// Build an issue unassignment note (kind:1) whose `p` tags name the people
+/// being removed and whose operation label is `t: unassignment`.
+///
+/// Clients trust unassignments signed by the issue author or repository owner,
+/// or a self-unassignment whose sole `p` tag is the signer.
+pub fn build_git_issue_unassignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_unassignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue unassignment note with an optional causal
+/// assignment-operation event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_unassignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Unassign,
+        prior,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GitIssueAssigneeOperation {
+    Assign,
+    Unassign,
+}
+
+impl GitIssueAssigneeOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Assign => "assignment",
+            Self::Unassign => "unassignment",
+        }
+    }
+}
+
+fn build_git_issue_assignee_operation(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    operation: GitIssueAssigneeOperation,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let issue = check_hex_exact(issue_id, 64, "issue")?;
+    let a_value = repo.to_a_tag_value()?;
+    if assignees.is_empty() || assignees.len() > 50 {
+        return Err(SdkError::InvalidInput(
+            "between 1 and 50 assignees are required".into(),
+        ));
+    }
+    let mut normalized = assignees
+        .iter()
+        .map(|assignee| check_pubkey_hex(assignee, "assignee"))
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+
+    let mut tags = vec![tag(&["e", &issue, "", "root"])?, tag(&["a", &a_value])?];
+    for assignee in &normalized {
+        tags.push(tag(&["p", assignee])?);
+    }
+    tags.push(tag(&["t", operation.label()])?);
+    if let Some(prior) = prior {
+        let prior = check_hex_exact(prior, 64, "prior assignment operation")?;
+        tags.push(tag(&["prior", &prior])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {
@@ -1482,11 +1618,13 @@ pub fn build_workflow_update(
     channel_id: Uuid,
     workflow_id: Uuid,
     yaml: &str,
+    expected_revision: &str,
 ) -> Result<EventBuilder, SdkError> {
     check_content(yaml, 64 * 1024)?;
     let tags = vec![
         tag(&["d", &workflow_id.to_string()])?,
         tag(&["h", &channel_id.to_string()])?,
+        tag(&["expected-revision", expected_revision])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml).tags(tags))
 }
@@ -2249,6 +2387,53 @@ mod tests {
     }
 
     #[test]
+    fn message_preserves_self_mention_p_tag() {
+        // nostr 0.44 strips p tags matching the signer by default.
+        // build_message must opt in via allow_self_tagging() so that
+        // explicit self-mentions survive signing. See #4906.
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder = build_message(cid, "self-canary", None, &[&self_pk], false, &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_post_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder = build_forum_post(cid, "self-canary", &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_comment_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let builder = build_forum_comment(cid, "self-canary", &tr, &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
     fn agent_observer_frame_happy_path() {
         let sender = keys();
         let recipient = keys();
@@ -2652,6 +2837,30 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 7);
         assert_eq!(ev.content, ":party_parrot:");
         assert!(has_tag(&ev, "emoji", "party_parrot"));
+    }
+
+    #[test]
+    fn custom_emoji_reaction_accepts_max_shortcode_length() {
+        let eid = event_id();
+        let shortcode = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let ev = sign(
+            build_custom_emoji_reaction(eid, &shortcode, "https://example.com/max.png").unwrap(),
+        );
+
+        assert_eq!(ev.content, format!(":{shortcode}:"));
+        assert_eq!(ev.content.chars().count(), MAX_CUSTOM_EMOJI_REACTION_LEN);
+        assert!(has_tag(&ev, "emoji", &shortcode));
+    }
+
+    #[test]
+    fn custom_emoji_reaction_rejects_overlong_shortcode() {
+        let eid = event_id();
+        let shortcode = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+
+        assert!(matches!(
+            build_custom_emoji_reaction(eid, &shortcode, "https://example.com/too-long.png"),
+            Err(SdkError::InvalidInput(message)) if message.contains("exceeds 64 bytes")
+        ));
     }
 
     #[test]
@@ -3400,6 +3609,149 @@ mod tests {
     }
 
     #[test]
+    fn git_issue_assignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // Duplicates (case-insensitive) collapse to a single p tag.
+        let assignees = vec!["C".repeat(64), "c".repeat(64), "d".repeat(64)];
+        let ev = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue to Thomas")
+                .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Assigned this issue to Thomas");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &"c".repeat(64)));
+        assert!(has_tag(&ev, "p", &"d".repeat(64)));
+        assert!(has_tag(&ev, "t", "assignment"));
+        let p_count = ev
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+            .count();
+        assert_eq!(p_count, 2);
+    }
+
+    #[test]
+    fn git_issue_assignment_rejects_bad_input() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // No assignees.
+        let err = build_git_issue_assignment(&repo, &issue, &[], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed assignee pubkey.
+        let err =
+            build_git_issue_assignment(&repo, &issue, &["nope".to_string()], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed issue id.
+        let err = build_git_issue_assignment(&repo, "short", &["c".repeat(64)], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_assignment_with_prior_emits_valid_causal_tag() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let prior = "d".repeat(64);
+        let ev = sign(
+            build_git_issue_assignment_with_prior(
+                &repo,
+                &issue,
+                &[assignee],
+                "Assigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+
+        assert!(has_tag(&ev, "prior", &prior));
+        let unassignment = sign(
+            build_git_issue_unassignment_with_prior(
+                &repo,
+                &issue,
+                &["c".repeat(64)],
+                "Unassigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&unassignment, "prior", &prior));
+        assert!(build_git_issue_assignment_with_prior(
+            &repo,
+            &issue,
+            &["c".repeat(64)],
+            "Assigned this issue",
+            Some("invalid"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn git_issue_unassignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let ev = sign(
+            build_git_issue_unassignment(
+                &repo,
+                &issue,
+                std::slice::from_ref(&assignee),
+                "Unassigned Thomas from this issue",
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Unassigned Thomas from this issue");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &assignee));
+        assert!(has_tag(&ev, "t", "unassignment"));
+        assert!(!has_tag(&ev, "t", "assignment"));
+    }
+
+    #[test]
+    fn legacy_issue_assignment_builders_omit_prior() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignees = vec!["c".repeat(64)];
+        let assignment = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue").unwrap(),
+        );
+        let unassignment = sign(
+            build_git_issue_unassignment(&repo, &issue, &assignees, "Unassigned this issue")
+                .unwrap(),
+        );
+
+        assert!(!assignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+        assert!(!unassignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+    }
+
+    #[test]
     fn git_status_open_happy_path() {
         let root = event_id().to_hex();
         let meta = GitStatusMeta {
@@ -3622,16 +3974,18 @@ mod tests {
     fn workflow_update_includes_h_tag() {
         let cid = uuid();
         let wid = uuid();
-        let ev = sign(build_workflow_update(cid, wid, "name: updated").unwrap());
+        let revision = "a".repeat(64);
+        let ev = sign(build_workflow_update(cid, wid, "name: updated", &revision).unwrap());
         assert_eq!(ev.kind.as_u16(), 30620);
         assert!(has_tag(&ev, "d", &wid.to_string()));
         assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "expected-revision", &revision));
     }
 
     #[test]
     fn workflow_update_rejects_oversized_yaml() {
         let big = "x".repeat(65 * 1024);
-        let err = build_workflow_update(uuid(), uuid(), &big).unwrap_err();
+        let err = build_workflow_update(uuid(), uuid(), &big, &"a".repeat(64)).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 

@@ -142,3 +142,106 @@ test("buildProjectsFromFetcher does not throw when tombstone enumeration succeed
     "unclaimed repo must appear as legacy project",
   );
 });
+
+// ── Tombstone scoping ────────────────────────────────────────────────────────
+//
+// Kind:5 is the app-wide NIP-09 deletion kind (every deleted chat message is
+// one), so the tombstone fetch must be scoped server-side with `#a` filters
+// on the announcement coordinates rather than crawling the relay's entire
+// deletion history.
+
+test("buildProjectsFromFetcher scopes the tombstone fetch to announcement coordinates", async () => {
+  const OWNER = "a".repeat(64);
+
+  const projectEvent = {
+    id: "p".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 200,
+    content: "",
+    tags: [["d", "proj"]],
+  };
+  const repoEvent = {
+    id: "r".repeat(64),
+    kind: 30617,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "repo"],
+      ["name", "repo"],
+    ],
+  };
+
+  const deletionCalls = [];
+  const fetchExhaustively = async (kinds, extraFilter) => {
+    if (kinds.includes(5)) {
+      deletionCalls.push(extraFilter);
+      return [];
+    }
+    if (kinds.includes(30621)) return [projectEvent];
+    if (kinds.includes(30617)) return [repoEvent];
+    return [];
+  };
+
+  await buildProjectsFromFetcher(fetchExhaustively);
+
+  assert.equal(deletionCalls.length, 1, "one scoped tombstone query");
+  assert.deepEqual(deletionCalls[0], {
+    "#a": [`30621:${OWNER}:proj`, `30617:${OWNER}:repo`],
+  });
+});
+
+test("buildProjectsFromFetcher skips the tombstone fetch when there are no announcements", async () => {
+  let deletionQueried = false;
+  const fetchExhaustively = async (kinds) => {
+    if (kinds.includes(5)) deletionQueried = true;
+    return [];
+  };
+
+  const projects = await buildProjectsFromFetcher(fetchExhaustively);
+
+  assert.deepEqual(projects, []);
+  assert.equal(
+    deletionQueried,
+    false,
+    "no coordinates means no tombstone query at all",
+  );
+});
+
+test("buildProjectsFromFetcher still suppresses deleted heads via the scoped fetch", async () => {
+  const OWNER = "a".repeat(64);
+
+  const repoEvent = {
+    id: "r".repeat(64),
+    kind: 30617,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "repo"],
+      ["name", "repo"],
+    ],
+  };
+  const deletionEvent = {
+    id: "5".repeat(64),
+    kind: 5,
+    pubkey: OWNER,
+    created_at: 150,
+    content: "",
+    tags: [["a", `30617:${OWNER}:repo`]],
+  };
+
+  const fetchExhaustively = async (kinds, extraFilter) => {
+    if (kinds.includes(5)) {
+      return extraFilter?.["#a"]?.includes(`30617:${OWNER}:repo`)
+        ? [deletionEvent]
+        : [];
+    }
+    if (kinds.includes(30617)) return [repoEvent];
+    return [];
+  };
+
+  const projects = await buildProjectsFromFetcher(fetchExhaustively);
+  assert.deepEqual(projects, [], "deleted repo must not surface as a project");
+});

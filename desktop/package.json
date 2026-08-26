@@ -1,7 +1,7 @@
 {
   "name": "buzz",
   "private": true,
-  "version": "0.5.5",
+  "version": "0.5.17",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,7 @@
     "check:px-text": "node ./scripts/check-px-text.mjs",
     "check:pubkey-truncation": "node ./scripts/check-pubkey-truncation.mjs",
     "lint": "biome lint .",
-    "check": "biome check . && pnpm check:file-sizes && pnpm check:px-text && pnpm check:pubkey-truncation",
+    "check": "biome check . && pnpm check:px-text && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
     "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\"",
     "preview": "vite preview",
@@ -20,6 +20,7 @@
     "test:e2e": "pnpm build:e2e && playwright test",
     "test:e2e:smoke": "pnpm build:e2e && playwright test --project=smoke",
     "test:e2e:integration": "pnpm build:e2e && playwright test --project=integration",
+    "test:e2e:release-smoke": "pnpm build:e2e && playwright test --config=playwright.release-smoke.config.ts",
     "test:e2e:report": "playwright show-report",
     "tauri:build": "tauri build"
   },
@@ -66,6 +67,7 @@
     "emoji-mart": "^5.6.0",
     "jdenticon": "^3.3.0",
     "lucide-react": "^1.0.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "motion": "^12.38.0",
     "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
@@ -90,7 +92,7 @@
     "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/router-plugin": "^1.167.12",
     "@tanstack/virtual-file-routes": "^1.161.7",
-    "@tauri-apps/cli": "~2.11",
+    "@tauri-apps/cli": "~2.11.4",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

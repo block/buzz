@@ -2,9 +2,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
+import 'channel.dart';
 import 'channel_messages_provider.dart';
+import 'message_mention_pubkeys.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
@@ -48,14 +50,26 @@ class SendMessage {
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    Channel? channel,
     List<List<String>> mediaTags = const [],
   }) async {
     _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
-    final resolvedMentions =
+    final explicitMentions =
         mentionPubkeys ?? await _resolveMentions(content, channelId);
     final authorPubkey = _signedEventRelay.pubkey;
+    final dmRecipientPubkeys = channel?.isDm == true
+        ? await _fetchDmRecipientPubkeys(channelId, channel!, authorPubkey)
+        : null;
+    final resolvedMentions = dmRecipientPubkeys != null
+        ? messageMentionPubkeys(
+            channel: channel!,
+            senderPubkey: authorPubkey,
+            explicitMentions: explicitMentions,
+            dmRecipientPubkeys: dmRecipientPubkeys,
+          )
+        : explicitMentions;
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
@@ -92,6 +106,36 @@ class SendMessage {
       if (event != null) _removeLocalMessage(channelId, event.id);
       rethrow;
     }
+  }
+
+  /// Resolve every identity that is actually a current member of this DM.
+  ///
+  /// Membership is authoritative for delivery. The channel metadata's `p`
+  /// tags can lag membership changes, so they are only used when the membership
+  /// snapshot is unavailable.
+  Future<Set<String>> _fetchDmRecipientPubkeys(
+    String channelId,
+    Channel channel,
+    String? authorPubkey,
+  ) async {
+    List<ChannelMember>? members;
+    try {
+      members = await _fetchMembers(channelId);
+    } catch (_) {
+      // Fall back to metadata below so an unavailable membership query does
+      // not block ordinary DM sends.
+    }
+
+    final author = authorPubkey?.toLowerCase();
+    final participants = members != null && members.isNotEmpty
+        ? members.map((member) => member.pubkey)
+        : channel.participantPubkeys;
+    return {
+      for (final participant in participants)
+        if (participant.trim().isNotEmpty &&
+            participant.toLowerCase() != author)
+          participant.toLowerCase(),
+    };
   }
 
   void _ensureDeliveryValid() {

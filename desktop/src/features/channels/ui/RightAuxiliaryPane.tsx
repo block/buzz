@@ -7,6 +7,7 @@ type RightAuxiliaryPaneProps = {
   canResetWidth: boolean;
   children: React.ReactNode;
   constrainToAvailableSpace?: boolean;
+  detached?: boolean;
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
   testId?: string;
@@ -17,6 +18,7 @@ export function RightAuxiliaryPane({
   canResetWidth,
   children,
   constrainToAvailableSpace = true,
+  detached = false,
   onResetWidth,
   onResizeStart,
   testId,
@@ -25,7 +27,10 @@ export function RightAuxiliaryPane({
   return (
     <aside
       className={cn(
-        "group/right-pane relative flex h-full shrink-0 flex-col overflow-hidden bg-background before:pointer-events-none before:absolute before:bottom-0 before:left-0 before:top-0 before:z-50 before:w-px before:bg-border/80 before:content-['']",
+        "group/right-pane relative flex h-full shrink-0 flex-col overflow-hidden bg-background",
+        detached
+          ? "bg-transparent"
+          : "before:pointer-events-none before:absolute before:bottom-0 before:left-0 before:top-0 before:z-50 before:w-px before:bg-border/80 before:content-['']",
       )}
       data-testid={testId}
       style={{

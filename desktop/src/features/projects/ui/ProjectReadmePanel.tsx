@@ -1,19 +1,16 @@
 import {
   BookOpen,
-  CircleAlert,
-  CloudOff,
   DownloadCloud,
   ExternalLink,
-  GitBranch,
   Globe,
   Loader2,
-  LockKeyhole,
-  RefreshCw,
 } from "lucide-react";
 
 import type { ProjectRepoFile } from "@/features/projects/hooks";
+import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { Button } from "@/shared/ui/button";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import {
   baseName,
@@ -27,6 +24,7 @@ import {
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
 import { GitHubMark } from "./GitHubMark";
+import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailableState";
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
   const readmes = files.filter((file) =>
@@ -91,24 +89,43 @@ function normalizeReadmeMarkdown(content: string) {
 }
 
 export function ReadmePanel({
+  accessChannelId,
   file,
   gitDataState,
   externalHost,
   externalUrl,
+  hideHeader,
+  ownerAvatarUrl,
+  ownerIsAgent,
+  ownerName,
   sourceControls,
   unavailableReason,
 }: {
+  /** `buzz-channel` binding of the repository, for access-restricted copy. */
+  accessChannelId?: string | null;
   file: ProjectRepoFile | null;
   gitDataState: "checking" | "available" | "empty" | "unavailable";
   externalHost?: string;
   externalUrl?: string | null;
+  /**
+   * Skip the header rows entirely — the workspace layout renders the source
+   * controls and last-changed timestamp itself.
+   */
+  hideHeader?: boolean;
+  ownerAvatarUrl?: string | null;
+  ownerIsAgent?: boolean;
+  ownerName?: string;
   unavailableReason?: ProjectRepoUnavailableReason;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
 }) {
+  const externalOpenUrl = projectExternalRefUrl(
+    externalUrl,
+    sourceControls?.selectedTag ?? sourceControls?.branch,
+  );
   // Two header rows, mirroring the files panel: controls on top, then the
   // file identity row.
-  const header = (
+  const header = hideHeader ? null : (
     <>
       {sourceControls ? (
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
@@ -116,7 +133,6 @@ export function ReadmePanel({
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
-            compact
             createBranchDisabled={sourceControls.createBranchDisabled}
             createBranchTitle={sourceControls.createBranchTitle}
             deleteBranchDisabled={sourceControls.deleteBranchDisabled}
@@ -151,57 +167,28 @@ export function ReadmePanel({
     return (
       <section className="overflow-hidden">
         {header}
-        <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Loading repository…
-        </div>
+        <BuzzLoadingState label="Loading repository" />
       </section>
     );
   }
 
   if (gitDataState === "unavailable") {
-    const reason = unavailableReason ?? "unknown";
-    const unavailableContent = {
-      authentication: {
-        description:
-          "Buzz could not authenticate with this repository. Check your access and try again.",
-        icon: LockKeyhole,
-        title: "Repository access failed",
-      },
-      missing: {
-        description:
-          "The project announcement exists, but its git repository was not found on the Buzz relay.",
-        icon: CircleAlert,
-        title: "Repository not initialized",
-      },
-      network: {
-        description:
-          "The Buzz git service could not be reached. Check your connection and try again.",
-        icon: CloudOff,
-        title: "Couldn’t reach repository",
-      },
-      ref: {
-        description:
-          "The selected branch is advertised by the project but is missing from its git remote.",
-        icon: GitBranch,
-        title: "Branch unavailable",
-      },
-      unknown: {
-        description:
-          "Buzz could not load this repository. Try again or contact the project owner.",
-        icon: CircleAlert,
-        title: "Repository unavailable",
-      },
-    } satisfies Record<
-      ProjectRepoUnavailableReason,
-      {
-        description: string;
-        icon: typeof CircleAlert;
-        title: string;
-      }
-    >;
-    const unavailable = unavailableContent[reason];
-    const UnavailableIcon = unavailable.icon;
+    if (!externalHost) {
+      return (
+        <section className="overflow-hidden">
+          <ProjectRepositoryUnavailableState
+            accessChannelId={accessChannelId}
+            onAskForAccess={sourceControls?.onAskForAccess}
+            onRetry={sourceControls?.onFetch}
+            ownerAvatarUrl={ownerAvatarUrl}
+            ownerIsAgent={ownerIsAgent}
+            ownerName={ownerName}
+            reason={unavailableReason}
+            retryPending={sourceControls?.fetchPending}
+          />
+        </section>
+      );
+    }
 
     return (
       <section className="overflow-hidden">
@@ -209,49 +196,29 @@ export function ReadmePanel({
           <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground">
             {externalHost === "github.com" ? (
               <GitHubMark className="h-6 w-6" />
-            ) : externalHost ? (
-              <Globe className="h-6 w-6" />
             ) : (
-              <UnavailableIcon className="h-6 w-6" />
+              <Globe className="h-6 w-6" />
             )}
           </div>
           <h3 className="text-base font-semibold text-foreground">
-            {externalHost
-              ? `Code hosted on ${externalHost}`
-              : unavailable.title}
+            Code hosted on {externalHost}
           </h3>
           <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-            {externalHost
-              ? "Clone this repository locally to explore its files, commits, and contributors in Buzz."
-              : unavailable.description}
+            Clone this repository locally to explore its files, commits, and
+            contributors in Buzz.
           </p>
-          {externalUrl ? (
+          {externalOpenUrl ? (
             <a
               className="mt-2 max-w-lg truncate font-mono text-xs text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              href={externalUrl}
+              href={externalOpenUrl}
               rel="noreferrer"
               target="_blank"
             >
-              {externalUrl}
+              {externalOpenUrl}
             </a>
           ) : null}
           <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-            {!externalHost && sourceControls?.onFetch ? (
-              <Button
-                disabled={sourceControls.fetchPending}
-                onClick={sourceControls.onFetch}
-                size="sm"
-                variant="outline"
-              >
-                {sourceControls.fetchPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
-                )}
-                {sourceControls.fetchPending ? "Retrying…" : "Retry"}
-              </Button>
-            ) : null}
-            {externalHost && sourceControls?.onCloneLocal ? (
+            {sourceControls?.onCloneLocal ? (
               <Button
                 disabled={sourceControls.clonePending}
                 onClick={sourceControls.onCloneLocal}
@@ -265,9 +232,9 @@ export function ReadmePanel({
                 {sourceControls.clonePending ? "Cloning…" : "Clone locally"}
               </Button>
             ) : null}
-            {externalUrl ? (
+            {externalOpenUrl ? (
               <Button asChild size="sm" variant="outline">
-                <a href={externalUrl} rel="noreferrer" target="_blank">
+                <a href={externalOpenUrl} rel="noreferrer" target="_blank">
                   <ExternalLink className="h-4 w-4" />
                   Open on {externalHost}
                 </a>

@@ -45,7 +45,7 @@
     color: hsl(var(--muted-foreground));
     display: flex;
     font: inherit;
-    font-size: 0.75rem;
+    font-size: calc(var(--buzz-type-rem) * 0.75);
     font-weight: 500;
     gap: 6px;
     height: 30px;
@@ -130,7 +130,7 @@
   .buzz-terminal-designator {
     align-items: center;
     display: inline-flex;
-    font-size: 0.75rem;
+    font-size: calc(var(--buzz-type-rem) * 0.75);
     gap: 2px;
     letter-spacing: 0;
   }
@@ -181,6 +181,31 @@
 
   .buzz-terminal-viewport canvas {
     display: block;
+  }
+
+  .buzz-terminal-selection-layer {
+    bottom: 0;
+    color: transparent;
+    font:
+      14px / 17px "JetBrains Mono",
+      monospace;
+    left: 1.25rem;
+    margin: 0;
+    overflow: hidden;
+    position: absolute;
+    right: 1.25rem;
+    top: 0.5rem;
+    user-select: text;
+    white-space: pre;
+  }
+
+  .buzz-terminal-selection-layer > div {
+    height: 17px;
+  }
+
+  .buzz-terminal-selection-layer::selection {
+    background: hsl(var(--accent) / 0.65);
+    color: transparent;
   }
 
   .buzz-terminal-welcome {

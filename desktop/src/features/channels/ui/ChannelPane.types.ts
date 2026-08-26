@@ -7,11 +7,12 @@ import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channel
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { useChannelFind } from "@/features/search/useChannelFind";
+import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type {
   ProfilePanelTab,
   ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanel";
+import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import type { Channel } from "@/shared/api/types";
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
@@ -34,7 +35,6 @@ export type ChannelPaneProps = {
    */
   onAutoSendComplete?: (() => void) | null;
   botTypingEntries: TypingIndicatorEntry[];
-  channelFind: ReturnType<typeof useChannelFind>;
   channelManagementOpen?: boolean;
   currentPubkey?: string;
   editTarget?: {
@@ -42,6 +42,7 @@ export type ChannelPaneProps = {
     body: string;
     id: string;
     imetaMedia?: ImetaMedia[];
+    mentionRefs?: DraftMentionRef[];
   } | null;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
@@ -97,7 +98,10 @@ export type ChannelPaneProps = {
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenMembers?: () => void;
-  onOpenProfilePanel: (pubkey: string) => void;
+  onOpenProfilePanel: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
   onOpenThread: (message: TimelineMessage) => void;
   onResetThreadPanelWidth: () => void;
   onSelectThreadReplyTarget: (message: TimelineMessage) => void;
@@ -106,6 +110,16 @@ export type ChannelPaneProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     channelId?: string | null,
+    threadContext?: {
+      parentEventId: string | null;
+      threadHeadId: string | null;
+    } | null,
+    forceRest?: boolean,
+  ) => Promise<void>;
+  onSendToChannel: (
+    message: TimelineMessage,
+    threadRoot: TimelineMessage,
+    channelId: string,
   ) => Promise<void>;
   onSendVideoReviewComment?: (
     message: TimelineMessage,

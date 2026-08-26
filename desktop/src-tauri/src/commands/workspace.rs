@@ -10,6 +10,32 @@ use crate::managed_agents::{
 };
 use crate::relay;
 
+const WORKSPACE_APPLY_SUPERSEDED: &str = "workspace apply superseded by a newer request";
+
+fn next_apply_generation(generation: &std::sync::atomic::AtomicU64) -> u64 {
+    generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+}
+
+fn assert_current_apply_generation(
+    generation: &std::sync::atomic::AtomicU64,
+    ticket: u64,
+) -> Result<(), String> {
+    if generation.load(Ordering::Acquire) == ticket {
+        Ok(())
+    } else {
+        Err(WORKSPACE_APPLY_SUPERSEDED.to_string())
+    }
+}
+
+async fn begin_workspace_apply(
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    generation: &std::sync::atomic::AtomicU64,
+) -> (tokio::sync::OwnedMutexGuard<()>, u64) {
+    let guard = lock.lock_owned().await;
+    let ticket = next_apply_generation(generation);
+    (guard, ticket)
+}
+
 /// Adopt the pre-scoping global retention database's pending rows into `scope`.
 ///
 /// Best-effort: a failure is logged and the boot proceeds. The migration's own
@@ -131,8 +157,24 @@ pub async fn apply_workspace(
     agent_managed_profiles: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    // Take the generation only after entering the serialized transaction. An
+    // apply that is already running remains authoritative until it releases
+    // the lock; the next apply then advances the generation. This keeps every
+    // awaited reconciliation/event-sync phase inside one ordered transaction.
+    let (apply_guard, apply_generation) = begin_workspace_apply(
+        state.workspace_apply_lock.clone(),
+        &state.workspace_apply_generation,
+    )
+    .await;
+
     let restore_app = app.clone();
+    let apply_app = app.clone();
+    // Capture the caller's relay before the blocking apply. Reading shared
+    // state afterward could pick up a newer concurrent community switch.
+    let profile_reconcile_relay = relay_url.clone();
     tokio::task::spawn_blocking(move || {
+        let app = apply_app;
         let state = app.state::<AppState>();
 
         // ── Validate before mutating ──────────────────────────────────────────
@@ -162,6 +204,11 @@ pub async fn apply_workspace(
             },
             None => None,
         };
+
+        // Defense in depth: this transaction still owns the serialized apply
+        // generation before making its first mutation. Normal queued applies
+        // cannot advance it until this transaction releases the guard.
+        assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
         {
@@ -211,7 +258,19 @@ pub async fn apply_workspace(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
+    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+
     let state = restore_app.state::<AppState>();
+    super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
+    // The Bumble→Pollen migration may have renamed stopped agents. Reconcile
+    // their relay profiles independently of runtime restore; successful writes
+    // record this relay while retaining the agent for other communities, and
+    // failures retry on the next workspace apply.
+    crate::managed_agents::spawn_pending_profile_reconciliations(
+        &restore_app,
+        &profile_reconcile_relay,
+    );
+
     // Backfill this exact relay+owner scope only after the workspace has been
     // applied. Running at process boot would target the fallback relay and
     // collapse every community into one pending-event store.
@@ -220,16 +279,39 @@ pub async fn apply_workspace(
             // Adopt whatever the pre-scoping release left queued in the global
             // retention database BEFORE the scoped reconcile and flush run, so
             // stranded tombstones and archive requests publish on this boot
-            // instead of being abandoned by the storage cutover.
+            // instead of being abandoned by the storage cutover. Best-effort:
+            // it is not a prerequisite for the superseding head — the team leg
+            // below builds the repaired roster's head fresh from disk with a
+            // monotonic `created_at` regardless of what the legacy copy left.
             migrate_legacy_retention_into(&restore_app, &scope);
-            crate::event_sync::spawn_event_sync(
+            // Await the reconcile to completion — do NOT spawn it — and
+            // propagate its failure. The boot migration may have repaired team
+            // membership on disk; the frontend starts inbound history replay
+            // the moment `useCommunityInit` observes the applied workspace, and
+            // an old relay team head could otherwise win that race and overwrite
+            // the repaired `persona_ids`. The team leg is fatal (see
+            // `run_event_sync`): only its success durably retains the corrected
+            // head with a superseding `monotonic_created_at`, so
+            // `retain_inbound_event`'s equal/older guard rejects the stale head.
+            // On failure we return `Err` — the command reports failure,
+            // `useCommunityInit` never exposes the community, and inbound replay
+            // never starts against an un-superseded disk state.
+            crate::event_sync::run_event_sync_blocking(
                 restore_app.clone(),
                 scope.owner_keys,
                 scope.db_path,
             )
+            .await?;
         }
         Err(error) => {
-            eprintln!("buzz-desktop: scoped event-sync unavailable after workspace apply: {error}");
+            // Scope resolution is a prerequisite for establishing the
+            // superseding head, so its failure is fatal for the same reason:
+            // without a scope we cannot retain the repaired roster ahead of an
+            // inbound replay. Fail the command rather than silently opening the
+            // inbound lane.
+            return Err(format!(
+                "scoped event-sync unavailable after workspace apply: {error}"
+            ));
         }
     }
 
@@ -237,17 +319,15 @@ pub async fn apply_workspace(
         .managed_agent_restore_pending
         .swap(false, Ordering::AcqRel);
 
-    // The coordinator starts before React applies the selected workspace, so
-    // its startup publication may have used the fallback relay and placeholder
-    // identity. Correct it off the command path so an unavailable relay cannot
-    // hold the frontend on its loading gate. On initial launch, restore MeshLLM
-    // first so a slow stopped-status request cannot overwrite a newly restored
-    // serving status, then restore managed agents after the admission identity
-    // has been published (or the bounded publication attempt has timed out).
+    // Transfer the apply guard to launch restoration. The command can return
+    // promptly, but a queued workspace cannot mutate relay/identity until the
+    // restore has completed every mutable workspace read and side effect.
     #[cfg(feature = "mesh-llm")]
     {
+        let restore_lock = apply_guard;
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
+            let _restore_lock = restore_lock;
             let state = app.state::<AppState>();
             if restore_pending {
                 if let Err(error) =
@@ -265,12 +345,15 @@ pub async fn apply_workspace(
                 }
             }
         });
+        return Ok(());
     }
 
     #[cfg(not(feature = "mesh-llm"))]
     if restore_pending {
+        let restore_lock = apply_guard;
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
+            let _restore_lock = restore_lock;
             let state = app.state::<AppState>();
             if let Err(error) =
                 restore_managed_agents_on_launch(&app, &state.shutdown_started).await
@@ -278,7 +361,59 @@ pub async fn apply_workspace(
                 eprintln!("buzz-desktop: failed to restore managed agents: {error}");
             }
         });
+        return Ok(());
     }
 
+    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+
+    use super::{assert_current_apply_generation, begin_workspace_apply, next_apply_generation};
+
+    #[test]
+    fn explicit_newer_generation_supersedes_older_ticket() {
+        let generation = AtomicU64::new(0);
+        let older = next_apply_generation(&generation);
+        let newer = next_apply_generation(&generation);
+
+        let error = assert_current_apply_generation(&generation, older).unwrap_err();
+        assert!(error.contains("superseded"), "{error}");
+        assert_current_apply_generation(&generation, newer).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_apply_cannot_supersede_running_transaction_or_restore_phase() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let generation = Arc::new(AtomicU64::new(0));
+        let (running_guard, running_ticket) =
+            begin_workspace_apply(Arc::clone(&lock), &generation).await;
+
+        let queued_lock = Arc::clone(&lock);
+        let queued_generation = Arc::clone(&generation);
+        let queued = tokio::spawn(async move {
+            let (_guard, ticket) = begin_workspace_apply(queued_lock, &queued_generation).await;
+            ticket
+        });
+        tokio::task::yield_now().await;
+
+        // A queued workspace has not advanced the generation, so every awaited
+        // phase of the running transaction, including one-shot launch restore,
+        // remains authoritative while it holds the lock.
+        assert_eq!(generation.load(Ordering::Acquire), running_ticket);
+        assert_current_apply_generation(&generation, running_ticket).unwrap();
+        assert!(!queued.is_finished());
+
+        drop(running_guard);
+        let queued_ticket = queued.await.unwrap();
+        assert!(queued_ticket > running_ticket);
+        assert_current_apply_generation(&generation, queued_ticket).unwrap();
+    }
 }

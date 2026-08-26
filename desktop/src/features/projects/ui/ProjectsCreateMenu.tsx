@@ -50,7 +50,7 @@ export function ProjectsCreateMenu({
   return (
     <nav
       aria-label="Create project item"
-      className="relative shrink-0 pl-4"
+      className="relative shrink-0"
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setOpen(false);
@@ -102,7 +102,7 @@ export function ProjectsCreateMenu({
               type="button"
             >
               <CircleDot />
-              Issue
+              Task
             </button>
             <button
               className={MENU_ITEM_CLASS}
@@ -111,7 +111,7 @@ export function ProjectsCreateMenu({
               type="button"
             >
               <GitPullRequest />
-              Pull Request
+              Review
             </button>
           </div>
         </div>

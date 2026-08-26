@@ -8,6 +8,8 @@ import {
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
 import { buildInboxListRows } from "@/features/home/lib/inboxListRows";
+import { hasRenderedVideoAttachment } from "@/features/messages/lib/videoReviewContext";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { InboxFilterMenu } from "@/features/home/ui/InboxFilterMenu";
 import {
   DraftsPanel,
@@ -30,7 +32,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
-import { Markdown } from "@/shared/ui/markdown";
+import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
 import {
   MENTION_CHIP_BASE_CLASSES,
   MESSAGE_MARKDOWN_CLASS,
@@ -82,13 +84,14 @@ function InboxLabel({
     <div
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
-        "mt-0 flex min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
+        "mt-0 flex min-h-[var(--inline-chip-min-height)] min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
         isActionRequired && !isDone
           ? "font-medium text-amber-600/80 dark:text-amber-300/80"
           : isDone
             ? "font-normal text-muted-foreground/70"
             : "font-medium text-muted-foreground/80",
       )}
+      data-inbox-type-label=""
     >
       <span className="shrink-0">{label.text}</span>
       {label.channelLabel ? (
@@ -118,6 +121,34 @@ function formatReminderStatus(notBefore: number | undefined) {
     return `Reminder in ${Math.floor(secondsUntil / 3_600)}h`;
   }
   return `Reminder in ${Math.floor(secondsUntil / 86_400)}d`;
+}
+
+function getInboxVideoReviewCommentRootId(item: InboxItem) {
+  const feedItems = [item.item, ...item.groupItems];
+  const feedItemById = new Map(
+    feedItems.map((feedItem) => [feedItem.id, feedItem]),
+  );
+  const videoMessageIds = new Set(
+    feedItems
+      .filter((feedItem) =>
+        hasRenderedVideoAttachment({
+          body: feedItem.content,
+          tags: feedItem.tags,
+        }),
+      )
+      .map((feedItem) => feedItem.id),
+  );
+  const visited = new Set<string>();
+  let ancestorId = getThreadReference(item.item.tags).parentId;
+
+  while (ancestorId && !visited.has(ancestorId)) {
+    if (videoMessageIds.has(ancestorId)) return ancestorId;
+    visited.add(ancestorId);
+    const ancestor = feedItemById.get(ancestorId);
+    ancestorId = ancestor ? getThreadReference(ancestor.tags).parentId : null;
+  }
+
+  return undefined;
 }
 
 function PersonalItemRow({
@@ -273,6 +304,7 @@ export function InboxListPane({
       );
     const hasChannelTarget = Boolean(item.item.channelId);
     const typeLabel = getInboxTypeLabel(item);
+    const videoReviewCommentRootId = getInboxVideoReviewCommentRootId(item);
     const isSenderAgent =
       agentPubkeys?.has(normalizePubkey(item.item.pubkey)) === true;
     const profileRole = isSenderAgent ? "bot" : undefined;
@@ -401,17 +433,18 @@ export function InboxListPane({
 
               <div
                 className={cn(
-                  "mt-1.5 text-sm leading-5 [&_a]:font-medium [&_a]:text-current",
+                  "mt-1.5 text-message [&_a]:font-medium [&_a]:text-current",
                   isDone
                     ? "font-normal text-muted-foreground"
                     : "font-semibold text-foreground",
                 )}
               >
-                <Markdown
-                  className="inbox-preview-markdown text-inherit leading-5"
+                <VideoReviewCommentMarkdown
+                  className="inbox-preview-markdown text-inherit"
                   content={item.preview}
                   interactive={false}
                   mentionNames={item.mentionNames}
+                  videoReviewCommentRootId={videoReviewCommentRootId}
                 />
               </div>
             </div>

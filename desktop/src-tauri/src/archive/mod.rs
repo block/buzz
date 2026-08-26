@@ -17,8 +17,12 @@
 //! validation (sig/id + kind + p-tag + agent tag + frame=telemetry + author
 //! == agent) is applied fail-closed.
 
+mod agent_usage;
+mod metric_store;
 mod pipeline;
 pub mod store;
+mod store_migrations;
+pub mod sync;
 
 use pipeline::{commit_archive, plan_archive, query_buckets};
 
@@ -116,9 +120,17 @@ pub struct MatchedScope {
 
 /// Result of a batch archive call.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArchiveBatchResult {
     /// Events successfully written to the store (event + scope rows).
     pub persisted: u32,
+    /// Newly-indexed `agent_metric_index` rows (valid or invalid) written in
+    /// this call — the count the frontend uses to decide whether an
+    /// agent-usage query needs to be invalidated. Distinct from `persisted`:
+    /// a re-ingested duplicate can be `persisted` (event/scope rows upserted,
+    /// no-op) without incrementing this counter, since the index row for
+    /// that id was already inserted by whichever earlier batch first saw it.
+    pub persisted_agent_metrics: u32,
     /// Events dropped due to access denial or invalid payload (not an error).
     pub dropped: u32,
 }
@@ -139,8 +151,20 @@ pub async fn archive_events(
     state: State<'_, AppState>,
     candidates: Vec<ArchiveCandidate>,
 ) -> Result<ArchiveBatchResult, String> {
-    let identity_pk = identity_pubkey(&state)?;
-    let relay_url = relay_ws_url_with_override(&state);
+    archive_candidates(&state, candidates).await
+}
+
+/// The body of [`archive_events`], callable without a command invocation.
+///
+/// The native sync task archives through this directly: routing its batches
+/// back out to the renderer just to have the renderer invoke the command would
+/// reintroduce the IPC round trip the move exists to delete.
+pub(crate) async fn archive_candidates(
+    state: &AppState,
+    candidates: Vec<ArchiveCandidate>,
+) -> Result<ArchiveBatchResult, String> {
+    let identity_pk = identity_pubkey(state)?;
+    let relay_url = relay_ws_url_with_override(state);
     let now = now_secs();
 
     // ── Phase 1: plan (blocking SQLite) ─────────────────────────────────────
@@ -152,8 +176,7 @@ pub async fn archive_events(
     .await?;
 
     // ── Phase 2: relay queries (async) ───────────────────────────────────────
-    let state_ref: &AppState = &state;
-    let bucket_results = query_buckets(plan.buckets, state_ref).await;
+    let bucket_results = query_buckets(plan.buckets, state).await;
 
     // ── Phase 3: persist (blocking SQLite) ──────────────────────────────────
     let owner_keys = {
@@ -275,6 +298,7 @@ fn validate_ephemeral_frame(
 #[tauri::command]
 pub async fn create_save_subscription(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     scope_type: ScopeType,
     scope_value: String,
     kinds: Vec<u32>,
@@ -322,7 +346,9 @@ pub async fn create_save_subscription(
         &scope_value,
         &kinds_json,
         now,
-    )
+    )?;
+    sync_state.notify_subscriptions_changed().await;
+    Ok(())
 }
 
 /// Probe: the current user has access to `channel_id` (kind 39002 lists them).
@@ -415,6 +441,7 @@ async fn probe_event_readable(state: &AppState, event_id: &str) -> Result<(), St
 #[tauri::command]
 pub async fn merge_save_subscription_kinds(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     kind: u32,
 ) -> Result<(), String> {
     if kind > u32::from(u16::MAX) {
@@ -428,7 +455,9 @@ pub async fn merge_save_subscription_kinds(
     run_archive_db_task(move |conn| {
         store::merge_owner_p_kinds(conn, &identity_pk, &relay_url, &owner_pk, kind, now)
     })
-    .await
+    .await?;
+    sync_state.notify_subscriptions_changed().await;
+    Ok(())
 }
 
 // ── remove_save_subscription_kind ────────────────────────────────────────────
@@ -448,6 +477,7 @@ pub async fn merge_save_subscription_kinds(
 #[tauri::command]
 pub async fn remove_save_subscription_kind(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     kind: u32,
 ) -> Result<(), String> {
     if kind > u32::from(u16::MAX) {
@@ -460,7 +490,9 @@ pub async fn remove_save_subscription_kind(
     run_archive_db_task(move |conn| {
         store::remove_owner_p_kind(conn, &identity_pk, &relay_url, &owner_pk, kind)
     })
-    .await
+    .await?;
+    sync_state.notify_subscriptions_changed().await;
+    Ok(())
 }
 
 // ── list_save_subscriptions ──────────────────────────────────────────────────
@@ -485,12 +517,13 @@ pub async fn list_save_subscriptions(
 #[tauri::command]
 pub async fn delete_save_subscription(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     scope_type: ScopeType,
     scope_value: String,
 ) -> Result<bool, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    run_archive_db_task(move |conn| {
+    let removed = run_archive_db_task(move |conn| {
         store::delete_save_subscription(
             conn,
             &identity_pk,
@@ -499,7 +532,11 @@ pub async fn delete_save_subscription(
             &scope_value,
         )
     })
-    .await
+    .await?;
+    if removed {
+        sync_state.notify_subscriptions_changed().await;
+    }
+    Ok(removed)
 }
 
 // ── read_archived_events ─────────────────────────────────────────────────────
@@ -672,6 +709,96 @@ pub async fn read_archived_events(
         )
     })
     .await
+}
+
+// ── get_agent_usage_series ───────────────────────────────────────────────────
+
+/// Compute the locally archived NIP-AM usage series for one identity/relay.
+///
+/// Synchronous SQLite core of [`get_agent_usage_series`], split out so tests
+/// can drive it directly against an in-memory `Connection` without a Tauri
+/// `AppState`. Backfills any unindexed kind-44200 rows, repairs orphaned
+/// index rows (defense in depth alongside A6's GC-time cascade), validates
+/// the request, loads the window + exact-key probe rows, and hands them to
+/// the pure `agent_usage::compute_series`.
+fn agent_usage_series(
+    conn: &Connection,
+    identity_pk: &str,
+    relay_url: &str,
+    request: &agent_usage::AgentUsageSeriesRequest,
+) -> Result<agent_usage::AgentUsageSeries, String> {
+    // Fail-closed request validation happens before any SQLite work.
+    let agent_pubkey = agent_usage::validate_request(request)?;
+
+    metric_store::backfill_agent_metric_index(conn, identity_pk, relay_url)?;
+    metric_store::repair_orphaned_metric_index_rows(conn, identity_pk, relay_url)?;
+
+    let collection_enabled = {
+        let kinds_json =
+            store::get_subscription_kinds(conn, identity_pk, relay_url, "owner_p", identity_pk)?
+                .unwrap_or_else(|| "[]".to_string());
+        let kinds: Vec<u64> = serde_json::from_str(&kinds_json).unwrap_or_default();
+        kinds.contains(&(KIND_AGENT_TURN_METRIC as u64))
+    };
+
+    // A13: only meaningful when the request is scoped to one author.
+    let has_archived_evidence = match &agent_pubkey {
+        None => None,
+        Some(pk) => Some(metric_store::has_archived_evidence(
+            conn,
+            identity_pk,
+            relay_url,
+            pk,
+        )?),
+    };
+
+    let start = request.bucket_boundaries[0];
+    let end = *request
+        .bucket_boundaries
+        .last()
+        .expect("validate_request already rejected fewer than 2 boundaries");
+
+    let window_rows = metric_store::load_window_valid_rows(
+        conn,
+        identity_pk,
+        relay_url,
+        start,
+        end,
+        agent_pubkey.as_deref(),
+    )?;
+    let invalid_report_count = metric_store::count_invalid_rows_in_window(
+        conn,
+        identity_pk,
+        relay_url,
+        start,
+        end,
+        agent_pubkey.as_deref(),
+    )?;
+    let probe_keys = agent_usage::window_probe_keys(&window_rows);
+    let probe_rows =
+        metric_store::load_rows_at_exact_keys(conn, identity_pk, relay_url, &probe_keys)?;
+
+    Ok(agent_usage::compute_series(
+        &window_rows,
+        &probe_rows,
+        invalid_report_count,
+        &request.bucket_boundaries,
+        has_archived_evidence,
+        collection_enabled,
+    ))
+}
+
+/// Compute the locally archived NIP-AM usage series for the active identity
+/// + relay (Rev 3 frozen contract). See [`agent_usage_series`] for the logic.
+#[tauri::command]
+pub async fn get_agent_usage_series(
+    state: State<'_, AppState>,
+    request: agent_usage::AgentUsageSeriesRequest,
+) -> Result<agent_usage::AgentUsageSeries, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    run_archive_db_task(move |conn| agent_usage_series(conn, &identity_pk, &relay_url, &request))
+        .await
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

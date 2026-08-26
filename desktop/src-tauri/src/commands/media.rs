@@ -115,11 +115,10 @@ fn fd_real_path(_file: &std::fs::File) -> Result<std::path::PathBuf, String> {
 
 /// MIME types blocked from upload — mirrors the server's generic-file deny-list.
 ///
-/// Active-content XSS carriers and native executables. Everything else (images,
-/// video, documents, archives, audio, text, data) is accepted; un-sniffable
-/// files fall back to `application/octet-stream` and are served as downloads.
+/// Active-content XSS carriers (JS, SVG) and native executables. Other types,
+/// including HTML, are accepted as downloads; un-sniffable files fall back to
+/// `application/octet-stream`. XHTML remains blocked in lockstep with the relay.
 const BLOCKED_MIME: &[&str] = &[
-    "text/html",
     "application/xhtml+xml",
     "image/svg+xml",
     "application/javascript",
@@ -350,11 +349,9 @@ pub(crate) fn sign_blossom_get_auth_header(
 /// Mint a `t=get` Authorization header value for a relay media fetch, or
 /// `None` when signing is unavailable (identity in recovery mode).
 ///
-/// Fail-open by design: while the relay's `BUZZ_REQUIRE_MEDIA_GET_AUTH` flag
-/// is off, an unauthenticated request still succeeds, so degrading to no
-/// header (instead of erroring) keeps media rendering during key recovery.
-/// Once the flag is on, these requests will 403 — the correct outcome for an
-/// identity that can't prove membership.
+/// When signing is unavailable, callers send no header and the relay rejects
+/// the read. This keeps recovery mode from accidentally treating a media URL
+/// as a bearer capability.
 ///
 /// Safety contract: callers must only attach the returned header to URLs
 /// constructed from (or validated against) the app's own relay base URL —
@@ -897,9 +894,29 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_and_validate_mime_rejects_html() {
+    fn test_detect_and_validate_mime_accepts_html_as_inert_download() {
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        assert!(detect_and_validate_mime(html).is_err());
+        assert_eq!(detect_and_validate_mime(html).unwrap(), "text/html");
+    }
+
+    #[test]
+    fn test_detect_and_validate_mime_still_rejects_executable() {
+        let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
+        assert!(detect_and_validate_mime(&elf).is_err());
+    }
+
+    #[test]
+    fn test_blocked_mime_keeps_active_content_and_executables() {
+        for kept in [
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/javascript",
+            "text/javascript",
+            "application/x-executable",
+            "application/x-mach-binary",
+        ] {
+            assert!(BLOCKED_MIME.contains(&kept), "{kept} must stay blocked");
+        }
     }
 
     #[test]
