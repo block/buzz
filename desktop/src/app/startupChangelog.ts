@@ -15,6 +15,7 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
       "修复迁移后 Agent 重复的问题，并在恢复身份时保留 Codex task 绑定。",
       "Codex Agent 可以读取更长的历史记录，并保持同一 task 只对应一个有效实例。",
       "更新日志改为按日期展示，并仅保留最新日期往前 10 个自然日。",
+      "修复手动安装时旧 Buzz 进程未退出、导致主程序没有被新版本覆盖的问题。",
     ],
   },
   {

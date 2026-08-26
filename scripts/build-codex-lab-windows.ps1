@@ -375,6 +375,9 @@ if ($EnableUpdater) {
             -Name dangerousInsecureTransportProtocol -Value $true -Force
     }
 }
+if ($GeneratedConfig.bundle.windows.nsis.installerHooks -ne "installer-hooks.nsh") {
+    throw "Codex Lab NSIS config must stop running Buzz processes via installer-hooks.nsh."
+}
 $CodexAcpResourceDirectory = Join-Path $BinariesDirectory "codex-acp"
 New-Item -ItemType Directory -Path $CodexAcpResourceDirectory -Force | Out-Null
 $BundledCodexAcpArchive = Join-Path $CodexAcpResourceDirectory "codex-acp-win-x64.zip"
