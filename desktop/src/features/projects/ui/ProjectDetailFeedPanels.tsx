@@ -162,7 +162,10 @@ export function ContributorsPanel({
   }
 
   return (
-    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
+    <div
+      className={`${PROJECT_DETAIL_PANEL_CLASS} mx-4`}
+      data-project-detail-panel
+    >
       {rows.map((row) => (
         <div
           className="flex min-h-9 min-w-0 items-center gap-2 px-4 py-1.5 transition-colors hover:bg-muted/35"
@@ -181,6 +184,7 @@ export function ContributorsPanel({
           />
           <span
             className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
+            data-projects-text-priority="primary"
             title={row.label}
           >
             {row.label}

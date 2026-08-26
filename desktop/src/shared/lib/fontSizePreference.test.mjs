@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { readFileSync } from "node:fs";
+
 import config from "../../../tailwind.config.js";
+
+const typographyCss = readFileSync(
+  new URL("../styles/globals/typography.css", import.meta.url),
+  "utf8",
+);
 
 const values = new Map();
 const attributes = new Map();
-const styleValues = new Map();
 const windowListeners = new Map();
-const style = {
-  setProperty: (name, value) => styleValues.set(name, value),
-};
 
 globalThis.window = {
   addEventListener: (type, listener) => windowListeners.set(type, listener),
@@ -21,7 +24,6 @@ globalThis.localStorage = {
 globalThis.document = {
   documentElement: {
     setAttribute: (name, value) => attributes.set(name, value),
-    style,
   },
 };
 
@@ -39,6 +41,28 @@ test("scales fixed line-height utilities with the typography rem", () => {
   });
 });
 
+test("derives the typography rem from the real root so zoom scales layout too", () => {
+  // Cmd +/- scales the root font-size; the type rem must stay rem-relative
+  // (never an absolute px) or text would zoom while containers froze.
+  assert.match(
+    typographyCss,
+    /--buzz-type-rem:\s*calc\(1rem \* var\(--buzz-type-scale\)\);/,
+  );
+  assert.doesNotMatch(typographyCss, /--buzz-type-rem:\s*[\d.]+px/);
+});
+
+test("maps the font size attribute to the 13 / 14 / 15px type contract", () => {
+  assert.match(typographyCss, /:root\s*\{[^}]*--buzz-type-scale:\s*1;/s);
+  assert.match(
+    typographyCss,
+    /:root\[data-font-size="smaller"\]\s*\{\s*--buzz-type-scale:\s*calc\(13 \/ 14\);/,
+  );
+  assert.match(
+    typographyCss,
+    /:root\[data-font-size="larger"\]\s*\{\s*--buzz-type-scale:\s*calc\(15 \/ 14\);/,
+  );
+});
+
 test("defaults invalid and missing font sizes to default", () => {
   assert.equal(preference.parseFontSize(null), "default");
   assert.equal(preference.parseFontSize("medium"), "default");
@@ -48,35 +72,28 @@ test("defaults invalid and missing font sizes to default", () => {
 });
 
 test("persists and applies the selected font size across the app", () => {
-  preference.applyTextZoomFactor(1);
   preference.setFontSize("smaller");
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(values.get(preference.FONT_SIZE_STORAGE_KEY), "smaller");
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(styleValues.get("--buzz-type-rem"), "14.857143px");
 });
 
 test("previews a font size without changing the saved preference", () => {
-  preference.applyTextZoomFactor(1.1);
   preference.setFontSize("smaller");
   preference.previewFontSize("larger");
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(values.get(preference.FONT_SIZE_STORAGE_KEY), "smaller");
   assert.equal(attributes.get("data-font-size"), "larger");
-  assert.equal(styleValues.get("--buzz-type-rem"), "18.857143px");
 
   preference.previewFontSize(null);
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(styleValues.get("--buzz-type-rem"), "16.342857px");
 });
 
 test("initializes from the stored font size", () => {
-  preference.applyTextZoomFactor(1);
   values.set(preference.FONT_SIZE_STORAGE_KEY, "larger");
   preference.initializeFontSizePreference();
   assert.equal(preference.getFontSize(), "larger");
   assert.equal(attributes.get("data-font-size"), "larger");
-  assert.equal(styleValues.get("--buzz-type-rem"), "17.142857px");
 });
 
 test("applies font size changes from another window", () => {
@@ -84,7 +101,6 @@ test("applies font size changes from another window", () => {
   windowListeners.get("storage")({ key: preference.FONT_SIZE_STORAGE_KEY });
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(styleValues.get("--buzz-type-rem"), "14.857143px");
 });
 
 test("returns to the default when another window clears storage", () => {
@@ -93,5 +109,4 @@ test("returns to the default when another window clears storage", () => {
   windowListeners.get("storage")({ key: null });
   assert.equal(preference.getFontSize(), "default");
   assert.equal(attributes.get("data-font-size"), "default");
-  assert.equal(styleValues.get("--buzz-type-rem"), "16px");
 });

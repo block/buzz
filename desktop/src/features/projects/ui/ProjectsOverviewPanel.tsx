@@ -8,7 +8,7 @@ import {
   Hash,
   Plus,
 } from "lucide-react";
-import type * as React from "react";
+import * as React from "react";
 
 import type {
   Project,
@@ -26,15 +26,14 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { ProjectsCreateMenu } from "./ProjectsCreateMenu";
 import { ProjectsSelectionCountMenu } from "./ProjectsSelectionCountMenu";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import {
   type OverviewContextStatIcon,
   type ProjectsOverviewSection,
   projectsOverviewContext,
 } from "./projectsOverviewContext";
-import {
-  ProjectsOverviewActivityGraph,
-  ProjectsOverviewPeople,
-} from "./ProjectsOverviewRail";
+import { ProjectsOverviewPeople } from "./ProjectsOverviewRail";
 
 export type { ProjectsOverviewSection };
 
@@ -130,11 +129,34 @@ export function ProjectsOverviewPanel({
 }
 
 export function ProjectsActivityIntro() {
+  const { activeCommunity } = useCommunities();
+  const communityIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
+  const communityIcon = communityIconQuery.data ?? null;
+
   return (
     <section
-      className="pb-8 pt-5 text-center"
+      className="pb-8 pt-16 text-center"
       data-testid="projects-activity-intro"
     >
+      <div
+        aria-label={`${activeCommunity?.name ?? "Current"} relay`}
+        className="mx-auto mb-3 flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl text-4xl"
+        data-testid="projects-activity-relay-icon"
+        role="img"
+      >
+        {communityIcon ? (
+          <img
+            alt=""
+            className="h-full w-full object-cover"
+            draggable={false}
+            src={communityIcon}
+          />
+        ) : (
+          <span aria-hidden="true" className="-translate-y-px leading-none">
+            🐝
+          </span>
+        )}
+      </div>
       <h2
         className="text-xl font-semibold tracking-tight text-foreground"
         data-testid="projects-page-header"
@@ -162,16 +184,24 @@ export function ProjectsOverviewContextPanel({
   summaries,
 }: ProjectsOverviewContextPanelProps) {
   const selection = useProjectSelection();
-  const selectionPresentation = projectSelectionPresentation(
-    selection?.items ?? [],
+  const selectionItems = selection?.items;
+  const selectionPresentation = React.useMemo(
+    () => projectSelectionPresentation(selectionItems ?? []),
+    [selectionItems],
   );
-  const context = projectsOverviewContext({
-    filter,
-    issues,
-    projects,
-    pullRequests,
-    summaries,
-  });
+  // Memoized: the rail re-renders with every Projects-view state change, and
+  // the context stats walk every issue and pull request in the community.
+  const context = React.useMemo(
+    () =>
+      projectsOverviewContext({
+        filter,
+        issues,
+        projects,
+        pullRequests,
+        summaries,
+      }),
+    [filter, issues, projects, pullRequests, summaries],
+  );
   const actionHandler =
     context.action?.kind === "issue"
       ? onCreateIssue
@@ -235,19 +265,12 @@ export function ProjectsOverviewContextPanel({
                 ))}
               </section>
             </div>
-            {context.people.length > 0 || context.activityByDay ? (
+            {context.people.length > 0 ? (
               <div className="mt-3 space-y-3 py-3">
                 <ProjectsOverviewPeople
                   people={context.people}
                   profiles={profiles}
                 />
-                {context.activityByDay ? (
-                  <div data-testid="projects-overview-activity">
-                    <ProjectsOverviewActivityGraph
-                      activityByDay={context.activityByDay}
-                    />
-                  </div>
-                ) : null}
               </div>
             ) : null}
           </>

@@ -195,7 +195,6 @@ function peopleContext(filter, overrides = {}) {
     pullRequests: [makePullRequest("Open")],
     summaries: {
       "project-buzz": {
-        activityByDay: { "2026-08-01": 4 },
         latestCommit: { author: REVIEW_AUTHOR },
       },
     },
@@ -226,22 +225,10 @@ test("listed repository contributors without commits stay off the repositories p
   assert.deepEqual(context.people, []);
 });
 
-test("projects pod shows owners and keeps the activity graph; channels hides both", () => {
+test("projects pod shows owners; channels hides people", () => {
   const projects = peopleContext("projects");
   const channels = peopleContext("channels");
 
   assert.deepEqual(projects.people, [OWNER]);
-  assert.deepEqual(projects.activityByDay, { "2026-08-01": 4 });
   assert.deepEqual(channels.people, []);
-  assert.equal(channels.activityByDay, null);
-});
-
-test("activity, projects, and repositories pods show the contribution graph", () => {
-  const expected = { "2026-08-01": 4 };
-  assert.deepEqual(peopleContext("all").activityByDay, expected);
-  assert.deepEqual(peopleContext("projects").activityByDay, expected);
-  assert.deepEqual(peopleContext("repositories").activityByDay, expected);
-  assert.equal(peopleContext("issues").activityByDay, null);
-  assert.equal(peopleContext("prs").activityByDay, null);
-  assert.equal(peopleContext("channels").activityByDay, null);
 });

@@ -17,7 +17,6 @@ import {
 } from "@/features/projects/hooks";
 import { useRepositoryActivitySummariesQuery } from "@/features/projects/repositoryActivityHooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
-import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import { buildProjectSelectionAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
@@ -31,7 +30,6 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import { ProjectsChannelsList } from "@/features/projects/ui/ProjectsChannelsList";
-import { ProjectsOverviewChatToggle } from "@/features/projects/ui/ProjectsOverviewChatToggle";
 import {
   ProjectsOverviewContextSheet,
   ProjectsOverviewNarrowContextToggle,
@@ -41,6 +39,7 @@ import {
   ProjectsOverviewContextPanel,
   ProjectsOverviewPanel,
 } from "@/features/projects/ui/ProjectsOverviewPanel";
+import { ProjectsOverviewChromeActions } from "@/features/projects/ui/ProjectsOverviewChromeActions";
 import { ProjectContextRail } from "@/features/projects/ui/ProjectContextRail";
 import {
   openAppSearch,
@@ -112,6 +111,12 @@ import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Button } from "@/shared/ui/button";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
 import { useProjectsOverviewAgentContext } from "./useProjectsOverviewAgentContext";
+import {
+  EMPTY_ITEMS,
+  useContextWorkItems,
+  useDeleteProjectHandler,
+  useOpenProjectTerminalHandler,
+} from "./projectsViewWorkItems";
 
 const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
@@ -136,8 +141,6 @@ export function ProjectsView() {
       : storedFilter;
   });
   const [overviewPanelOpen, setOverviewPanelOpen] = React.useState(true);
-  // Narrow layouts present the same context as a dismissible sheet instead of
-  // the docked rail; the sheet starts closed so resizing never pops a modal.
   const [narrowContextOpen, setNarrowContextOpen] = React.useState(false);
   const contextToggleRef = React.useRef<HTMLButtonElement | null>(null);
   const isNarrowProjectsLayout = useMediaBreakpoint(
@@ -483,16 +486,21 @@ export function ProjectsView() {
   });
   const handleFilterChange = React.useCallback(
     (nextFilter: ProjectsFilter) => {
-      if (
-        nextFilter === "projects" &&
-        (repositoryScope === "buzz" || repositoryScope === "linked")
-      ) {
-        setRepositoryScope("all");
-        writeStoredRepositoryScope("all");
-      }
-      setSelectionAgentContext(null);
-      setFilter(nextFilter);
       writeStoredFilter(nextFilter);
+      // Tab content swaps mount hundreds of rows/cards at once; a transition
+      // lets React keep the click responsive and paint the previous tab until
+      // the new tree is ready instead of blocking the main thread.
+      React.startTransition(() => {
+        if (
+          nextFilter === "projects" &&
+          (repositoryScope === "buzz" || repositoryScope === "linked")
+        ) {
+          setRepositoryScope("all");
+          writeStoredRepositoryScope("all");
+        }
+        setSelectionAgentContext(null);
+        setFilter(nextFilter);
+      });
     },
     [repositoryScope, setSelectionAgentContext],
   );
@@ -545,20 +553,9 @@ export function ProjectsView() {
   );
 
   const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
-  const handleOpenTerminal = React.useCallback(
-    (project: Project) => {
-      const repository = selectProjectRepository(project, null);
-      if (!repository) return Promise.resolve();
-      return openTerminal(repository, {
-        // Check the selected repository only — not all members — so the
-        // terminal affordance reflects the repository the button will open.
-        hasLocalCheckout: hasLocalRepositoryCheckout(
-          repository,
-          localRepoNames,
-        ),
-      });
-    },
-    [localRepoNames, openTerminal],
+  const handleOpenTerminal = useOpenProjectTerminalHandler(
+    openTerminal,
+    localRepoNames,
   );
   const handleOpenRepositoryTerminal = React.useCallback(
     (repository: Repository) =>
@@ -571,18 +568,12 @@ export function ProjectsView() {
     [localRepoNames, openTerminal],
   );
 
-  const handleDeleteProject = React.useCallback(
-    async (project: Project) => {
-      try {
-        await deleteProjectMutation.mutateAsync(project);
-        toast.success("Project deleted");
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to delete project",
-        );
-      }
-    },
-    [deleteProjectMutation],
+  const handleDeleteProject = useDeleteProjectHandler(
+    deleteProjectMutation.mutateAsync,
+  );
+
+  const { contextIssues, contextPullRequests } = useContextWorkItems(
+    projectsWorkItemsQuery.data,
   );
 
   if (projectsQuery.isLoading) {
@@ -640,7 +631,6 @@ export function ProjectsView() {
   const listHeaderBar = (
     <ProjectsListHeaderBar
       filter={filter}
-      variant="bar"
       issueScope={issueScope}
       onIssueScopeChange={handleIssueScopeChange}
       onPullRequestScopeChange={handlePullRequestScopeChange}
@@ -675,14 +665,16 @@ export function ProjectsView() {
         isLoading={
           repoSnapshotsQuery.isLoading || projectsWorkItemsQuery.isLoading
         }
-        issues={projectsWorkItemsQuery.data?.issues.items ?? []}
+        issues={projectsWorkItemsQuery.data?.issues.items ?? EMPTY_ITEMS}
         onOpenCommit={handleOpenCommit}
         onOpenIssue={handleOpenIssue}
         onOpenProject={handleOpenProject}
         onOpenPullRequest={handleOpenPullRequest}
         profiles={profiles}
         projects={projects}
-        pullRequests={projectsWorkItemsQuery.data?.pullRequests.items ?? []}
+        pullRequests={
+          projectsWorkItemsQuery.data?.pullRequests.items ?? EMPTY_ITEMS
+        }
         snapshots={repoSnapshotsQuery.data?.snapshots}
       />
     </>
@@ -690,8 +682,7 @@ export function ProjectsView() {
 
   const contextPanelProps = {
     filter,
-    issues:
-      projectsWorkItemsQuery.data?.issues.items.map(({ issue }) => issue) ?? [],
+    issues: contextIssues,
     onChatWithAgent: (items: ProjectSelectionItem[]) =>
       setSelectionAgentContext(buildProjectSelectionAgentContext(items)),
     onCreateIssue: () => setCreateIssueOpen(true),
@@ -699,28 +690,34 @@ export function ProjectsView() {
     onCreatePullRequest: () => setCreatePullRequestOpen(true),
     profiles,
     projects,
-    pullRequests:
-      projectsWorkItemsQuery.data?.pullRequests.items.map(
-        ({ pullRequest }) => pullRequest,
-      ) ?? [],
+    pullRequests: contextPullRequests,
     summaries: activitySummariesQuery.data,
   };
-  const overviewDetached = overviewPanelOpen && !isNarrowProjectsLayout;
   const contextOpen = isNarrowProjectsLayout
     ? narrowContextOpen
     : overviewPanelOpen;
-  const chromeActions = (
-    <>
-      <ProjectsOverviewNarrowContextToggle
-        onToggle={() =>
-          isNarrowProjectsLayout
-            ? setNarrowContextOpen((open) => !open)
-            : setOverviewPanelOpen((open) => !open)
-        }
-        open={contextOpen}
-        ref={contextToggleRef}
-      />
-    </>
+  const overviewChatOpen =
+    selectionAgentContext !== null && !isNarrowProjectsLayout;
+  const overviewContextOpen = overviewPanelOpen && !isNarrowProjectsLayout;
+  const overviewDetached = overviewContextOpen || overviewChatOpen;
+  const chromeActions = isNarrowProjectsLayout ? (
+    <ProjectsOverviewNarrowContextToggle
+      onToggle={() => setNarrowContextOpen((open) => !open)}
+      open={contextOpen}
+      ref={contextToggleRef}
+    />
+  ) : (
+    <ProjectsOverviewChromeActions
+      chatOpen={overviewChatOpen}
+      contextOpen={overviewPanelOpen}
+      onToggleChat={() =>
+        setSelectionAgentContext((context) =>
+          context ? null : overviewAgentContext,
+        )
+      }
+      onToggleContext={() => setOverviewPanelOpen((open) => !open)}
+      sectionTitle={projectsSectionTitle(filter)}
+    />
   );
 
   return (
@@ -842,19 +839,10 @@ export function ProjectsView() {
                           onFilterChange={handleFilterChange}
                         />
                       </div>
-                      <ProjectsOverviewChatToggle
-                        active={selectionAgentContext !== null}
-                        onToggle={() =>
-                          setSelectionAgentContext((context) =>
-                            context ? null : overviewAgentContext,
-                          )
-                        }
-                        sectionTitle={projectsSectionTitle(filter)}
-                      />
                     </div>
                     <div
                       className={
-                        filter === "all" ? "mx-auto w-full max-w-xl" : "w-full"
+                        filter === "all" ? "mx-auto w-full max-w-2xl" : "w-full"
                       }
                     >
                       {filter === "all" ? (
@@ -867,14 +855,16 @@ export function ProjectsView() {
                       ) : (
                         <>
                           <ProjectSectionHeader
-                            className="-mx-4"
+                            className="mb-2 rounded-xl bg-muted/40"
                             icon={projectsSectionIcon(filter)}
                             testId="projects-page-header"
                             title={projectsSectionTitle(filter)}
+                            trailing={
+                              filter === "channels" ? undefined : listHeaderBar
+                            }
                           />
                           <section>
                             <div className="space-y-3">
-                              {filter === "channels" ? null : listHeaderBar}
                               {filter === "prs" ? (
                                 <ProjectsPullRequestsList
                                   embedded={viewMode === "list"}
@@ -933,20 +923,29 @@ export function ProjectsView() {
                 </div>
               </div>
             </div>
-            {selectionAgentContext && !isNarrowProjectsLayout ? (
-              <ProjectAgentChatPanel
-                canResetWidth={overviewAgentPanelWidth.canReset}
-                context={selectionAgentContext}
-                onClose={() => setSelectionAgentContext(null)}
-                onResetWidth={overviewAgentPanelWidth.onResetWidth}
-                onResizeStart={overviewAgentPanelWidth.onResizeStart}
-                widthPx={overviewAgentPanelWidth.widthPx}
-              />
-            ) : null}
           </div>
         </div>
         <ProjectContextRail
-          open={overviewDetached}
+          open={overviewChatOpen}
+          panelWidthPx={overviewAgentPanelWidth.widthPx}
+          resizing={overviewAgentPanelWidth.isResizing}
+          testId="projects-overview-agent-rail"
+        >
+          {selectionAgentContext ? (
+            <ProjectAgentChatPanel
+              canResetWidth={overviewAgentPanelWidth.canReset}
+              constrainToAvailableSpace={false}
+              context={selectionAgentContext}
+              detached
+              onClose={() => setSelectionAgentContext(null)}
+              onResetWidth={overviewAgentPanelWidth.onResetWidth}
+              onResizeStart={overviewAgentPanelWidth.onResizeStart}
+              widthPx={overviewAgentPanelWidth.widthPx}
+            />
+          ) : null}
+        </ProjectContextRail>
+        <ProjectContextRail
+          open={overviewContextOpen}
           panelWidthPx={PROJECT_CONTEXT_PANEL_DEFAULT_WIDTH_PX}
           testId="projects-overview-context-rail"
         >

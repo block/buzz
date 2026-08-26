@@ -267,7 +267,9 @@ export function IssueAssigneesRow({
       {canSelfAssign && viewer ? (
         <Button
           className={cn(
-            "h-5 px-1 text-xs text-muted-foreground hover:text-foreground",
+            contextActions
+              ? "h-5 px-1 text-xs text-muted-foreground hover:text-foreground"
+              : "h-5 px-0 text-xs text-primary hover:bg-transparent hover:text-primary hover:underline",
             contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
           )}
           data-testid={`${testIdPrefix}-self-assign`}

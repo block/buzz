@@ -233,7 +233,9 @@ async function openReviewWithPostedTimecode(
 
   await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
-    page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
+    page
+      .getByTestId("message-composer")
+      .getByRole("button", { name: "Video attachment bbbb", exact: true }),
   ).toBeVisible();
   await page.getByTestId("send-message").click();
   await expect(page.getByText("Sending")).toHaveCount(0);
@@ -289,8 +291,12 @@ test("video upload previews use poster frames and inline videos open review mode
   await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
-  const composerPoster = composer.getByAltText("Video attachment bbbb");
-  await expect(composerPoster).toBeVisible();
+  const composerTrigger = composer.getByRole("button", {
+    name: "Video attachment bbbb",
+    exact: true,
+  });
+  await expect(composerTrigger).toBeVisible();
+  const composerPoster = composerTrigger.locator("img");
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();

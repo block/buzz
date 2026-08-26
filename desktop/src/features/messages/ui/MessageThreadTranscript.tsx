@@ -21,6 +21,7 @@ type MessageThreadTranscriptProps = {
     remove: boolean,
   ) => Promise<void>;
   profiles?: UserProfileLookup;
+  renderAfterMessage?: (message: TimelineMessage) => React.ReactNode;
   testId?: string;
 };
 
@@ -36,6 +37,7 @@ export function MessageThreadTranscript({
   messages,
   onToggleReaction,
   profiles,
+  renderAfterMessage,
   testId = "message-thread-transcript",
 }: MessageThreadTranscriptProps) {
   const renderItems = React.useMemo(() => {
@@ -59,16 +61,18 @@ export function MessageThreadTranscript({
       data-testid={testId}
     >
       {renderItems.map(({ isContinuation, message }) => (
-        <MessageThreadRow
-          channelId={channelId}
-          currentPubkey={currentPubkey}
-          isContinuation={isContinuation}
-          key={message.renderKey ?? message.id}
-          message={message}
-          onToggleReaction={onToggleReaction}
-          profiles={profiles}
-          showDepthGuides={false}
-        />
+        <React.Fragment key={message.renderKey ?? message.id}>
+          <MessageThreadRow
+            channelId={channelId}
+            currentPubkey={currentPubkey}
+            isContinuation={isContinuation}
+            message={message}
+            onToggleReaction={onToggleReaction}
+            profiles={profiles}
+            showDepthGuides={false}
+          />
+          {renderAfterMessage?.(message)}
+        </React.Fragment>
       ))}
     </div>
   );

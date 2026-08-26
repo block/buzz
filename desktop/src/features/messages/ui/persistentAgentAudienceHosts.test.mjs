@@ -16,16 +16,12 @@ test("supported conversation hosts opt into explicit audience contexts", async (
     ],
   );
 
-  assert.doesNotMatch(channelPane, /audienceContext=/);
+  assert.match(channelPane, /audienceContext=\{\{ type: "channel" \}\}/);
   assert.doesNotMatch(newMessage, /audienceContext=/);
-  assert.match(
-    threadPanel,
-    /type: "thread"[\s\S]*threadRootId: threadHead\.id/,
-  );
-  assert.match(
-    inboxDetail,
-    /type: "thread"[\s\S]*threadRootId: item\.conversationId/,
-  );
+  assert.match(threadPanel, /audienceContext=\{\{ type: "thread" \}\}/);
+  assert.match(inboxDetail, /type: "thread"/);
+  assert.doesNotMatch(threadPanel, /audienceContext=\{[\s\S]*threadRootId/);
+  assert.doesNotMatch(inboxDetail, /audienceContext=\{[\s\S]*threadRootId/);
 });
 
 test("video review remains explicitly outside persistent audience routing", async () => {
@@ -43,5 +39,5 @@ test("composer never derives audience context from draft keys", async () => {
   const composer = await source("./MessageComposer.tsx");
 
   assert.doesNotMatch(composer, /draftKey\?\.startsWith\("thread:"\)/);
-  assert.match(composer, /audienceContext\?\.threadRootId/);
+  assert.match(composer, /audienceContext && channelId && ownerPubkey/);
 });

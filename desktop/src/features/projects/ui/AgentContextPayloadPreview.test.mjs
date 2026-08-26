@@ -33,7 +33,7 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-async function renderPreview(payload) {
+async function renderPreview(payload, options = {}) {
   const { createElement } = await import("react");
   const { render } = await import("@testing-library/react");
   const { AgentContextPayloadPreview } = await import(
@@ -41,8 +41,9 @@ async function renderPreview(payload) {
   );
   return render(
     createElement(AgentContextPayloadPreview, {
+      iconOnly: options.iconOnly,
       payload,
-      triggerLabel: "Context",
+      triggerLabel: options.triggerLabel ?? "Context",
     }),
   );
 }
@@ -81,6 +82,24 @@ test("discloses the exact appended payload before send, adversarial metadata inc
   // Toggles closed again.
   fireEvent.click(screen.getByTestId("agent-context-preview-trigger"));
   assert.equal(screen.queryByTestId("agent-context-preview"), null);
+});
+
+test("supports a subtle icon-only disclosure without losing its accessible name", async () => {
+  const { fireEvent, screen } = await import("@testing-library/react");
+  await renderPreview("Exact context", {
+    iconOnly: true,
+    triggerLabel: "Preview message context",
+  });
+
+  const trigger = screen.getByRole("button", {
+    name: "Preview message context",
+  });
+  assert.equal(trigger.textContent?.trim(), "");
+  fireEvent.click(trigger);
+  assert.equal(
+    screen.getByTestId("agent-context-preview-payload").textContent,
+    "Exact context",
+  );
 });
 
 test("renders nothing when there is no payload to append", async () => {

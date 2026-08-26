@@ -9,6 +9,7 @@ pub(super) struct TtsMonitorState {
     pub(super) activity_frames: Arc<Mutex<VecDeque<TtsSpeakerActivityFrame>>>,
     pub(super) active_speaker: ActiveSpeaker,
     pub(super) speaker_cancel: SpeakerCancellation,
+    pub(super) broadcasters: TtsBroadcasters,
     pub(super) activity_app: Option<tauri::AppHandle>,
 }
 
@@ -31,6 +32,7 @@ pub(super) fn spawn_tts_monitor(state: TtsMonitorState) -> std::io::Result<threa
                         // append winning the lock handoff cannot have its own
                         // activity publication overwritten by this `false`.
                         || {
+                            state.broadcasters.cancel_all();
                             state
                                 .active_speaker
                                 .lock()

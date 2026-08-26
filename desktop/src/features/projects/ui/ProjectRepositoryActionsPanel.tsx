@@ -35,10 +35,7 @@ import {
 import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   RepoSourceDropdown,
   type RepoSourceHeaderControls,
@@ -90,14 +87,19 @@ type ProjectRepositoryActionsPanelProps = {
 function RepositoryPanelSection({
   children,
   divided = false,
+  testId,
   title,
 }: {
   children: React.ReactNode;
   divided?: boolean;
+  testId?: string;
   title?: string;
 }) {
   return (
-    <section className={divided ? "!mt-2 space-y-0.5 pt-2" : "space-y-0.5"}>
+    <section
+      className={divided ? "!mt-2 space-y-0.5 pt-2" : "space-y-0.5"}
+      data-testid={testId}
+    >
       {title ? (
         <h3 className="flex h-7 min-w-0 items-center truncate text-sm font-normal text-muted-foreground/70">
           {title}
@@ -105,49 +107,6 @@ function RepositoryPanelSection({
       ) : null}
       {children}
     </section>
-  );
-}
-
-function RepositoryPeople({
-  people,
-  profiles,
-}: {
-  people: string[];
-  profiles?: UserProfileLookup;
-}) {
-  return (
-    <div
-      className="flex -space-x-1.5 pb-1 pt-0"
-      data-testid="project-repository-people"
-    >
-      {people.slice(0, 18).map((person) => {
-        const profile = profiles?.[person];
-        const label =
-          profile?.displayName?.trim() ||
-          profile?.nip05Handle?.trim() ||
-          person;
-        return (
-          <Tooltip key={person}>
-            <TooltipTrigger asChild>
-              <span
-                className="relative inline-flex rounded-full ring-2 ring-background"
-                data-testid="project-repository-person"
-              >
-                <UserAvatar
-                  accent={profile?.isAgent === true}
-                  avatarUrl={profile?.avatarUrl ?? null}
-                  displayName={label}
-                  size="sm"
-                />
-              </span>
-            </TooltipTrigger>
-            <TooltipContent data-testid="project-repository-person-tooltip">
-              {label}
-            </TooltipContent>
-          </Tooltip>
-        );
-      })}
-    </div>
   );
 }
 
@@ -207,19 +166,6 @@ export function ProjectRepositoryActionsPanel({
   terminalTitle,
   widthPx,
 }: ProjectRepositoryActionsPanelProps) {
-  const contextPeople = selectedIssue
-    ? [selectedIssue.author, ...selectedIssue.assignees]
-    : selectedPullRequest
-      ? [
-          selectedPullRequest.author,
-          ...selectedPullRequest.reviewers,
-          ...selectedPullRequest.approvals.map(({ author }) => author),
-          ...selectedPullRequest.changeRequests.map(({ author }) => author),
-        ]
-      : [repository.owner, ...repository.contributors];
-  const people = [
-    ...new Set(contextPeople.filter(Boolean).map(normalizePubkey)),
-  ];
   const selection = useProjectSelection();
   const selectionPresentation = projectSelectionPresentation(
     selection?.items ?? [],
@@ -246,6 +192,16 @@ export function ProjectRepositoryActionsPanel({
     sourceControls.externalUrl,
     branchScoped ? (sourceControls.selectedTag ?? sourceControls.branch) : null,
   );
+  const showCreateTask = activeTab === "issues" && !selectionPresentation;
+  const showCreateReview =
+    activeTab === "prs" &&
+    !selectionPresentation &&
+    Boolean(onCreatePullRequest);
+  const showActions =
+    Boolean(selectedIssue || selectedPullRequest || contextItem) ||
+    branchScoped ||
+    showCreateTask ||
+    showCreateReview;
 
   return (
     <RightAuxiliaryPane
@@ -310,163 +266,183 @@ export function ProjectRepositoryActionsPanel({
               selectionPresentation ? "hidden" : ""
             }`}
           >
-            <ProjectWorkItemContextActions
-              issue={selectedIssue}
-              profiles={profiles}
-              pullRequest={selectedPullRequest}
-              repository={repository}
-            />
-            {contextItem ? (
-              <ProjectWorkItemCommunicationActions
-                item={contextItem}
-                onChatWithAgent={onChatWithAgent}
-              />
-            ) : null}
-            {branchScoped ? (
-              <RepositoryPanelSection>
-                <div className="grid gap-0.5 [&_button]:-mx-2 [&_button]:h-7 [&_button]:w-[calc(100%+1rem)] [&_button]:max-w-none [&_button]:justify-start [&_button]:gap-3 [&_button]:rounded-md [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:text-left [&_button]:text-sm [&_button]:font-normal [&_button]:shadow-none [&_button]:hover:bg-muted/70 [&_button>svg:last-child]:ml-auto">
-                  <RepoSourceDropdown controls={sourceControls} />
-                  <RepositoryBranchDropdown
-                    branch={sourceControls.branch}
-                    branchOptions={sourceControls.branchOptions}
-                    createBranchDisabled={sourceControls.createBranchDisabled}
-                    createBranchTitle={sourceControls.createBranchTitle}
-                    deleteBranchDisabled={sourceControls.deleteBranchDisabled}
-                    deleteBranchTitle={sourceControls.deleteBranchTitle}
-                    onBranchChange={sourceControls.onBranchChange}
-                    onCreateBranch={sourceControls.onCreateBranch}
-                    onDeleteBranch={sourceControls.onDeleteBranch}
-                    onTagChange={sourceControls.onTagChange}
-                    selectedTag={sourceControls.selectedTag}
-                    tagOptions={sourceControls.tagOptions}
+            {showActions ? (
+              <RepositoryPanelSection testId="project-context-actions">
+                <ProjectWorkItemContextActions
+                  issue={selectedIssue}
+                  profiles={profiles}
+                  pullRequest={selectedPullRequest}
+                  repository={repository}
+                />
+                {contextItem ? (
+                  <ProjectWorkItemCommunicationActions
+                    item={contextItem}
+                    onChatWithAgent={onChatWithAgent}
                   />
-                </div>
-              </RepositoryPanelSection>
-            ) : activeTab === "issues" && !selectionPresentation ? (
-              <RepositoryPanelSection>
-                <RepositoryActionButton
-                  disabled={createIssuePending}
-                  onClick={onCreateTask}
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Create task
-                </RepositoryActionButton>
-              </RepositoryPanelSection>
-            ) : null}
-
-            {branchScoped ? (
-              <RepositoryPanelSection>
-                <div className="grid gap-0.5">
-                  {cloneAction ? (
-                    <RepositoryActionButton
-                      disabled={sourceControls.clonePending}
-                      onClick={cloneAction}
+                ) : null}
+                {branchScoped ? (
+                  <>
+                    <div
+                      className="grid gap-0.5 [&_button]:-mx-2 [&_button]:h-7 [&_button]:w-[calc(100%+1rem)] [&_button]:max-w-none [&_button]:justify-start [&_button]:gap-3 [&_button]:rounded-md [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:text-left [&_button]:text-sm [&_button]:font-normal [&_button]:shadow-none [&_button]:hover:bg-muted/70 [&_button>svg:last-child]:ml-auto"
+                      data-testid="project-context-source-controls"
                     >
-                      {sourceControls.clonePending ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <DownloadCloud className="h-3.5 w-3.5" />
-                      )}
-                      {sourceControls.clonePending ? "Cloning…" : "Clone"}
-                    </RepositoryActionButton>
-                  ) : null}
-                  {sourceControls.remoteUnavailableReason === "access" &&
-                  sourceControls.onAskForAccess ? (
-                    <RepositoryActionButton
-                      onClick={sourceControls.onAskForAccess}
-                      title="Open project chat to ask for repository access"
+                      <RepoSourceDropdown controls={sourceControls} />
+                      <RepositoryBranchDropdown
+                        branch={sourceControls.branch}
+                        branchOptions={sourceControls.branchOptions}
+                        createBranchDisabled={
+                          sourceControls.createBranchDisabled
+                        }
+                        createBranchTitle={sourceControls.createBranchTitle}
+                        deleteBranchDisabled={
+                          sourceControls.deleteBranchDisabled
+                        }
+                        deleteBranchTitle={sourceControls.deleteBranchTitle}
+                        onBranchChange={sourceControls.onBranchChange}
+                        onCreateBranch={sourceControls.onCreateBranch}
+                        onDeleteBranch={sourceControls.onDeleteBranch}
+                        onTagChange={sourceControls.onTagChange}
+                        selectedTag={sourceControls.selectedTag}
+                        tagOptions={sourceControls.tagOptions}
+                      />
+                    </div>
+                    <div
+                      className="grid gap-0.5"
+                      data-testid="project-context-repository-actions"
                     >
-                      <MessageCircle className="h-3.5 w-3.5" />
-                      Ask for access
-                    </RepositoryActionButton>
-                  ) : null}
-                  {fetchAction ? (
-                    <RepositoryActionButton
-                      disabled={sourceControls.fetchPending}
-                      onClick={fetchAction}
-                      title={sourceControls.fetchTitle}
-                    >
-                      {sourceControls.fetchPending ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      )}
-                      Fetch
-                    </RepositoryActionButton>
-                  ) : null}
-                  {pullAction ? (
-                    <RepositoryActionButton
-                      disabled={sourceControls.pullDisabled}
-                      onClick={pullAction}
-                      title={sourceControls.pullTitle}
-                    >
-                      {sourceControls.pullPending ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <DownloadCloud className="h-3.5 w-3.5" />
-                      )}
-                      Pull
-                      {sourceControls.behindCount
-                        ? ` ${sourceControls.behindCount}`
-                        : ""}
-                    </RepositoryActionButton>
-                  ) : null}
-                  {pushAction ? (
-                    <RepositoryActionButton
-                      disabled={sourceControls.pushDisabled}
-                      onClick={pushAction}
-                      title={sourceControls.pushTitle}
-                    >
-                      {sourceControls.pushPending ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <UploadCloud className="h-3.5 w-3.5" />
-                      )}
-                      Push
-                      {sourceControls.aheadCount
-                        ? ` ${sourceControls.aheadCount}`
-                        : ""}
-                    </RepositoryActionButton>
-                  ) : null}
-                  <RepositoryActionButton
-                    onClick={onOpenTerminal}
-                    title={terminalTitle ?? "Open terminal"}
-                  >
-                    <SquareTerminal className="h-3.5 w-3.5" />
-                    Terminal
-                  </RepositoryActionButton>
-                  {sourceControls.source === "local" ? (
-                    <RepositoryActionButton
-                      onClick={onOpenLocalRepository}
-                      title="Open local repository folder"
-                    >
-                      <FolderOpen className="h-3.5 w-3.5" />
-                      Open
-                    </RepositoryActionButton>
-                  ) : externalOpenUrl ? (
-                    <Button
-                      asChild
-                      className="-mx-2 h-7 w-[calc(100%+1rem)] justify-start gap-3 rounded-md px-2 text-left text-sm font-normal hover:bg-muted/70 [&_svg]:h-4 [&_svg]:w-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground"
-                      size="sm"
-                      variant="ghost"
-                    >
-                      <a
-                        href={externalOpenUrl}
-                        rel="noreferrer"
-                        target="_blank"
+                      {cloneAction ? (
+                        <RepositoryActionButton
+                          disabled={sourceControls.clonePending}
+                          onClick={cloneAction}
+                        >
+                          {sourceControls.clonePending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <DownloadCloud className="h-3.5 w-3.5" />
+                          )}
+                          {sourceControls.clonePending ? "Cloning…" : "Clone"}
+                        </RepositoryActionButton>
+                      ) : null}
+                      {sourceControls.remoteUnavailableReason === "access" &&
+                      sourceControls.onAskForAccess ? (
+                        <RepositoryActionButton
+                          onClick={sourceControls.onAskForAccess}
+                          title="Open project chat to ask for repository access"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5" />
+                          Ask for access
+                        </RepositoryActionButton>
+                      ) : null}
+                      {fetchAction ? (
+                        <RepositoryActionButton
+                          disabled={sourceControls.fetchPending}
+                          onClick={fetchAction}
+                          title={sourceControls.fetchTitle}
+                        >
+                          {sourceControls.fetchPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          )}
+                          Fetch
+                        </RepositoryActionButton>
+                      ) : null}
+                      {pullAction ? (
+                        <RepositoryActionButton
+                          disabled={sourceControls.pullDisabled}
+                          onClick={pullAction}
+                          title={sourceControls.pullTitle}
+                        >
+                          {sourceControls.pullPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <DownloadCloud className="h-3.5 w-3.5" />
+                          )}
+                          Pull
+                          {sourceControls.behindCount
+                            ? ` ${sourceControls.behindCount}`
+                            : ""}
+                        </RepositoryActionButton>
+                      ) : null}
+                      {pushAction ? (
+                        <RepositoryActionButton
+                          disabled={sourceControls.pushDisabled}
+                          onClick={pushAction}
+                          title={sourceControls.pushTitle}
+                        >
+                          {sourceControls.pushPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <UploadCloud className="h-3.5 w-3.5" />
+                          )}
+                          Push
+                          {sourceControls.aheadCount
+                            ? ` ${sourceControls.aheadCount}`
+                            : ""}
+                        </RepositoryActionButton>
+                      ) : null}
+                      <RepositoryActionButton
+                        onClick={onOpenTerminal}
+                        title={terminalTitle ?? "Open terminal"}
                       >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        Open
-                      </a>
-                    </Button>
-                  ) : null}
-                </div>
+                        <SquareTerminal className="h-3.5 w-3.5" />
+                        Terminal
+                      </RepositoryActionButton>
+                      {sourceControls.source === "local" ? (
+                        <RepositoryActionButton
+                          onClick={onOpenLocalRepository}
+                          title="Open local repository folder"
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          Open
+                        </RepositoryActionButton>
+                      ) : externalOpenUrl ? (
+                        <Button
+                          asChild
+                          className="-mx-2 h-7 w-[calc(100%+1rem)] justify-start gap-3 rounded-md px-2 text-left text-sm font-normal hover:bg-muted/70 [&_svg]:h-4 [&_svg]:w-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground"
+                          size="sm"
+                          variant="ghost"
+                        >
+                          <a
+                            href={externalOpenUrl}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                            Open
+                          </a>
+                        </Button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
+                {showCreateTask ? (
+                  <RepositoryActionButton
+                    disabled={createIssuePending}
+                    onClick={onCreateTask}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Create task
+                  </RepositoryActionButton>
+                ) : null}
+                {showCreateReview && onCreatePullRequest ? (
+                  <RepositoryActionButton
+                    onClick={onCreatePullRequest}
+                    title="Create review — choose a repository and branches to compare"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Create review
+                  </RepositoryActionButton>
+                ) : null}
               </RepositoryPanelSection>
             ) : null}
 
-            {branchScoped ? (
-              <RepositoryPanelSection divided title="Details">
-                <RepositoryPeople people={people} profiles={profiles} />
+            <RepositoryPanelSection
+              divided={showActions}
+              testId="project-context-details"
+              title="Details"
+            >
+              {branchScoped ? (
                 <dl className="text-sm [&>div]:h-7 [&_dd]:ml-auto [&_dd]:tabular-nums [&_dt]:gap-3 [&_dt]:text-foreground [&_dt_svg]:h-4 [&_dt_svg]:w-4 [&_dt_svg]:shrink-0 [&_dt_svg]:text-muted-foreground">
                   <div className="flex items-center justify-between gap-3">
                     <dt className="flex items-center gap-3 text-muted-foreground">
@@ -499,121 +475,94 @@ export function ProjectRepositoryActionsPanel({
                     </dd>
                   </div>
                 </dl>
-              </RepositoryPanelSection>
-            ) : (
-              <>
-                <RepositoryPanelSection
-                  divided={activeTab === "issues"}
-                  title={
-                    selectedIssue || selectedPullRequest
-                      ? "People"
-                      : activeTab === "issues"
-                        ? "Details"
-                        : undefined
-                  }
-                >
-                  <RepositoryPeople people={people} profiles={profiles} />
-                </RepositoryPanelSection>
-                <RepositoryPanelSection
-                  title={
-                    selectedIssue
-                      ? "Task details"
-                      : selectedPullRequest
-                        ? "Review details"
-                        : activeTab === "issues"
-                          ? undefined
-                          : activeTab === "prs"
-                            ? "Review activity"
-                            : "Repository activity"
-                  }
-                >
-                  <dl className="text-sm [&>div]:h-7 [&_dd]:ml-auto [&_dd]:tabular-nums [&_dt]:gap-3 [&_dt]:text-foreground [&_dt_svg]:h-4 [&_dt_svg]:w-4 [&_dt_svg]:shrink-0 [&_dt_svg]:text-muted-foreground">
-                    <ProjectWorkItemContextDetails
-                      issue={selectedIssue}
-                      pullRequest={selectedPullRequest}
-                    />
-                    {!selectedIssue &&
-                    !selectedPullRequest &&
-                    activeTab !== "prs" ? (
-                      <>
-                        <div className="flex items-center justify-between gap-3">
-                          <dt className="flex items-center gap-3 text-muted-foreground">
-                            <CircleDot className="h-3.5 w-3.5" />
-                            {activeTab === "issues" ? "Tasks" : "Active tasks"}
-                          </dt>
-                          <dd className="font-medium text-foreground">
-                            {activeTab === "issues"
-                              ? taskActivity.total
-                              : taskActivity.active}
-                          </dd>
-                        </div>
-                        {activeTab === "issues" ? (
-                          <>
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-3 text-muted-foreground">
-                                <CircleDot className="h-3.5 w-3.5" />
-                                Active
-                              </dt>
-                              <dd className="font-medium text-foreground">
-                                {taskActivity.active}
-                              </dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-3 text-muted-foreground">
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                Completed
-                              </dt>
-                              <dd className="font-medium text-foreground">
-                                {taskActivity.completed}
-                              </dd>
-                            </div>
-                          </>
-                        ) : null}
-                      </>
-                    ) : null}
-                    {!selectedIssue &&
-                    !selectedPullRequest &&
-                    activeTab !== "issues" ? (
-                      <>
-                        <div className="flex items-center justify-between gap-3">
-                          <dt className="flex items-center gap-3 text-muted-foreground">
-                            <GitPullRequest className="h-3.5 w-3.5" />
-                            {activeTab === "prs" ? "Reviews" : "Open reviews"}
-                          </dt>
-                          <dd className="font-medium text-foreground">
-                            {activeTab === "prs"
-                              ? reviewActivity.total
-                              : reviewActivity.open}
-                          </dd>
-                        </div>
-                        {activeTab === "prs" ? (
-                          <>
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-3 text-muted-foreground">
-                                <GitPullRequest className="h-3.5 w-3.5" />
-                                Open
-                              </dt>
-                              <dd className="font-medium text-foreground">
-                                {reviewActivity.open}
-                              </dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-3 text-muted-foreground">
-                                <GitMerge className="h-3.5 w-3.5" />
-                                Merged
-                              </dt>
-                              <dd className="font-medium text-foreground">
-                                {reviewActivity.merged}
-                              </dd>
-                            </div>
-                          </>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </dl>
-                </RepositoryPanelSection>
-              </>
-            )}
+              ) : (
+                <dl className="text-sm [&>div]:h-7 [&_dd]:ml-auto [&_dd]:tabular-nums [&_dt]:gap-3 [&_dt]:text-foreground [&_dt_svg]:h-4 [&_dt_svg]:w-4 [&_dt_svg]:shrink-0 [&_dt_svg]:text-muted-foreground">
+                  <ProjectWorkItemContextDetails
+                    issue={selectedIssue}
+                    pullRequest={selectedPullRequest}
+                    repository={repository}
+                  />
+                  {!selectedIssue &&
+                  !selectedPullRequest &&
+                  activeTab !== "prs" ? (
+                    <>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="flex items-center gap-3 text-muted-foreground">
+                          <CircleDot className="h-3.5 w-3.5" />
+                          {activeTab === "issues" ? "Tasks" : "Active tasks"}
+                        </dt>
+                        <dd className="font-medium text-foreground">
+                          {activeTab === "issues"
+                            ? taskActivity.total
+                            : taskActivity.active}
+                        </dd>
+                      </div>
+                      {activeTab === "issues" ? (
+                        <>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="flex items-center gap-3 text-muted-foreground">
+                              <CircleDot className="h-3.5 w-3.5" />
+                              Active
+                            </dt>
+                            <dd className="font-medium text-foreground">
+                              {taskActivity.active}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="flex items-center gap-3 text-muted-foreground">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              Completed
+                            </dt>
+                            <dd className="font-medium text-foreground">
+                              {taskActivity.completed}
+                            </dd>
+                          </div>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {!selectedIssue &&
+                  !selectedPullRequest &&
+                  activeTab !== "issues" ? (
+                    <>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="flex items-center gap-3 text-muted-foreground">
+                          <GitPullRequest className="h-3.5 w-3.5" />
+                          {activeTab === "prs" ? "Reviews" : "Open reviews"}
+                        </dt>
+                        <dd className="font-medium text-foreground">
+                          {activeTab === "prs"
+                            ? reviewActivity.total
+                            : reviewActivity.open}
+                        </dd>
+                      </div>
+                      {activeTab === "prs" ? (
+                        <>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="flex items-center gap-3 text-muted-foreground">
+                              <GitPullRequest className="h-3.5 w-3.5" />
+                              Open
+                            </dt>
+                            <dd className="font-medium text-foreground">
+                              {reviewActivity.open}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="flex items-center gap-3 text-muted-foreground">
+                              <GitMerge className="h-3.5 w-3.5" />
+                              Merged
+                            </dt>
+                            <dd className="font-medium text-foreground">
+                              {reviewActivity.merged}
+                            </dd>
+                          </div>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
+                </dl>
+              )}
+            </RepositoryPanelSection>
           </div>
         </div>
       </div>

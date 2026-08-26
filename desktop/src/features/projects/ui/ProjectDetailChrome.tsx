@@ -3,9 +3,6 @@ import type * as React from "react";
 
 import { AppTopChromePortal } from "@/app/AppTopChromePortal";
 import type { Project, Repository } from "@/features/projects/hooks";
-import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
-import type { EntityLinkTab } from "@/shared/lib/entityLink";
-import { ShareLinkButton } from "./ShareLinkButton";
 
 export type ProjectDetailWorkItemCrumb = {
   category: string;
@@ -21,7 +18,6 @@ export function ProjectDetailChrome({
   onGoProjects,
   project,
   repository,
-  shareTab,
 }: {
   /** Repository-scoped controls, rendered left of the project-wide ones. */
   actions?: React.ReactNode;
@@ -31,7 +27,6 @@ export function ProjectDetailChrome({
   onGoProjects: () => void;
   project: Project;
   repository: Repository;
-  shareTab?: EntityLinkTab;
 }) {
   return (
     <AppTopChromePortal>
@@ -120,12 +115,6 @@ export function ProjectDetailChrome({
           )}
         </nav>
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
-          <ShareLinkButton
-            className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            label="Copy project link"
-            link={projectShareLink(project, shareTab)}
-            testId="project-detail-copy-link"
-          />
           {actions}
         </div>
       </div>

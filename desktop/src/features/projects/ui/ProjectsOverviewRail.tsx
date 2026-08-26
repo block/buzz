@@ -8,7 +8,6 @@ import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { ProjectsContributionGraph } from "./ProjectsContributionGraph";
 
 /** Matches Tailwind `-space-x-1.5` so stacked rows stay zoom-safe. */
 const STACK_OVERLAP_REM = 0.375;
@@ -179,12 +178,4 @@ export function ProjectsOverviewPeople({
       })}
     </div>
   );
-}
-
-export function ProjectsOverviewActivityGraph({
-  activityByDay,
-}: {
-  activityByDay: Record<string, number>;
-}) {
-  return <ProjectsContributionGraph activityByDay={activityByDay} compact />;
 }

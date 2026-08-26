@@ -773,10 +773,11 @@ test.describe("channel activity hover preview", () => {
     await rootRow.hover();
     const actionBar = page.getByTestId(`message-action-bar-${root.id}`);
     await expect(actionBar).toBeVisible();
-    await actionBar
-      .getByRole("button", { name: /^React with / })
-      .first()
-      .click();
+    await actionBar.getByRole("button", { name: "Open reactions" }).click();
+    const picker = page.locator("em-emoji-picker");
+    await expect(picker).toBeVisible();
+    await picker.locator("input[type='search']").fill("thumbs up");
+    await picker.getByRole("button", { name: "👍" }).first().click();
     await expect(
       rootRow.getByRole("button", { name: /^Toggle .* reaction$/ }),
     ).toBeVisible();

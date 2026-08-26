@@ -5,6 +5,12 @@ import {
 } from "./projectSelection.ts";
 
 const PROJECT_PAGE_CONTEXT_MARKER = "Current Buzz project page:";
+/** Marker for the repository set appended by the full Projects agent page. */
+export const PROJECT_WORKSPACE_CONTEXT_MARKER = "Workspace repositories:";
+const PROJECT_AGENT_CONTEXT_MARKERS = [
+  PROJECT_PAGE_CONTEXT_MARKER,
+  PROJECT_WORKSPACE_CONTEXT_MARKER,
+];
 const MAX_OVERVIEW_CONTEXT_ITEMS = 200;
 const MAX_OVERVIEW_CONTEXT_FIELD_LENGTH = 180;
 const MAX_SELECTION_CONTEXT_ITEMS = 100;
@@ -323,8 +329,24 @@ function overviewContextField(value: string | null | undefined) {
   return normalizedPromptValue(value, MAX_OVERVIEW_CONTEXT_FIELD_LENGTH);
 }
 
+export function splitProjectDetailAgentContext(content: string): {
+  context: string | null;
+  message: string;
+} {
+  const markerIndex = Math.max(
+    ...PROJECT_AGENT_CONTEXT_MARKERS.map((marker) =>
+      content.lastIndexOf(`---\n${marker}`),
+    ),
+  );
+  if (markerIndex === -1) {
+    return { context: null, message: content };
+  }
+  return {
+    context: content.slice(markerIndex).trim(),
+    message: content.slice(0, markerIndex).replace(/\n+$/, ""),
+  };
+}
+
 export function stripProjectDetailAgentContext(content: string) {
-  const markerIndex = content.indexOf(`---\n${PROJECT_PAGE_CONTEXT_MARKER}`);
-  if (markerIndex === -1) return content;
-  return content.slice(0, markerIndex).replace(/\n+$/, "");
+  return splitProjectDetailAgentContext(content).message;
 }

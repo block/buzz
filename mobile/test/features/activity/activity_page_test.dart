@@ -197,6 +197,7 @@ void main() {
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
     expect(appBar.bottomHeight, Grid.xxs);
+    expect(appBar.centerTitle, isFalse);
     expect(find.byTooltip('Back'), findsNothing);
   });
 

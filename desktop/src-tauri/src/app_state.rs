@@ -129,6 +129,7 @@ pub struct AppState {
     /// bounded and letting a later leave correctly flip the channel back to
     /// `is_member=false`.
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
+    pub archive_db: crate::archive::ArchiveDb,
 }
 
 /// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
@@ -193,8 +194,8 @@ pub fn build_app_state() -> AppState {
         identity_storage: AtomicU8::new(identity_storage as u8),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(std::time::Duration::from_secs(300))
+            .pool_max_idle_per_host(2)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         media_fetch_client: build_media_fetch_client().expect(
@@ -219,9 +220,7 @@ pub fn build_app_state() -> AppState {
         huddle_audio: Default::default(),
         app_handle: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
-        prevent_sleep: Arc::new(Mutex::new(
-            crate::prevent_sleep::PreventSleepState::default(),
-        )),
+        prevent_sleep: Default::default(),
         keyring_locked: AtomicBool::new(false),
         identity_lost: AtomicBool::new(false),
         reset_failed: AtomicBool::new(false),
@@ -232,6 +231,7 @@ pub fn build_app_state() -> AppState {
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
         pending_owned_channels: Mutex::new(std::collections::HashSet::new()),
+        archive_db: crate::archive::ArchiveDb::default(),
     }
 }
 

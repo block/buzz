@@ -124,6 +124,12 @@ def test_exports_only_public_directory_and_observed_channel_state():
 
     assert evidence["task_name"] == "create-channel-invite-users"
     assert evidence["directory"] == [
-        {"name": "benchmark-user-01", "role": "user", "pubkey": "d" * 64}
+        {
+            "identity_id": "benchmark-user-01",
+            "name": "benchmark-user-01",
+            "role": "user",
+            "pubkey": "d" * 64,
+            "about": "",
+        }
     ]
     assert evidence["observed_channels"] == channels

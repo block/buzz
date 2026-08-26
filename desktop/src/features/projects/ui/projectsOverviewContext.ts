@@ -46,7 +46,6 @@ export type OverviewContextStat = {
 
 export type OverviewContextPresentation = {
   action: OverviewContextAction;
-  activityByDay: Record<string, number> | null;
   detailsTitle: string;
   people: string[];
   stats: OverviewContextStat[];
@@ -127,21 +126,6 @@ function uniquePubkeys(pubkeys: Array<string | null | undefined>) {
         .map((pubkey) => normalizePubkey(pubkey)),
     ),
   ];
-}
-
-function summaryActivityByDay(
-  projects: Project[],
-  summaries: Record<string, ProjectActivitySummary> | undefined,
-) {
-  const merged: Record<string, number> = {};
-  for (const project of projects) {
-    const byDay = summaries?.[project.id]?.activityByDay;
-    if (!byDay) continue;
-    for (const [day, count] of Object.entries(byDay)) {
-      merged[day] = (merged[day] ?? 0) + count;
-    }
-  }
-  return merged;
 }
 
 function latestCommitAuthors(
@@ -227,18 +211,7 @@ function overviewContextPeople({
   return projectOwners(projects);
 }
 
-function overviewContextActivityByDay({
-  filter,
-  projects,
-  summaries,
-}: OverviewContextInput): Record<string, number> | null {
-  if (filter === "all" || filter === "projects" || filter === "repositories") {
-    return summaryActivityByDay(projects, summaries);
-  }
-  return null;
-}
-
-/** Title, people, activity, and stats for the Projects overview context pod. */
+/** Title, people, and stats for the Projects overview context pod. */
 export function projectsOverviewContext(
   input: OverviewContextInput,
 ): OverviewContextPresentation {
@@ -249,12 +222,10 @@ export function projectsOverviewContext(
   const channelCount = uniqueProjectRelatedChannelCount(projects);
   const repositories = repositoryCount(projects);
   const people = overviewContextPeople(input);
-  const activityByDay = overviewContextActivityByDay(input);
 
   if (filter === "repositories") {
     return {
       action: null,
-      activityByDay,
       detailsTitle: "Repository activity",
       people,
       stats: [
@@ -284,7 +255,6 @@ export function projectsOverviewContext(
   if (filter === "channels") {
     return {
       action: null,
-      activityByDay,
       detailsTitle: "Details",
       people,
       stats: [
@@ -318,7 +288,6 @@ export function projectsOverviewContext(
         label: "Create task",
         testId: "projects-overview-create-issue",
       },
-      activityByDay,
       detailsTitle: "Details",
       people,
       stats: [
@@ -352,7 +321,6 @@ export function projectsOverviewContext(
         label: "Create review",
         testId: "projects-overview-create-pull-request",
       },
-      activityByDay,
       detailsTitle: "Review activity",
       people,
       stats: [
@@ -382,7 +350,6 @@ export function projectsOverviewContext(
   if (filter === "all") {
     return {
       action: createProjectAction(),
-      activityByDay,
       detailsTitle: "Details",
       people,
       stats: [
@@ -423,7 +390,6 @@ export function projectsOverviewContext(
 
   return {
     action: createProjectAction(),
-    activityByDay,
     detailsTitle: "Details",
     people,
     stats: [

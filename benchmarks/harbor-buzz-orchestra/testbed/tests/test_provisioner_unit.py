@@ -7,6 +7,7 @@ import json
 
 import coincurve
 import pytest
+from harbor_buzz_orchestra.task_fixtures import DirectoryEntry
 
 from harbor_buzz_testbed.provisioner import (
     BuzzTrialProvisioner,
@@ -112,9 +113,13 @@ def test_mint_credentials_missing_api_key_is_explicit(manifest):
 def test_directory_credentials_are_stable_distinct_and_attested():
     provisioner = BuzzTrialProvisioner(config())
 
-    first = provisioner._directory_credential("benchmark-user-01", "user")
-    again = provisioner._directory_credential("benchmark-user-01", "user")
-    other = provisioner._directory_credential("benchmark-bot-01", "bot")
+    first = provisioner._directory_credential(
+        DirectoryEntry("benchmark-user-01", "user")
+    )
+    again = provisioner._directory_credential(
+        DirectoryEntry("benchmark-user-01", "user")
+    )
+    other = provisioner._directory_credential(DirectoryEntry("benchmark-bot-01", "bot"))
 
     assert first.nostr_secret_key == again.nostr_secret_key
     assert first.nostr_pubkey == again.nostr_pubkey
@@ -133,8 +138,8 @@ def test_seed_directory_has_50_users_10_bots_and_skips_existing(monkeypatch):
     published = []
 
     class Publisher:
-        def set_profile(self, name):
-            published.append(name)
+        def set_profile(self, name, about=None):
+            published.append((name, about))
 
     monkeypatch.setattr(provisioner, "_cli_for", lambda _credential: Publisher())
 
@@ -144,7 +149,20 @@ def test_seed_directory_has_50_users_10_bots_and_skips_existing(monkeypatch):
     assert sum(identity.role == "user" for identity in directory) == 50
     assert sum(identity.role == "bot" for identity in directory) == 10
     assert len(published) == 59
-    assert directory[0].name not in published
+    assert (directory[0].name, None) not in published
+
+
+def test_duplicate_display_names_keep_distinct_stable_identities():
+    provisioner = BuzzTrialProvisioner(config())
+    first = provisioner._directory_credential(
+        DirectoryEntry("Taylor Morgan Lee", "user", identity_id="release")
+    )
+    second = provisioner._directory_credential(
+        DirectoryEntry("Taylor Morgan Lee", "user", identity_id="observer")
+    )
+
+    assert first.agent_id == second.agent_id == "Taylor Morgan Lee"
+    assert first.nostr_pubkey != second.nostr_pubkey
 
 
 def test_lock_key_is_deterministic_and_distinct():

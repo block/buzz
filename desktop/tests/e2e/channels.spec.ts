@@ -1133,6 +1133,15 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
 
   await input.fill(retryMessage);
   const retryBaseline = commandsAfterFailure.length;
+  // The first send left the cursor parked over the bottom-right error toast,
+  // which overlaps the send button. Sonner pauses its dismiss timer while the
+  // toaster is hovered, so move the cursor away and let the transient toast
+  // clear before retrying — otherwise the retry click is intercepted for the
+  // full timeout.
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, {
+    timeout: 10_000,
+  });
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
@@ -1746,8 +1755,15 @@ test("empty channel shows intro actions", async ({ page }) => {
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
+  const addAgentsAction = page.getByTestId("channel-intro-action-create-agent");
+  await expect(addAgentsAction).toBeVisible();
   await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
+    addAgentsAction.getByText("Add agents", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    addAgentsAction.getByText("Bring them in.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-add-people"),
@@ -1767,7 +1783,7 @@ test("empty channel shows intro actions", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
-  await page.getByTestId("channel-intro-action-create-agent").click();
+  await addAgentsAction.click();
   await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
 
   await page.keyboard.press("Escape");
@@ -4000,7 +4016,40 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(memberRows.first()).toBeVisible();
   expect(await memberRows.count()).toBeLessThan(50);
 
+  const firstGeneratedRow = memberList.getByTestId(
+    `sidebar-member-${pubkeys[0]}`,
+  );
+  await expect
+    .poll(() =>
+      firstGeneratedRow.evaluate(
+        (row) =>
+          getComputedStyle(row.parentElement as HTMLElement).contentVisibility,
+      ),
+    )
+    .toBe("visible");
+
   const virtualizedList = memberList.locator(".overflow-y-auto");
+  await page.evaluate(() => document.fonts.ready);
+
+  const heights: number[] = [];
+  for (const ratio of [0, 0.1, 0.25, 0.5, 0.75, 1]) {
+    heights.push(
+      await virtualizedList.evaluate(async (element, ratio) => {
+        element.scrollTop =
+          (element.scrollHeight - element.clientHeight) * ratio;
+        element.dispatchEvent(new Event("scroll"));
+
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+
+        return element.scrollHeight;
+      }, ratio),
+    );
+  }
+
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThan(120);
+
   await virtualizedList.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
@@ -4008,6 +4057,25 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(
     memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
   ).toBeVisible();
+});
+
+test("opening a human-only members sidebar skips managed runtime discovery", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const baselineCommands = await readCommandLog(page);
+  const baselineRuntimeListCount = commandCount(
+    baselineCommands,
+    "list_managed_agent_runtimes",
+  );
+
+  await openMembersSidebar(page, "random");
+  await expect(page.getByTestId("members-sidebar-people")).toBeVisible();
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "list_managed_agent_runtimes")).toBe(
+    baselineRuntimeListCount,
+  );
 });
 
 test("members sidebar can invite relay-authorized agents", async ({ page }) => {
@@ -4521,8 +4589,17 @@ test("members sidebar can stop and start a managed bot in this community", async
     baselineCommands,
     "stop_managed_agent",
   );
+  const baselineRuntimeListCount = commandCount(
+    baselineCommands,
+    "list_managed_agent_runtimes",
+  );
 
   await openMembersSidebar(page, "general");
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "list_managed_agent_runtimes"),
+    )
+    .toBe(baselineRuntimeListCount + 1);
 
   const agentStatus = page.getByTestId(
     `sidebar-managed-agent-status-${agentPubkey}`,

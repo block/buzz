@@ -19,7 +19,11 @@ from harbor_buzz_orchestra.container_runtime import (
     RuntimeLaunchError,
 )
 from harbor_buzz_orchestra.manifest import ExperimentManifest
-from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
+from harbor_buzz_orchestra.provisioning import (
+    AgentCredential,
+    FixtureActor,
+    TrialHandle,
+)
 from harbor_buzz_orchestra.task_fixtures import fixture_for
 
 
@@ -453,6 +457,70 @@ async def test_send_mentions_by_pubkey_so_task_text_stays_inert(tmp_path, monkey
     assert calls[-1][-2:] == ("--content", "plain content")
 
 
+async def test_sends_task_declared_actor_messages_and_records_event_ids(
+    tmp_path, monkeypatch
+):
+    rt = runtime(tmp_path)
+    orch = credential("solo-1", "orchestrator", "orch-model")
+    reporters = tuple(
+        FixtureActor(name, credential(name, "bot", ""))
+        for name in ("Ledger Scout", "Risk Sentinel", "Ops Forecaster")
+    )
+    trial = replace(
+        trial_handle((orch,)),
+        task_name="interleaved-agent-reports",
+        fixture_actors=reporters,
+    )
+    calls = []
+
+    async def send(actor, trial_arg, content, **kwargs):
+        calls.append((actor.agent_id, trial_arg, content, kwargs))
+        return {"event_id": f"event-{len(calls)}"}
+
+    monkeypatch.setattr(rt, "_send", send)
+
+    events = await rt._send_scripted_messages(
+        trial=trial, orchestrator=orch, task_event_id="task-root"
+    )
+
+    assert [event["label"] for event in events] == [
+        "ledger-report",
+        "risk-report",
+        "operations-report",
+    ]
+    assert [event["event_id"] for event in events] == [
+        "event-1",
+        "event-2",
+        "event-3",
+    ]
+    assert {call[0] for call in calls} == {
+        "Ledger Scout",
+        "Risk Sentinel",
+        "Ops Forecaster",
+    }
+    assert all(call[3]["mention"] == orch.nostr_pubkey for call in calls)
+    assert all(call[3]["reply_to"] == "task-root" for call in calls)
+
+
+async def test_scripted_message_requires_an_event_id(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("solo-1", "orchestrator", "orch-model")
+    trial = replace(
+        trial_handle((orch,)),
+        task_name="cross-thread-requests",
+    )
+
+    async def send(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(rt, "_send", send)
+
+    with pytest.raises(RuntimeLaunchError, match="did not return an event ID"):
+        await rt._send_scripted_messages(
+            trial=trial, orchestrator=orch, task_event_id="task-root"
+        )
+
+
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):
     rt = runtime(tmp_path, poll_seconds=0)
     orch = credential("orch-1", "orchestrator", "orch-model")
@@ -498,6 +566,112 @@ async def test_solo_turn_end_completes_without_done_message(tmp_path, monkeypatc
 
     monkeypatch.setattr(rt, "_buzz_json", buzz_json)
     assert await rt._wait_for_done(environment, orch, trial, [], solo=solo) is None
+
+
+async def test_scripted_events_wait_for_delivery_receipt(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    alpha = {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}
+    beta = {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "BETA"}
+    scripted_event_id = "b" * 64
+    message_rounds = iter([[alpha]] * 8 + [[alpha, beta]] * 2)
+    turn_rounds = iter(
+        [(1, 1, set())] * 8 + [(2, 1, set()), (2, 2, {scripted_event_id})]
+    )
+    polls = 0
+
+    async def buzz_json(*args, **kwargs):
+        nonlocal polls
+        polls += 1
+        return next(message_rounds)
+
+    async def turn_status(*args, **kwargs):
+        return next(turn_rounds)
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_turn_status", turn_status)
+
+    result = await rt._wait_for_done(
+        Environment(),
+        orch,
+        trial,
+        [],
+        solo=solo,
+        scripted_event_ids={scripted_event_id},
+    )
+
+    assert result["id"] == "beta"
+    assert polls == 10
+
+
+async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    messages = [
+        {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"},
+        {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "DONE: BETA"},
+    ]
+    scripted_event_id = "b" * 64
+    turn_rounds = iter([(2, 1, {scripted_event_id}), (2, 2, {scripted_event_id})])
+    polls = 0
+
+    async def buzz_json(*args, **kwargs):
+        nonlocal polls
+        polls += 1
+        return messages
+
+    async def turn_status(*args, **kwargs):
+        return next(turn_rounds)
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_turn_status", turn_status)
+
+    result = await rt._wait_for_done(
+        Environment(),
+        orch,
+        trial,
+        [],
+        solo=solo,
+        scripted_event_ids={scripted_event_id},
+    )
+
+    assert result["id"] == "beta"
+    assert polls == 2
+
+
+def test_turn_status_parses_completed_batch_and_successful_steer_receipts():
+    batch_event_id = "a" * 64
+    steer_event_id = "b" * 64
+    rejected_event_id = "c" * 64
+    output = "\n".join(
+        [
+            "turn starting for channel test",
+            f"turn delivered Buzz events for channel test: {batch_event_id}",
+            "turn complete for channel test: end_turn",
+            (
+                "non-cancelling steer ack received "
+                f"event_id={steer_event_id} ack=Ok(Success {{ session_id: session }})"
+            ),
+            (
+                "non-cancelling steer ack received "
+                f"event_id={rejected_event_id} ack=Ok(Err(OutcomeRejected))"
+            ),
+        ]
+    )
+
+    assert BuzzContainerRuntime._parse_turn_status(output) == (
+        1,
+        1,
+        {batch_event_id, steer_event_id},
+    )
 
 
 async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch):

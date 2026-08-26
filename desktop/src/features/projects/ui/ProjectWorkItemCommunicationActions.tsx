@@ -18,13 +18,10 @@ export function ProjectWorkItemCommunicationActions({
   const discussInChannel = useProjectDiscussInChannel(items);
 
   return (
-    <section
-      className="space-y-0.5 pt-2"
+    <div
+      className="space-y-0.5"
       data-testid="project-context-communication-actions"
     >
-      <h3 className="text-xs font-normal text-muted-foreground/70">
-        Discussion
-      </h3>
       <Button
         className={PROJECT_CONTEXT_ACTION_BUTTON_CLASS}
         data-testid="project-context-chat-agent"
@@ -41,6 +38,6 @@ export function ProjectWorkItemCommunicationActions({
         onSelectChannel={discussInChannel}
         testIdPrefix="project-context"
       />
-    </section>
+    </div>
   );
 }
