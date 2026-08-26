@@ -5650,6 +5650,8 @@ mod tests {
             workspace_section(r"C:\Users\me\buzz"),
             "<workspace>\nCurrent working directory: C:\\Users\\me\\buzz\n</workspace>"
         );
+    }
+
     /// `REACTION_TIMEOUT` is shorter than the REST ladder's *first* backoff
     /// sleep, so `reaction_add` must use the single-attempt submit path.
     /// Wrapping the retrying one in that budget is not a slow success — the
@@ -5687,8 +5689,6 @@ mod tests {
             "REACTION_REMOVE_TIMEOUT must leave a usable window after the \
              backoff, not merely cross it"
         );
-    }
-
     }
 
     #[test]
@@ -9208,17 +9208,13 @@ done"#,
         // points at an unroutable address, so seed a fresh "no project" cache entry
         // (the same idiom upstream's own pool tests use) to keep this test about
         // session-restore env forwarding.
-        ctx.channel_info
-            .projects
-            .write()
-            .unwrap()
-            .insert(
-                channel_id,
-                CachedProjectInfo {
-                    fetched_at: std::time::Instant::now(),
-                    value: None,
-                },
-            );
+        ctx.channel_info.projects.write().unwrap().insert(
+            channel_id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now(),
+                value: None,
+            },
+        );
         let ctx = Arc::new(ctx);
         let (result_tx, mut result_rx) = mpsc::unbounded_channel();
         run_prompt_task(

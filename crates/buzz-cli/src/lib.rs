@@ -234,6 +234,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Validate and canonicalize local Buzz CML task snapshots
+    #[command(subcommand)]
+    Cml(CmlCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -1901,6 +1904,68 @@ pub enum MemCmd {
     },
 }
 
+/// Subcommands for local CML task snapshots.
+#[derive(Subcommand)]
+pub enum CmlCmd {
+    /// Validate a CML file; use `-` to read standard input
+    Validate {
+        /// CML file path or `-`
+        path: String,
+    },
+    /// Emit canonical, key-sorted CML; use `-` to read standard input
+    Canonicalize {
+        /// CML file path or `-`
+        path: String,
+        /// Write to a file instead of standard output
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Publish and reduce signed CML lifecycle events on a relay
+    #[command(subcommand)]
+    Events(CmlEventsCmd),
+}
+
+/// Signed CML lifecycle operations against a relay.
+#[derive(Subcommand)]
+pub enum CmlEventsCmd {
+    /// Fetch a task's CML events and print the reduced snapshot
+    Reduce {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+    },
+    /// Sign and publish one lifecycle transition
+    Publish {
+        /// Transition name, e.g. plan, claim, start, submit, reject, fix-submit, approve, merge, prove
+        #[arg(long)]
+        transition: String,
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Path to the canonical CML snapshot for the target state
+        #[arg(long)]
+        task_file: String,
+        /// Previous transition event ID (required for non-plan transitions)
+        #[arg(long)]
+        prev: Option<String>,
+    },
+    /// Fetch a task's CML events and print the observation-time workstream card
+    Card {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+        /// Observation time as unix seconds (default: now)
+        #[arg(long)]
+        as_of: Option<u64>,
+    },
+}
+
 /// Subcommands for `buzz pack`.
 #[derive(Subcommand)]
 pub enum PackCmd {
@@ -2050,12 +2115,22 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
-    if let Cmd::Pack(ref sub) = cli.command {
-        return match sub {
-            PackCmd::Validate { path } => commands::pack::cmd_validate(path),
-            PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
-        };
+    // CML and pack commands are local-only — no relay connection needed.
+    match &cli.command {
+        Cmd::Cml(sub) => match sub {
+            CmlCmd::Validate { path } => return commands::cml::cmd_validate(path),
+            CmlCmd::Canonicalize { path, output } => {
+                return commands::cml::cmd_canonicalize(path.as_str(), output.as_deref())
+            }
+            CmlCmd::Events(_) => {}
+        },
+        Cmd::Pack(sub) => {
+            return match sub {
+                PackCmd::Validate { path } => commands::pack::cmd_validate(path),
+                PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
+            };
+        }
+        _ => {}
     }
 
     // Auth: private key is required for all relay operations.
@@ -2117,6 +2192,41 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Cml(sub) => match sub {
+            CmlCmd::Validate { path } => commands::cml::cmd_validate(path.as_str()),
+            CmlCmd::Canonicalize { path, output } => {
+                commands::cml::cmd_canonicalize(path.as_str(), output.as_deref())
+            }
+            CmlCmd::Events(events) => match events {
+                CmlEventsCmd::Reduce { channel, task } => {
+                    commands::cml::cmd_events_reduce(&client, channel.as_str(), task.as_str()).await
+                }
+                CmlEventsCmd::Publish {
+                    transition,
+                    channel,
+                    task_file,
+                    prev,
+                } => {
+                    commands::cml::cmd_events_publish(
+                        &client,
+                        &private_key_str,
+                        transition.as_str(),
+                        channel.as_str(),
+                        task_file.as_str(),
+                        prev.as_deref(),
+                    )
+                    .await
+                }
+                CmlEventsCmd::Card {
+                    channel,
+                    task,
+                    as_of,
+                } => {
+                    commands::cml::cmd_events_card(&client, channel.as_str(), task.as_str(), as_of)
+                        .await
+                }
+            },
+        },
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2271,6 +2381,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "cml",
             "dms",
             "emoji",
             "feed",
@@ -2378,6 +2489,10 @@ mod tests {
         assert_eq!(
             names(&cmd, "canvas"),
             vec!["get", "history", "restore", "set"]
+        );
+        assert_eq!(
+            names(&cmd, "cml"),
+            vec!["canonicalize", "events", "validate"]
         );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(

@@ -84,6 +84,9 @@ impl SqliteSessionStore {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                // Keep any existing database bytes — this open only ensures the
+                // file exists at 0600 before SQLite opens it.
+                .truncate(false)
                 .mode(0o600)
                 .open(path)
                 .map_err(|e| {

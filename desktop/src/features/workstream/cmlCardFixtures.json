@@ -1,0 +1,116 @@
+{
+  "fresh_heartbeat_expired_lease": {
+    "card": {
+      "base_short": "1111111",
+      "blocker_count": 0,
+      "branch": "feat/cml-view",
+      "head_short": "abcdef0",
+      "host_id": "h_0123456789abcdef",
+      "live_claim": false,
+      "liveness": "online",
+      "objective": "Board shows liveness recomputed at view time",
+      "priority": "P1",
+      "repo": "block/buzz",
+      "review_round": 0,
+      "status": "claimed",
+      "title": "CML view projection",
+      "worktree_alias": "buzz-s4"
+    },
+    "observed_at": 1787673000
+  },
+  "missing_head_sha": {
+    "card": {
+      "base_short": "1111111",
+      "blocker_count": 0,
+      "branch": "feat/cml-view",
+      "head_short": null,
+      "host_id": "h_0123456789abcdef",
+      "live_claim": true,
+      "liveness": "online",
+      "objective": "Board shows liveness recomputed at view time",
+      "priority": "P1",
+      "repo": "block/buzz",
+      "review_round": 0,
+      "status": "claimed",
+      "title": "CML view projection",
+      "worktree_alias": "buzz-s4"
+    },
+    "observed_at": 1787673000
+  },
+  "no_heartbeat_offline": {
+    "card": {
+      "base_short": "1111111",
+      "blocker_count": 0,
+      "branch": "feat/cml-view",
+      "head_short": "abcdef0",
+      "host_id": "h_0123456789abcdef",
+      "live_claim": false,
+      "liveness": "offline",
+      "objective": "Board shows liveness recomputed at view time",
+      "priority": "P1",
+      "repo": "block/buzz",
+      "review_round": 0,
+      "status": "claimed",
+      "title": "CML view projection",
+      "worktree_alias": "buzz-s4"
+    },
+    "observed_at": 1787673000
+  },
+  "offline_two_ttl": {
+    "card": {
+      "base_short": "1111111",
+      "blocker_count": 0,
+      "branch": "feat/cml-view",
+      "head_short": "abcdef0",
+      "host_id": "h_0123456789abcdef",
+      "live_claim": false,
+      "liveness": "offline",
+      "objective": "Board shows liveness recomputed at view time",
+      "priority": "P1",
+      "repo": "block/buzz",
+      "review_round": 0,
+      "status": "claimed",
+      "title": "CML view projection",
+      "worktree_alias": "buzz-s4"
+    },
+    "observed_at": 1787673400
+  },
+  "online_live_claim": {
+    "card": {
+      "base_short": "1111111",
+      "blocker_count": 0,
+      "branch": "feat/cml-view",
+      "head_short": "abcdef0",
+      "host_id": "h_0123456789abcdef",
+      "live_claim": true,
+      "liveness": "online",
+      "objective": "Board shows liveness recomputed at view time",
+      "priority": "P1",
+      "repo": "block/buzz",
+      "review_round": 0,
+      "status": "claimed",
+      "title": "CML view projection",
+      "worktree_alias": "buzz-s4"
+    },
+    "observed_at": 1787673000
+  },
+  "stale_not_live": {
+    "card": {
+      "base_short": "1111111",
+      "blocker_count": 0,
+      "branch": "feat/cml-view",
+      "head_short": "abcdef0",
+      "host_id": "h_0123456789abcdef",
+      "live_claim": false,
+      "liveness": "stale",
+      "objective": "Board shows liveness recomputed at view time",
+      "priority": "P1",
+      "repo": "block/buzz",
+      "review_round": 0,
+      "status": "claimed",
+      "title": "CML view projection",
+      "worktree_alias": "buzz-s4"
+    },
+    "observed_at": 1787673180
+  }
+}

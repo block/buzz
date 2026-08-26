@@ -4,6 +4,8 @@
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    cml::{CmlStatus, CmlTask},
+    cml_event::{CmlRole, CmlTransition},
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -19,7 +21,7 @@ use buzz_core::{
         OBSERVER_FRAME_TELEMETRY,
     },
 };
-use nostr::{EventBuilder, Kind, Tag};
+use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
 use crate::{
@@ -613,6 +615,118 @@ pub fn canvas_write_created_at(head_created_at: u64) -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     now.max(head_created_at.saturating_add(1))
+}
+
+/// Build a canonical signed-CML lifecycle event using the existing job kinds.
+///
+/// The builder pins `created_at` to `task.updated_at`. Plan roots omit
+/// `previous`; every other v1 transition requires it. Fork resolution uses
+/// [`build_cml_fork_resolution`].
+pub fn build_cml_transition(
+    channel_id: Uuid,
+    task: &CmlTask,
+    transition: CmlTransition,
+    role: CmlRole,
+    previous: Option<EventId>,
+) -> Result<EventBuilder, SdkError> {
+    task.validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if !transition.allows_role(role) {
+        return Err(SdkError::InvalidInput(
+            "role is not authorized for transition".into(),
+        ));
+    }
+    if transition == CmlTransition::Plan && previous.is_some() {
+        return Err(SdkError::InvalidInput(
+            "plan root must not have a predecessor".into(),
+        ));
+    }
+    if transition != CmlTransition::Plan
+        && transition != CmlTransition::OwnerResolve
+        && previous.is_none()
+    {
+        return Err(SdkError::InvalidInput(
+            "non-root transition requires a predecessor".into(),
+        ));
+    }
+    if transition == CmlTransition::OwnerResolve {
+        return Err(SdkError::InvalidInput(
+            "owner.resolve requires explicit fork markers".into(),
+        ));
+    }
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["d", &task.id.to_string()])?,
+        tag(&["protocol", "buzz-cml", "1"])?,
+        tag(&["transition", transition.as_str()])?,
+        tag(&["status", cml_status_wire(task.status)])?,
+        tag(&["role", role.as_str()])?,
+    ];
+    if let Some(previous) = previous {
+        tags.push(tag(&["e", &previous.to_hex(), "prev"])?);
+    }
+    let content = task
+        .to_canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    Ok(
+        EventBuilder::new(Kind::Custom(transition.event_kind() as u16), content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(task.updated_at)),
+    )
+}
+
+/// Build an owner-authorized resolution that selects one of two fork heads.
+pub fn build_cml_fork_resolution(
+    channel_id: Uuid,
+    task: &CmlTask,
+    fork_a: EventId,
+    fork_b: EventId,
+    selected: EventId,
+) -> Result<EventBuilder, SdkError> {
+    task.validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if fork_a == fork_b || (selected != fork_a && selected != fork_b) {
+        return Err(SdkError::InvalidInput(
+            "resolution must select one of two distinct fork heads".into(),
+        ));
+    }
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["d", &task.id.to_string()])?,
+        tag(&["protocol", "buzz-cml", "1"])?,
+        tag(&["transition", CmlTransition::OwnerResolve.as_str()])?,
+        tag(&["status", cml_status_wire(task.status)])?,
+        tag(&["role", CmlRole::Planner.as_str()])?,
+        tag(&["e", &fork_a.to_hex(), "fork_a"])?,
+        tag(&["e", &fork_b.to_hex(), "fork_b"])?,
+        tag(&["e", &selected.to_hex(), "selected"])?,
+    ];
+    let content = task
+        .to_canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    Ok(EventBuilder::new(
+        Kind::Custom(CmlTransition::OwnerResolve.event_kind() as u16),
+        content,
+    )
+    .tags(tags)
+    .custom_created_at(nostr::Timestamp::from(task.updated_at)))
+}
+
+fn cml_status_wire(status: CmlStatus) -> &'static str {
+    match status {
+        CmlStatus::Proposed => "proposed",
+        CmlStatus::Planned => "planned",
+        CmlStatus::Claimed => "claimed",
+        CmlStatus::Working => "working",
+        CmlStatus::Blocked => "blocked",
+        CmlStatus::Review => "review",
+        CmlStatus::Fixing => "fixing",
+        CmlStatus::Verified => "verified",
+        CmlStatus::Integrated => "integrated",
+        CmlStatus::Shipped => "shipped",
+        CmlStatus::Cancelled => "cancelled",
+        CmlStatus::Conflicted => "conflicted",
+    }
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
