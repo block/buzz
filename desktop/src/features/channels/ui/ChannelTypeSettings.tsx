@@ -1,4 +1,4 @@
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ClockFading, Hash } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import {
@@ -19,8 +19,14 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { SegmentedControl } from "@/shared/ui/segmented-control";
 import { EditableInfoFieldRow } from "./ChannelManagementSheetRows";
 import { ChannelTypePicker } from "./ChannelTypePicker";
+
+const CHANNEL_TYPE_OPTIONS = [
+  { value: "ongoing", label: "Ongoing", Icon: Hash },
+  { value: "temporary", label: "Temporary", Icon: ClockFading },
+] as const;
 
 const EPHEMERAL_TIMEOUT_OPTIONS = [
   { label: "30 minutes", seconds: 30 * 60 },
@@ -76,6 +82,7 @@ export function ChannelTypeSettings({
   temporary,
   testIdPrefix,
   ttlSeconds,
+  variant = "dropdown",
 }: {
   channelId?: string | null;
   disabled?: boolean;
@@ -87,6 +94,7 @@ export function ChannelTypeSettings({
   temporary: boolean;
   testIdPrefix: string;
   ttlSeconds: number;
+  variant?: "dropdown" | "segmented";
 }) {
   const projectHome = useIsProjectHomeChannel(channelId);
   const lifecycle = channelLifecycle({ projectHome, temporary });
@@ -117,17 +125,31 @@ export function ChannelTypeSettings({
         data-testid={`${testIdPrefix}-channel-type-row`}
       >
         <span className="text-sm font-medium text-foreground">{label}</span>
-        <ChannelTypePicker
-          align="end"
-          allowProject={projectHome}
-          className="-mr-2.5"
-          disabled={disabled}
-          lifecycle={lifecycle}
-          onLifecycleChange={(next) => onTemporaryChange(next === "temporary")}
-          onOpenChange={onOpenChange}
-          open={open}
-          testId={`${testIdPrefix}-channel-type`}
-        />
+        {variant === "segmented" ? (
+          <SegmentedControl
+            disabled={disabled}
+            legend="Channel type"
+            onValueChange={(value) => onTemporaryChange(value === "temporary")}
+            optionTestIdPrefix={`${testIdPrefix}-channel-type-option`}
+            options={CHANNEL_TYPE_OPTIONS}
+            testId={`${testIdPrefix}-channel-type`}
+            value={temporary ? "temporary" : "ongoing"}
+          />
+        ) : (
+          <ChannelTypePicker
+            align="end"
+            allowProject={projectHome}
+            className="-mr-2.5"
+            disabled={disabled}
+            lifecycle={lifecycle}
+            onLifecycleChange={(next) =>
+              onTemporaryChange(next === "temporary")
+            }
+            onOpenChange={onOpenChange}
+            open={open}
+            testId={`${testIdPrefix}-channel-type`}
+          />
+        )}
       </div>
       <AnimatePresence initial={false}>
         {temporary && !projectHome ? (

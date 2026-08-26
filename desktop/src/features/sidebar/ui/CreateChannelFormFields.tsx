@@ -136,6 +136,7 @@ export function CreateChannelFormFields({
         temporary={form.ephemeral}
         testIdPrefix="create-channel"
         ttlSeconds={form.ttlSeconds}
+        variant="segmented"
       />
 
       <ChannelPermissionsSettings
@@ -143,6 +144,7 @@ export function CreateChannelFormFields({
         onVisibilityChange={form.setVisibility}
         testIdPrefix="create-channel"
         visibility={form.visibility}
+        variant="segmented"
       />
 
       <div
