@@ -536,6 +536,37 @@ test("relay-only shared agents emit an outbound mention tag when selected", asyn
     .toContain(TEST_IDENTITIES.alice.pubkey);
 });
 
+test("typing an exact agent name and Space commits its chip and mention tag", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@alice");
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toBeVisible();
+
+  await input.fill("Ask @alice");
+  await input.press(" ");
+  await page.keyboard.type("please reply");
+
+  const content = "Ask @alice please reply";
+  await expect(input).toHaveText(content);
+  await expect(
+    input.locator(".agent-mention-highlight", { hasText: "alice" }),
+  ).toBeVisible();
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toContain(TEST_IDENTITIES.alice.pubkey);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {

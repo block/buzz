@@ -39,7 +39,7 @@ import { channelMemberPubkeySet } from "@/shared/lib/rosterDerivations";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
 import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
-import { flushMentionDebounce } from "./flushMentionDebounce";
+import { flushMentionDebounce, isPlainSpace } from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import {
@@ -507,9 +507,7 @@ export function useMentions(
   const latestCursorRef = React.useRef<number>(0);
   const flushedMentionStartIndexRef = React.useRef<number | null>(null);
   const searchableNamesLowerRef = React.useRef<string[]>(searchableNamesLower);
-  React.useEffect(() => {
-    searchableNamesLowerRef.current = searchableNamesLower;
-  }, [searchableNamesLower]);
+  searchableNamesLowerRef.current = searchableNamesLower;
   React.useEffect(
     () => () => {
       if (debounceTimerRef.current !== null) {
@@ -885,9 +883,8 @@ export function useMentions(
     (
       event: React.KeyboardEvent,
     ): { handled: boolean; suggestion?: MentionSuggestion } => {
-      if (!isMentionOpen) {
-        return { handled: false };
-      }
+      const exactMentionSpace = isPlainSpace(event.nativeEvent);
+      if (!isMentionOpen && !exactMentionSpace) return { handled: false };
       if (event.key === "ArrowDown") {
         event.preventDefault();
         setSelected((current) =>
@@ -903,6 +900,7 @@ export function useMentions(
         return { handled: true };
       }
       if (
+        exactMentionSpace ||
         event.key === "Tab" ||
         (event.key === "Enter" &&
           !event.ctrlKey &&
@@ -910,8 +908,7 @@ export function useMentions(
           !event.altKey &&
           !event.shiftKey)
       ) {
-        event.preventDefault();
-        if (debounceTimerRef.current !== null) {
+        if (debounceTimerRef.current !== null || exactMentionSpace) {
           const flushed = flushMentionDebounce({
             debounceTimerRef,
             latestValueRef,
@@ -924,7 +921,11 @@ export function useMentions(
             currentPubkey,
             ownerProfiles: ownerProfilesQuery.data?.profiles,
             profiles,
+            requireExact: exactMentionSpace,
           });
+          if (exactMentionSpace && flushed?.type !== "match")
+            return { handled: false };
+          event.preventDefault();
           if (flushed?.type === "match") {
             flushedMentionStartIndexRef.current = flushed.startIndex;
             mentionPickerOriginRef.current = "inline";
@@ -936,6 +937,7 @@ export function useMentions(
             return { handled: true };
           }
         }
+        event.preventDefault();
         return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
       }
       if (event.key === "Escape") {
