@@ -17,6 +17,7 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
       "更新日志改为按日期展示，并仅保留最新日期往前 10 个自然日。",
       "修复手动安装时旧 Buzz 进程未退出、导致主程序没有被新版本覆盖的问题。",
       "重新发布 Buzz Codex Lab v0.5.15，替换此前未正确覆盖主程序的安装包。",
+      "修复同一 Codex task 通过多个 relay 地址重复启动，导致 Activity、回复和思考状态重复的问题。",
     ],
   },
   {
