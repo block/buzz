@@ -996,61 +996,6 @@ impl Db {
         })
     }
 
-    /// List reports for the deployment-global read-only admin plane.
-    #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "admin_list_reports", system = "postgresql")]
-    pub async fn admin_list_reports(
-        &self,
-        community_id: Option<Uuid>,
-        status: Option<&str>,
-        report_type: Option<&str>,
-        target_kind: Option<&str>,
-        after: Option<DateTime<Utc>>,
-        before: Option<DateTime<Utc>>,
-        cursor: Option<(DateTime<Utc>, Uuid)>,
-        limit: i64,
-    ) -> Result<Vec<admin_moderation::AdminReport>> {
-        admin_moderation::list_reports(
-            &self.pool,
-            community_id,
-            status,
-            report_type,
-            target_kind,
-            after,
-            before,
-            cursor,
-            limit,
-        )
-        .await
-    }
-
-    /// Fetch one report for the deployment-global read-only admin plane.
-    #[datastore_span(name = "admin_get_report", system = "postgresql")]
-    pub async fn admin_get_report(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<admin_moderation::AdminReportDetail>> {
-        admin_moderation::get_report(&self.pool, id).await
-    }
-
-    /// List feedback for the deployment-global read-only admin plane.
-    #[datastore_span(name = "admin_list_feedback", system = "postgresql")]
-    pub async fn admin_list_feedback(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<admin_moderation::AdminFeedback>> {
-        admin_moderation::list_feedback(&self.pool, limit).await
-    }
-
-    /// Fetch one feedback submission for the deployment-global admin plane.
-    #[datastore_span(name = "admin_get_feedback", system = "postgresql")]
-    pub async fn admin_get_feedback(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<admin_moderation::AdminFeedback>> {
-        admin_moderation::get_feedback(&self.pool, id).await
-    }
-
     /// Return the shared durable whole-community deletion adapter.
     pub fn deletion_store(&self) -> deletion::DeletionStore {
         deletion::DeletionStore::new(self.pool.clone())

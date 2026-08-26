@@ -4,12 +4,14 @@
 //! [`CommunityId`](buzz_core::CommunityId). Keep ordinary moderation reads in
 //! [`crate::moderation`] tenant-fenced.
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
+use crate::Db;
 
 /// Maximum rows accepted by one admin query.
 pub const MAX_PAGE_SIZE: i64 = 200;
@@ -404,11 +406,59 @@ fn row_to_feedback(row: sqlx::postgres::PgRow) -> Result<AdminFeedback> {
     })
 }
 
+impl Db {
+    /// List reports for the deployment-global read-only admin plane.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "admin_list_reports", system = "postgresql")]
+    pub async fn admin_list_reports(
+        &self,
+        community_id: Option<Uuid>,
+        status: Option<&str>,
+        report_type: Option<&str>,
+        target_kind: Option<&str>,
+        after: Option<DateTime<Utc>>,
+        before: Option<DateTime<Utc>>,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<AdminReport>> {
+        list_reports(
+            &self.pool,
+            community_id,
+            status,
+            report_type,
+            target_kind,
+            after,
+            before,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch one report for the deployment-global read-only admin plane.
+    #[datastore_span(name = "admin_get_report", system = "postgresql")]
+    pub async fn admin_get_report(&self, id: Uuid) -> Result<Option<AdminReportDetail>> {
+        get_report(&self.pool, id).await
+    }
+
+    /// List feedback for the deployment-global read-only admin plane.
+    #[datastore_span(name = "admin_list_feedback", system = "postgresql")]
+    pub async fn admin_list_feedback(&self, limit: i64) -> Result<Vec<AdminFeedback>> {
+        list_feedback(&self.pool, limit).await
+    }
+
+    /// Fetch one feedback submission for the deployment-global admin plane.
+    #[datastore_span(name = "admin_get_feedback", system = "postgresql")]
+    pub async fn admin_get_feedback(&self, id: Uuid) -> Result<Option<AdminFeedback>> {
+        get_feedback(&self.pool, id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
