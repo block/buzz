@@ -2944,7 +2944,7 @@ mod tests {
             .connect(&scratch_url)
             .await
             .expect("connect desired-schema scratch db");
-        sqlx::raw_sql(include_str!("../../../schema/schema.sql"))
+        sqlx::raw_sql(include_str!("../../../../schema/schema.sql"))
             .execute(&pool)
             .await
             .expect("apply desired-state schema");

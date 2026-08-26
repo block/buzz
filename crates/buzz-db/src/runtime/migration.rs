@@ -1040,7 +1040,7 @@ mod tests {
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
 
-        let desired_schema = include_str!("../../../schema/schema.sql");
+        let desired_schema = include_str!("../../../../schema/schema.sql");
         assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
@@ -1309,7 +1309,7 @@ mod tests {
             .sql
             .as_str()
             .contains("error_code"));
-        assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+        assert!(include_str!("../../../../schema/schema.sql").contains("error_code          TEXT"));
     }
 
     #[test]
@@ -1480,7 +1480,7 @@ mod tests {
         let migrator_run_to = ["MIGRATOR", ".run_to("].concat();
 
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let this_file = manifest_dir.join("src/migration.rs");
+        let this_file = manifest_dir.join("src/runtime/migration.rs");
         let crates_dir = manifest_dir.parent().expect("workspace crates dir");
         // The push gateway migrates its own dedicated authority database; it
         // never holds relay tenant tables, so it is exempt from the relay

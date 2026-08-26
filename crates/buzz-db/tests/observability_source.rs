@@ -1,6 +1,6 @@
 #[test]
 fn database_metrics_and_slow_logs_exclude_sensitive_or_unbounded_fields() {
-    let implementation = include_str!("../src/observability.rs");
+    let implementation = include_str!("../src/runtime/observability.rs");
     let datastore_macro = include_str!("../../buzz-datastore-tracing/src/lib.rs");
     let instrumentation = format!("{implementation}\n{datastore_macro}");
 
