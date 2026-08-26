@@ -533,7 +533,8 @@ void main() {
           '2222222222222222222222222222222222222222222222222222222222222222';
       final session = _RecordingSessionNotifier();
       final reopenAttempts = <String>[];
-      final firstReopenGate = Completer<void>();
+      final gateA = Completer<void>();
+      final gateB = Completer<void>();
       var reopenCalls = 0;
       final container = ProviderContainer(
         overrides: [
@@ -561,12 +562,17 @@ void main() {
             ],
           ),
           dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
-            reopenCalls += 1;
+            final call = ++reopenCalls;
             reopenAttempts.add(pubkeys.single);
-            if (reopenCalls == 1) {
-              // Hold attempt A open past the rebuild so the follower lands on a
-              // new generation while A is still suspended.
-              await firstReopenGate.future;
+            // Suspend attempt A (call 1, old generation) and attempt B (call 2,
+            // new generation) so both are in flight simultaneously: A must
+            // retire while B's entry still occupies the pending map. B's first
+            // attempt then fails so its retry loop drains the coalesced
+            // follower C as call 3.
+            if (call == 1) await gateA.future;
+            if (call == 2) {
+              await gateB.future;
+              throw StateError('transient reopen failure');
             }
             return 'hidden-dm';
           }),
@@ -595,21 +601,36 @@ void main() {
       session.emit(hiddenDmEvent('message-a'));
       await _waitFor(() => reopenCalls == 1);
 
-      // Activity rebuilds (generation N+1) with the pending map preserved, then
-      // a follower lands on the replacement subscription.
+      // Activity rebuilds (generation N+1). Follower B lands on the replacement
+      // subscription: A's entry belongs to the old generation, so B does not
+      // coalesce — it installs its own entry and starts a second attempt, which
+      // suspends. A and B are now both in flight.
       container.invalidate(activityProvider);
       await container.read(activityProvider.future);
       await Future<void>.delayed(const Duration(milliseconds: 10));
       session.emit(hiddenDmEvent('message-b'));
+      await _waitFor(() => reopenCalls == 2);
 
-      // B owns generation N+1, so it starts its own attempt and reopens even
-      // though A has not yet retired.
-      await _waitFor(() => reopenCalls >= 2);
-
-      // A retires; its cleanup must not delete B's live entry.
-      firstReopenGate.complete();
+      // A retires while B is still pending. Its instance-checked cleanup must
+      // leave B's entry in the map; unconditional removal would evict B's live
+      // entry here.
+      gateA.complete();
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      expect(reopenAttempts, [alice, alice]);
+
+      // Follower C arrives on the current generation. Because B's entry is still
+      // present, C coalesces into it (no new attempt). With unconditional
+      // cleanup, A would have evicted B's entry and C would wrongly start a
+      // third overlapping attempt.
+      session.emit(hiddenDmEvent('message-c'));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(reopenCalls, 2);
+
+      // Releasing B fails its first attempt; the coalesced follower C drives one
+      // retry, which succeeds as the third reopen.
+      gateB.complete();
+      await _waitFor(() => reopenCalls == 3);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(reopenAttempts, [alice, alice, alice]);
     },
   );
 
