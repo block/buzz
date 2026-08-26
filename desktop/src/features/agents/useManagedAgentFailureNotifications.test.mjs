@@ -57,3 +57,24 @@ test("writer conflicts do not offer a blind retry action", () => {
   );
   assert.equal(managedAgentFailureAllowsRetry(agent()), true);
 });
+
+test("a permanently missing identity does not offer a blind retry action", () => {
+  assert.equal(
+    managedAgentFailureAllowsRetry(
+      agent({
+        lastError:
+          "agent abc identity key is missing. The Codex task and workspace are intact",
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    managedAgentFailureAllowsRetry(
+      agent({
+        lastError:
+          "agent abc identity key cannot be read because the OS keyring is unavailable",
+      }),
+    ),
+    true,
+  );
+});

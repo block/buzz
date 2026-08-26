@@ -12,7 +12,8 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 use super::{
-    agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
+    agent_key_availability_with, agent_keyring_name, hydrate_keys_with, migrate_inline_key,
+    persist_agent_keys_with, spawn_key_refusal_for_availability, AgentKeyAvailability,
     KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
 };
 
@@ -233,15 +234,39 @@ fn hydrate_leaves_key_empty_on_keyring_outage() {
 }
 
 #[test]
-fn spawn_refused_when_private_key_empty() {
-    // The spawn path MUST refuse a record left empty by an outage/absence
-    // before injecting an empty BUZZ_PRIVATE_KEY / NOSTR_PRIVATE_KEY — never
-    // launch an agent with no identity (Wes storage.rs:158).
+fn empty_key_distinguishes_missing_secret_from_keyring_outage() {
     let record = record_with_key("");
-    assert!(
-        super::spawn_key_refusal(&record).is_some(),
-        "an agent with no private key must be refused"
+
+    assert_eq!(
+        agent_key_availability_with(&FakeKeyStore::reachable(), &record),
+        AgentKeyAvailability::Missing
     );
+    assert_eq!(
+        agent_key_availability_with(&FakeKeyStore::unreachable(), &record),
+        AgentKeyAvailability::KeyringUnavailable
+    );
+}
+
+#[test]
+fn missing_key_refusal_preserves_the_codex_task_recovery_path() {
+    let record = record_with_key("");
+    let error = spawn_key_refusal_for_availability(&record, AgentKeyAvailability::Missing)
+        .expect("missing key must be refused");
+
+    assert!(error.contains("identity key is missing"));
+    assert!(error.contains("Codex task and workspace are intact"));
+    assert!(error.contains("add the same Codex task again"));
+}
+
+#[test]
+fn keyring_outage_refusal_does_not_claim_the_key_is_missing() {
+    let record = record_with_key("");
+    let error =
+        spawn_key_refusal_for_availability(&record, AgentKeyAvailability::KeyringUnavailable)
+            .expect("unavailable keyring must be refused");
+
+    assert!(error.contains("OS keyring is unavailable"));
+    assert!(!error.contains("identity key is missing"));
 }
 
 #[test]

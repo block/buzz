@@ -7,6 +7,7 @@ import {
 } from "@/features/agents/hooks";
 import {
   friendlyAgentLastError,
+  isAgentIdentityMissingError,
   isCodexWriterConflictError,
 } from "@/features/agents/lib/friendlyAgentLastError";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -34,7 +35,10 @@ function failureCursor(
 }
 
 export function managedAgentFailureAllowsRetry(agent: ManagedAgent): boolean {
-  return !isCodexWriterConflictError(agent.lastError);
+  return (
+    !isCodexWriterConflictError(agent.lastError) &&
+    !isAgentIdentityMissingError(agent.lastError)
+  );
 }
 
 export function useManagedAgentFailureNotifications(): void {

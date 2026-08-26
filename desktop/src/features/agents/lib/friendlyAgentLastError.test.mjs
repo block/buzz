@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_IDENTITY_MISSING_COPY,
+  AGENT_KEYRING_UNAVAILABLE_COPY,
   CODEX_TASK_FRAME_TOO_LARGE_COPY,
   CODEX_TASK_LOAD_FAILED_COPY,
   CODEX_WRITER_CONFLICT_COPY,
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
   CLI_ACP_INTERNAL_ERROR_COPY,
+  isAgentIdentityMissingError,
   isCodexWriterConflictError,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
@@ -53,6 +56,24 @@ test("distinguishes oversized ACP task history from a timeout", () => {
       copy: CODEX_TASK_FRAME_TOO_LARGE_COPY,
     },
   );
+});
+
+test("distinguishes a missing agent identity from a keyring outage", () => {
+  const missing =
+    "agent abc identity key is missing. The Codex task and workspace are intact";
+  const unavailable =
+    "agent abc identity key cannot be read because the OS keyring is unavailable";
+
+  assert.deepEqual(friendlyAgentLastError(missing), {
+    severity: "generic",
+    copy: AGENT_IDENTITY_MISSING_COPY,
+  });
+  assert.deepEqual(friendlyAgentLastError(unavailable), {
+    severity: "generic",
+    copy: AGENT_KEYRING_UNAVAILABLE_COPY,
+  });
+  assert.equal(isAgentIdentityMissingError(missing), true);
+  assert.equal(isAgentIdentityMissingError(unavailable), false);
 });
 
 test("null lastError → null", () => {
