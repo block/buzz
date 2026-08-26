@@ -1268,7 +1268,177 @@ pub async fn find_by_owner_and_name(
     }
 }
 
-// -- Db API -------------------------------------------------------------------
+// -- Run and approval Db API --------------------------------------------------
+
+impl Db {
+    /// Create a new workflow run.
+    #[datastore_span(name = "create_workflow_run", system = "postgresql")]
+    pub async fn create_workflow_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        trigger_event_id: Option<&[u8]>,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<Uuid> {
+        crate::workflow::create_workflow_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            trigger_event_id,
+            trigger_context,
+        )
+        .await
+    }
+
+    /// Fetch a single workflow run, scoped to its community.
+    #[datastore_span(name = "get_workflow_run", system = "postgresql")]
+    pub async fn get_workflow_run(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+    ) -> Result<crate::workflow::WorkflowRunRecord> {
+        crate::workflow::get_workflow_run(&self.pool, community_id, id).await
+    }
+
+    /// List runs for a workflow.
+    #[datastore_span(name = "list_workflow_runs", system = "postgresql")]
+    pub async fn list_workflow_runs(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<crate::workflow::WorkflowRunRecord>> {
+        crate::workflow::list_workflow_runs(&self.pool, community_id, workflow_id, limit).await
+    }
+
+    /// List one keyset-paginated page of workflow runs.
+    #[datastore_span(name = "list_workflow_runs_page", system = "postgresql")]
+    pub async fn list_workflow_runs_page(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        before_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<crate::workflow::WorkflowRunRecord>> {
+        crate::workflow::list_workflow_runs_page(
+            &self.pool,
+            community_id,
+            workflow_id,
+            before,
+            before_id,
+            limit,
+        )
+        .await
+    }
+
+    /// Update a workflow run's status.
+    #[datastore_span(name = "update_workflow_run", system = "postgresql")]
+    pub async fn update_workflow_run(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        status: crate::workflow::RunStatus,
+        current_step: i32,
+        trace: &serde_json::Value,
+        failure: Option<crate::workflow::WorkflowRunFailure<'_>>,
+    ) -> Result<()> {
+        crate::workflow::update_workflow_run(
+            &self.pool,
+            community_id,
+            id,
+            status,
+            current_step,
+            trace,
+            failure,
+        )
+        .await
+    }
+
+    /// Create an approval request.
+    #[datastore_span(name = "create_approval", system = "postgresql")]
+    pub async fn create_approval(
+        &self,
+        params: crate::workflow::CreateApprovalParams<'_>,
+    ) -> Result<()> {
+        crate::workflow::create_approval(&self.pool, params).await
+    }
+
+    /// Fetch an approval by raw token.
+    #[datastore_span(name = "get_approval", system = "postgresql")]
+    pub async fn get_approval(
+        &self,
+        community_id: CommunityId,
+        token: &str,
+    ) -> Result<crate::workflow::ApprovalRecord> {
+        crate::workflow::get_approval(&self.pool, community_id, token).await
+    }
+
+    /// Fetch an approval by its already-hashed token (no re-hashing).
+    #[datastore_span(name = "get_approval_by_stored_hash", system = "postgresql")]
+    pub async fn get_approval_by_stored_hash(
+        &self,
+        community_id: CommunityId,
+        token_hash: &[u8],
+    ) -> Result<crate::workflow::ApprovalRecord> {
+        crate::workflow::get_approval_by_stored_hash(&self.pool, community_id, token_hash).await
+    }
+
+    /// Fetch all approvals for a workflow run.
+    #[datastore_span(name = "get_run_approvals", system = "postgresql")]
+    pub async fn get_run_approvals(
+        &self,
+        community_id: CommunityId,
+        workflow_id: uuid::Uuid,
+        run_id: uuid::Uuid,
+    ) -> Result<Vec<crate::workflow::ApprovalRecord>> {
+        crate::workflow::get_run_approvals(&self.pool, community_id, workflow_id, run_id).await
+    }
+
+    /// Update an approval's status.
+    #[datastore_span(name = "update_approval", system = "postgresql")]
+    pub async fn update_approval(
+        &self,
+        community_id: CommunityId,
+        token: &str,
+        status: crate::workflow::ApprovalStatus,
+        approver_pubkey: Option<&[u8]>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        crate::workflow::update_approval(
+            &self.pool,
+            community_id,
+            token,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    /// Update an approval by its already-hashed token (no re-hashing).
+    #[datastore_span(name = "update_approval_by_stored_hash", system = "postgresql")]
+    pub async fn update_approval_by_stored_hash(
+        &self,
+        community_id: CommunityId,
+        token_hash: &[u8],
+        status: crate::workflow::ApprovalStatus,
+        approver_pubkey: Option<&[u8]>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        crate::workflow::update_approval_by_stored_hash(
+            &self.pool,
+            community_id,
+            token_hash,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+}
+
+// -- Workflow lifecycle Db API ------------------------------------------------
 
 impl Db {
     /// Create a new workflow.
