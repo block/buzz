@@ -165,18 +165,15 @@ export function useRichTextEditor({
   onLinkShortcut,
 }: RichTextEditorOptions) {
   const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
+  const [isFocused, setIsFocused] = React.useState(false);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
-
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
-
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
-
   const onEditLinkRef = React.useRef(onEditLink);
   onEditLinkRef.current = onEditLink;
-
   const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
   onLinkSelectionChangeRef.current = onLinkSelectionChange;
 
@@ -600,6 +597,8 @@ export function useRichTextEditor({
           buildPreviewUpdate(ed.state.doc, ed.state.selection.anchor),
         );
       },
+      onFocus: () => setIsFocused(true),
+      onBlur: () => setIsFocused(false),
     },
     [],
   );
@@ -930,6 +929,7 @@ export function useRichTextEditor({
 
   return {
     editor,
+    isFocused,
     getMarkdown,
     isEmpty,
     clearContent,

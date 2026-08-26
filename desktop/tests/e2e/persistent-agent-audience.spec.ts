@@ -690,6 +690,59 @@ test("always-mentioned agents remain selected without replaying their animation 
   ).toHaveCount(1);
 });
 
+test("the unfocused main composer keeps its mention menu closed during a thread send", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page, { sendMessageDelayMs: 500 });
+  await openGeneral(page);
+
+  const mainComposer = channelComposer(page);
+  const mainInput = mainComposer.getByTestId("message-input");
+  await automaticallyMention(mainComposer, "Morgarita");
+  await mainInput.fill("@Morgarita earlier message");
+  await mainInput.press("Enter");
+  await expect(mainInput).toHaveText("@Morgarita ");
+  await mainInput.fill("@Morgarita");
+  await expect(mainInput).toHaveText("@Morgarita");
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toBeVisible();
+  await mainInput.press("Escape");
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+
+  const rootMessage = page.locator(
+    `[data-testid="message-row"][data-message-id="${THREAD_ROOT_ID}"]`,
+  );
+  await rootMessage
+    .getByRole("button", { name: "Reply" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.click();
+  await expect(threadInput).toBeFocused();
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  await mainComposer.evaluate((element) => {
+    element.dataset.mentionMenuReopened = "false";
+    new MutationObserver(() => {
+      if (element.querySelector('[data-testid="mention-autocomplete"]')) {
+        element.dataset.mentionMenuReopened = "true";
+      }
+    }).observe(element, { childList: true, subtree: true });
+  });
+
+  const reply = `Thread reply ${Date.now()}`;
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  await expect(mainInput).toHaveAttribute("contenteditable", "false");
+  await expect(threadPanel).toContainText(reply);
+  await expect(mainInput).toHaveAttribute("contenteditable", "true");
+
+  expect(await mainComposer.getAttribute("data-mention-menu-reopened")).toBe(
+    "false",
+  );
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+});
+
 test("a failed always-mentioned send shakes the composer avatar without replaying its selection animation", async ({
   page,
 }) => {
