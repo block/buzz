@@ -97,7 +97,27 @@ plugin in this repo yet to shape it against. It answers the same question
 by proving the `parseBinding`/`glyph`/priority-cascade mechanics on two real
 call sites, so that field has something real to build on.
 
+## Review focus
+
+1. Is the reduced scope (settings-section registry plus a two-plugin
+   channel classifier, no `tabs`/`sidebar`/`headerAction` surface) the
+   right size for a first PR, or should more of the RFC's surface be
+   included speculatively even without a second consumer?
+2. Does this typed classification seam compose cleanly with #3275's own
+   review question about the same relationship ("does the current typed
+   channel-surface seam compose cleanly with the behavior-preserving
+   registry proposed in #3280")? This PR doesn't answer that by adding a
+   `tabs` field, it answers it by proving the underlying mechanics: does
+   that stand on its own, or do you want the `tabs` field sketched here
+   too even without a plugin to use it yet?
+3. `channelGlyph`'s stream-vs-Hash styling special case in `ChatHeader.tsx`
+   is the one place the port kept a pre-existing wart rather than
+   generalizing it. Worth fixing here, or fine as a named follow-up?
+
 ## Testing
+
+At commit `31861518d` (the last code commit on this branch; later commits
+only touch this description):
 
 - `pnpm typecheck`: clean.
 - `pnpm lint` (`biome check`): clean on all touched/added files (two
