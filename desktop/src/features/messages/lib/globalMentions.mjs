@@ -31,22 +31,6 @@ export const MENTION_SCOPE_HERE = "here";
 const VALID_SCOPES = new Set([MENTION_SCOPE_CHANNEL, MENTION_SCOPE_HERE]);
 
 /**
- * Above this many members, `@channel` narrows to channel admins by default.
- *
- * Borrowed from WhatsApp's `@all`, which is unrestricted in small groups and
- * admins-only past 32. The insight worth keeping is that group size, not
- * configuration, decides when governance is needed: a five-person channel does
- * not need a policy, a forty-person one does, and nobody sets one in advance.
- *
- * `@here` is never gated by size — it only reaches people who are already at
- * their desk, so its worst case is bounded by who is actually around.
- */
-export const CHANNEL_MENTION_ADMIN_THRESHOLD = 32;
-
-/** Roles permitted to use a gated scope. */
-const PRIVILEGED_ROLES = new Set(["owner", "admin"]);
-
-/**
  * Find a global mention written in the message text.
  *
  * Deliberately literal: `@channel` and `@here` are matched in the composed
@@ -84,42 +68,6 @@ export function mentionScopeOf(tags) {
   return null;
 }
 
-/** The tag to attach when sending. */
-export function mentionScopeTag(scope) {
-  if (!VALID_SCOPES.has(scope)) return null;
-  return [MENTION_SCOPE_TAG, scope];
-}
-
-/**
- * May this member use this scope in this channel?
- *
- * `override` is the channel's explicit setting when an admin has set one:
- * `"everyone"` or `"admins"`. With no override the size rule applies.
- */
-export function canUseMentionScope({
-  scope,
-  memberCount,
-  role,
-  override = null,
-}) {
-  if (!VALID_SCOPES.has(scope)) return false;
-
-  // `@here` is open to everyone unless a channel explicitly closes it. Its
-  // reach is self-limiting, so gating it by default buys nothing and costs the
-  // one broadcast people should feel comfortable using.
-  if (scope === MENTION_SCOPE_HERE) {
-    return override === "admins" ? PRIVILEGED_ROLES.has(role) : true;
-  }
-
-  if (override === "everyone") return true;
-  if (override === "admins") return PRIVILEGED_ROLES.has(role);
-
-  if ((memberCount ?? 0) > CHANNEL_MENTION_ADMIN_THRESHOLD) {
-    return PRIVILEGED_ROLES.has(role);
-  }
-  return true;
-}
-
 /**
  * Should this member be notified by an event carrying `scope`?
  *
@@ -154,35 +102,4 @@ export function shouldNotifyForMentionScope({
 
   if (isMuted) return allowChannelMentionWhileMuted;
   return true;
-}
-
-/**
- * Everyone a scope notifies, given the channel's current membership.
- *
- * Membership is resolved at call time rather than baked into the event, so an
- * announcement stays correct as people join and leave.
- */
-export function resolveMentionAudience({
-  scope,
-  members,
-  authorPubkey = null,
-  mutedBy,
-  optedOutOfMutedChannelMentions,
-  presenceByPubkey,
-}) {
-  if (!VALID_SCOPES.has(scope)) return [];
-
-  return (members ?? [])
-    .filter((pubkey) =>
-      shouldNotifyForMentionScope({
-        scope,
-        isAuthor: pubkey === authorPubkey,
-        isMuted: mutedBy?.has(pubkey) ?? false,
-        allowChannelMentionWhileMuted: !(
-          optedOutOfMutedChannelMentions?.has(pubkey) ?? false
-        ),
-        presence: presenceByPubkey?.get(pubkey) ?? "offline",
-      }),
-    )
-    .slice();
 }
