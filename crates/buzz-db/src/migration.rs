@@ -846,7 +846,9 @@ mod tests {
 
         // NIP-PMA kind:30179 FTS exclusion (0033): same wrap-the-existing-
         // expression shape as 0014 so brownfield databases stop tokenizing
-        // private managed-agent ciphertext without a heap rewrite.
+        // private managed-agent ciphertext without a policy rewrite. (The
+        // migration itself still rewrites the events heap and rebuilds the
+        // GIN index — see the 0033 header for the operational cost.)
         assert_eq!(migrations[32].version, 33);
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));

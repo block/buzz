@@ -10,6 +10,16 @@
 -- expression in place, so capture the current expression, drop the column,
 -- and re-add it wrapped with the new exclusion. Every other kind keeps
 -- whatever policy the database had before.
+--
+-- Operational cost: this is not free on large databases. DROP COLUMN +
+-- ADD ... GENERATED ... STORED rewrites the entire events heap and then
+-- rebuilds the GIN index, all under an ACCESS EXCLUSIVE lock inside the
+-- migration transaction (CREATE INDEX CONCURRENTLY is not possible
+-- here), with no lock_timeout. Expect relay downtime proportional to
+-- the size of events. The index is recreated from the stock definition
+-- below; any non-stock indexes or storage parameters on search_tsv are
+-- not captured or replayed. 0014 set this precedent on smaller tables;
+-- operators with large brownfield databases should schedule a window.
 DO $$
 DECLARE
     existing_expression TEXT;
