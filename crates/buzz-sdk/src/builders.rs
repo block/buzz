@@ -1,4 +1,4 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -537,9 +537,82 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 }
 
 /// Build a canvas update event (kind 40100).
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+///
+/// When `expected_revision` is set, an `["expected-revision", …]` tag is
+/// attached documenting the head the write was composed against: a 64-hex
+/// event ID names the head it expects, and the literal `none` asserts no head
+/// exists yet. Concurrency enforcement is **client-side** (the CLI/Desktop
+/// compare against a freshly read head before publishing); the relay does not
+/// interpret this tag today, so it is advisory/documentary and preserves the
+/// option to add relay enforcement later with zero client change. Omit it for
+/// an unconditional append (backward compatible).
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(expected_revision) = expected_revision {
+        if expected_revision != "none"
+            && (expected_revision.len() != 64
+                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+            )));
+        }
+        tags.push(tag(&["expected-revision", expected_revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+/// Build a canvas write (kind 40100) that edits or restores against a known
+/// head, applying writer discipline in one place.
+///
+/// Sets the `expected-revision` precondition to `head_id` and stamps
+/// `created_at = max(now, head_created_at + 1)` so the event sorts strictly
+/// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
+/// legitimate first-party restore/edit whose local clock lags the head from
+/// landing behind that head in read order (which would "succeed" without
+/// changing the visible canvas). First-party signers (CLI `set`/restore,
+/// Desktop save/restore) MUST route disciplined canvas writes through this
+/// helper rather than re-deriving the timestamp.
+///
+/// Ordering note: the `+ 1` bump guarantees a strictly greater `created_at`, so
+/// the write never ties the head. Writes that *do* share a second resolve by
+/// `id ASC` under `created_at DESC, id ASC` — the smallest event id wins the
+/// visible head, not the last write. This helper sidesteps that tie by stamping
+/// ahead; unconditional appends that omit the bump remain subject to it.
+pub fn build_set_canvas_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_id: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    if head_created_at == u64::MAX {
+        return Err(SdkError::InvalidInput(
+            "head_created_at must be below u64::MAX so the write can stamp strictly ahead of it"
+                .into(),
+        ));
+    }
+    let created_at = canvas_write_created_at(head_created_at);
+    Ok(build_set_canvas(channel_id, content, Some(head_id))?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Contract-v3 writer-discipline timestamp for a canvas write asserting a head
+/// at `head_created_at`: `max(now, head_created_at + 1)` (Unix seconds).
+///
+/// The single home for canvas timestamp discipline. `build_set_canvas_after_head`
+/// stamps CLI restore/`set` writes with this, and Desktop's `set_canvas` calls
+/// it directly for the same reason, so the `max(now, head + 1)` rule is never
+/// re-derived per surface.
+pub fn canvas_write_created_at(head_created_at: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.max(head_created_at.saturating_add(1))
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
@@ -2888,10 +2961,77 @@ mod tests {
     #[test]
     fn set_canvas_happy_path() {
         let cid = uuid();
-        let ev = sign(build_set_canvas(cid, "# Canvas\nHello").unwrap());
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHello", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 40100);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert_eq!(ev.content, "# Canvas\nHello");
+        assert!(!ev.tags.iter().any(|t| t
+            .as_slice()
+            .first()
+            .is_some_and(|k| k == "expected-revision")));
+    }
+
+    #[test]
+    fn set_canvas_pins_expected_revision() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHi", Some(&head)).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+
+        let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
+        assert!(has_tag(&create, "expected-revision", "none"));
+    }
+
+    #[test]
+    fn set_canvas_after_head_pins_revision_and_bumps_timestamp() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+
+        // Head created far in the future relative to the signer's clock: the
+        // discipline must still stamp strictly ahead of the asserted head.
+        let future_head = 4_000_000_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, future_head).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(
+            ev.created_at.as_secs() > future_head,
+            "created_at {} must be strictly ahead of future head {future_head}",
+            ev.created_at.as_secs()
+        );
+
+        // Head in the past: the signer's `now` wins and is still ahead.
+        let past_head = 1_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, past_head).unwrap());
+        assert!(ev.created_at.as_secs() > past_head);
+    }
+
+    #[test]
+    fn set_canvas_rejects_malformed_expected_revision() {
+        let cid = uuid();
+        // Wrong length (63 hex chars).
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"a".repeat(63))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Correct length but non-hex.
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"z".repeat(64))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Literal "none" and a valid 64-hex id are accepted.
+        assert!(build_set_canvas(cid, "x", Some("none")).is_ok());
+        assert!(build_set_canvas(cid, "x", Some(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn set_canvas_after_head_rejects_max_head_created_at() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        // u64::MAX cannot be stamped strictly ahead of: reject instead of
+        // silently saturating and breaking the head-advancement guarantee.
+        assert!(matches!(
+            build_set_canvas_after_head(cid, "# Restored", &head, u64::MAX),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 
     #[test]

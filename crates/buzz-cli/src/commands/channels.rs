@@ -263,16 +263,68 @@ pub async fn cmd_list_channel_members(
     Ok(())
 }
 
-pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+/// Fetch the live canvas head (kind 40100) for a channel.
+///
+/// The relay orders results `created_at DESC, id ASC`, so a `limit: 1` query
+/// returns exactly the head every surface agrees on — no full-stream scan, no
+/// silent page clamp.
+async fn fetch_canvas_head(
+    client: &BuzzClient,
+    channel_id: &str,
+) -> Result<Option<serde_json::Value>, CliError> {
     let filter = serde_json::json!({
         "kinds": [40100],
-        "#h": [channel_id]
+        "#h": [channel_id],
+        "limit": 1,
     });
     let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    if let Some(content) = events
-        .first()
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas head: {e}"
+        ))
+    })?;
+    Ok(events.into_iter().next())
+}
+
+/// Fetch a single canvas revision by event ID, scoped to the channel and kind.
+///
+/// An ID-scoped query resolves revisions of any age; scanning a capped stream
+/// would report a retained-but-old revision as absent.
+async fn fetch_canvas_revision(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: &str,
+) -> Result<Option<serde_json::Value>, CliError> {
+    let filter = serde_json::json!({
+        "ids": [revision],
+        "kinds": [40100],
+        "#h": [channel_id],
+        "limit": 1,
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas revision: {e}"
+        ))
+    })?;
+    Ok(events.into_iter().next())
+}
+
+pub async fn cmd_get_canvas(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: Option<&str>,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    let selected = match revision {
+        Some(revision) => {
+            validate_hex64(revision)?;
+            fetch_canvas_revision(client, channel_id, revision).await?
+        }
+        None => fetch_canvas_head(client, channel_id).await?,
+    };
+    if let Some(content) = selected
+        .as_ref()
         .and_then(|e| e.get("content"))
         .and_then(|c| c.as_str())
     {
@@ -280,6 +332,97 @@ pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(),
     } else {
         println!("null");
     }
+    Ok(())
+}
+
+/// List canvas revisions newest-first as JSON `{event_id, author, created_at}`.
+///
+/// Uses composite `(until, before_id)` pagination so a `limit` above one relay
+/// page returns the full requested window instead of a silently truncated one.
+/// The Clap layer bounds `limit` to 1–10000, so the request is never unbounded.
+///
+/// Ordering is `created_at DESC, id ASC`: revisions sharing a second break the
+/// tie by smallest event id, not by which write arrived last.
+pub async fn cmd_canvas_history(
+    client: &BuzzClient,
+    channel_id: &str,
+    limit: u32,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    let filter = serde_json::json!({
+        "kinds": [40100],
+        "#h": [channel_id],
+    });
+    let events = client.query_paginated(filter, limit).await?;
+    let revisions: Vec<serde_json::Value> = events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                "author": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&revisions).unwrap_or_default());
+    Ok(())
+}
+
+/// Restore the canvas to a previous revision by re-publishing its content.
+///
+/// The target revision is fetched by an ID-scoped query (resolves any age) and
+/// the head by a separate `limit: 1` query — neither scans the full stream.
+/// Fetching the head immediately before the write is the advisory
+/// concurrency check: a missing target revision or absent head fails here, and
+/// restoring the current head is short-circuited so history never grows a
+/// redundant revision. The republished event is built via
+/// [`buzz_sdk::build_set_canvas_after_head`], which applies writer discipline
+/// (`created_at = max(now, head.created_at + 1)`) so the restore sorts strictly
+/// ahead of the head it read; the `expected-revision` tag it carries is
+/// advisory (no relay enforcement).
+pub async fn cmd_restore_canvas(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: &str,
+) -> Result<(), CliError> {
+    let channel_uuid = parse_uuid(channel_id)?;
+    validate_hex64(revision)?;
+
+    let content = fetch_canvas_revision(client, channel_id, revision)
+        .await?
+        .as_ref()
+        .and_then(|e| e.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "revision {revision} not found for channel {channel_id}"
+            ))
+        })?
+        .to_string();
+
+    let head = fetch_canvas_head(client, channel_id)
+        .await?
+        .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+    let head_id = head
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+    let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // Restoring the revision that is already the head would publish a new event
+    // with identical content, growing history with a redundant revision. Match
+    // Desktop, which hides Restore on the current revision, by short-circuiting.
+    if head_id.eq_ignore_ascii_case(revision) {
+        println!("revision {revision} is already the current revision");
+        return Ok(());
+    }
+
+    let builder =
+        buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
+            .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
     Ok(())
 }
 
@@ -730,7 +873,9 @@ pub async fn cmd_create_channel_from_template(
             .replace("{channel.name}", name)
             .replace("{template.name}", &template.name);
         let canvas_result: Result<(), CliError> = async {
-            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
+            // Fresh channel: no head can exist yet, so assert the create with
+            // `Some("none")` to match the create-assertion convention.
+            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none"))
                 .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
             let event = client.sign_event(builder)?;
             client.submit_event(event).await?;
@@ -1071,8 +1216,23 @@ pub async fn cmd_set_canvas(
     let content = read_or_stdin(content)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
-        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    // `set` is an unconditional replace — a moved head is not an error, so it
+    // never returns the restore path's conflict/exit-5. It does apply the same
+    // writer discipline: read the head and stamp `created_at = max(now, head + 1)`
+    // so the write sorts strictly ahead of a newer or future-dated head under
+    // `created_at DESC, id ASC` instead of reporting success behind it. With no
+    // head yet, `Some("none")` records the create-assertion at the default `now`.
+    let builder = match fetch_canvas_head(client, channel_id).await? {
+        Some(head) => {
+            let head_id = head.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+                CliError::Other(format!("no canvas head id found for channel {channel_id}"))
+            })?;
+            let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
+        }
+        None => buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none")),
+    }
+    .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1188,8 +1348,14 @@ pub async fn dispatch(
 pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::CanvasCmd;
     match cmd {
-        CanvasCmd::Get { channel } => cmd_get_canvas(client, &channel).await,
+        CanvasCmd::Get { channel, revision } => {
+            cmd_get_canvas(client, &channel, revision.as_deref()).await
+        }
         CanvasCmd::Set { channel, content } => cmd_set_canvas(client, &channel, &content).await,
+        CanvasCmd::History { channel, limit } => cmd_canvas_history(client, &channel, limit).await,
+        CanvasCmd::Restore { channel, revision } => {
+            cmd_restore_canvas(client, &channel, &revision).await
+        }
     }
 }
 
@@ -1745,6 +1911,178 @@ mod tests {
         assert!(
             report.get("archive_state_warning").is_none(),
             "no warning key expected: {report}"
+        );
+    }
+}
+
+/// Command-level coverage for `cmd_set_canvas`'s writer discipline: it must read
+/// the head, stamp `created_at` strictly ahead of a future-dated head, carry the
+/// head's id as the `expected-revision` tag, fall back to an `expected-revision:
+/// none` create when no head exists, and refuse to submit against a structurally
+/// malformed head. These pin the fix so a revert to `created_at = now` / no head
+/// read fails a test rather than silently recreating the false-success bug.
+///
+/// Each test spins up a local axum relay that answers `POST /query` with a fixed
+/// head and captures the event submitted to `POST /events`, then inspects the
+/// signed event — behaviour at the command seam, not implementation details.
+#[cfg(test)]
+mod set_canvas_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    use super::cmd_set_canvas;
+    use crate::client::BuzzClient;
+    use crate::CliError;
+
+    const CHANNEL: &str = "326d56bc-c96c-4af0-86a1-5e804cd1b467";
+
+    #[derive(Clone)]
+    struct RelayState {
+        query_response: Arc<String>,
+        submitted: Arc<Mutex<Option<Value>>>,
+    }
+
+    /// Spawn a relay that returns `query_response` from `POST /query` and records
+    /// the event posted to `POST /events`. `submitted` stays `None` until (and
+    /// unless) `set` actually publishes.
+    async fn relay(query_response: &str) -> (String, Arc<Mutex<Option<Value>>>) {
+        let submitted: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let state = RelayState {
+            query_response: Arc::new(query_response.to_string()),
+            submitted: submitted.clone(),
+        };
+        let app = Router::new()
+            .route(
+                "/query",
+                post(|State(s): State<RelayState>, _body: Bytes| async move {
+                    (*s.query_response).clone()
+                }),
+            )
+            .route(
+                "/events",
+                post(|State(s): State<RelayState>, body: Bytes| async move {
+                    let event: Value = serde_json::from_slice(&body).expect("event json");
+                    *s.submitted.lock().unwrap() = Some(event);
+                    r#"{"event_id":"deadbeef","accepted":true,"message":""}"#.to_string()
+                }),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted)
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    fn tag_value(event: &Value, key: &str) -> Option<String> {
+        event
+            .get("tags")?
+            .as_array()?
+            .iter()
+            .find(|t| {
+                t.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some(key)
+            })
+            .and_then(|t| t.as_array())
+            .and_then(|a| a.get(1))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// A future-dated head forces the `max(now, head + 1)` bump to resolve to
+    /// `head + 1` deterministically (no clock dependence, no sleeps), so the
+    /// submitted revision sorts strictly ahead of the head under
+    /// `created_at DESC, id ASC` and carries the head id as `expected-revision`.
+    #[tokio::test]
+    async fn set_stamps_ahead_of_future_head_and_asserts_it() {
+        let head_id = "a".repeat(64);
+        let future: u64 = 4_102_444_800; // 2100-01-01Z — always ahead of `now`
+        let head = json!([{
+            "id": head_id,
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": future,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, submitted) = relay(&head.to_string()).await;
+
+        cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect("set succeeds");
+
+        let event = submitted.lock().unwrap().clone().expect("set must submit");
+        assert_eq!(
+            event.get("created_at").and_then(|v| v.as_u64()),
+            Some(future + 1),
+            "must stamp strictly ahead of the future-dated head"
+        );
+        assert_eq!(
+            tag_value(&event, "expected-revision").as_deref(),
+            Some(head_id.as_str()),
+            "must assert the head id it read"
+        );
+        assert_eq!(event.get("kind").and_then(|v| v.as_u64()), Some(40100));
+    }
+
+    /// No head yet: `set` still submits (create is not an error) and records the
+    /// create-assertion `expected-revision: none`.
+    #[tokio::test]
+    async fn set_with_no_head_creates_with_expected_revision_none() {
+        let (url, submitted) = relay("[]").await;
+
+        cmd_set_canvas(&client(&url), CHANNEL, "first content")
+            .await
+            .expect("set on empty channel succeeds");
+
+        let event = submitted.lock().unwrap().clone().expect("set must submit");
+        assert_eq!(
+            tag_value(&event, "expected-revision").as_deref(),
+            Some("none"),
+            "no-head create must assert expected-revision: none"
+        );
+    }
+
+    /// A structurally malformed head (row without `id`) is an ordinary error, not
+    /// a conflict, and nothing is published — the exact boundary the fix added.
+    #[tokio::test]
+    async fn set_errors_on_head_without_id_and_does_not_submit() {
+        let head = json!([{
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": 1_700_000_000u64,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, submitted) = relay(&head.to_string()).await;
+
+        let err = cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect_err("malformed head must error");
+
+        assert!(
+            matches!(err, CliError::Other(_)),
+            "expected Other, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("no canvas head id found"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            submitted.lock().unwrap().is_none(),
+            "no event may be published when the head is malformed"
         );
     }
 }

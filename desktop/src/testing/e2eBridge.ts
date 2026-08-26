@@ -347,6 +347,10 @@ type E2eConfig = {
     deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
+    /** Seed canvas revisions (oldest first) so history/restore journeys can
+     *  drive the real panel against a stateful store. Each save appends a new
+     *  head; `get_canvas_history` pages over the accumulated stream. */
+    canvasRevisions?: MockCanvasRevisionSeed[];
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
@@ -3124,6 +3128,49 @@ type MockSaveSubscriptionRow = {
   kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
 };
 let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
+
+// Stateful mock canvas: an append-only revision stream keyed by channel, newest
+// first, mirroring the relay's 40100 history. `get_canvas` returns the head,
+// `set_canvas` appends a new head, and `get_canvas_history` pages over the
+// stream with the same `(created_at DESC, id ASC)` composite cursor the Rust
+// command uses — so history/save-conflict/restore journeys run against real
+// state instead of a fixed stub.
+type MockCanvasRevisionSeed = {
+  content: string;
+  /** Optional; defaults to a monotonically increasing second per seed. */
+  createdAt?: number;
+  /** Optional 64-hex id; defaults to a fresh mock event id. */
+  eventId?: string;
+  /** Optional author pubkey; defaults to the mock viewer. */
+  author?: string;
+};
+type MockCanvasRevision = {
+  eventId: string;
+  content: string;
+  createdAt: number;
+  author: string;
+};
+let mockCanvasRevisions = new Map<string, MockCanvasRevision[]>();
+
+// The canvas UI reaches the mock via the starter "general" channel in specs.
+const DEFAULT_STARTER_CANVAS_CHANNEL = STARTER_GENERAL_CHANNEL_ID;
+
+function resetMockCanvasRevisions(config: E2eConfig | undefined) {
+  mockCanvasRevisions = new Map();
+  const seeds = config?.mock?.canvasRevisions;
+  if (!seeds || seeds.length === 0) {
+    return;
+  }
+  // Seeds are oldest-first; store newest-first so index 0 is always the head.
+  const revisions = seeds.map((seed, index) => ({
+    eventId: seed.eventId ?? mockEventId(),
+    content: seed.content,
+    createdAt: seed.createdAt ?? 1_700_000_000 + index,
+    author: seed.author ?? DEFAULT_MOCK_IDENTITY.pubkey,
+  }));
+  revisions.reverse();
+  mockCanvasRevisions.set(DEFAULT_STARTER_CANVAS_CHANNEL, revisions);
+}
 
 type MockObservedUnreadScope = {
   generation: string;
@@ -10736,6 +10783,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPersonaCatalogEvents(config);
   resetMockObservedUnread();
   resetMockSaveSubscriptions(config);
+  resetMockCanvasRevisions(config);
   resetMockPendingCommunityDeepLinks(config);
   resetMockPendingNavigationDeepLinks(config);
   resetMockPendingEntityDeepLinks(config);
@@ -13825,15 +13873,100 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
-      case "set_canvas":
-        return { ok: true, event_id: mockEventId() };
+      case "set_canvas": {
+        const req = payload as {
+          channelId: string;
+          content: string;
+          expectedRevision?: string | null;
+        };
+        const stream = mockCanvasRevisions.get(req.channelId) ?? [];
+        const head = stream[0] ?? null;
+        // Mirror the desktop command's client-side advisory check: read the
+        // live head, compare locally, and fail with the frozen conflict
+        // strings so canvasConflict.ts recognizes them.
+        const expected = req.expectedRevision;
+        if (expected !== undefined && expected !== null) {
+          if (expected === "none" && head) {
+            throw new Error("conflict: canvas changed since it was loaded");
+          }
+          if (expected !== "none" && !head) {
+            throw new Error("conflict: canvas revision does not exist");
+          }
+          if (expected !== "none" && head && expected !== head.eventId) {
+            throw new Error("conflict: canvas changed since it was loaded");
+          }
+        }
+        const revision: MockCanvasRevision = {
+          eventId: mockEventId(),
+          content: req.content,
+          createdAt: (head?.createdAt ?? 1_700_000_000) + 1,
+          author: DEFAULT_MOCK_IDENTITY.pubkey,
+        };
+        mockCanvasRevisions.set(req.channelId, [revision, ...stream]);
+        return { ok: true, event_id: revision.eventId };
+      }
       case "get_canvas": {
         const canvasReadError = activeConfig?.mock?.canvasReadError;
         if (canvasReadError) {
           throw new Error(canvasReadError);
         }
-        // Return the no-canvas success shape — content null means no canvas set.
-        return { content: null, updated_at: null, author: null };
+        const req = payload as { channelId: string };
+        const head = mockCanvasRevisions.get(req.channelId)?.[0] ?? null;
+        if (!head) {
+          // No-canvas success shape — content null means no canvas set.
+          return {
+            content: null,
+            event_id: null,
+            updated_at: null,
+            author: null,
+          };
+        }
+        return {
+          content: head.content,
+          event_id: head.eventId,
+          updated_at: head.createdAt,
+          author: head.author,
+        };
+      }
+      case "get_canvas_history": {
+        const req = payload as {
+          channelId: string;
+          limit?: number | null;
+          until?: number | null;
+          beforeId?: string | null;
+        };
+        const pageSize = Math.max(req.limit ?? 100, 1);
+        const stream = mockCanvasRevisions.get(req.channelId) ?? [];
+        // Keyset over the newest-first stream: strictly older than the
+        // composite cursor, preserving (created_at DESC, id ASC) so a tied
+        // second never skips or repeats a revision across a page boundary.
+        const until = req.until;
+        const beforeId = req.beforeId;
+        const windowed =
+          until == null
+            ? stream
+            : stream.filter((rev) => {
+                if (rev.createdAt < until) return true;
+                if (rev.createdAt > until) return false;
+                return beforeId != null && rev.eventId > beforeId;
+              });
+        const page = windowed.slice(0, pageSize);
+        const nextCursor =
+          page.length === pageSize && page.length > 0
+            ? {
+                created_at: page[page.length - 1].createdAt,
+                event_id: page[page.length - 1].eventId,
+              }
+            : null;
+        return {
+          revisions: page.map((rev) => ({
+            event_id: rev.eventId,
+            content: rev.content,
+            created_at: rev.createdAt,
+            author: rev.author,
+          })),
+          next_cursor: nextCursor,
+        };
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
