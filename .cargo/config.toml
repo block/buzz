@@ -9,3 +9,7 @@ debug = "line-tables-only"
 # cmake_minimum_required < 3.5; audiopus_sys's vendored opus declares 3.1.
 # Same workaround CI uses. A value already set in the environment wins.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+

@@ -156,3 +156,10 @@ tokio = { version = "1", features = ["test-util"] }
 # The relay's media validation, so the snapshot-sharing tests can prove the
 # full export → sanitize → relay-accept → import contract end to end.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
+
+[profile.dev]
+debug = true
+
+[profile.dev.package."*"]
+debug = false
+

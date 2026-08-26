@@ -160,10 +160,10 @@ export function BackupStep({
   );
   const storageDescription =
     identityStorage === "system-keyring"
-      ? "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key."
+      ? "Orbit keeps your identity key in your system keychain. Your computer may ask for your password when Orbit needs to read the key."
       : identityStorage === "local-file"
-        ? "Your system keychain wasn’t available, so Buzz keeps your identity key in a private file on this device."
-        : "Buzz keeps your identity key protected on this device. Make a separate backup in case you lose access.";
+        ? "Your system keychain wasn’t available, so Orbit keeps your identity key in a private file on this device."
+        : "Orbit keeps your identity key protected on this device. Make a separate backup in case you lose access.";
   const storageTitle =
     identityStorage === "system-keyring"
       ? "Protected by your system keychain"
@@ -172,9 +172,9 @@ export function BackupStep({
         : "Protected in private device storage";
   const introStorageDescription =
     identityStorage === "system-keyring"
-      ? "Buzz keeps your identity key in your system keychain."
+      ? "Orbit keeps your identity key in your system keychain."
       : identityStorage === "local-file"
-        ? "Buzz keeps your identity key in a private file on this device because the system keychain wasn’t available."
+        ? "Orbit keeps your identity key in a private file on this device because the system keychain wasn’t available."
         : "Your identity key is protected on this device.";
 
   if (optionsExpanded) {
@@ -190,7 +190,7 @@ export function BackupStep({
             Backup options
           </h1>
           <p className="mt-5 text-sm leading-6 text-foreground/75">
-            Your identity key works like a password for your Buzz account. Keep
+            Your identity key works like a password for your Orbit account. Keep
             a copy somewhere safe. You can create a backup file and lock it with
             a password you can remember.
           </p>

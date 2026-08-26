@@ -39,6 +39,12 @@ case "${BUZZ_TEST_PLATFORM:-$(uname -s)}" in
         remove_path "${XDG_CONFIG_HOME:-$HOME/.config}/$instance_id"
         remove_path "${XDG_CACHE_HOME:-$HOME/.cache}/$instance_id"
         ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT*)
+        appdata_roaming="${APPDATA//\\//}"
+        appdata_local="${LOCALAPPDATA//\\//}"
+        remove_path "$appdata_roaming/$instance_id"
+        remove_path "$appdata_local/$instance_id"
+        ;;
     *)
         echo "reset-desktop-standalone-state: unsupported platform" >&2
         exit 1

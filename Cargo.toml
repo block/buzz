@@ -162,6 +162,13 @@ opt-level = 1
 [profile.ci.package."*"]
 opt-level = 3
 
+[profile.dev]
+debug = true
+
+[profile.dev.package."*"]
+debug = false
+
+
 # Sprig profile — optimized for deploy-anywhere Sprig release artifacts.
 # Sprig is distributed over the network and installed on fresh hosts, so binary
 # size matters more than compile speed here. Keep this separate from the normal

@@ -24,7 +24,12 @@ export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
 export PGDATABASE="${PGDATABASE:-buzz}"
 export RELAY_URL="${RELAY_URL:-ws://localhost:3000}"
 
-hosts_sql=$(python3 - <<'PY'
+PYTHON_CMD="python3"
+if ! python3 --version &>/dev/null; then
+  PYTHON_CMD="python"
+fi
+
+hosts_sql=$($PYTHON_CMD - <<'PY'
 import os
 from urllib.parse import urlparse
 

@@ -4,7 +4,7 @@ import type { Page } from "@playwright/test";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const IMAGE_SHA = "c".repeat(64);
-const IMAGE_URL = "http://127.0.0.1:4173/buzz.svg";
+const IMAGE_URL = "http://127.0.0.1:4173/orbit.svg";
 const IMAGE_DESCRIPTOR = {
   url: IMAGE_URL,
   sha256: IMAGE_SHA,
@@ -13,7 +13,7 @@ const IMAGE_DESCRIPTOR = {
   uploaded: Math.floor(Date.now() / 1000),
   thumb: IMAGE_URL,
   dim: "64x64",
-  filename: "buzz.svg",
+  filename: "orbit.svg",
 };
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
